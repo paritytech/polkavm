@@ -395,7 +395,7 @@ impl PackReturnTy for (Reg, Reg) {
 pub struct MetadataPointer(pub *const u8);
 unsafe impl Sync for MetadataPointer {}
 
-#[repr(packed)]
+#[repr(C, packed(1))]
 pub struct ExternMetadataV1 {
     pub version: u8,
     pub flags: u32,
@@ -405,7 +405,7 @@ pub struct ExternMetadataV1 {
     pub output_regs: u8,
 }
 
-#[repr(packed)]
+#[repr(C, packed(1))]
 pub struct ExternMetadataV2 {
     pub version: u8,
     pub flags: u32,
