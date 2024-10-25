@@ -5739,6 +5739,10 @@ fn replace_immediates_with_registers(
         for (_, op) in &mut all_blocks[block_target.index()].ops {
             match op {
                 BasicInst::LoadImmediate { dst, imm } => {
+                    if let Some(old_imm) = reg_to_imm[*dst as usize].take() {
+                        imm_to_reg.get_mut(&old_imm).unwrap().remove(*dst);
+                    }
+
                     imm_to_reg.entry(*imm as u32).or_insert(RegMask::empty()).insert(*dst);
                     reg_to_imm[*dst as usize] = Some(*imm as u32);
                     continue;
