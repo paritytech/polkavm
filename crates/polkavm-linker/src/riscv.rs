@@ -162,6 +162,21 @@ impl StoreKind {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum RegKind {
+    CountLeadingZeroBits,
+    CountLeadingZeroBitsWord,
+    CountSetBits,
+    CountSetBitsWord,
+    CountTrailingZeroBits,
+    CountTrailingZeroBitsWord,
+    OrCombineByte,
+    ReverseByte,
+    SignExtendByte,
+    SignExtendHalfWord,
+    ZeroExtendHalfWord,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub enum RegImmKind {
     Add32,
     Add32AndSignExtend,
@@ -185,6 +200,9 @@ pub enum RegImmKind {
     ShiftArithmeticRight32,
     ShiftArithmeticRight32AndSignExtend,
     ShiftArithmeticRight64,
+
+    RotateRight,
+    RotateRightWord,
 }
 
 impl RegImmKind {
@@ -256,6 +274,18 @@ pub enum RegRegKind {
     RemUnsigned32,
     RemUnsigned32AndSignExtend,
     RemUnsigned64,
+
+    AndInverted,
+    OrInverted,
+    Xnor,
+    Maximum,
+    MaximumUnsigned,
+    Minimum,
+    MinimumUnsigned,
+    RotateLeft,
+    RotateLeftWord,
+    RotateRight,
+    RotateRightWord,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
@@ -309,6 +339,11 @@ pub enum Inst {
         dst: Reg,
         src: Reg,
         imm: i32,
+    },
+    Reg {
+        kind: RegKind,
+        dst: Reg,
+        src: Reg,
     },
     RegReg {
         kind: RegRegKind,
@@ -945,36 +980,112 @@ impl Inst {
             }),
             0b0010011 => match (op >> 12) & 0b111 {
                 0b001 => {
-                    if !config.rv64 && op & 0xfe000000 != 0 {
-                        return None;
-                    }
-                    if config.rv64 && op & 0xfc000000 != 0 {
-                        return None;
-                    }
+                    let op1 = (op >> 25) & 0b1111111;
+                    let op2 = (op >> 20) & 0b11111;
+                    let dst = Reg::decode(op >> 7);
+                    let src1 = Reg::decode(op >> 15);
 
-                    let end = if config.rv64 { 5 } else { 4 };
-                    Some(Inst::RegImm {
-                        kind: xlen!(RegImmKind, ShiftLogicalLeft32, ShiftLogicalLeft64),
-                        dst: Reg::decode(op >> 7),
-                        src: Reg::decode(op >> 15),
-                        imm: bits(0, end, op, 20) as i32,
-                    })
+                    match (op1, op2) {
+                        (0b0000000, _) if !config.rv64 => Some(Inst::RegImm {
+                            kind: xlen!(RegImmKind, ShiftLogicalLeft32, ShiftLogicalLeft64),
+                            dst,
+                            src: src1,
+                            imm: bits(0, 4, op, 20) as i32,
+                        }),
+                        (0b0000000, _) | (0b0000001, _) if config.rv64 => Some(Inst::RegImm {
+                            kind: xlen!(RegImmKind, ShiftLogicalLeft32, ShiftLogicalLeft64),
+                            dst,
+                            src: src1,
+                            imm: bits(0, 5, op, 20) as i32,
+                        }),
+                        (0b0110000, 0b00000) => Some(Inst::Reg {
+                            kind: RegKind::CountLeadingZeroBits,
+                            dst,
+                            src: src1,
+                        }),
+                        (0b0110000, 0b00001) => Some(Inst::Reg {
+                            kind: RegKind::CountTrailingZeroBits,
+                            dst,
+                            src: src1,
+                        }),
+                        (0b0110000, 0b00010) => Some(Inst::Reg {
+                            kind: RegKind::CountSetBits,
+                            dst,
+                            src: src1,
+                        }),
+                        (0b0110000, 0b00100) => Some(Inst::Reg {
+                            kind: RegKind::SignExtendByte,
+                            dst,
+                            src: src1,
+                        }),
+                        (0b0110000, 0b00101) => Some(Inst::Reg {
+                            kind: RegKind::SignExtendHalfWord,
+                            dst,
+                            src: src1,
+                        }),
+                        _ => None,
+                    }
                 }
                 0b101 => {
-                    let mask = if config.rv64 { 0xfc000000 } else { 0xfe000000 };
-                    let kind = match (op & mask) >> 24 {
-                        0b00000000 => xlen!(RegImmKind, ShiftLogicalRight32, ShiftLogicalRight64),
-                        0b01000000 => xlen!(RegImmKind, ShiftArithmeticRight32, ShiftArithmeticRight64),
-                        _ => return None,
-                    };
+                    let op1 = (op >> 25) & 0b1111111;
+                    let op2 = (op >> 20) & 0b11111;
+                    let dst = Reg::decode(op >> 7);
+                    let src = Reg::decode(op >> 15);
 
-                    let end = if config.rv64 { 5 } else { 4 };
-                    Some(Inst::RegImm {
-                        kind,
-                        dst: Reg::decode(op >> 7),
-                        src: Reg::decode(op >> 15),
-                        imm: bits(0, end, op, 20) as i32,
-                    })
+                    match (op1, op2) {
+                        (0b0000000, _) if !config.rv64 => Some(Inst::RegImm {
+                            kind: RegImmKind::ShiftLogicalRight32,
+                            dst,
+                            src,
+                            imm: bits(0, 4, op, 20) as i32,
+                        }),
+                        (0b0000000, _) | (0b0000001, _) if config.rv64 => Some(Inst::RegImm {
+                            kind: RegImmKind::ShiftLogicalRight64,
+                            dst,
+                            src,
+                            imm: bits(0, 5, op, 20) as i32,
+                        }),
+                        (0b0100000, _) if !config.rv64 => Some(Inst::RegImm {
+                            kind: RegImmKind::ShiftArithmeticRight32,
+                            dst,
+                            src,
+                            imm: bits(0, 4, op, 20) as i32,
+                        }),
+                        (0b0100000, _) | (0b0100001, _) if config.rv64 => Some(Inst::RegImm {
+                            kind: RegImmKind::ShiftArithmeticRight64,
+                            dst,
+                            src,
+                            imm: bits(0, 5, op, 20) as i32,
+                        }),
+                        (0b0110000, _) if !config.rv64 => Some(Inst::RegImm {
+                            kind: RegImmKind::RotateRight,
+                            dst,
+                            src,
+                            imm: bits(0, 4, op, 20) as i32,
+                        }),
+                        (0b0110000, _) | (0b0110001, _) if config.rv64 => Some(Inst::RegImm {
+                            kind: RegImmKind::RotateRight,
+                            dst,
+                            src,
+                            imm: bits(0, 5, op, 20) as i32,
+                        }),
+                        (0b0010100, 0b00111) => Some(Inst::Reg {
+                            kind: RegKind::OrCombineByte,
+                            dst,
+                            src,
+                        }),
+                        (0b0110100, 0b11000) if !config.rv64 => Some(Inst::Reg {
+                            kind: RegKind::ReverseByte,
+                            dst,
+                            src,
+                        }),
+                        (0b0110101, 0b11000) if config.rv64 => Some(Inst::Reg {
+                            kind: RegKind::ReverseByte,
+                            dst,
+                            src,
+                        }),
+                        _ => None,
+                    }
                 }
                 _ => Some(Inst::RegImm {
                     kind: RegImmKind::decode(op >> 12, config.rv64)?,
@@ -983,39 +1094,81 @@ impl Inst {
                     imm: sign_ext(op >> 20, 12),
                 }),
             },
-            0b0011011 if config.rv64 => match (op >> 12) & 0b111 {
-                0b000 => Some(Inst::RegImm {
+            0b0011011 => match (op >> 12) & 0b111 {
+                0b000 if config.rv64 => Some(Inst::RegImm {
                     kind: RegImmKind::Add32AndSignExtend,
                     dst: Reg::decode(op >> 7),
                     src: Reg::decode(op >> 15),
                     imm: sign_ext(op >> 20, 12),
                 }),
-                0b001 if op >> 25 == 0 => Some(Inst::RegImm {
-                    kind: RegImmKind::ShiftLogicalLeft32AndSignExtend,
-                    dst: Reg::decode(op >> 7),
-                    src: Reg::decode(op >> 15),
-                    imm: bits(0, 4, op, 20) as i32,
-                }),
-                0b101 if op >> 25 == 0 || op >> 25 == 0b0100000 => {
-                    let kind = match (op & 0xfe000000) >> 25 {
-                        0b0000000 => RegImmKind::ShiftLogicalRight32AndSignExtend,
-                        0b0100000 => RegImmKind::ShiftArithmeticRight32AndSignExtend,
-                        _ => return None,
-                    };
+                0b001 if config.rv64 => {
+                    let op1 = (op >> 25) & 0b1111111;
+                    let op2 = (op >> 20) & 0b11111;
+                    let dst = Reg::decode(op >> 7);
+                    let src = Reg::decode(op >> 15);
 
-                    Some(Inst::RegImm {
-                        kind,
+                    match (op1, op2) {
+                        (0b0000000, _) => Some(Inst::RegImm {
+                            kind: RegImmKind::ShiftLogicalLeft32AndSignExtend,
+                            dst,
+                            src,
+                            imm: bits(0, 5, op, 20) as i32,
+                        }),
+                        (0b0110000, 0b00000) => Some(Inst::Reg {
+                            kind: RegKind::CountLeadingZeroBitsWord,
+                            dst,
+                            src,
+                        }),
+                        (0b0110000, 0b00001) => Some(Inst::Reg {
+                            kind: RegKind::CountTrailingZeroBitsWord,
+                            dst,
+                            src,
+                        }),
+                        (0b0110000, 0b00010) => Some(Inst::Reg {
+                            kind: RegKind::CountSetBitsWord,
+                            dst,
+                            src,
+                        }),
+
+                        _ => None,
+                    }
+                }
+                0b101 => match (op >> 25) & 0b1111111 {
+                    0b0000000 if config.rv64 => Some(Inst::RegImm {
+                        kind: RegImmKind::ShiftLogicalRight32AndSignExtend,
                         dst: Reg::decode(op >> 7),
                         src: Reg::decode(op >> 15),
-                        imm: bits(0, 4, op, 20) as i32,
-                    })
-                }
+                        imm: bits(0, 5, op, 20) as i32,
+                    }),
+                    0b0100000 if config.rv64 => Some(Inst::RegImm {
+                        kind: RegImmKind::ShiftArithmeticRight32AndSignExtend,
+                        dst: Reg::decode(op >> 7),
+                        src: Reg::decode(op >> 15),
+                        imm: bits(0, 5, op, 20) as i32,
+                    }),
+                    0b0110000 => Some(Inst::RegImm {
+                        kind: RegImmKind::RotateRightWord,
+                        dst: Reg::decode(op >> 7),
+                        src: Reg::decode(op >> 15),
+                        imm: bits(0, 5, op, 20) as i32,
+                    }),
+                    _ => None,
+                },
                 _ => None,
             },
             0b0110011 => {
                 let dst = Reg::decode(op >> 7);
                 let src1 = Reg::decode(op >> 15);
                 let src2 = Reg::decode(op >> 20);
+
+                if !config.rv64 && (op & 0xfff07000) == 0x8004000 {
+                    return Some(Inst::Reg {
+                        kind: RegKind::ZeroExtendHalfWord,
+                        dst,
+                        src: src1,
+                    });
+                }
+
                 let kind = match op & 0b1111111_00000_00000_111_00000_0000000 {
                     0b0000000_00000_00000_000_00000_0000000 => xlen!(RegRegKind, Add32, Add64),
                     0b0100000_00000_00000_000_00000_0000000 => xlen!(RegRegKind, Sub32, Sub64),
@@ -1036,27 +1189,52 @@ impl Inst {
                     0b0000001_00000_00000_110_00000_0000000 => xlen!(RegRegKind, Rem32, Rem64),
                     0b0000001_00000_00000_111_00000_0000000 => xlen!(RegRegKind, RemUnsigned32, RemUnsigned64),
 
+                    0b0000101_00000_00000_100_00000_0000000 => RegRegKind::Minimum,
+                    0b0000101_00000_00000_101_00000_0000000 => RegRegKind::MinimumUnsigned,
+                    0b0000101_00000_00000_110_00000_0000000 => RegRegKind::Maximum,
+                    0b0000101_00000_00000_111_00000_0000000 => RegRegKind::MaximumUnsigned,
+
+                    0b0100000_00000_00000_100_00000_0000000 => RegRegKind::Xnor,
+                    0b0100000_00000_00000_110_00000_0000000 => RegRegKind::OrInverted,
+                    0b0100000_00000_00000_111_00000_0000000 => RegRegKind::AndInverted,
+
+                    0b0110000_00000_00000_001_00000_0000000 => RegRegKind::RotateLeft,
+                    0b0110000_00000_00000_101_00000_0000000 => RegRegKind::RotateRight,
+
                     _ => return None,
                 };
 
                 Some(Inst::RegReg { kind, dst, src1, src2 })
             }
-            0b0111011 if config.rv64 => {
+            0b0111011 => {
                 let dst = Reg::decode(op >> 7);
                 let src1 = Reg::decode(op >> 15);
                 let src2 = Reg::decode(op >> 20);
 
+                if config.rv64 && (op & 0xfff07000) == 0x8004000 {
+                    return Some(Inst::Reg {
+                        kind: RegKind::ZeroExtendHalfWord,
+                        dst,
+                        src: src1,
+                    });
+                }
+
                 let kind = match op & 0b1111111_00000_00000_111_00000_0000000 {
-                    0b0000000_00000_00000_000_00000_0000000 => RegRegKind::Add32AndSignExtend,
-                    0b0100000_00000_00000_000_00000_0000000 => RegRegKind::Sub32AndSignExtend,
-                    0b0000000_00000_00000_001_00000_0000000 => RegRegKind::ShiftLogicalLeft32AndSignExtend,
-                    0b0000000_00000_00000_101_00000_0000000 => RegRegKind::ShiftLogicalRight32AndSignExtend,
-                    0b0100000_00000_00000_101_00000_0000000 => RegRegKind::ShiftArithmeticRight32AndSignExtend,
-                    0b0000001_00000_00000_000_00000_0000000 => RegRegKind::Mul32AndSignExtend,
-                    0b0000001_00000_00000_100_00000_0000000 => RegRegKind::Div32AndSignExtend,
-                    0b0000001_00000_00000_101_00000_0000000 => RegRegKind::DivUnsigned32AndSignExtend,
-                    0b0000001_00000_00000_110_00000_0000000 => RegRegKind::Rem32AndSignExtend,
-                    0b0000001_00000_00000_111_00000_0000000 => RegRegKind::RemUnsigned32AndSignExtend,
+                    0b0000000_00000_00000_000_00000_0000000 if config.rv64 => RegRegKind::Add32AndSignExtend,
+                    0b0000000_00000_00000_001_00000_0000000 if config.rv64 => RegRegKind::ShiftLogicalLeft32AndSignExtend,
+                    0b0000000_00000_00000_101_00000_0000000 if config.rv64 => RegRegKind::ShiftLogicalRight32AndSignExtend,
+
+                    0b0000001_00000_00000_000_00000_0000000 if config.rv64 => RegRegKind::Mul32AndSignExtend,
+                    0b0000001_00000_00000_100_00000_0000000 if config.rv64 => RegRegKind::Div32AndSignExtend,
+                    0b0000001_00000_00000_101_00000_0000000 if config.rv64 => RegRegKind::DivUnsigned32AndSignExtend,
+                    0b0000001_00000_00000_110_00000_0000000 if config.rv64 => RegRegKind::Rem32AndSignExtend,
+                    0b0000001_00000_00000_111_00000_0000000 if config.rv64 => RegRegKind::RemUnsigned32AndSignExtend,
+
+                    0b0100000_00000_00000_000_00000_0000000 if config.rv64 => RegRegKind::Sub32AndSignExtend,
+                    0b0100000_00000_00000_101_00000_0000000 if config.rv64 => RegRegKind::ShiftArithmeticRight32AndSignExtend,
+
+                    0b0110000_00000_00000_001_00000_0000000 => RegRegKind::RotateLeftWord,
+                    0b0110000_00000_00000_101_00000_0000000 => RegRegKind::RotateRightWord,
 
                     _ => return None,
                 };
