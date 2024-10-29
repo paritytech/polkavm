@@ -80,6 +80,18 @@ impl cast<u16> {
     }
 }
 
+impl cast<u16> {
+    #[inline(always)]
+    pub const fn to_signed(self) -> i16 {
+        self.0 as i16
+    }
+
+    #[inline(always)]
+    pub const fn to_u32(self) -> u32 {
+        self.0 as u32
+    }
+}
+
 impl cast<u32> {
     #[inline(always)]
     pub const fn to_signed(self) -> i32 {
