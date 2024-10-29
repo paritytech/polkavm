@@ -593,6 +593,11 @@ enum BasicInst<T> {
         dst: Reg,
         src: Reg,
     },
+    Reg {
+        kind: RegKind,
+        dst: Reg,
+        src: Reg,
+    },
     RegReg {
         kind: RegRegKind,
         dst: Reg,
@@ -645,7 +650,7 @@ impl<T> BasicInst<T> {
             | BasicInst::LoadAbsolute { .. }
             | BasicInst::LoadAddress { .. }
             | BasicInst::LoadAddressIndirect { .. } => RegMask::empty(),
-            BasicInst::MoveReg { src, .. } => RegMask::from(src),
+            BasicInst::MoveReg { src, .. } | BasicInst::Reg { src, .. } => RegMask::from(src),
             BasicInst::StoreAbsolute { src, .. } => RegMask::from(src),
             BasicInst::LoadIndirect { base, .. } => RegMask::from(base),
             BasicInst::StoreIndirect { src, base, .. } => RegMask::from(src) | RegMask::from(base),
@@ -669,6 +674,7 @@ impl<T> BasicInst<T> {
             | BasicInst::LoadIndirect { dst, .. }
             | BasicInst::RegReg { dst, .. }
             | BasicInst::Cmov { dst, .. }
+            | BasicInst::Reg { dst, .. }
             | BasicInst::AnyAny { dst, .. } => RegMask::from(dst),
             BasicInst::Ecalli { nth_import } => imports[nth_import].dst_mask(),
             BasicInst::Sbrk { dst, .. } => RegMask::from(dst),
@@ -681,6 +687,7 @@ impl<T> BasicInst<T> {
             BasicInst::LoadAbsolute { .. } | BasicInst::LoadIndirect { .. } => !config.elide_unnecessary_loads,
             BasicInst::Nop
             | BasicInst::MoveReg { .. }
+            | BasicInst::Reg { .. }
             | BasicInst::LoadImmediate { .. }
             | BasicInst::LoadImmediate64 { .. }
             | BasicInst::LoadAddress { .. }
@@ -731,6 +738,11 @@ impl<T> BasicInst<T> {
                 src: src.map_register(|reg| map(reg, OpKind::Read)),
                 base: map(base, OpKind::Read),
                 offset,
+            }),
+            BasicInst::Reg { kind, dst, src } => Some(BasicInst::Reg {
+                kind,
+                src: map(src, OpKind::Read),
+                dst: map(dst, OpKind::Write),
             }),
             BasicInst::RegReg { kind, dst, src1, src2 } => Some(BasicInst::RegReg {
                 kind,
@@ -821,6 +833,7 @@ impl<T> BasicInst<T> {
             BasicInst::LoadAddressIndirect { dst, target } => BasicInst::LoadAddressIndirect { dst, target: map(target)? },
             BasicInst::LoadIndirect { kind, dst, base, offset } => BasicInst::LoadIndirect { kind, dst, base, offset },
             BasicInst::StoreIndirect { kind, src, base, offset } => BasicInst::StoreIndirect { kind, src, base, offset },
+            BasicInst::Reg { kind, dst, src } => BasicInst::Reg { kind, dst, src },
             BasicInst::RegReg { kind, dst, src1, src2 } => BasicInst::RegReg { kind, dst, src1, src2 },
             BasicInst::AnyAny { kind, dst, src1, src2 } => BasicInst::AnyAny { kind, dst, src1, src2 },
             BasicInst::Cmov { kind, dst, src, cond } => BasicInst::Cmov { kind, dst, src, cond },
@@ -843,6 +856,7 @@ impl<T> BasicInst<T> {
             | BasicInst::LoadImmediate64 { .. }
             | BasicInst::LoadIndirect { .. }
             | BasicInst::StoreIndirect { .. }
+            | BasicInst::Reg { .. }
             | BasicInst::RegReg { .. }
             | BasicInst::AnyAny { .. }
             | BasicInst::Cmov { .. }
@@ -1703,6 +1717,84 @@ fn emit_minmax(
     }));
 }
 
+fn resolve_simple_zero_register_usage(
+    kind: crate::riscv::RegRegKind,
+    dst: Reg,
+    src1: RReg,
+    src2: RReg,
+    mut emit: impl FnMut(InstExt<SectionTarget, SectionTarget>),
+) -> bool {
+    use crate::riscv::RegRegKind as K;
+    if kind == K::OrInverted && src1 == RReg::Zero && src2 != RReg::Zero {
+        emit(InstExt::Basic(BasicInst::AnyAny {
+            kind: AnyAnyKind::Xor32,
+            dst,
+            src1: RegImm::Imm(!0),
+            src2: cast_reg_any(src2).unwrap(),
+        }));
+        return true;
+    }
+
+    if kind == K::Xnor && src1 == RReg::Zero && src2 != RReg::Zero {
+        emit(InstExt::Basic(BasicInst::AnyAny {
+            kind: AnyAnyKind::Xor32,
+            dst,
+            src1: RegImm::Imm(!0),
+            src2: cast_reg_any(src2).unwrap(),
+        }));
+        return true;
+    }
+
+    if kind == K::Xnor && src1 != RReg::Zero && src2 == RReg::Zero {
+        emit(InstExt::Basic(BasicInst::AnyAny {
+            kind: AnyAnyKind::Xor32,
+            dst,
+            src1: cast_reg_any(src1).unwrap(),
+            src2: RegImm::Imm(!0),
+        }));
+        return true;
+    }
+
+    if (kind == K::Minimum || kind == K::Maximum) && (src1 == RReg::Zero || src2 == RReg::Zero) {
+        if src1 == RReg::Zero && src2 == RReg::Zero {
+            emit(InstExt::Basic(BasicInst::LoadImmediate { dst, imm: 0 }));
+            return true;
+        }
+
+        let tmp = Reg::E2;
+        let src1 = cast_reg_any(src1).unwrap();
+        let src2 = cast_reg_any(src2).unwrap();
+        let (kind, cmp_src1, cmp_src2) = match kind {
+            K::Minimum => (AnyAnyKind::SetLessThanSigned32, src1, src2),
+            K::Maximum => (AnyAnyKind::SetLessThanSigned32, src2, src1),
+            _ => unreachable!(),
+        };
+
+        emit(InstExt::Basic(BasicInst::AnyAny {
+            kind,
+            dst: tmp,
+            src1: cmp_src1,
+            src2: cmp_src2,
+        }));
+
+        match src1 {
+            RegImm::Reg(src) => emit(InstExt::Basic(BasicInst::MoveReg { dst, src })),
+            RegImm::Imm(imm) => emit(InstExt::Basic(BasicInst::LoadImmediate { dst, imm })),
+        }
+
+        emit(InstExt::Basic(BasicInst::Cmov {
+            kind: CmovKind::EqZero,
+            dst,
+            src: src2,
+            cond: tmp,
+        }));
+
+        return true;
+    }
+
+    false
+}
+
 fn convert_instruction<H>(
     elf: &Elf<H>,
     section: &Section,
@@ -1855,6 +1947,8 @@ where
                 RegImmKind::ShiftArithmeticRight32 => AnyAnyKind::ShiftArithmeticRight32,
                 RegImmKind::ShiftArithmeticRight32AndSignExtend => AnyAnyKind::ShiftArithmeticRight32AndSignExtend,
                 RegImmKind::ShiftArithmeticRight64 => AnyAnyKind::ShiftArithmeticRight64,
+                RegImmKind::RotateRight => AnyAnyKind::RotateRight,
+                RegImmKind::RotateRightWord => AnyAnyKind::RotateRightWord,
             };
 
             match src {
@@ -1880,6 +1974,35 @@ where
                     }));
                 }
             }
+
+            Ok(())
+        }
+        Inst::Reg { kind, dst, src } => {
+            let Some(dst) = cast_reg_non_zero(dst)? else {
+                emit(InstExt::nop());
+                return Ok(());
+            };
+
+            let Some(src) = cast_reg_non_zero(src)? else {
+                return Err(ProgramFromElfError::other("found an invalid instruction"));
+            };
+
+            use crate::riscv::RegKind as K;
+            let kind = match kind {
+                K::CountLeadingZeroBits => RegKind::CountLeadingZeroBits,
+                K::CountLeadingZeroBitsWord => RegKind::CountLeadingZeroBitsWord,
+                K::CountSetBits => RegKind::CountSetBits,
+                K::CountSetBitsWord => RegKind::CountSetBitsWord,
+                K::CountTrailingZeroBits => RegKind::CountTrailingZeroBits,
+                K::CountTrailingZeroBitsWord => RegKind::CountTrailingZeroBitsWord,
+                K::OrCombineByte => RegKind::OrCombineByte,
+                K::ReverseByte => RegKind::ReverseByte,
+                K::SignExtendByte => RegKind::SignExtendByte,
+                K::SignExtendHalfWord => RegKind::SignExtendHalfWord,
+                K::ZeroExtendHalfWord => RegKind::ZeroExtendHalfWord,
+            };
+
+            emit(InstExt::Basic(BasicInst::Reg { kind, dst, src }));
 
             Ok(())
         }
@@ -1931,6 +2054,7 @@ where
                                     let imm: i32 = imm.try_into().expect("immediate operand overflow");
                                     BasicInst::LoadImmediate { dst, imm }
                                 }
+                                Some(RegValue::InputReg { reg, .. }) => BasicInst::MoveReg { dst, src: reg },
                                 _ => {
                                     return Err(ProgramFromElfError::other(format!(
                                         "found a {:?} instruction using a zero register",
@@ -1942,6 +2066,10 @@ where
                     }
                 };
             }
+
+            if resolve_simple_zero_register_usage(kind, dst, src1, src2, &mut emit) {
+                return Ok(());
+            };
 
             use crate::riscv::RegRegKind as K;
             let instruction = match kind {
@@ -1991,6 +2119,18 @@ where
                 K::RemUnsigned32 => regreg!(RemUnsigned32),
                 K::RemUnsigned32AndSignExtend => regreg!(RemUnsigned32AndSignExtend),
                 K::RemUnsigned64 => regreg!(RemUnsigned64),
+
+                K::AndInverted => regreg!(AndInverted),
+                K::OrInverted => regreg!(OrInverted),
+                K::Xnor => regreg!(Xnor),
+                K::Maximum => regreg!(Maximum),
+                K::MaximumUnsigned => regreg!(MaximumUnsigned),
+                K::Minimum => regreg!(Minimum),
+                K::MinimumUnsigned => regreg!(MinimumUnsigned),
+                K::RotateLeft => regreg!(RotateLeft),
+                K::RotateLeftWord => regreg!(RotateLeftWord),
+                K::RotateRight => anyany!(RotateRight),
+                K::RotateRightWord => anyany!(RotateRightWord),
             };
 
             emit(InstExt::Basic(instruction));
@@ -3516,6 +3656,23 @@ pub enum AnyAnyKind {
     Mul32,
     Mul32AndSignExtend,
     Mul64,
+    RotateRight,
+    RotateRightWord,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum RegKind {
+    CountLeadingZeroBits,
+    CountLeadingZeroBitsWord,
+    CountSetBits,
+    CountSetBitsWord,
+    CountTrailingZeroBits,
+    CountTrailingZeroBitsWord,
+    OrCombineByte,
+    ReverseByte,
+    SignExtendByte,
+    SignExtendHalfWord,
+    ZeroExtendHalfWord,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -3538,6 +3695,16 @@ pub enum RegRegKind {
     RemUnsigned32,
     RemUnsigned32AndSignExtend,
     RemUnsigned64,
+
+    AndInverted,
+    OrInverted,
+    Xnor,
+    Maximum,
+    MaximumUnsigned,
+    Minimum,
+    MinimumUnsigned,
+    RotateLeft,
+    RotateLeftWord,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -3598,6 +3765,18 @@ enum OperationKind {
     SetGreaterOrEqualSigned64,
     SetGreaterOrEqualUnsigned32,
     SetGreaterOrEqualUnsigned64,
+
+    AndInverted,
+    OrInverted,
+    Xnor,
+    Maximum,
+    MaximumUnsigned,
+    Minimum,
+    MinimumUnsigned,
+    RotateLeft,
+    RotateLeftWord,
+    RotateRight,
+    RotateRightWord,
 }
 
 impl From<AnyAnyKind> for OperationKind {
@@ -3631,6 +3810,8 @@ impl From<AnyAnyKind> for OperationKind {
             AnyAnyKind::Mul32 => Self::Mul32,
             AnyAnyKind::Mul32AndSignExtend => Self::Mul32AndSignExtend,
             AnyAnyKind::Mul64 => Self::Mul64,
+            AnyAnyKind::RotateRight => Self::RotateRight,
+            AnyAnyKind::RotateRightWord => Self::RotateRightWord,
         }
     }
 }
@@ -3656,6 +3837,15 @@ impl From<RegRegKind> for OperationKind {
             RegRegKind::RemUnsigned32 => Self::RemUnsigned32,
             RegRegKind::RemUnsigned32AndSignExtend => Self::RemUnsigned32AndSignExtend,
             RegRegKind::RemUnsigned64 => Self::RemUnsigned64,
+            RegRegKind::AndInverted => Self::AndInverted,
+            RegRegKind::OrInverted => Self::OrInverted,
+            RegRegKind::Xnor => Self::Xnor,
+            RegRegKind::Maximum => Self::Maximum,
+            RegRegKind::MaximumUnsigned => Self::MaximumUnsigned,
+            RegRegKind::Minimum => Self::Minimum,
+            RegRegKind::MinimumUnsigned => Self::MinimumUnsigned,
+            RegRegKind::RotateLeft => Self::RotateLeft,
+            RegRegKind::RotateLeftWord => Self::RotateLeftWord,
         }
     }
 }
@@ -3872,6 +4062,20 @@ impl OperationKind {
             Self::Xor64 => {
                 lhs ^ rhs
             },
+            //
+            // Zbb instructions
+            //
+            Self::AndInverted => lhs & (!rhs),
+            Self::OrInverted => lhs | (!rhs),
+            Self::Xnor => !(lhs ^ rhs),
+            Self::Maximum => lhs.max(rhs),
+            Self::MaximumUnsigned => (lhs as u64).max(rhs as u64) as i64,
+            Self::Minimum => lhs.min(rhs),
+            Self::MinimumUnsigned => (lhs as u64).min(rhs as u64) as i64,
+            Self::RotateLeft => cast((lhs as u32).rotate_left(rhs as u32) as i32).to_i64_sign_extend(),
+            Self::RotateLeftWord => cast((lhs as u32).rotate_left(rhs as u32) as i32).to_i64_sign_extend(),
+            Self::RotateRight => cast((lhs as u32).rotate_right(rhs as u32) as i32).to_i64_sign_extend(),
+            Self::RotateRightWord => cast((lhs as u32).rotate_right(rhs as u32) as i32).to_i64_sign_extend(),
         }
     }
 
@@ -3991,6 +4195,30 @@ impl OperationKind {
             (O::Div64,                    _, C(0)) => C(-1),
             (O::DivUnsigned32,            _, C(0)) => C(-1),
             (O::DivUnsigned64,            _, C(0)) => C(-1),
+
+            // (x & ~0) = x
+            (O::AndInverted,              lhs, C(0)) => lhs,
+            // (0 & ~x) = 0
+            (O::AndInverted,              C(0), _) => C(0),
+            (O::OrInverted,               _, C(0)) => C(-1),
+
+            (O::MaximumUnsigned, C(0), rhs) => rhs,
+            (O::MaximumUnsigned, lhs, C(0)) => lhs,
+
+            (O::MinimumUnsigned, C(0), _rhs) => C(0),
+            (O::MinimumUnsigned, _lhs, C(0)) => C(0),
+
+            (O::RotateLeft, lhs, C(0)) => lhs,
+            (O::RotateLeft, C(0), _) => C(0),
+
+            (O::RotateLeftWord, lhs, C(0)) => lhs,
+            (O::RotateLeftWord, C(0), _) => C(0),
+
+            (O::RotateRight, lhs, C(0)) => lhs,
+            (O::RotateRight, C(0), _) => C(0),
+
+            (O::RotateRightWord, lhs, C(0)) => lhs,
+            (O::RotateRightWord, C(0), _) => C(0),
 
             _ => return None,
         };
@@ -6897,6 +7125,25 @@ fn emit_code(
                         Instruction::load_i32(conv_reg(dst), value)
                     }
                 }
+                BasicInst::Reg { kind, dst, src } => {
+                    codegen! {
+                        args = (conv_reg(dst), conv_reg(src)),
+                        kind = kind,
+                        {
+                            RegKind::CountLeadingZeroBits => count_leading_zero_bits,
+                            RegKind::CountLeadingZeroBitsWord => count_leading_zero_bits_word,
+                            RegKind::CountSetBits => count_set_bits,
+                            RegKind::CountSetBitsWord => count_set_bits_word,
+                            RegKind::CountTrailingZeroBits => count_trailing_zero_bits,
+                            RegKind::CountTrailingZeroBitsWord => count_trailing_zero_bits_word,
+                            RegKind::OrCombineByte => or_combine_byte,
+                            RegKind::ReverseByte => reverse_byte,
+                            RegKind::SignExtendByte => sign_extend_byte,
+                            RegKind::SignExtendHalfWord => sign_extend_half_word,
+                            RegKind::ZeroExtendHalfWord => zero_extend_half_word,
+                        }
+                    }
+                }
                 BasicInst::RegReg { kind, dst, src1, src2 } => {
                     use RegRegKind as K;
                     codegen! {
@@ -6921,6 +7168,15 @@ fn emit_code(
                             K::RemUnsigned32 => rem_unsigned_32,
                             K::RemUnsigned32AndSignExtend => rem_unsigned_32,
                             K::RemUnsigned64 => rem_unsigned_64,
+                            K::AndInverted => and_inverted,
+                            K::OrInverted => or_inverted,
+                            K::Xnor => xnor,
+                            K::Maximum => maximum,
+                            K::MaximumUnsigned => maximum_unsigned,
+                            K::Minimum => minimum,
+                            K::MinimumUnsigned => minimum_unsigned,
+                            K::RotateLeft => rotate_left,
+                            K::RotateLeftWord => rotate_left_word,
                         }
                     }
                 }
@@ -6963,6 +7219,8 @@ fn emit_code(
                                     K::Mul32 => mul_32,
                                     K::Mul32AndSignExtend => mul_32,
                                     K::Mul64 => mul_64,
+                                    K::RotateRight => rotate_right,
+                                    K::RotateRightWord => rotate_right_word,
                                 }
                             }
                         }
@@ -6995,6 +7253,8 @@ fn emit_code(
                                 K::Mul32 => I::mul_imm_32(dst, src1, src2),
                                 K::Mul32AndSignExtend => I::mul_imm_32(dst, src1, src2),
                                 K::Mul64 => I::mul_imm_64(dst, src1, src2),
+                                K::RotateRight => I::rotate_right_imm(dst, src1, src2),
+                                K::RotateRightWord => I::rotate_right_word_imm(dst, src1, src2),
                             }
                         }
                         (RegImm::Imm(src1), RegImm::Reg(src2)) => {
@@ -7027,6 +7287,9 @@ fn emit_code(
                                 K::ShiftArithmeticRight32 => I::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
                                 K::ShiftArithmeticRight32AndSignExtend => I::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
                                 K::ShiftArithmeticRight64 => I::shift_arithmetic_right_imm_alt_64(dst, src2, src1),
+
+                                K::RotateRight => I::rotate_right_imm_alt(dst, src2, src1),
+                                K::RotateRightWord => I::rotate_right_word_imm_alt(dst, src2, src1),
                             }
                         }
                         (RegImm::Imm(src1), RegImm::Imm(src2)) => {

@@ -190,6 +190,61 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
+    fn and_inverted(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn or_inverted(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn xnor(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn maximum(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn maximum_unsigned(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn minimum(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn minimum_unsigned(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn rotate_left(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn rotate_left_word(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn rotate_right(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn rotate_right_word(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
     fn mul_imm_32(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
@@ -300,6 +355,61 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
+    fn count_leading_zero_bits(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn count_leading_zero_bits_word(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn count_trailing_zero_bits(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn count_trailing_zero_bits_word(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn count_set_bits(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn count_set_bits_word(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn sign_extend_byte(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn sign_extend_half_word(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn zero_extend_half_word(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn or_combine_byte(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn reverse_byte(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
     fn cmov_if_zero(&mut self, _d: RawReg, _s: RawReg, _c: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
@@ -316,6 +426,26 @@ impl InstructionVisitor for GasVisitor {
 
     #[inline(always)]
     fn cmov_if_not_zero_imm(&mut self, _d: RawReg, _c: RawReg, _s: u32) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn rotate_right_imm(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn rotate_right_imm_alt(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn rotate_right_word_imm(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn rotate_right_word_imm_alt(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 

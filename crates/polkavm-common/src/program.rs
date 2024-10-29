@@ -1507,6 +1507,11 @@ define_opcodes! {
 
         [I_64, I_32] cmov_if_zero_imm                         = 85,
         [I_64, I_32] cmov_if_not_zero_imm                     = 86,
+
+        [I_64, I_32] rotate_right_imm                         = 158,
+        [I_64, I_32] rotate_right_imm_alt                     = 159,
+        [I_64, I_32] rotate_right_word_imm                    = 160,
+        [I_64, I_32] rotate_right_word_imm_alt                = 161,
     ]
 
     // Instructions with args: reg, reg, offset
@@ -1552,6 +1557,18 @@ define_opcodes! {
 
         [I_64, I_32] cmov_if_zero                             = 83,
         [I_64, I_32] cmov_if_not_zero                         = 84,
+
+        [I_64, I_32] and_inverted                             = 162,
+        [I_64, I_32] or_inverted                              = 137,
+        [I_64, I_32] xnor                                     = 138,
+        [I_64, I_32] maximum                                  = 145,
+        [I_64, I_32] maximum_unsigned                         = 146,
+        [I_64, I_32] minimum                                  = 147,
+        [I_64, I_32] minimum_unsigned                         = 148,
+        [I_64, I_32] rotate_left                              = 152,
+        [I_64, I_32] rotate_left_word                         = 153,
+        [I_64, I_32] rotate_right                             = 154,
+        [I_64, I_32] rotate_right_word                        = 155,
     ]
 
     // Instructions with args: offset
@@ -1576,6 +1593,17 @@ define_opcodes! {
     [
         [I_64, I_32] move_reg                                 = 82,
         [I_SBRK]     sbrk                                     = 87,
+        [I_64, I_32] count_leading_zero_bits                  = 139,
+        [I_64]       count_leading_zero_bits_word             = 140,
+        [I_64, I_32] count_trailing_zero_bits                 = 141,
+        [I_64]       count_trailing_zero_bits_word            = 142,
+        [I_64, I_32] count_set_bits                           = 143,
+        [I_64]       count_set_bits_word                      = 144,
+        [I_64, I_32] sign_extend_byte                         = 149,
+        [I_64, I_32] sign_extend_half_word                    = 150,
+        [I_64, I_32] zero_extend_half_word                    = 151,
+        [I_64, I_32] or_combine_byte                          = 156,
+        [I_64, I_32] reverse_byte                             = 157,
     ]
 
     // Instructions with args: reg, reg, imm, imm
@@ -2027,6 +2055,83 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "i64 {d} = i64 {s1} %s i64 {s2}")
     }
 
+    fn and_inverted(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "{d} = ({s1} & ~{s2})")
+    }
+
+    fn or_inverted(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "{d} = ({s1} | ~{s2})")
+    }
+
+    fn xnor(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "{d} = ~({s1} ^ {s2})")
+    }
+
+    fn maximum(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "{d} = max({s1}, {s2})")
+    }
+
+    fn maximum_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "{d} = max({s1} % u, {s2} % u)")
+    }
+
+    fn minimum(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "{d} = min({s1}, {s2})")
+    }
+
+    fn minimum_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "{d} = min({s1} %u, {s2} %u)")
+    }
+
+    fn rotate_left(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "{d} = {s1} <<rotate {s2}")
+    }
+
+    fn rotate_left_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "{d} = {s1} <<rotate.32 {s2}")
+    }
+
+    fn rotate_right(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "{d} = {s1} >>rotate {s2}")
+    }
+
+    fn rotate_right_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "{d} = {s1} >>rotate.32 {s2}")
+    }
+
     fn set_less_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
@@ -2157,6 +2262,72 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "{d} = {s}")
     }
 
+    fn count_leading_zero_bits(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s = self.format_reg(s);
+        write!(self, "{d} = clz {s}")
+    }
+
+    fn count_leading_zero_bits_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s = self.format_reg(s);
+        write!(self, "{d} = clz.w {s}")
+    }
+
+    fn count_trailing_zero_bits(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s = self.format_reg(s);
+        write!(self, "{d} = ctz {s}")
+    }
+
+    fn count_trailing_zero_bits_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s = self.format_reg(s);
+        write!(self, "{d} = ctz.w {s}")
+    }
+
+    fn count_set_bits(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s = self.format_reg(s);
+        write!(self, "{d} = cpop {s}")
+    }
+
+    fn count_set_bits_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s = self.format_reg(s);
+        write!(self, "{d} = cpop.w {s}")
+    }
+
+    fn sign_extend_byte(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s = self.format_reg(s);
+        write!(self, "{d} = sext.b {s}")
+    }
+
+    fn sign_extend_half_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s = self.format_reg(s);
+        write!(self, "{d} = sext.h {s}")
+    }
+
+    fn zero_extend_half_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s = self.format_reg(s);
+        write!(self, "{d} = zext.h {s}")
+    }
+
+    fn or_combine_byte(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s = self.format_reg(s);
+        write!(self, "{d} = orc.b {s}")
+    }
+
+    fn reverse_byte(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s = self.format_reg(s);
+        write!(self, "{d} = reverse {s}")
+    }
+
     fn cmov_if_zero(&mut self, d: RawReg, s: RawReg, c: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
@@ -2181,6 +2352,30 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let d = self.format_reg(d);
         let c = self.format_reg(c);
         write!(self, "{d} = {s} if {c} != 0")
+    }
+
+    fn rotate_right_imm(&mut self, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s = self.format_reg(s);
+        write!(self, "{d} = {s} >>rotate.imm {c}")
+    }
+
+    fn rotate_right_imm_alt(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let c = self.format_reg(c);
+        write!(self, "{d} = {s} >>rotate.imm {c}")
+    }
+
+    fn rotate_right_word_imm(&mut self, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s = self.format_reg(s);
+        write!(self, "{d} = {s} >>rotate.imm.32 {c}")
+    }
+
+    fn rotate_right_word_imm_alt(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let c = self.format_reg(c);
+        write!(self, "{d} = {s} >>rotate.imm.32 {c}")
     }
 
     fn add_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
