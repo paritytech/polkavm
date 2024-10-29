@@ -35,7 +35,7 @@ Dir["tests/*/*.S"].sort.each do |path|
         mabi = "ilp32"
     end
 
-    march += "ima_zifencei"
+    march += "ima_zifencei_zbb"
 
     FileUtils.mkdir_p File.dirname(output_path)
     FileUtils.mkdir_p File.dirname(raw_output_path)
