@@ -505,35 +505,35 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                             let src1 = src1.into();
                             let src2 = src2.into();
                             emit_and_continue!(match op {
-                                Op::Add => Instruction::add(dst, src1, src2),
-                                Op::Sub => Instruction::sub(dst, src1, src2),
+                                Op::Add => Instruction::add_32(dst, src1, src2),
+                                Op::Sub => Instruction::sub_32(dst, src1, src2),
                                 Op::And => Instruction::and(dst, src1, src2),
                                 Op::Xor => Instruction::xor(dst, src1, src2),
                                 Op::Or => Instruction::or(dst, src1, src2),
-                                Op::Mul => Instruction::mul(dst, src1, src2),
-                                Op::DivUnsigned => Instruction::div_unsigned(dst, src1, src2),
-                                Op::DivSigned => Instruction::div_signed(dst, src1, src2),
-                                Op::RemUnsigned => Instruction::rem_unsigned(dst, src1, src2),
-                                Op::RemSigned => Instruction::rem_signed(dst, src1, src2),
+                                Op::Mul => Instruction::mul_32(dst, src1, src2),
+                                Op::DivUnsigned => Instruction::div_unsigned_32(dst, src1, src2),
+                                Op::DivSigned => Instruction::div_signed_32(dst, src1, src2),
+                                Op::RemUnsigned => Instruction::rem_unsigned_32(dst, src1, src2),
+                                Op::RemSigned => Instruction::rem_signed_32(dst, src1, src2),
                                 Op::LessUnsigned => Instruction::set_less_than_unsigned(dst, src1, src2),
                                 Op::LessSigned => Instruction::set_less_than_signed(dst, src1, src2),
                                 Op::GreaterUnsigned => Instruction::set_less_than_unsigned(dst, src2, src1),
                                 Op::GreaterSigned => Instruction::set_less_than_signed(dst, src2, src1),
-                                Op::ShiftLeft => Instruction::shift_logical_left(dst, src1, src2),
-                                Op::ShiftRight => Instruction::shift_logical_right(dst, src1, src2),
-                                Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right(dst, src1, src2),
+                                Op::ShiftLeft => Instruction::shift_logical_left_32(dst, src1, src2),
+                                Op::ShiftRight => Instruction::shift_logical_right_32(dst, src1, src2),
+                                Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_32(dst, src1, src2),
                             });
                         } else if let Some(src2) = parse_imm(src2) {
                             let dst = dst.into();
                             let src1 = src1.into();
                             let src2 = src2 as u32;
                             emit_and_continue!(match op {
-                                Op::Add => Instruction::add_imm(dst, src1, src2),
-                                Op::Sub => Instruction::add_imm(dst, src1, (-(src2 as i32)) as u32),
+                                Op::Add => Instruction::add_imm_32(dst, src1, src2),
+                                Op::Sub => Instruction::add_imm_32(dst, src1, (-(src2 as i32)) as u32),
                                 Op::And => Instruction::and_imm(dst, src1, src2),
                                 Op::Xor => Instruction::xor_imm(dst, src1, src2),
                                 Op::Or => Instruction::or_imm(dst, src1, src2),
-                                Op::Mul => Instruction::mul_imm(dst, src1, src2),
+                                Op::Mul => Instruction::mul_imm_32(dst, src1, src2),
                                 Op::DivUnsigned | Op::DivSigned => {
                                     return Err(format!("cannot parse line {nth_line}: division is not supported for immediates"));
                                 }
@@ -544,9 +544,9 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                 Op::LessSigned => Instruction::set_less_than_signed_imm(dst, src1, src2),
                                 Op::GreaterUnsigned => Instruction::set_greater_than_unsigned_imm(dst, src1, src2),
                                 Op::GreaterSigned => Instruction::set_greater_than_signed_imm(dst, src1, src2),
-                                Op::ShiftLeft => Instruction::shift_logical_left_imm(dst, src1, src2),
-                                Op::ShiftRight => Instruction::shift_logical_right_imm(dst, src1, src2),
-                                Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm(dst, src1, src2),
+                                Op::ShiftLeft => Instruction::shift_logical_left_imm_32(dst, src1, src2),
+                                Op::ShiftRight => Instruction::shift_logical_right_imm_32(dst, src1, src2),
+                                Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_32(dst, src1, src2),
                             });
                         }
                     } else if let Some(src1) = parse_imm(src1) {
@@ -555,12 +555,12 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                             let src1 = src1 as u32;
                             let src2 = src2.into();
                             emit_and_continue!(match op {
-                                Op::Add => Instruction::add_imm(dst, src2, src1),
-                                Op::Sub => Instruction::negate_and_add_imm(dst, src2, src1),
+                                Op::Add => Instruction::add_imm_32(dst, src2, src1),
+                                Op::Sub => Instruction::negate_and_add_imm_32(dst, src2, src1),
                                 Op::And => Instruction::and_imm(dst, src2, src1),
                                 Op::Xor => Instruction::xor_imm(dst, src2, src1),
                                 Op::Or => Instruction::or_imm(dst, src2, src1),
-                                Op::Mul => Instruction::mul_imm(dst, src2, src1),
+                                Op::Mul => Instruction::mul_imm_32(dst, src2, src1),
                                 Op::DivUnsigned | Op::DivSigned => {
                                     return Err(format!("cannot parse line {nth_line}: division is not supported for immediates"));
                                 }
@@ -571,9 +571,9 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                 Op::LessSigned => Instruction::set_greater_than_signed_imm(dst, src2, src1),
                                 Op::GreaterUnsigned => Instruction::set_less_than_unsigned_imm(dst, src2, src1),
                                 Op::GreaterSigned => Instruction::set_less_than_signed_imm(dst, src2, src1),
-                                Op::ShiftLeft => Instruction::shift_logical_left_imm_alt(dst, src2, src1),
-                                Op::ShiftRight => Instruction::shift_logical_right_imm_alt(dst, src2, src1),
-                                Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_alt(dst, src2, src1),
+                                Op::ShiftLeft => Instruction::shift_logical_left_imm_alt_32(dst, src2, src1),
+                                Op::ShiftRight => Instruction::shift_logical_right_imm_alt_32(dst, src2, src1),
+                                Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
                             });
                         }
                     }
@@ -602,7 +602,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                         emit_and_continue!(match kind {
                             LoadKind::I8 => Instruction::load_indirect_i8(dst, base, offset),
                             LoadKind::I16 => Instruction::load_indirect_i16(dst, base, offset),
-                            LoadKind::U32 => Instruction::load_indirect_u32(dst, base, offset),
+                            LoadKind::U32 => Instruction::load_indirect_i32(dst, base, offset),
                             LoadKind::U8 => Instruction::load_indirect_u8(dst, base, offset),
                             LoadKind::U16 => Instruction::load_indirect_u16(dst, base, offset),
                         });
@@ -612,7 +612,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                         emit_and_continue!(match kind {
                             LoadKind::I8 => Instruction::load_i8(dst, offset),
                             LoadKind::I16 => Instruction::load_i16(dst, offset),
-                            LoadKind::U32 => Instruction::load_u32(dst, offset),
+                            LoadKind::U32 => Instruction::load_i32(dst, offset),
                             LoadKind::U8 => Instruction::load_u8(dst, offset),
                             LoadKind::U16 => Instruction::load_u16(dst, offset),
                         });

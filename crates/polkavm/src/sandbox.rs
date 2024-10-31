@@ -115,7 +115,7 @@ pub(crate) trait Sandbox: Sized {
 
     fn run(&mut self) -> Result<InterruptKind, Self::Error>;
     fn reg(&self, reg: Reg) -> RegValue;
-    fn set_reg(&mut self, reg: Reg, value: u32);
+    fn set_reg(&mut self, reg: Reg, value: RegValue);
     fn gas(&self) -> Gas;
     fn set_gas(&mut self, gas: Gas);
     fn program_counter(&self) -> Option<ProgramCounter>;

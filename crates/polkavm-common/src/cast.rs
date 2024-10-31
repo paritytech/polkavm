@@ -13,12 +13,22 @@ impl cast<i8> {
     pub const fn to_i32_sign_extend(self) -> i32 {
         self.0 as i32
     }
+
+    #[inline(always)]
+    pub const fn to_i64_sign_extend(self) -> i64 {
+        self.0 as i64
+    }
 }
 
 impl cast<i16> {
     #[inline(always)]
     pub const fn to_i32_sign_extend(self) -> i32 {
         self.0 as i32
+    }
+
+    #[inline(always)]
+    pub const fn to_i64_sign_extend(self) -> i64 {
+        self.0 as i64
     }
 }
 
@@ -45,6 +55,18 @@ impl cast<u8> {
     #[inline(always)]
     pub const fn to_signed(self) -> i8 {
         self.0 as i8
+    }
+
+    #[inline(always)]
+    pub const fn to_u64(self) -> u64 {
+        self.0 as u64
+    }
+}
+
+impl cast<u16> {
+    #[inline(always)]
+    pub const fn to_u64(self) -> u64 {
+        self.0 as u64
     }
 }
 
@@ -85,6 +107,21 @@ impl cast<u64> {
     #[inline(always)]
     pub const fn to_signed(self) -> i64 {
         self.0 as i64
+    }
+
+    #[inline(always)]
+    pub const fn truncate_to_u8(self) -> u8 {
+        self.0 as u8
+    }
+
+    #[inline(always)]
+    pub const fn truncate_to_u16(self) -> u16 {
+        self.0 as u16
+    }
+
+    #[inline(always)]
+    pub const fn truncate_to_u32(self) -> u32 {
+        self.0 as u32
     }
 }
 

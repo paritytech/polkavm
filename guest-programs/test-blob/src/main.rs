@@ -232,3 +232,53 @@ fn test_input_registers() {
         2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23
     );
 }
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn add_u32(a0: u32, a1: u32) -> u32 {
+    a0.wrapping_add(a1)
+}
+
+#[cfg(target_pointer_width = "64")]
+#[polkavm_derive::polkavm_export]
+extern "C" fn add_u32_asm(a0: u32, a1: u32) -> u64 {
+    unsafe {
+        let output;
+        core::arch::asm!(
+            "addw a2, a1, a0",
+            in("a0") a0,
+            in("a1") a1,
+            lateout("a2") output,
+        );
+        output
+    }
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn add_u64(a0: u64, a1: u64) -> u64 {
+    a0.wrapping_add(a1)
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn xor_imm_u32(a0: u32) -> u32 {
+    a0 ^ 0xfb8f5c1e
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn test_branch_less_than_zero() {
+    unsafe {
+        #[cfg(target_arch = "riscv64")]
+        let mut output: usize = 0xff00000000000000;
+        #[cfg(target_arch = "riscv32")]
+        let mut output: usize = 0xff000000;
+        core::arch::asm!(
+            "bltz a0, 1f",
+            "li a0, 0",
+            "j 2f",
+            "1:",
+            "li a0, 1",
+            "2:",
+            inout("a0") output,
+        );
+        assert_eq!(output, 1);
+    }
+}

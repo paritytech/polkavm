@@ -843,32 +843,32 @@ where
     }
 
     #[inline(always)]
-    pub fn shift_logical_right(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+    pub fn shift_logical_right_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         self.shift(d, s1, s2, ShiftKind::LogicalRight);
     }
 
     #[inline(always)]
-    pub fn shift_arithmetic_right(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+    pub fn shift_arithmetic_right_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         self.shift(d, s1, s2, ShiftKind::ArithmeticRight);
     }
 
     #[inline(always)]
-    pub fn shift_logical_left(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+    pub fn shift_logical_left_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         self.shift(d, s1, s2, ShiftKind::LogicalLeft);
     }
 
     #[inline(always)]
-    pub fn shift_logical_right_imm_alt(&mut self, d: RawReg, s2: RawReg, s1: u32) {
+    pub fn shift_logical_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: u32) {
         self.shift(d, s1, s2, ShiftKind::LogicalRight);
     }
 
     #[inline(always)]
-    pub fn shift_arithmetic_right_imm_alt(&mut self, d: RawReg, s2: RawReg, s1: u32) {
+    pub fn shift_arithmetic_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: u32) {
         self.shift(d, s1, s2, ShiftKind::ArithmeticRight);
     }
 
     #[inline(always)]
-    pub fn shift_logical_left_imm_alt(&mut self, d: RawReg, s2: RawReg, s1: u32) {
+    pub fn shift_logical_left_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: u32) {
         self.shift(d, s1, s2, ShiftKind::LogicalLeft);
     }
 
@@ -939,7 +939,7 @@ where
     }
 
     #[inline(always)]
-    pub fn add(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+    pub fn add_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
@@ -961,7 +961,7 @@ where
     }
 
     #[inline(always)]
-    pub fn sub(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+    pub fn sub_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
@@ -986,7 +986,7 @@ where
     }
 
     #[inline(always)]
-    pub fn negate_and_add_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn negate_and_add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
@@ -1014,7 +1014,7 @@ where
     }
 
     #[inline(always)]
-    pub fn mul(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+    pub fn mul_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
@@ -1036,7 +1036,7 @@ where
     }
 
     #[inline(always)]
-    pub fn mul_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn mul_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) {
         self.push(imul_imm(RegSize::R32, conv_reg(d), conv_reg(s1), s2 as i32));
     }
 
@@ -1044,16 +1044,6 @@ where
     pub fn mul_upper_signed_signed(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         let asm = self.asm.reserve::<U4>();
         let asm = asm.push(movsxd_32_to_64(TMP_REG, conv_reg(s2)));
-        let asm = asm.push(movsxd_32_to_64(conv_reg(d), conv_reg(s1)));
-        let asm = asm.push(imul(RegSize::R64, conv_reg(d), TMP_REG));
-        let asm = asm.push(shr_imm(RegSize::R64, conv_reg(d), 32));
-        asm.assert_reserved_exactly_as_needed();
-    }
-
-    #[inline(always)]
-    pub fn mul_upper_signed_signed_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
-        let asm = self.asm.reserve::<U4>();
-        let asm = asm.push(mov_imm(TMP_REG, imm64(s2 as i32)));
         let asm = asm.push(movsxd_32_to_64(conv_reg(d), conv_reg(s1)));
         let asm = asm.push(imul(RegSize::R64, conv_reg(d), TMP_REG));
         let asm = asm.push(shr_imm(RegSize::R64, conv_reg(d), 32));
@@ -1075,16 +1065,6 @@ where
             asm.push(imul(RegSize::R64, conv_reg(d), conv_reg(s2)))
         };
 
-        let asm = asm.push(shr_imm(RegSize::R64, conv_reg(d), 32));
-        asm.assert_reserved_exactly_as_needed();
-    }
-
-    #[inline(always)]
-    pub fn mul_upper_unsigned_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
-        let asm = self.asm.reserve::<U4>();
-        let asm = asm.push(mov_imm(TMP_REG, imm32(s2)));
-        let asm = asm.push_if(d != s1, mov(RegSize::R32, conv_reg(d), conv_reg(s1)));
-        let asm = asm.push(imul(RegSize::R64, conv_reg(d), TMP_REG));
         let asm = asm.push(shr_imm(RegSize::R64, conv_reg(d), 32));
         asm.assert_reserved_exactly_as_needed();
     }
@@ -1122,37 +1102,37 @@ where
     }
 
     #[inline(always)]
-    pub fn div_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+    pub fn div_unsigned_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         self.div_rem(d, s1, s2, DivRem::Div, Signedness::Unsigned);
     }
 
     #[inline(always)]
-    pub fn div_signed(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+    pub fn div_signed_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         self.div_rem(d, s1, s2, DivRem::Div, Signedness::Signed);
     }
 
     #[inline(always)]
-    pub fn rem_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+    pub fn rem_unsigned_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         self.div_rem(d, s1, s2, DivRem::Rem, Signedness::Unsigned);
     }
 
     #[inline(always)]
-    pub fn rem_signed(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+    pub fn rem_signed_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         self.div_rem(d, s1, s2, DivRem::Rem, Signedness::Signed);
     }
 
     #[inline(always)]
-    pub fn shift_logical_right_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn shift_logical_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) {
         self.shift_imm(d, s1, s2, ShiftKind::LogicalRight);
     }
 
     #[inline(always)]
-    pub fn shift_arithmetic_right_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn shift_arithmetic_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) {
         self.shift_imm(d, s1, s2, ShiftKind::ArithmeticRight);
     }
 
     #[inline(always)]
-    pub fn shift_logical_left_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn shift_logical_left_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) {
         self.shift_imm(d, s1, s2, ShiftKind::LogicalLeft);
     }
 
@@ -1208,6 +1188,11 @@ where
     }
 
     #[inline(always)]
+    pub fn load_imm64(&mut self, _dst: RawReg, _s2: u64) {
+        todo!();
+    }
+
+    #[inline(always)]
     pub fn move_reg(&mut self, d: RawReg, s: RawReg) {
         self.mov(d, s);
     }
@@ -1233,7 +1218,7 @@ where
     }
 
     #[inline(always)]
-    pub fn add_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
@@ -1332,7 +1317,8 @@ where
     }
 
     #[inline(always)]
-    pub fn load_indirect_u32(&mut self, dst: RawReg, base: RawReg, offset: u32) {
+    pub fn load_indirect_i32(&mut self, dst: RawReg, base: RawReg, offset: u32) {
+        // NOTE: For 32-bit the 'LoadKind::U32' is deliberate.
         self.load(dst, Some(base), offset, LoadKind::U32);
     }
 
@@ -1357,7 +1343,8 @@ where
     }
 
     #[inline(always)]
-    pub fn load_u32(&mut self, dst: RawReg, offset: u32) {
+    pub fn load_i32(&mut self, dst: RawReg, offset: u32) {
+        // NOTE: For 32-bit the 'LoadKind::U32' is deliberate.
         self.load(dst, None, offset, LoadKind::U32);
     }
 

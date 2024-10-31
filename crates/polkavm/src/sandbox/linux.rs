@@ -1835,15 +1835,15 @@ impl super::Sandbox for Sandbox {
     }
 
     fn reg(&self, reg: Reg) -> RegValue {
-        self.vmctx().regs[reg as usize].load(Ordering::Relaxed)
+        u64::from(self.vmctx().regs[reg as usize].load(Ordering::Relaxed))
     }
 
-    fn set_reg(&mut self, reg: Reg, value: u32) {
+    fn set_reg(&mut self, reg: Reg, value: RegValue) {
         if let Some(ref mut pagefault) = self.pending_pagefault {
             pagefault.registers_modified = true;
         }
 
-        self.vmctx().regs[reg as usize].store(value, Ordering::Relaxed)
+        self.vmctx().regs[reg as usize].store(value as u32, Ordering::Relaxed)
     }
 
     fn gas(&self) -> Gas {

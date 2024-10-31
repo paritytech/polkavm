@@ -127,6 +127,49 @@ fn get_bytes_required(value: u32) -> u32 {
 }
 
 #[inline]
+fn get_bytes_required64(value: u64) -> u64 {
+    let zeros = value.leading_zeros();
+    if zeros == 64 {
+        0
+    } else if zeros > 56 {
+        1
+    } else if zeros > 48 {
+        2
+    } else if zeros > 40 {
+        3
+    } else if zeros > 32 {
+        4
+    } else if zeros > 24 {
+        5
+    } else if zeros > 16 {
+        6
+    } else if zeros > 8 {
+        7
+    } else if zeros != 0 {
+        8
+    } else {
+        let ones = value.leading_ones();
+        if ones > 56 {
+            1
+        } else if ones > 48 {
+            2
+        } else if ones > 40 {
+            3
+        } else if ones > 32 {
+            4
+        } else if ones > 24 {
+            5
+        } else if ones > 16 {
+            6
+        } else if ones > 8 {
+            7
+        } else {
+            8
+        }
+    }
+}
+
+#[inline]
 pub(crate) fn write_simple_varint(value: u32, buffer: &mut [u8]) -> usize {
     let varint_length = get_bytes_required(value);
     match varint_length {
@@ -151,6 +194,76 @@ pub(crate) fn write_simple_varint(value: u32, buffer: &mut [u8]) -> usize {
             buffer[1] = bytes[1];
             buffer[2] = bytes[2];
             buffer[3] = bytes[3];
+        }
+        _ => unreachable!(),
+    }
+
+    varint_length as usize
+}
+
+#[inline]
+pub(crate) fn write_simple_varint64(value: u64, buffer: &mut [u8]) -> usize {
+    let varint_length = get_bytes_required64(value);
+    match varint_length {
+        0 => {}
+        1 => {
+            buffer[0] = value as u8;
+        }
+        2 => {
+            let bytes = value.to_le_bytes();
+            buffer[0] = bytes[0];
+            buffer[1] = bytes[1];
+        }
+        3 => {
+            let bytes = value.to_le_bytes();
+            buffer[0] = bytes[0];
+            buffer[1] = bytes[1];
+            buffer[2] = bytes[2];
+        }
+        4 => {
+            let bytes = value.to_le_bytes();
+            buffer[0] = bytes[0];
+            buffer[1] = bytes[1];
+            buffer[2] = bytes[2];
+            buffer[3] = bytes[3];
+        }
+        5 => {
+            let bytes = value.to_le_bytes();
+            buffer[0] = bytes[0];
+            buffer[1] = bytes[1];
+            buffer[2] = bytes[2];
+            buffer[3] = bytes[3];
+            buffer[4] = bytes[4];
+        }
+        6 => {
+            let bytes = value.to_le_bytes();
+            buffer[0] = bytes[0];
+            buffer[1] = bytes[1];
+            buffer[2] = bytes[2];
+            buffer[3] = bytes[3];
+            buffer[4] = bytes[4];
+            buffer[5] = bytes[5];
+        }
+        7 => {
+            let bytes = value.to_le_bytes();
+            buffer[0] = bytes[0];
+            buffer[1] = bytes[1];
+            buffer[2] = bytes[2];
+            buffer[3] = bytes[3];
+            buffer[4] = bytes[4];
+            buffer[5] = bytes[5];
+            buffer[6] = bytes[6];
+        }
+        8 => {
+            let bytes = value.to_le_bytes();
+            buffer[0] = bytes[0];
+            buffer[1] = bytes[1];
+            buffer[2] = bytes[2];
+            buffer[3] = bytes[3];
+            buffer[4] = bytes[4];
+            buffer[5] = bytes[5];
+            buffer[6] = bytes[6];
+            buffer[7] = bytes[7];
         }
         _ => unreachable!(),
     }

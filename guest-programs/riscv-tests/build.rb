@@ -30,7 +30,6 @@ Dir["tests/*/*.S"].sort.each do |path|
     if path =~ /rv64/
         march = "rv64"
         mabi = "lp64"
-        next # TODO: Remove once 64-bit works.
     else
         march = "rv32"
         mabi = "ilp32"
