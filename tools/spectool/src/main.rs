@@ -295,7 +295,7 @@ fn main_generate() {
         for ((final_value, reg), required_value) in expected_regs.iter().zip(Reg::ALL).zip(post.regs.iter()) {
             if let Some(required_value) = required_value {
                 if final_value != required_value {
-                    eprintln!("{path:?}: unexpected {reg}: {final_value} (expected: {required_value})");
+                    eprintln!("{path:?}: unexpected {reg}: 0x{final_value:x} (expected: 0x{required_value:x})");
                     found_post_check_errors = true;
                 }
             }
