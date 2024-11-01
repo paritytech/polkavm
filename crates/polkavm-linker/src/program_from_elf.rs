@@ -8346,6 +8346,7 @@ where
         let is_writable = section.is_writable();
         if name == ".rodata"
             || name.starts_with(".rodata.")
+            || name.starts_with(".srodata.")
             || name == ".data.rel.ro"
             || name.starts_with(".data.rel.ro.")
             || name == ".got"
