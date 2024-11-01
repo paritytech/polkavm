@@ -210,7 +210,7 @@ fn find_benchmarks() -> Result<Vec<Benchmark>, std::io::Error> {
     let mut output = Vec::new();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest-programs");
     let paths = [
-        root.join("target/riscv32ema-unknown-none-elf/release"),
+        root.join("target/riscv32emac-unknown-none-polkavm/release"),
         root.join("target/riscv64imac-unknown-none-elf/release"),
         root.join("target/wasm32-unknown-unknown/release"),
         root.join("target/sbf-solana-solana/release"),
