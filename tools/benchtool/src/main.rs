@@ -146,7 +146,8 @@ pub struct Benchmark {
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BenchmarkKind {
-    PolkaVM,
+    PolkaVM32,
+    PolkaVM64,
     WebAssembly,
     Ckbvm,
     Solana,
@@ -177,7 +178,15 @@ fn find_benchmarks_in(root_path: &Path) -> Result<Vec<Benchmark>, std::io::Error
             if extension == "wasm" {
                 BenchmarkKind::WebAssembly
             } else if extension == "polkavm" {
-                BenchmarkKind::PolkaVM
+                let Some(target) = target else { continue };
+                if target == "riscv64emac-unknown-none-polkavm" {
+                    BenchmarkKind::PolkaVM64
+                } else if target == "riscv32emac-unknown-none-polkavm" {
+                    BenchmarkKind::PolkaVM32
+                } else {
+                    eprintln!("WARNING: found unrecognized .polkavm artifact: {path:?} (target = {target:?})");
+                    continue;
+                }
             } else if extension == "so" {
                 if target.as_ref().map_or(false, |target| *target == "sbf-solana-solana") {
                     BenchmarkKind::Solana
@@ -211,6 +220,7 @@ fn find_benchmarks() -> Result<Vec<Benchmark>, std::io::Error> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest-programs");
     let paths = [
         root.join("target/riscv32emac-unknown-none-polkavm/release"),
+        root.join("target/riscv64emac-unknown-none-polkavm/release"),
         root.join("target/riscv64imac-unknown-none-elf/release"),
         root.join("target/wasm32-unknown-unknown/release"),
         root.join("target/sbf-solana-solana/release"),
