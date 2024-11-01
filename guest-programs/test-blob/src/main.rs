@@ -47,7 +47,7 @@ extern "C" fn increment_global() {
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn get_global_address() -> *mut u32 {
-    unsafe { core::ptr::addr_of_mut!(GLOBAL) }
+    core::ptr::addr_of_mut!(GLOBAL)
 }
 
 #[polkavm_derive::polkavm_export]
