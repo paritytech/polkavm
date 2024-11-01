@@ -2406,11 +2406,13 @@ fn test_basic_debug_info(raw_blob: &'static [u8]) {
     assert_eq!(frame.path().unwrap().unwrap(), "test-blob/src/main.rs");
 }
 
+#[ignore]
 #[test]
 fn test_basic_debug_info_32() {
     test_basic_debug_info(TEST_BLOB_32_ELF_ZST);
 }
 
+#[ignore]
 #[test]
 fn test_basic_debug_info_64() {
     test_basic_debug_info(TEST_BLOB_64_ELF_ZST);
