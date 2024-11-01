@@ -69,7 +69,7 @@ if [ "${SOLANA_PLATFORM_TOOLS_DIR:-}" == "" ]; then
 fi
 
 build_polkavm() {
-    echo "> Building: '$1' (polkavm)"
+    echo "> Building: '$1' (polkavm, 32-bit)"
 
     RUSTFLAGS="$extra_flags" cargo build  \
         -Z build-std=core,alloc \
@@ -81,6 +81,21 @@ build_polkavm() {
     cargo run -q -p polkatool link \
         --run-only-if-newer guest-programs/target/riscv32emac-unknown-none-polkavm/release/$1 \
         -o guest-programs/target/riscv32emac-unknown-none-polkavm/release/$1.polkavm
+
+    popd
+
+    echo "> Building: '$1' (polkavm, 64-bit)"
+
+    RUSTFLAGS="$extra_flags" cargo build  \
+        -Z build-std=core,alloc \
+        --target "$PWD/riscv64emac-unknown-none-polkavm.json" \
+        -q --release --bin $1 -p $1
+
+    pushd ..
+
+    cargo run -q -p polkatool link \
+        --run-only-if-newer guest-programs/target/riscv64emac-unknown-none-polkavm/release/$1 \
+        -o guest-programs/target/riscv64emac-unknown-none-polkavm/release/$1.polkavm
 
     popd
 }
