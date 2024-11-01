@@ -3,19 +3,17 @@
 set -euo pipefail
 cd "${0%/*}/"
 
-source ../ci/jobs/detect-or-install-riscv-toolchain.sh
-
 function build_test_data() {
     output_path="../test-data/$1_32.elf.zst"
     echo "> Building: '$1' [32 bit] (-> $output_path)"
-    RUSTFLAGS="-C target-feature=+lui-addi-fusion,+fast-unaligned-access,+xtheadcondmov -C relocation-model=pie -C link-arg=--emit-relocs -C link-arg=--unique --remap-path-prefix=$(pwd)= --remap-path-prefix=$HOME=~" cargo build -q --profile $2 --bin $1 -p $1 --target=riscv32emac-unknown-none-polkavm.json -Zbuild-std=core,alloc
-    zstd -f -q -19 -o $output_path target/riscv32ema-unknown-none-elf/$2/$1
+    RUSTFLAGS="--remap-path-prefix=$(pwd)= --remap-path-prefix=$HOME=~" cargo build -q --profile $2 --bin $1 -p $1 --target=riscv32emac-unknown-none-polkavm.json -Zbuild-std=core,alloc
+    zstd -f -q -19 -o $output_path target/riscv32emac-unknown-none-polkavm/$2/$1
     chmod -x $output_path
 
     output_path="../test-data/$1_64.elf.zst"
     echo "> Building: '$1' [64 bit] (-> $output_path)"
-    RUSTFLAGS="-C target-feature=+lui-addi-fusion,+fast-unaligned-access,-xtheadcondmov,-c,-m -C relocation-model=pie -C link-arg=--emit-relocs -C link-arg=--unique --remap-path-prefix=$(pwd)= --remap-path-prefix=$HOME=~" rustup run $RV32E_TOOLCHAIN cargo build -q --profile $2 --bin $1 -p $1 --target=riscv64ema-unknown-none-elf -Zbuild-std=core,alloc
-    zstd -f -q -19 -o $output_path target/riscv64ema-unknown-none-elf/$2/$1
+    RUSTFLAGS="--remap-path-prefix=$(pwd)= --remap-path-prefix=$HOME=~" cargo build -q --profile $2 --bin $1 -p $1 --target=riscv64emac-unknown-none-polkavm.json -Zbuild-std=core,alloc
+    zstd -f -q -19 -o $output_path target/riscv64emac-unknown-none-polkavm/$2/$1
     chmod -x $output_path
 }
 
