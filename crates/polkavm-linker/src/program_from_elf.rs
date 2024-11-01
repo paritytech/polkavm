@@ -8171,12 +8171,11 @@ where
                     (src, InstExt::Basic(BasicInst::LoadAddress { dst, target }))
                 }
                 Inst::Load { kind, base, dst, .. } => {
-                    let Some(dst) = cast_reg_non_zero(dst)? else {
-                        // The instruction will be translated to a NOP.
-                        continue;
-                    };
-
-                    (base, InstExt::Basic(BasicInst::LoadAbsolute { kind, dst, target }))
+                    if let Some(dst) = cast_reg_non_zero(dst)? {
+                        (base, InstExt::Basic(BasicInst::LoadAbsolute { kind, dst, target }))
+                    } else {
+                        (base, InstExt::nop())
+                    }
                 }
                 Inst::Store { kind, base, src, .. } => (
                     base,
