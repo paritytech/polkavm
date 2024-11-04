@@ -701,6 +701,41 @@ where
         self.push(ret());
     }
 
+    pub(crate) fn emit_or_combine_trampoline(&mut self) {
+        log::trace!("Emitting trampoline: or_combine");
+        let label = self.or_combine_label;
+        let reg_size = RegSize::R64;
+
+        self.define_label(label);
+        self.push(push(TMP_REG));
+        self.save_registers_to_vmctx();
+
+        self.push(pop(rdi));
+        self.push(or((rdi, imm32(0xff))));
+        self.push(test((TMP_REG, imm32(0xff))));
+        self.push(cmov(Condition::NotEqual, reg_size, TMP_REG, rdi));
+
+        self.push(mov(reg_size, rdi, TMP_REG));
+        self.push(or((rdi, imm32(0xff00))));
+        self.push(test((TMP_REG, imm32(0xff00))));
+        self.push(cmov(Condition::NotEqual, reg_size, TMP_REG, rdi));
+
+        self.push(mov(reg_size, rdi, TMP_REG));
+        self.push(or((rdi, imm32(0xff0000))));
+        self.push(test((TMP_REG, imm32(0xff0000))));
+        self.push(cmov(Condition::NotEqual, reg_size, TMP_REG, rdi));
+
+        self.push(mov(reg_size, rdi, TMP_REG));
+        self.push(or((rdi, imm32(0xff000000))));
+        self.push(test((TMP_REG, imm32(0xff000000))));
+        self.push(cmov(Condition::NotEqual, reg_size, TMP_REG, rdi));
+        self.push(push(TMP_REG));
+
+        self.restore_registers_from_vmctx();
+        self.push(pop(TMP_REG));
+        self.push(ret());
+    }
+
     pub(crate) fn trace_execution(&mut self, code_offset: u32) {
         let step_label = self.step_label;
         let asm = self.asm.reserve::<U3>();
@@ -814,6 +849,196 @@ where
         let trap_label = self.trap_label;
         let asm = self.asm.reserve::<U1>();
         let asm = asm.push(call_label32(trap_label));
+        asm.assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn and_inverted(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        let reg_size = self.reg_size();
+        let d = conv_reg(d);
+        let s1 = conv_reg(s1);
+        let s2 = conv_reg(s2);
+
+        // todo: change this with ANDN instruction
+
+        let asm = self.asm.reserve::<U3>();
+        if d == s1 {
+            // d = d & ~s2
+            let asm = asm.push(mov(reg_size, TMP_REG, s2));
+            let asm = asm.push(not(reg_size, TMP_REG));
+            asm.push(and((reg_size, d, TMP_REG)))
+        } else if d == s2 {
+            // d = s1 & ~d
+            let asm = asm.push(not(reg_size, s2));
+            let asm = asm.push(and((reg_size, d, s1)));
+            asm.push_none()
+        } else {
+            // d = s1 & ~s2
+            let asm = asm.push(mov(reg_size, d, s2));
+            let asm = asm.push(not(reg_size, d));
+            asm.push(and((reg_size, d, s1)))
+        }
+        .assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn or_inverted(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        let reg_size = self.reg_size();
+        let d = conv_reg(d);
+        let s1 = conv_reg(s1);
+        let s2 = conv_reg(s2);
+
+        let asm = self.asm.reserve::<U3>();
+        if d == s1 {
+            // d = d & ~s2
+            let asm = asm.push(mov(reg_size, TMP_REG, s2));
+            let asm = asm.push(not(reg_size, TMP_REG));
+            asm.push(or((reg_size, d, TMP_REG)))
+        } else if d == s2 {
+            // d = s1 & ~d
+            let asm = asm.push(not(reg_size, s2));
+            let asm = asm.push(or((reg_size, d, s1)));
+            asm.push_none()
+        } else {
+            // d = s1 & ~s2
+            let asm = asm.push(mov(reg_size, d, s2));
+            let asm = asm.push(not(reg_size, d));
+            asm.push(or((reg_size, d, s1)))
+        }
+        .assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn xnor(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        let reg_size = self.reg_size();
+        self.xor(d, s1, s2);
+        let asm = self.asm.reserve::<U1>();
+        asm.push(not(reg_size, conv_reg(d))).assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn maximum(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        let reg_size = self.reg_size();
+        let d = conv_reg(d);
+        let s1 = conv_reg(s1);
+        let s2 = conv_reg(s2);
+
+        let asm = self.asm.reserve::<U3>();
+        if d == s1 {
+            let asm = asm.push(cmp((reg_size, s2, s1)));
+            asm.push(cmov(Condition::Greater, reg_size, d, s2)).push_none()
+        } else if d == s2 {
+            let asm = asm.push(cmp((reg_size, s1, s2)));
+            asm.push(cmov(Condition::Greater, reg_size, d, s1)).push_none()
+        } else {
+            let asm = asm.push(mov(reg_size, d, s1));
+            let asm = asm.push(cmp((reg_size, s2, s1)));
+            asm.push(cmov(Condition::Greater, reg_size, d, s2))
+        }
+        .assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn maximum_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        let reg_size = self.reg_size();
+        let d = conv_reg(d);
+        let s1 = conv_reg(s1);
+        let s2 = conv_reg(s2);
+
+        let asm = self.asm.reserve::<U3>();
+        if d == s1 {
+            let asm = asm.push(cmp((reg_size, s2, s1)));
+            asm.push(cmov(Condition::Above, reg_size, d, s2)).push_none()
+        } else if d == s2 {
+            let asm = asm.push(cmp((reg_size, s1, s2)));
+            asm.push(cmov(Condition::Above, reg_size, d, s1)).push_none()
+        } else {
+            let asm = asm.push(mov(reg_size, d, s1));
+            let asm = asm.push(cmp((reg_size, s2, s1)));
+            asm.push(cmov(Condition::Above, reg_size, d, s2))
+        }
+        .assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn minimum(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        let reg_size = self.reg_size();
+        let d = conv_reg(d);
+        let s1 = conv_reg(s1);
+        let s2 = conv_reg(s2);
+
+        let asm = self.asm.reserve::<U3>();
+        if d == s1 {
+            let asm = asm.push(cmp((reg_size, s2, s1)));
+            asm.push(cmov(Condition::Less, reg_size, d, s2)).push_none()
+        } else if d == s2 {
+            let asm = asm.push(cmp((reg_size, s1, s2)));
+            asm.push(cmov(Condition::Less, reg_size, d, s1)).push_none()
+        } else {
+            let asm = asm.push(mov(reg_size, d, s1));
+            let asm = asm.push(cmp((reg_size, s2, s1)));
+            asm.push(cmov(Condition::Less, reg_size, d, s2))
+        }
+        .assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn minimum_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        let reg_size = self.reg_size();
+        let d = conv_reg(d);
+        let s1 = conv_reg(s1);
+        let s2 = conv_reg(s2);
+
+        let asm = self.asm.reserve::<U3>();
+        if d == s1 {
+            let asm = asm.push(cmp((reg_size, s2, s1)));
+            asm.push(cmov(Condition::Below, reg_size, d, s2)).push_none()
+        } else if d == s2 {
+            let asm = asm.push(cmp((reg_size, s1, s2)));
+            asm.push(cmov(Condition::Below, reg_size, d, s1)).push_none()
+        } else {
+            let asm = asm.push(mov(reg_size, d, s1));
+            let asm = asm.push(cmp((reg_size, s2, s1)));
+            asm.push(cmov(Condition::Below, reg_size, d, s2))
+        }
+        .assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn rotate_left(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        self.rotate_left_word(d, s1, s2);
+    }
+
+    #[inline(always)]
+    pub fn rotate_left_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        let reg_size = self.reg_size();
+        let d = conv_reg(d);
+        let s1 = conv_reg(s1);
+        let s2 = conv_reg(s2);
+
+        let asm = self.asm.reserve::<polkavm_assembler::U3>();
+        let asm = asm.push(mov(reg_size, rcx, s2));
+        let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
+        let asm = asm.push(rol_cl(reg_size, d));
+        asm.assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn rotate_right(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        self.rotate_right_word(d, s1, s2);
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        let reg_size = self.reg_size();
+        let d = conv_reg(d);
+        let s1 = conv_reg(s1);
+        let s2 = conv_reg(s2);
+
+        let asm = self.asm.reserve::<polkavm_assembler::U3>();
+        let asm = asm.push(mov(reg_size, rcx, s2));
+        let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
+        let asm = asm.push(ror_cl(reg_size, d));
         asm.assert_reserved_exactly_as_needed();
     }
 
@@ -1528,6 +1753,72 @@ where
     }
 
     #[inline(always)]
+    pub fn count_leading_zero_bits(&mut self, d: RawReg, s: RawReg) {
+        self.count_leading_zero_bits_word(d, s);
+    }
+
+    #[inline(always)]
+    pub fn count_leading_zero_bits_word(&mut self, d: RawReg, s: RawReg) {
+        self.push(lzcnt(self.reg_size(), conv_reg(d), conv_reg(s)))
+    }
+
+    #[inline(always)]
+    pub fn count_trailing_zero_bits(&mut self, d: RawReg, s: RawReg) {
+        self.count_trailing_zero_bits_word(d, s);
+    }
+
+    #[inline(always)]
+    pub fn count_trailing_zero_bits_word(&mut self, d: RawReg, s: RawReg) {
+        self.push(tzcnt(self.reg_size(), conv_reg(d), conv_reg(s)))
+    }
+
+    #[inline(always)]
+    pub fn count_set_bits(&mut self, d: RawReg, s: RawReg) {
+        self.count_set_bits_word(d, s);
+    }
+
+    #[inline(always)]
+    pub fn count_set_bits_word(&mut self, d: RawReg, s: RawReg) {
+        self.push(popcnt(self.reg_size(), conv_reg(d), conv_reg(s)))
+    }
+
+    #[inline(always)]
+    pub fn sign_extend_byte(&mut self, d: RawReg, s: RawReg) {
+        self.push(movsx_8_to_64(conv_reg(d), conv_reg(s)))
+    }
+
+    #[inline(always)]
+    pub fn sign_extend_half_word(&mut self, d: RawReg, s: RawReg) {
+        self.push(movsx_16_to_64(conv_reg(d), conv_reg(s)))
+    }
+
+    #[inline(always)]
+    pub fn zero_extend_half_word(&mut self, d: RawReg, s: RawReg) {
+        self.push(movzx_16_to_64(conv_reg(d), conv_reg(s)))
+    }
+
+    #[inline(always)]
+    pub fn or_combine_byte(&mut self, d: RawReg, s: RawReg) {
+        let reg_size = self.reg_size();
+        let d = conv_reg(d);
+        let s = conv_reg(s);
+        let or_combine_label = self.or_combine_label;
+
+        self.push(mov(reg_size, TMP_REG, s));
+        self.call_to_label(or_combine_label);
+        self.push(mov(reg_size, d, TMP_REG));
+    }
+
+    #[inline(always)]
+    pub fn reverse_byte(&mut self, d: RawReg, s: RawReg) {
+        let reg_size = self.reg_size();
+        let asm = self.asm.reserve::<U2>();
+        let asm = asm.push_if(d != s, mov(reg_size, conv_reg(d), conv_reg(s)));
+        let asm = asm.push(bswap(reg_size, conv_reg(d)));
+        asm.assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
     pub fn cmov_if_zero(&mut self, d: RawReg, s: RawReg, c: RawReg) {
         self.cmov(d, s, c, Condition::Equal);
     }
@@ -1545,6 +1836,42 @@ where
     #[inline(always)]
     pub fn cmov_if_not_zero_imm(&mut self, d: RawReg, c: RawReg, s: u32) {
         self.cmov_imm(d, s, c, Condition::NotEqual);
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_imm(&mut self, d: RawReg, s: RawReg, c: u32) {
+        self.rotate_right_word_imm(d, s, c);
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_imm_alt(&mut self, d: RawReg, s: RawReg, c: u32) {
+        self.rotate_right_word_imm_alt(d, s, c);
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_word_imm(&mut self, d: RawReg, s: RawReg, c: u32) {
+        let reg_size = self.reg_size();
+        let d = conv_reg(d);
+        let s = conv_reg(s);
+
+        let asm = self.asm.reserve::<polkavm_assembler::U3>();
+        let asm = asm.push(mov_imm(rcx, imm32(c)));
+        let asm = asm.push_if(d != s, mov(reg_size, d, s));
+        let asm = asm.push(ror_cl(reg_size, d));
+        asm.assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_word_imm_alt(&mut self, d: RawReg, s: RawReg, c: u32) {
+        let reg_size = self.reg_size();
+        let d = conv_reg(d);
+        let s = conv_reg(s);
+
+        let asm = self.asm.reserve::<polkavm_assembler::U3>();
+        let asm = asm.push(mov(reg_size, rcx, s));
+        let asm = asm.push(mov_imm(d, imm32(c)));
+        let asm = asm.push(ror_cl(reg_size, d));
+        asm.assert_reserved_exactly_as_needed();
     }
 
     #[inline(always)]

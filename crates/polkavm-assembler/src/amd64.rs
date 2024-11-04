@@ -9,6 +9,7 @@ const REX_EXT_MODRM_REG: u8 = REX | (1 << 2);
 const REX_EXT_MODRM_SIB_INDEX: u8 = REX | (1 << 1);
 const REX_EXT_MODRM_RM: u8 = REX | (1 << 0);
 
+const PREFIX_REP: u8 = 0xf3;
 const PREFIX_OVERRIDE_SEGMENT_FS: u8 = 0x64;
 const PREFIX_OVERRIDE_SEGMENT_GS: u8 = 0x65;
 const PREFIX_OVERRIDE_OP_SIZE: u8 = 0x66;
@@ -443,6 +444,7 @@ impl From<MemOp> for RegMem {
 }
 
 struct Inst {
+    op_rep_prefix: bool,
     override_op_size: bool,
     override_addr_size: bool,
     op_alt: bool,
@@ -463,6 +465,7 @@ impl Inst {
     #[inline]
     const fn new(opcode: u8) -> Self {
         Inst {
+            op_rep_prefix: false,
             override_op_size: false,
             override_addr_size: false,
             op_alt: false,
@@ -482,6 +485,12 @@ impl Inst {
     #[inline]
     const fn with_reg_in_op(opcode: u8, reg: Reg) -> Self {
         Inst::new(opcode | reg.modrm_rm_bits()).rex_from_reg(reg)
+    }
+
+    #[inline]
+    const fn op_rep_prefix(mut self) -> Self {
+        self.op_rep_prefix = true;
+        self
     }
 
     #[inline]
@@ -696,6 +705,10 @@ impl Inst {
 
     #[inline(always)]
     fn encode_into(self, buf: &mut InstBuf) {
+        if self.op_rep_prefix {
+            buf.append(PREFIX_REP);
+        }
+
         match self.override_segment {
             Some(SegReg::fs) => buf.append(PREFIX_OVERRIDE_SEGMENT_FS),
             Some(SegReg::gs) => buf.append(PREFIX_OVERRIDE_SEGMENT_GS),
@@ -1282,6 +1295,21 @@ pub mod inst {
             None,
             (fmt.write_fmt(core::format_args!("mov {}, {}", self.1.name_from(self.0), self.2.name_from(self.0)))),
 
+        movsx_8_to_64(Reg, Reg) =>
+            Inst::new(0xbe).op_alt().rex_64b().modrm_rm_direct(self.1).modrm_reg(self.0).encode(),
+            None,
+            (fmt.write_fmt(core::format_args!("movsx {}, {}", self.0.name(), self.1.name32()))),
+
+        movsx_16_to_64(Reg, Reg) =>
+            Inst::new(0xbf).op_alt().rex_64b().modrm_rm_direct(self.1).modrm_reg(self.0).encode(),
+            None,
+            (fmt.write_fmt(core::format_args!("movsx {}, {}", self.0.name(), self.1.name32()))),
+
+        movzx_16_to_64(Reg, Reg) =>
+            Inst::new(0xb7).op_alt().rex_64b().modrm_rm_direct(self.1).modrm_reg(self.0).encode(),
+            None,
+            (fmt.write_fmt(core::format_args!("movzx {}, {}", self.0.name(), self.1.name32()))),
+
         movsxd_32_to_64(Reg, Reg) =>
             Inst::new(0x63).rex_64b().modrm_rm_direct(self.1).modrm_reg(self.0).encode(),
             None,
@@ -1516,6 +1544,58 @@ pub mod inst {
             },
             None,
             (fmt.write_fmt(core::format_args!("ror {}, 0x{:x}", self.1.display(Size::from(self.0)), self.2))),
+
+        rol_cl(RegSize, RegMem) =>
+            Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b000).encode(),
+            None,
+            (fmt.write_fmt(core::format_args!("rol {}, cl", self.1.display(Size::from(self.0))))),
+
+        ror_cl(RegSize, RegMem) =>
+            Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b001).encode(),
+            None,
+            (fmt.write_fmt(core::format_args!("ror {}, cl", self.1.display(Size::from(self.0))))),
+
+        // https://www.felixcloutier.com/x86/popcnt
+        popcnt(RegSize, Reg, RegMem) =>
+            {
+                Inst::new(0xb8)
+                    .op_rep_prefix()
+                    .op_alt()
+                    .rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2).encode()
+            },
+            None,
+            (fmt.write_fmt(core::format_args!("popcnt {}, {}", self.1.name_from(self.0), self.2.display(Size::from(self.0))))),
+
+        // https://www.felixcloutier.com/x86/lzcnt
+        lzcnt(RegSize, Reg, RegMem) =>
+        {
+            Inst::new(0xbd)
+                .op_rep_prefix()
+                .op_alt()
+                .rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2).encode()
+        },
+        None,
+        (fmt.write_fmt(core::format_args!("lzcnt {}, {}", self.1.name_from(self.0), self.2.display(Size::from(self.0))))),
+
+        // https://www.felixcloutier.com/x86/tzcnt
+        tzcnt(RegSize, Reg, RegMem) =>
+        {
+            Inst::new(0xbc)
+                .op_rep_prefix()
+                .op_alt()
+                .rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2).encode()
+        },
+        None,
+        (fmt.write_fmt(core::format_args!("tzcnt {}, {}", self.1.name_from(self.0), self.2.display(Size::from(self.0))))),
+
+        // https://www.felixcloutier.com/x86/bswap
+        bswap(RegSize, Reg) =>
+        {
+            Inst::with_reg_in_op(0xc8, self.1)
+                .op_alt().encode()
+        },
+        None,
+        (fmt.write_fmt(core::format_args!("bswap {}", self.1.name_from(self.0)))),
 
         // https://www.felixcloutier.com/x86/test
         test(Operands) =>
@@ -2282,6 +2362,8 @@ mod tests {
         push_imm,
         ret,
         ror_imm,
+        rol_cl,
+        ror_cl,
         sar_cl,
         sar_imm,
         setcc,
