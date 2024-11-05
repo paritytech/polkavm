@@ -1573,6 +1573,11 @@ pub mod inst {
                 }
             }),
 
+        imul_dx_ax(RegSize, RegMem) =>
+            Inst::new(0xf7).modrm_opext(0b101).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).encode(),
+            None,
+            (fmt.write_fmt(core::format_args!("imul {}", self.1.display(Size::from(self.0))))),
+
         // https://www.felixcloutier.com/x86/div
         div(RegSize, RegMem) =>
             Inst::new(0xf7).modrm_opext(0b110).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).encode(),
@@ -2231,6 +2236,7 @@ mod tests {
         div,
         endbr64,
         idiv,
+        imul_dx_ax,
         imul_imm,
         imul,
         inc,
