@@ -1591,6 +1591,11 @@ pub mod inst {
             None,
             (fmt.write_str("cdq")),
 
+        cqo() =>
+            Inst::new(0x99).rex_64b().encode(),
+            None,
+            (fmt.write_str("cqo")),
+
         // https://www.felixcloutier.com/x86/setcc
         setcc(Condition, RegMem) =>
             {
@@ -2222,6 +2227,7 @@ mod tests {
         cdq,
         cmov,
         cmp,
+        cqo,
         div,
         endbr64,
         idiv,
