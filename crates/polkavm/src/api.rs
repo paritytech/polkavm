@@ -930,6 +930,16 @@ impl RawInstance {
                     panic!("run: crosscheck mismatch, interpreter = {expected_interruption:?}, backend = {interruption:?}");
                 }
 
+                if self.module.gas_metering() != Some(GasMeteringKind::Async) {
+                    for reg in Reg::ALL {
+                        let value = access_backend!(self.backend, |backend| backend.reg(reg));
+                        let expected_value = crosscheck.reg(reg);
+                        if value != expected_value {
+                            panic!("run: crosscheck mismatch for {reg}, interpreter = 0x{expected_value:x}, backend = 0x{value:x}");
+                        }
+                    }
+                }
+
                 let crosscheck_gas = crosscheck.gas();
                 let crosscheck_program_counter = crosscheck.program_counter();
                 let crosscheck_next_program_counter = crosscheck.next_program_counter();
