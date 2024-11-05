@@ -1578,6 +1578,12 @@ pub mod inst {
             None,
             (fmt.write_fmt(core::format_args!("imul {}", self.1.display(Size::from(self.0))))),
 
+        // https://www.felixcloutier.com/x86/mul
+        mul(RegSize, RegMem) =>
+            Inst::new(0xf7).modrm_opext(0b100).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).encode(),
+            None,
+            (fmt.write_fmt(core::format_args!("mul {}", self.1.display(Size::from(self.0))))),
+
         // https://www.felixcloutier.com/x86/div
         div(RegSize, RegMem) =>
             Inst::new(0xf7).modrm_opext(0b110).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).encode(),
@@ -2251,6 +2257,7 @@ mod tests {
         mov_imm64,
         mov,
         movsxd_32_to_64,
+        mul,
         neg,
         nop,
         nop10,
