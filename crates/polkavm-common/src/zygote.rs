@@ -121,7 +121,7 @@ pub const VM_SHARED_MEMORY_SIZE: u64 = u32::MAX as u64;
 ///
 /// This does *not* affect the VM ABI and can be changed at will,
 /// but should be high enough that it's never hit.
-pub const VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH: u32 = 53;
+pub const VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH: u32 = 66;
 
 /// The maximum number of bytes the jump table can be.
 pub const VM_SANDBOX_MAXIMUM_JUMP_TABLE_SIZE: u64 = (crate::abi::VM_MAXIMUM_JUMP_TABLE_ENTRIES as u64 + 1)
@@ -133,7 +133,7 @@ pub const VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE: u64 = 0x100000000 * core::
 
 // TODO: Make this smaller.
 /// The maximum number of bytes the native code can be.
-pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = 2048 * 1024 * 1024 - 1;
+pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = 2176 * 1024 * 1024 - 1;
 
 #[repr(C)]
 pub struct JmpBuf {
