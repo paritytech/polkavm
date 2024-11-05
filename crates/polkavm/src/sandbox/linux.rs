@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use super::{get_native_page_size, OffsetTable, SandboxInit, SandboxKind, WorkerCache, WorkerCacheKind};
 use crate::api::{CompiledModuleKind, MemoryAccessError, Module};
-use crate::compiler::CompiledModule;
+use crate::compiler::{Bitness, CompiledModule, B32, B64};
 use crate::config::Config;
 use crate::config::GasMeteringKind;
 use crate::page_set::PageSet;
@@ -1835,15 +1835,26 @@ impl super::Sandbox for Sandbox {
     }
 
     fn reg(&self, reg: Reg) -> RegValue {
-        u64::from(self.vmctx().regs[reg as usize].load(Ordering::Relaxed))
+        let mut value = self.vmctx().regs[reg as usize].load(Ordering::Relaxed);
+        let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
+        if compiled_module.bitness == Bitness::B32 {
+            value &= 0xffffffff;
+        }
+
+        value
     }
 
-    fn set_reg(&mut self, reg: Reg, value: RegValue) {
+    fn set_reg(&mut self, reg: Reg, mut value: RegValue) {
         if let Some(ref mut pagefault) = self.pending_pagefault {
             pagefault.registers_modified = true;
         }
 
-        self.vmctx().regs[reg as usize].store(value as u32, Ordering::Relaxed)
+        let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
+        if compiled_module.bitness == Bitness::B32 {
+            value &= 0xffffffff;
+        }
+
+        self.vmctx().regs[reg as usize].store(value, Ordering::Relaxed)
     }
 
     fn gas(&self) -> Gas {
@@ -2201,13 +2212,22 @@ impl Sandbox {
                 core::sync::atomic::fence(Ordering::Acquire);
 
                 let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
+                if compiled_module.bitness == Bitness::B32 {
+                    for reg_value in &self.vmctx().regs {
+                        reg_value.fetch_and(0xffffffff, Ordering::Relaxed);
+                    }
+                }
+
                 let address = self.vmctx().next_native_program_counter.load(Ordering::Relaxed);
                 let gas = self.vmctx().gas.load(Ordering::Relaxed);
                 if gas < 0 {
                     // Read the gas cost from the machine code.
-                    let Some(offset) = address
-                        .checked_sub(compiled_module.native_code_origin + crate::compiler::ArchVisitor::<Self>::GAS_METERING_TRAP_OFFSET)
-                    else {
+                    let gas_metering_trap_offset = match compiled_module.bitness {
+                        Bitness::B32 => crate::compiler::ArchVisitor::<Self, B32>::GAS_METERING_TRAP_OFFSET,
+                        Bitness::B64 => crate::compiler::ArchVisitor::<Self, B64>::GAS_METERING_TRAP_OFFSET,
+                    };
+
+                    let Some(offset) = address.checked_sub(compiled_module.native_code_origin + gas_metering_trap_offset) else {
                         return Err(Error::from_str("internal error: address underflow after a trap"));
                     };
 
@@ -2219,7 +2239,12 @@ impl Sandbox {
                         return Err(Error::from_str("internal error: failed to find the program counter based on the native program counter when running out of gas"));
                     };
 
-                    let offset = offset as usize + crate::compiler::ArchVisitor::<Self>::GAS_COST_OFFSET;
+                    let gas_cost_offset = match compiled_module.bitness {
+                        Bitness::B32 => crate::compiler::ArchVisitor::<Self, B32>::GAS_COST_OFFSET,
+                        Bitness::B64 => crate::compiler::ArchVisitor::<Self, B64>::GAS_COST_OFFSET,
+                    };
+
+                    let offset = offset as usize + gas_cost_offset;
                     let Some(gas_cost) = &compiled_module.machine_code().get(offset..offset + 4) else {
                         return Err(Error::from_str(
                             "internal error: failed to read back the gas cost from the machine code",
@@ -2440,7 +2465,7 @@ impl Sandbox {
             use polkavm_common::regmap::NativeReg::*;
 
             #[deny(unreachable_patterns)]
-            let value = match polkavm_common::regmap::to_native_reg(reg) {
+            let mut value = match polkavm_common::regmap::to_native_reg(reg) {
                 rax => regs.rax,
                 rcx => regs.rcx,
                 rdx => regs.rdx,
@@ -2458,7 +2483,11 @@ impl Sandbox {
                 r15 => regs.r15,
             };
 
-            self.vmctx().regs[reg as usize].store(value as u32, Ordering::Relaxed);
+            if compiled_module.bitness == Bitness::B32 {
+                value &= 0xffffffff;
+            }
+
+            self.vmctx().regs[reg as usize].store(value, Ordering::Relaxed);
         }
 
         Ok(())
@@ -2488,7 +2517,7 @@ impl Sandbox {
                 r15 => &mut regs.r15,
             };
 
-            *value = u64::from(self.vmctx().regs[reg as usize].load(Ordering::Relaxed));
+            *value = self.vmctx().regs[reg as usize].load(Ordering::Relaxed);
         }
 
         linux_raw::sys_ptrace_setregs(self.child.pid, &regs)?;

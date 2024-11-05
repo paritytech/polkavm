@@ -344,7 +344,7 @@ unsafe extern "C" fn signal_handler(signal: u32, _info: &linux_raw::siginfo_t, c
             r15 => context.uc_mcontext.r15,
         };
 
-        VMCTX.regs[reg as usize].store(value as u32, Ordering::Relaxed);
+        VMCTX.regs[reg as usize].store(value, Ordering::Relaxed);
     }
 
     VMCTX.next_native_program_counter.store(rip, Ordering::Relaxed);

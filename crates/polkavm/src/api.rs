@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 use polkavm_common::abi::{MemoryMap, MemoryMapBuilder, VM_ADDR_RETURN_TO_HOST};
 use polkavm_common::cast::cast;
 use polkavm_common::program::{
-    build_static_dispatch_table, FrameKind, ISA32_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode, ProgramBlob, Reg,
-    ISA32_V1, ISA64_V1,
+    build_static_dispatch_table, FrameKind, ISA32_V1_NoSbrk, ISA64_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode,
+    ProgramBlob, Reg, ISA32_V1, ISA64_V1,
 };
 use polkavm_common::utils::{ArcBytes, AsUninitSliceMut};
 
@@ -23,7 +23,7 @@ use crate::module_cache::{ModuleCache, ModuleKey};
 if_compiler_is_supported! {
     {
         use crate::sandbox::{Sandbox, SandboxInstance};
-        use crate::compiler::{CompiledModule, CompilerCache};
+        use crate::compiler::{CompiledModule, CompilerCache, B32, B64};
 
         #[cfg(target_os = "linux")]
         use crate::sandbox::linux::Sandbox as SandboxLinux;
@@ -358,10 +358,6 @@ impl Module {
             bail!("dynamic paging was not enabled; use `Config::set_allow_dynamic_paging` to enable it");
         }
 
-        if blob.is_64_bit() && engine.selected_backend == BackendKind::Compiler {
-            bail!("the recompiler is currently not implemented for 64-bit modules");
-        }
-
         #[cfg(feature = "module-cache")]
         let module_key = {
             let (module_key, module) = engine.state.module_cache.get(config, &blob);
@@ -442,9 +438,9 @@ impl Module {
 
         #[allow(unused_macros)]
         macro_rules! compile_module {
-            ($sandbox_kind:ident, $visitor_name:ident, $module_kind:ident) => {{
-                type VisitorTy<'a> = crate::compiler::CompilerVisitor<'a, $sandbox_kind>;
-                let (mut visitor, aux) = crate::compiler::CompilerVisitor::<$sandbox_kind>::new(
+            ($sandbox_kind:ident, $bitness_kind:ident, $isa:ident, $isa_no_sbrk:ident, $visitor_name:ident, $module_kind:ident) => {{
+                type VisitorTy<'a> = crate::compiler::CompilerVisitor<'a, $sandbox_kind, $bitness_kind>;
+                let (mut visitor, aux) = crate::compiler::CompilerVisitor::<$sandbox_kind, $bitness_kind>::new(
                     &engine.state.compiler_cache,
                     config,
                     instruction_set,
@@ -458,13 +454,10 @@ impl Module {
                 )?;
 
                 if config.allow_sbrk {
-                    blob.visit(
-                        build_static_dispatch_table!($visitor_name, ISA32_V1, VisitorTy<'a>),
-                        &mut visitor,
-                    );
+                    blob.visit(build_static_dispatch_table!($visitor_name, $isa, VisitorTy<'a>), &mut visitor);
                 } else {
                     blob.visit(
-                        build_static_dispatch_table!($visitor_name, ISA32_V1_NoSbrk, VisitorTy<'a>),
+                        build_static_dispatch_table!($visitor_name, $isa_no_sbrk, VisitorTy<'a>),
                         &mut visitor,
                     );
                 }
@@ -483,7 +476,11 @@ impl Module {
                             SandboxKind::Linux => {
                                 #[cfg(target_os = "linux")]
                                 {
-                                    compile_module!(SandboxLinux, COMPILER_VISITOR_LINUX, Linux)
+                                    if blob.is_64_bit() {
+                                        compile_module!(SandboxLinux, B64, ISA64_V1, ISA64_V1_NoSbrk, COMPILER_VISITOR_LINUX, Linux)
+                                    } else {
+                                        compile_module!(SandboxLinux, B32, ISA32_V1, ISA32_V1_NoSbrk, COMPILER_VISITOR_LINUX, Linux)
+                                    }
                                 }
 
                                 #[cfg(not(target_os = "linux"))]
@@ -495,7 +492,11 @@ impl Module {
                             SandboxKind::Generic => {
                                 #[cfg(feature = "generic-sandbox")]
                                 {
-                                    compile_module!(SandboxGeneric, COMPILER_VISITOR_GENERIC, Generic)
+                                    if blob.is_64_bit() {
+                                        compile_module!(SandboxGeneric, B64, ISA64_V1, ISA64_V1_NoSbrk, COMPILER_VISITOR_GENERIC, Generic)
+                                    } else {
+                                        compile_module!(SandboxGeneric, B32, ISA32_V1, ISA32_V1_NoSbrk, COMPILER_VISITOR_GENERIC, Generic)
+                                    }
                                 }
 
                                 #[cfg(not(feature = "generic-sandbox"))]

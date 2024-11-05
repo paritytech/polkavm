@@ -253,7 +253,7 @@ pub struct VmCtx {
     pub arg: AtomicU32,
 
     /// A dump of all of the registers of the VM.
-    pub regs: [AtomicU32; REG_COUNT],
+    pub regs: [AtomicU64; REG_COUNT],
 
     /// The address of the native code to call inside of the VM process, if non-zero.
     pub next_native_program_counter: AtomicU64,
@@ -328,7 +328,7 @@ pub const VMCTX_FUTEX_GUEST_SIGNAL: u32 = VMCTX_FUTEX_IDLE | (3 << 1);
 pub const VMCTX_FUTEX_GUEST_STEP: u32 = VMCTX_FUTEX_IDLE | (4 << 1);
 
 #[allow(clippy::declare_interior_mutable_const)]
-const ATOMIC_U32_ZERO: AtomicU32 = AtomicU32::new(0);
+const ATOMIC_U64_ZERO: AtomicU64 = AtomicU64::new(0);
 
 #[allow(clippy::new_without_default)]
 impl VmCtx {
@@ -343,7 +343,7 @@ impl VmCtx {
             next_program_counter: AtomicU32::new(0),
             arg: AtomicU32::new(0),
             arg2: AtomicU32::new(0),
-            regs: [ATOMIC_U32_ZERO; REG_COUNT],
+            regs: [ATOMIC_U64_ZERO; REG_COUNT],
             jump_into: AtomicU64::new(0),
             next_native_program_counter: AtomicU64::new(0),
 

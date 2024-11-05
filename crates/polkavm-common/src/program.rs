@@ -827,6 +827,7 @@ macro_rules! define_opcodes {
         define_opcodes!(@impl_instruction_set ISA32_V1         [I_32, I_SBRK]  $([$($tag),+] $name = $value,)+);
         define_opcodes!(@impl_instruction_set ISA32_V1_NoSbrk  [I_32]          $([$($tag),+] $name = $value,)+);
         define_opcodes!(@impl_instruction_set ISA64_V1         [I_64, I_SBRK]  $([$($tag),+] $name = $value,)+);
+        define_opcodes!(@impl_instruction_set ISA64_V1_NoSbrk  [I_64]          $([$($tag),+] $name = $value,)+);
 
         #[test]
         fn test_opcode_from_u8() {
@@ -3117,6 +3118,10 @@ pub struct ISA32_V1_NoSbrk;
 #[allow(non_camel_case_types)]
 #[derive(Copy, Clone, Debug, Default)]
 pub struct ISA64_V1;
+
+#[allow(non_camel_case_types)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct ISA64_V1_NoSbrk;
 
 pub type DefaultInstructionSet = ISA32_V1;
 
