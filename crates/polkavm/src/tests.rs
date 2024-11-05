@@ -90,28 +90,30 @@ macro_rules! run_test_blob_tests {
     ($($test_name:ident)+) => {
         paste! {
             run_tests! {
+                $([<unoptimized_32_ $test_name>])+
+                $([<unoptimized_64_ $test_name>])+
+
                 $([<optimized_32_ $test_name>])+
+                $([<optimized_64_ $test_name>])+
             }
         }
 
         $(
             paste! {
+                fn [<unoptimized_32_ $test_name>](config: Config) {
+                    $test_name(config, false, false)
+                }
+
+                fn [<unoptimized_64_ $test_name>](config: Config) {
+                    $test_name(config, false, true)
+                }
+
                 fn [<optimized_32_ $test_name>](config: Config) {
                     $test_name(config, true, false)
                 }
 
-                #[test]
-                fn [<interpreter_unoptimized_32_ $test_name>]() {
-                    let mut config = crate::Config::default();
-                    config.set_backend(Some(crate::BackendKind::Interpreter));
-                    $test_name(config, false, false);
-                }
-
-                #[test]
-                fn [<interpreter_unoptimized_64_ $test_name>]() {
-                    let mut config = crate::Config::default();
-                    config.set_backend(Some(crate::BackendKind::Interpreter));
-                    $test_name(config, false, true);
+                fn [<optimized_64_ $test_name>](config: Config) {
+                    $test_name(config, true, true)
                 }
             }
         )+
@@ -1495,11 +1497,6 @@ fn pinky_impl(config: Config, is_64_bit: bool) {
         return; // Too slow.
     }
 
-    if is_64_bit && config.backend() == Some(crate::BackendKind::Compiler) {
-        // TODO: FIXME: The recompiler currently doesn't work for 64-bit.
-        return;
-    }
-
     let _ = env_logger::try_init();
     let blob = if !is_64_bit {
         get_blob(include_bytes!("../../../test-data/bench-pinky_32.elf.zst"))
@@ -2539,10 +2536,6 @@ fn run_riscv_test(engine_config: Config, elf: &[u8], testnum_reg: Reg, optimize:
 
     let _ = env_logger::try_init();
     let blob = ProgramBlob::parse(raw_blob.into()).unwrap();
-    if blob.is_64_bit() && engine_config.backend == Some(BackendKind::Compiler) {
-        // TODO: FIXME: The recompiler currently doesn't work for 64-bit.
-        return;
-    }
 
     let engine = Engine::new(&engine_config).unwrap();
     let mut module_config = ModuleConfig::new();
