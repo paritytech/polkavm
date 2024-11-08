@@ -26,6 +26,9 @@ solana_rbpf = { version = "0.8.1", optional = true }
 wasmer = { version = "4.3.2", default-features = false, features = ["std", "singlepass"], optional = true }
 wasmtime = { version = "26.0.1", default-features = false, features = ["cranelift", "winch", "runtime"], optional = true }
 
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(dummy)'] }
+
 [features]
 default = [
     "native",
