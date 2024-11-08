@@ -27,14 +27,14 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 #[cfg(not(any(target_os = "solana", target_ckb_vm)))]
-#[polkavm_derive::polkavm_export]
+#[cfg_attr(target_env = "polkavm", polkavm_derive::polkavm_export)]
 #[no_mangle]
 pub extern "C" fn initialize() {
     benchmark_initialize(unsafe { &mut STATE });
 }
 
 #[cfg(not(any(target_os = "solana", target_ckb_vm)))]
-#[polkavm_derive::polkavm_export]
+#[cfg_attr(target_env = "polkavm", polkavm_derive::polkavm_export)]
 #[no_mangle]
 pub extern "C" fn run() {
     benchmark_run(unsafe { &mut STATE });

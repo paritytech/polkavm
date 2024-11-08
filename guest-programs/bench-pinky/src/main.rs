@@ -90,7 +90,7 @@ fn benchmark_run(state: &mut State) {
 
 // Used by unit tests.
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-#[polkavm_derive::polkavm_export]
+#[cfg_attr(target_env = "polkavm", polkavm_derive::polkavm_export)]
 #[no_mangle]
 extern "C" fn get_framebuffer() -> usize {
     unsafe { STATE.framebuffer.as_mut().unwrap().as_mut_ptr() as usize }

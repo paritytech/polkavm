@@ -121,12 +121,14 @@ function build_benchmark() {
 
     if [ "${SOLANA_PLATFORM_TOOLS_DIR:-}" != "" ]; then
         echo "> Building: '$1' (Solana eBPF)"
+        sed -i "s/version = 4/version = 3/" Cargo.lock
         CARGO_TARGET_SBF_SOLANA_SOLANA_LINKER=$SOLANA_PLATFORM_TOOLS_DIR/llvm/bin/lld \
         PATH=$PATH:$SOLANA_PLATFORM_TOOLS_DIR/rust/bin:$SOLANA_PLATFORM_TOOLS_DIR/llvm/bin \
         LD_LIBRARY_PATH=$SOLANA_PLATFORM_TOOLS_DIR/rust/lib:$SOLANA_PLATFORM_TOOLS_DIR/llvm/lib \
         RUSTC=$SOLANA_PLATFORM_TOOLS_DIR/rust/bin/rustc \
         RUSTFLAGS="-C link-arg=-e -C link-arg=__solana_entry_point -C link-arg=-T.cargo/solana.ld" \
         $SOLANA_PLATFORM_TOOLS_DIR/rust/bin/cargo build --target=sbf-solana-solana --release -Zbuild-std=std,panic_abort --lib -p $1
+        sed -i "s/version = 3/version = 4/" Cargo.lock
     fi
 }
 
