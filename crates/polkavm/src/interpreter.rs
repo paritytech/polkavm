@@ -237,12 +237,8 @@ macro_rules! emit {
 macro_rules! emit_branch {
     ($self:ident, $name:ident, $s1:ident, $s2:ident, $i:ident) => {
         let target_true = ProgramCounter($i);
-        if !$self.module.is_jump_target_valid(target_true) {
-            emit!($self, invalid_branch($self.program_counter));
-        } else {
-            let target_false = $self.next_program_counter();
-            emit!($self, $name($s1, $s2, target_true, target_false));
-        }
+        let target_false = $self.next_program_counter();
+        emit!($self, $name($s1, $s2, target_true, target_false));
     };
 }
 
@@ -821,6 +817,8 @@ impl InterpretedInstance {
 
     fn compile_out_of_range_stub(&mut self) {
         const DEBUG: bool = false;
+        emit!(self, invalid_branch_target());
+
         if self.step_tracing {
             emit!(self, step_out_of_range());
         }
@@ -1739,7 +1737,8 @@ fn not_enough_gas_impl<const DEBUG: bool>(visitor: &mut Visitor, program_counter
     None
 }
 
-const TARGET_OUT_OF_RANGE: Target = 0;
+const TARGET_INVALID_BRANCH: Target = 0;
+const TARGET_OUT_OF_RANGE: Target = 1;
 
 macro_rules! handle_unresolved_branch {
     ($debug:expr, $visitor:ident, $s1:ident, $s2:ident, $tt:ident, $tf:ident, $name:ident) => {{
@@ -1747,15 +1746,12 @@ macro_rules! handle_unresolved_branch {
             log::trace!("[{}]: jump {} if {} {} {}", $visitor.inner.compiled_offset, $tt, $s1, $debug, $s2);
         }
 
+        let offset = $visitor.inner.compiled_offset;
         let target_false = $visitor.inner.resolve_jump::<DEBUG>($tf).unwrap_or(TARGET_OUT_OF_RANGE);
-        if let Some(target_true) = $visitor.inner.resolve_jump::<DEBUG>($tt) {
-            let offset = $visitor.inner.compiled_offset;
-            $visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG>);
-            $visitor.inner.compiled_args[cast(offset).to_usize()] = Args::$name($s1, $s2, target_true, target_false);
-            Some(offset)
-        } else {
-            todo!()
-        }
+        let target_true = $visitor.inner.resolve_jump::<DEBUG>($tt).unwrap_or(TARGET_INVALID_BRANCH);
+        $visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG>);
+        $visitor.inner.compiled_args[cast(offset).to_usize()] = Args::$name($s1, $s2, target_true, target_false);
+        Some(offset)
     }};
 }
 
@@ -1773,6 +1769,15 @@ define_interpreter! {
             visitor.inner.gas = new_gas;
             visitor.go_to_next_instruction()
         }
+    }
+
+    fn invalid_branch_target<const DEBUG: bool>(visitor: &mut Visitor) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: trap (invalid branch)", visitor.inner.compiled_offset);
+        }
+
+        let program_counter = visitor.inner.program_counter;
+        trap_impl::<DEBUG>(visitor, program_counter)
     }
 
     fn out_of_range<const DEBUG: bool>(visitor: &mut Visitor, gas: u32) -> Option<Target> {
@@ -1833,11 +1838,6 @@ define_interpreter! {
         }
 
         log::debug!("Trap at {}: explicit trap", program_counter);
-        trap_impl::<DEBUG>(visitor, program_counter)
-    }
-
-    fn invalid_branch<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter) -> Option<Target> {
-        log::debug!("Trap at {}: invalid branch", program_counter);
         trap_impl::<DEBUG>(visitor, program_counter)
     }
 

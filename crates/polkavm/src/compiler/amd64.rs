@@ -175,7 +175,15 @@ where
             Err(offset) => asm.push(jcc_rel32(condition, offset)),
         }
     } else {
-        asm.push(jcc_label32(condition, label))
+        // For invalid jumps this will emit:
+        //   0f 84 fc ff ff ff    je near 2
+        // so if the branch triggers this will jump into itself:
+        //   fc                   cld
+        //   ff ff                invalid
+        // The `cld` here is harmless, and the 'ff' is the opcode shared by single register 'inc/dec/call/jmp/push' instructions,
+        // however the /7 opext it has here is currently undefined so this will trap. Same as for gas, this is technically
+        // a forward compatibility hazard.
+        asm.push(jcc_label32_default(condition, label, -4))
     }
 }
 

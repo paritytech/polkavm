@@ -1693,6 +1693,89 @@ fn invalid_instruction_after_fallthrough(engine_config: Config) {
     assert_eq!(instance.next_program_counter(), None);
 }
 
+fn invalid_branch_target(engine_config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::branch_eq_imm(Reg::A0, 33, 2),
+            asm::load_imm(Reg::A1, 1),
+            asm::trap(),
+            asm::load_imm(Reg::A1, 2),
+            asm::trap(),
+        ],
+        &[],
+    );
+
+    let mut module_config: ModuleConfig = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+
+    let instructions: Vec<_>;
+
+    // Valid branch.
+    {
+        let blob = ProgramBlob::parse(builder.to_vec().into()).unwrap();
+        instructions = blob.instructions(DefaultInstructionSet::default()).collect();
+
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+        // False branch.
+        let mut instance = module.instantiate().unwrap();
+        instance.set_gas(100);
+        instance.set_next_program_counter(instructions[0].offset);
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+        assert_eq!(instance.gas(), 97);
+        assert_eq!(instance.program_counter().unwrap(), instructions[2].offset);
+        assert_eq!(instance.next_program_counter(), None);
+        assert_eq!(instance.reg(Reg::A1), 1);
+
+        // True branch.
+        let mut instance = module.instantiate().unwrap();
+        instance.set_gas(100);
+        instance.set_next_program_counter(instructions[0].offset);
+        instance.set_reg(Reg::A0, 33);
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+        assert_eq!(instance.gas(), 97);
+        assert_eq!(instance.program_counter().unwrap(), instructions[4].offset);
+        assert_eq!(instance.next_program_counter(), None);
+        assert_eq!(instance.reg(Reg::A1), 2);
+    }
+
+    // Invalid branch.
+    {
+        let mut blob = ProgramBlob::parse(builder.to_vec().into()).unwrap();
+        let mut raw_code = blob.code().to_vec();
+        raw_code[instructions[0].next_offset.0 as usize - 1] -= 1;
+        blob.set_code(raw_code.into());
+
+        let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+
+        // False branch.
+        let mut instance = module.instantiate().unwrap();
+        instance.set_gas(100);
+        instance.set_next_program_counter(instructions[0].offset);
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+        assert_eq!(instance.gas(), 97);
+        assert_eq!(instance.program_counter().unwrap(), instructions[2].offset);
+        assert_eq!(instance.next_program_counter(), None);
+        assert_eq!(instance.reg(Reg::A1), 1);
+
+        // True branch.
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::A0, 33);
+        instance.set_gas(100);
+        instance.set_next_program_counter(instructions[0].offset);
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+        assert_eq!(instance.gas(), 99);
+        assert_eq!(instance.program_counter().unwrap(), instructions[0].offset);
+        assert_eq!(instance.next_program_counter(), None);
+        assert_eq!(instance.reg(Reg::A1), 0);
+    }
+}
+
 fn aux_data_works(config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
@@ -2610,6 +2693,7 @@ run_tests! {
     fallthrough_into_already_compiled_block
     implicit_trap_after_fallthrough
     invalid_instruction_after_fallthrough
+    invalid_branch_target
     aux_data_works
     access_memory_from_host
     sbrk_knob_works
