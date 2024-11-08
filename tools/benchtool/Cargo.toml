@@ -23,7 +23,7 @@ wasm3 = { git = "https://github.com/wasm3/wasm3-rs.git", rev = "df74c2a17ed88315
 solana_rbpf = { version = "0.8.1", optional = true }
 
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
-wasmer = { version = "4.3.2", default-features = false, features = ["std", "singlepass"], optional = true }
+wasmer = { version = "5.0.0", default-features = false, features = ["std", "singlepass"], optional = true }
 wasmtime = { version = "26.0.1", default-features = false, features = ["cranelift", "winch", "runtime"], optional = true }
 
 [lints.rust]
