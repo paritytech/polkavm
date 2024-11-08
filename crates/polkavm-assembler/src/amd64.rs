@@ -1704,6 +1704,11 @@ pub mod inst {
             Some((self.1, FixupKind::new_2([0x0f, 0x80 | self.0 as u32], 4))),
             (fmt.write_fmt(core::format_args!("j{} {}", self.0.suffix(), self.1))),
 
+        jcc_label32_default(Condition, Label, i32) =>
+            Inst::new(0x80 | self.0 as u8).op_alt().imm32(self.2 as u32).encode(),
+            Some((self.1, FixupKind::new_2([0x0f, 0x80 | self.0 as u32], 4))),
+            (fmt.write_fmt(core::format_args!("j{} {} or near 0x{:x}", self.0.suffix(), self.1, i64::from(self.2).wrapping_add(6)))),
+
         lea_rip_label(Reg, Label) =>
             InstBuf::from_array([0x0f, 0x0b, 0x0f, 0x0b, 0x0f, 0x0b, 0x90]),
             {
