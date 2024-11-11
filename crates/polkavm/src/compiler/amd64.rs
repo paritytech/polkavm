@@ -704,33 +704,31 @@ where
     pub(crate) fn emit_or_combine_trampoline(&mut self) {
         log::trace!("Emitting trampoline: or_combine");
         let label = self.or_combine_label;
-        let reg_size = RegSize::R64;
+        let (reg_size, range) = if B::BITNESS == Bitness::B32 {
+            (RegSize::R32, (8..32))
+        } else {
+            (RegSize::R64, (8..64))
+        };
 
         self.define_label(label);
         self.push(push(TMP_REG));
         self.save_registers_to_vmctx();
 
         self.push(pop(rdi));
-        self.push(or((rdi, imm32(0xff))));
-        self.push(test((TMP_REG, imm32(0xff))));
+        self.push(mov_imm(rax, imm32(0xff)));
+        self.push(or((reg_size, rdi, rax)));
+        self.push(test((reg_size, TMP_REG, rax)));
         self.push(cmov(Condition::NotEqual, reg_size, TMP_REG, rdi));
 
-        self.push(mov(reg_size, rdi, TMP_REG));
-        self.push(or((rdi, imm32(0xff00))));
-        self.push(test((TMP_REG, imm32(0xff00))));
-        self.push(cmov(Condition::NotEqual, reg_size, TMP_REG, rdi));
+        for _ in range.step_by(8) {
+            self.push(mov(reg_size, rdi, TMP_REG));
+            self.push(shl_imm(RegSize::R64, rax, 8));
+            self.push(or((reg_size, rdi, rax)));
+            self.push(test((reg_size, TMP_REG, rax)));
+            self.push(cmov(Condition::NotEqual, reg_size, TMP_REG, rdi));
+        }
 
-        self.push(mov(reg_size, rdi, TMP_REG));
-        self.push(or((rdi, imm32(0xff0000))));
-        self.push(test((TMP_REG, imm32(0xff0000))));
-        self.push(cmov(Condition::NotEqual, reg_size, TMP_REG, rdi));
-
-        self.push(mov(reg_size, rdi, TMP_REG));
-        self.push(or((rdi, imm32(0xff000000))));
-        self.push(test((TMP_REG, imm32(0xff000000))));
-        self.push(cmov(Condition::NotEqual, reg_size, TMP_REG, rdi));
         self.push(push(TMP_REG));
-
         self.restore_registers_from_vmctx();
         self.push(pop(TMP_REG));
         self.push(ret());
@@ -1006,11 +1004,6 @@ where
 
     #[inline(always)]
     pub fn rotate_left(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
-        self.rotate_left_word(d, s1, s2);
-    }
-
-    #[inline(always)]
-    pub fn rotate_left_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
@@ -1024,12 +1017,28 @@ where
     }
 
     #[inline(always)]
-    pub fn rotate_right(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
-        self.rotate_right_word(d, s1, s2);
+    pub fn rotate_left_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        let reg_size = RegSize::R32;
+        let d = conv_reg(d);
+        let s1 = conv_reg(s1);
+        let s2 = conv_reg(s2);
+
+        let asm = self.asm.reserve::<polkavm_assembler::U4>();
+        let asm = asm.push(mov(reg_size, rcx, s2));
+        let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
+        let asm = asm.push(rol_cl(reg_size, d));
+
+        let asm = if B::BITNESS == Bitness::B64 {
+            asm.push(movsxd_32_to_64(d, d))
+        } else {
+            asm.push_none()
+        };
+
+        asm.assert_reserved_exactly_as_needed();
     }
 
     #[inline(always)]
-    pub fn rotate_right_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+    pub fn rotate_right(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
@@ -1039,6 +1048,27 @@ where
         let asm = asm.push(mov(reg_size, rcx, s2));
         let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
         let asm = asm.push(ror_cl(reg_size, d));
+        asm.assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        let reg_size = RegSize::R32;
+        let d = conv_reg(d);
+        let s1 = conv_reg(s1);
+        let s2 = conv_reg(s2);
+
+        let asm = self.asm.reserve::<polkavm_assembler::U4>();
+        let asm = asm.push(mov(reg_size, rcx, s2));
+        let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
+        let asm = asm.push(ror_cl(reg_size, d));
+
+        let asm = if B::BITNESS == Bitness::B64 {
+            asm.push(movsxd_32_to_64(d, d))
+        } else {
+            asm.push_none()
+        };
+
         asm.assert_reserved_exactly_as_needed();
     }
 
@@ -1754,32 +1784,32 @@ where
 
     #[inline(always)]
     pub fn count_leading_zero_bits(&mut self, d: RawReg, s: RawReg) {
-        self.count_leading_zero_bits_word(d, s);
-    }
-
-    #[inline(always)]
-    pub fn count_leading_zero_bits_word(&mut self, d: RawReg, s: RawReg) {
         self.push(lzcnt(self.reg_size(), conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]
-    pub fn count_trailing_zero_bits(&mut self, d: RawReg, s: RawReg) {
-        self.count_trailing_zero_bits_word(d, s);
+    pub fn count_leading_zero_bits_word(&mut self, d: RawReg, s: RawReg) {
+        self.push(lzcnt(RegSize::R32, conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]
-    pub fn count_trailing_zero_bits_word(&mut self, d: RawReg, s: RawReg) {
+    pub fn count_trailing_zero_bits(&mut self, d: RawReg, s: RawReg) {
         self.push(tzcnt(self.reg_size(), conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]
+    pub fn count_trailing_zero_bits_word(&mut self, d: RawReg, s: RawReg) {
+        self.push(tzcnt(RegSize::R32, conv_reg(d), conv_reg(s)))
+    }
+
+    #[inline(always)]
     pub fn count_set_bits(&mut self, d: RawReg, s: RawReg) {
-        self.count_set_bits_word(d, s);
+        self.push(popcnt(self.reg_size(), conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]
     pub fn count_set_bits_word(&mut self, d: RawReg, s: RawReg) {
-        self.push(popcnt(self.reg_size(), conv_reg(d), conv_reg(s)))
+        self.push(popcnt(RegSize::R32, conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]
@@ -1840,16 +1870,6 @@ where
 
     #[inline(always)]
     pub fn rotate_right_imm(&mut self, d: RawReg, s: RawReg, c: u32) {
-        self.rotate_right_word_imm(d, s, c);
-    }
-
-    #[inline(always)]
-    pub fn rotate_right_imm_alt(&mut self, d: RawReg, s: RawReg, c: u32) {
-        self.rotate_right_word_imm_alt(d, s, c);
-    }
-
-    #[inline(always)]
-    pub fn rotate_right_word_imm(&mut self, d: RawReg, s: RawReg, c: u32) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s = conv_reg(s);
@@ -1862,7 +1882,7 @@ where
     }
 
     #[inline(always)]
-    pub fn rotate_right_word_imm_alt(&mut self, d: RawReg, s: RawReg, c: u32) {
+    pub fn rotate_right_imm_alt(&mut self, d: RawReg, s: RawReg, c: u32) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s = conv_reg(s);
@@ -1871,6 +1891,46 @@ where
         let asm = asm.push(mov(reg_size, rcx, s));
         let asm = asm.push(mov_imm(d, imm32(c)));
         let asm = asm.push(ror_cl(reg_size, d));
+        asm.assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_word_imm(&mut self, d: RawReg, s: RawReg, c: u32) {
+        let reg_size = RegSize::R32;
+        let d = conv_reg(d);
+        let s = conv_reg(s);
+
+        let asm = self.asm.reserve::<polkavm_assembler::U4>();
+        let asm = asm.push(mov_imm(rcx, imm32(c)));
+        let asm = asm.push_if(d != s, mov(reg_size, d, s));
+        let asm = asm.push(ror_cl(reg_size, d));
+
+        let asm = if B::BITNESS == Bitness::B64 {
+            asm.push(movsxd_32_to_64(d, d))
+        } else {
+            asm.push_none()
+        };
+
+        asm.assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_word_imm_alt(&mut self, d: RawReg, s: RawReg, c: u32) {
+        let reg_size = RegSize::R32;
+        let d = conv_reg(d);
+        let s = conv_reg(s);
+
+        let asm = self.asm.reserve::<polkavm_assembler::U4>();
+        let asm = asm.push(mov(reg_size, rcx, s));
+        let asm = asm.push(mov_imm(d, imm32(c)));
+        let asm = asm.push(ror_cl(reg_size, d));
+
+        let asm = if B::BITNESS == Bitness::B64 {
+            asm.push(movsxd_32_to_64(d, d))
+        } else {
+            asm.push_none()
+        };
+
         asm.assert_reserved_exactly_as_needed();
     }
 

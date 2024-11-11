@@ -2144,7 +2144,7 @@ define_interpreter! {
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(rem64(cast(s1).to_signed(), cast(s2).to_signed())).to_unsigned())
     }
 
-    fn and_inverted<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn and_inverted_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::and_inverted(d, s1, s2));
         }
@@ -2152,7 +2152,15 @@ define_interpreter! {
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| (s1 & !s2))
     }
 
-    fn or_inverted<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn and_inverted_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::and_inverted(d, s1, s2));
+        }
+
+        visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| (s1 & !s2))
+    }
+
+    fn or_inverted_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::or_inverted(d, s1, s2));
         }
@@ -2160,7 +2168,15 @@ define_interpreter! {
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| (s1 | !s2))
     }
 
-    fn xnor<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn or_inverted_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::or_inverted(d, s1, s2));
+        }
+
+        visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| (s1 | !s2))
+    }
+
+    fn xnor_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::xnor(d, s1, s2));
         }
@@ -2168,7 +2184,15 @@ define_interpreter! {
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| !(s1 ^ s2))
     }
 
-    fn maximum<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn xnor_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::xnor(d, s1, s2));
+        }
+
+        visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| !(s1 ^ s2))
+    }
+
+    fn maximum_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::maximum(d, s1, s2));
         }
@@ -2176,7 +2200,15 @@ define_interpreter! {
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().max(cast(s2).to_signed())).to_unsigned())
     }
 
-    fn maximum_unsigned<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn maximum_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::maximum(d, s1, s2));
+        }
+
+        visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().max(cast(s2).to_signed())).to_unsigned())
+    }
+
+    fn maximum_unsigned_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::maximum_unsigned(d, s1, s2));
         }
@@ -2184,7 +2216,15 @@ define_interpreter! {
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| s1.max(s2))
     }
 
-    fn minimum<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn maximum_unsigned_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::maximum_unsigned(d, s1, s2));
+        }
+
+        visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1.max(s2))
+    }
+
+    fn minimum_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::minimum(d, s1, s2));
         }
@@ -2192,7 +2232,15 @@ define_interpreter! {
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().min(cast(s2).to_signed())).to_unsigned())
     }
 
-    fn minimum_unsigned<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn minimum_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::minimum(d, s1, s2));
+        }
+
+        visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().min(cast(s2).to_signed())).to_unsigned())
+    }
+
+    fn minimum_unsigned_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::minimum_unsigned(d, s1, s2));
         }
@@ -2200,7 +2248,15 @@ define_interpreter! {
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| s1.min(s2))
     }
 
-    fn rotate_left<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn minimum_unsigned_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::minimum_unsigned(d, s1, s2));
+        }
+
+        visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1.min(s2))
+    }
+
+    fn rotate_left_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_left(d, s1, s2));
         }
@@ -2208,7 +2264,15 @@ define_interpreter! {
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_left)
     }
 
-    fn rotate_left_word<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn rotate_left_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_left(d, s1, s2));
+        }
+
+        visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::rotate_left(s1, cast(s2).truncate_to_u32()))
+    }
+
+    fn rotate_left_word_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_left_word(d, s1, s2));
         }
@@ -2216,7 +2280,15 @@ define_interpreter! {
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_left)
     }
 
-    fn rotate_right<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn rotate_left_word_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_left_word(d, s1, s2));
+        }
+
+        visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_left)
+    }
+
+    fn rotate_right_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right(d, s1, s2));
         }
@@ -2224,7 +2296,23 @@ define_interpreter! {
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
     }
 
-    fn rotate_right_word<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn rotate_right_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right(d, s1, s2));
+        }
+
+        visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::rotate_right(s1, cast(s2).truncate_to_u32()))
+    }
+
+    fn rotate_right_word_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_word(d, s1, s2));
+        }
+
+        visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
+    }
+
+    fn rotate_right_word_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_word(d, s1, s2));
         }
@@ -2413,7 +2501,7 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn count_leading_zero_bits<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn count_leading_zero_bits_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_leading_zero_bits(d, s));
         }
@@ -2422,7 +2510,16 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn count_leading_zero_bits_word<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn count_leading_zero_bits_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_leading_zero_bits(d, s));
+        }
+
+        visitor.set64::<DEBUG>(d, cast(u64::leading_zeros(visitor.get64(s))).to_u64());
+        visitor.go_to_next_instruction()
+    }
+
+    fn count_leading_zero_bits_word_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_leading_zero_bits_word(d, s));
         }
@@ -2431,7 +2528,16 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn count_trailing_zero_bits<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn count_leading_zero_bits_word_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_leading_zero_bits_word(d, s));
+        }
+
+        visitor.set32::<DEBUG>(d, u32::leading_zeros(visitor.get32(s)));
+        visitor.go_to_next_instruction()
+    }
+
+    fn count_trailing_zero_bits_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_trailing_zero_bits(d, s));
         }
@@ -2440,7 +2546,16 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn count_trailing_zero_bits_word<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn count_trailing_zero_bits_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_trailing_zero_bits(d, s));
+        }
+
+        visitor.set64::<DEBUG>(d, cast(u64::trailing_zeros(visitor.get64(s))).to_u64());
+        visitor.go_to_next_instruction()
+    }
+
+    fn count_trailing_zero_bits_word_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_trailing_zero_bits_word(d, s));
         }
@@ -2449,7 +2564,16 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn count_set_bits<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn count_trailing_zero_bits_word_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_trailing_zero_bits_word(d, s));
+        }
+
+        visitor.set32::<DEBUG>(d, u32::trailing_zeros(visitor.get32(s)));
+        visitor.go_to_next_instruction()
+    }
+
+    fn count_set_bits_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_set_bits(d, s));
         }
@@ -2458,7 +2582,16 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn count_set_bits_word<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn count_set_bits_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_set_bits(d, s));
+        }
+
+        visitor.set64::<DEBUG>(d, cast(u64::count_ones(visitor.get64(s))).to_u64());
+        visitor.go_to_next_instruction()
+    }
+
+    fn count_set_bits_word_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_set_bits_word(d, s));
         }
@@ -2467,7 +2600,16 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn sign_extend_byte<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn count_set_bits_word_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_set_bits_word(d, s));
+        }
+
+        visitor.set32::<DEBUG>(d, u32::count_ones(visitor.get32(s)));
+        visitor.go_to_next_instruction()
+    }
+
+    fn sign_extend_byte_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_byte(d, s));
         }
@@ -2477,7 +2619,17 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn sign_extend_half_word<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn sign_extend_byte_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_byte(d, s));
+        }
+
+        let byte = cast(cast(visitor.get64(s)).truncate_to_u8()).to_signed();
+        visitor.set64::<DEBUG>(d, cast(cast(byte).to_i64_sign_extend()).to_unsigned());
+        visitor.go_to_next_instruction()
+    }
+
+    fn sign_extend_half_word_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_half_word(d, s));
         }
@@ -2487,7 +2639,17 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn zero_extend_half_word<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn sign_extend_half_word_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_half_word(d, s));
+        }
+
+        let hword = cast(cast(visitor.get64(s)).truncate_to_u16()).to_signed();
+        visitor.set64::<DEBUG>(d, cast(cast(hword).to_i64_sign_extend()).to_unsigned());
+        visitor.go_to_next_instruction()
+    }
+
+    fn zero_extend_half_word_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::zero_extend_half_word(d, s));
         }
@@ -2497,7 +2659,17 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn or_combine_byte<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn zero_extend_half_word_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::zero_extend_half_word(d, s));
+        }
+
+        let hword = cast(visitor.get64(s)).truncate_to_u16();
+        visitor.set64::<DEBUG>(d, cast(hword).to_u64());
+        visitor.go_to_next_instruction()
+    }
+
+    fn or_combine_byte_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::or_combine_byte(d, s));
         }
@@ -2506,8 +2678,8 @@ define_interpreter! {
 
         let mut result = 0;
         for i in (0..32).step_by(8) {
-            if (word & (0xff << i)) != 0 {
-                result |= 0xff << i;
+            if (word & (0xffu32 << i)) != 0 {
+                result |= 0xffu32 << i;
             }
         }
 
@@ -2515,12 +2687,39 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn reverse_byte<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn or_combine_byte_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::or_combine_byte(d, s));
+        }
+
+        let word = visitor.get64(s);
+
+        let mut result = 0;
+        for i in (0..64).step_by(8) {
+            if (word & (0xffu64 << i)) != 0 {
+                result |= 0xffu64 << i;
+            }
+        }
+
+        visitor.set64::<DEBUG>(d, result);
+        visitor.go_to_next_instruction()
+    }
+
+    fn reverse_byte_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::reverse_byte(d, s));
         }
 
         visitor.set32::<DEBUG>(d, u32::swap_bytes(visitor.get32(s)));
+        visitor.go_to_next_instruction()
+    }
+
+    fn reverse_byte_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::reverse_byte(d, s));
+        }
+
+        visitor.set64::<DEBUG>(d, u64::swap_bytes(visitor.get64(s)));
         visitor.go_to_next_instruction()
     }
 
@@ -2574,7 +2773,7 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn rotate_right_imm<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn rotate_right_imm_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_imm(d, s1, s2));
         }
@@ -2582,7 +2781,15 @@ define_interpreter! {
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
     }
 
-    fn rotate_right_imm_alt<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn rotate_right_imm_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_imm(d, s1, s2));
+        }
+
+        visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::rotate_right(s1, cast(s2).truncate_to_u32()))
+    }
+
+    fn rotate_right_imm_alt_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_imm(d, s1, s2));
         }
@@ -2590,7 +2797,15 @@ define_interpreter! {
         visitor.set3_32::<DEBUG>(d, s2, s1, u32::rotate_right)
     }
 
-    fn rotate_right_word_imm<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn rotate_right_imm_alt_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_imm(d, s1, s2));
+        }
+
+        visitor.set3_64::<DEBUG>(d, s2, s1, |s2, s1| u64::rotate_right(s2, cast(s1).truncate_to_u32()))
+    }
+
+    fn rotate_right_word_imm_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_word_imm(d, s1, s2));
         }
@@ -2598,7 +2813,23 @@ define_interpreter! {
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
     }
 
-    fn rotate_right_word_imm_alt<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn rotate_right_word_imm_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_word_imm(d, s1, s2));
+        }
+
+        visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
+    }
+
+    fn rotate_right_word_imm_alt_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_word_imm(d, s1, s2));
+        }
+
+        visitor.set3_32::<DEBUG>(d, s2, s1, u32::rotate_right)
+    }
+
+    fn rotate_right_word_imm_alt_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_word_imm(d, s1, s2));
         }
@@ -3576,47 +3807,91 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
     }
 
     fn and_inverted(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit!(self, and_inverted(d, s1, s2));
+        if self.module.blob().is_64_bit() {
+            emit!(self, and_inverted_64(d, s1, s2));
+        } else {
+            emit!(self, and_inverted_32(d, s1, s2));
+        }
     }
 
     fn or_inverted(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit!(self, or_inverted(d, s1, s2));
+        if self.module.blob().is_64_bit() {
+            emit!(self, or_inverted_64(d, s1, s2));
+        } else {
+            emit!(self, or_inverted_32(d, s1, s2));
+        }
     }
 
     fn xnor(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit!(self, xnor(d, s1, s2));
+        if self.module.blob().is_64_bit() {
+            emit!(self, xnor_64(d, s1, s2));
+        } else {
+            emit!(self, xnor_32(d, s1, s2));
+        }
     }
 
     fn maximum(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit!(self, maximum(d, s1, s2));
+        if self.module.blob().is_64_bit() {
+            emit!(self, maximum_64(d, s1, s2));
+        } else {
+            emit!(self, maximum_32(d, s1, s2));
+        }
     }
 
     fn maximum_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit!(self, maximum_unsigned(d, s1, s2));
+        if self.module.blob().is_64_bit() {
+            emit!(self, maximum_unsigned_64(d, s1, s2));
+        } else {
+            emit!(self, maximum_unsigned_32(d, s1, s2));
+        }
     }
 
     fn minimum(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit!(self, minimum(d, s1, s2));
+        if self.module.blob().is_64_bit() {
+            emit!(self, minimum_64(d, s1, s2));
+        } else {
+            emit!(self, minimum_32(d, s1, s2));
+        }
     }
 
     fn minimum_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit!(self, minimum_unsigned(d, s1, s2));
+        if self.module.blob().is_64_bit() {
+            emit!(self, minimum_unsigned_64(d, s1, s2));
+        } else {
+            emit!(self, minimum_unsigned_32(d, s1, s2));
+        }
     }
 
     fn rotate_left(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit!(self, rotate_left(d, s1, s2));
+        if self.module.blob().is_64_bit() {
+            emit!(self, rotate_left_64(d, s1, s2));
+        } else {
+            emit!(self, rotate_left_32(d, s1, s2));
+        }
     }
 
     fn rotate_left_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit!(self, rotate_left_word(d, s1, s2));
+        if self.module.blob().is_64_bit() {
+            emit!(self, rotate_left_word_64(d, s1, s2));
+        } else {
+            emit!(self, rotate_left_word_32(d, s1, s2));
+        }
     }
 
     fn rotate_right(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit!(self, rotate_right(d, s1, s2));
+        if self.module.blob().is_64_bit() {
+            emit!(self, rotate_right_64(d, s1, s2));
+        } else {
+            emit!(self, rotate_right_32(d, s1, s2));
+        }
     }
 
     fn rotate_right_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit!(self, rotate_right_word(d, s1, s2));
+        if self.module.blob().is_64_bit() {
+            emit!(self, rotate_right_word_64(d, s1, s2));
+        } else {
+            emit!(self, rotate_right_word_32(d, s1, s2));
+        }
     }
 
     fn set_less_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
@@ -3711,47 +3986,91 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
     }
 
     fn count_leading_zero_bits(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit!(self, count_leading_zero_bits(d, s));
+        if self.module.blob().is_64_bit() {
+            emit!(self, count_leading_zero_bits_64(d, s));
+        } else {
+            emit!(self, count_leading_zero_bits_32(d, s));
+        }
     }
 
     fn count_leading_zero_bits_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit!(self, count_leading_zero_bits_word(d, s));
+        if self.module.blob().is_64_bit() {
+            emit!(self, count_leading_zero_bits_word_64(d, s));
+        } else {
+            emit!(self, count_leading_zero_bits_word_32(d, s));
+        }
     }
 
     fn count_trailing_zero_bits(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit!(self, count_trailing_zero_bits(d, s));
+        if self.module.blob().is_64_bit() {
+            emit!(self, count_trailing_zero_bits_64(d, s));
+        } else {
+            emit!(self, count_trailing_zero_bits_32(d, s));
+        }
     }
 
     fn count_trailing_zero_bits_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit!(self, count_trailing_zero_bits_word(d, s));
+        if self.module.blob().is_64_bit() {
+            emit!(self, count_trailing_zero_bits_word_64(d, s));
+        } else {
+            emit!(self, count_trailing_zero_bits_word_32(d, s));
+        }
     }
 
     fn count_set_bits(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit!(self, count_set_bits(d, s));
+        if self.module.blob().is_64_bit() {
+            emit!(self, count_set_bits_64(d, s));
+        } else {
+            emit!(self, count_set_bits_32(d, s));
+        }
     }
 
     fn count_set_bits_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit!(self, count_set_bits_word(d, s));
+        if self.module.blob().is_64_bit() {
+            emit!(self, count_set_bits_word_64(d, s));
+        } else {
+            emit!(self, count_set_bits_word_32(d, s));
+        }
     }
 
     fn sign_extend_byte(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit!(self, sign_extend_byte(d, s));
+        if self.module.blob().is_64_bit() {
+            emit!(self, sign_extend_byte_64(d, s));
+        } else {
+            emit!(self, sign_extend_byte_32(d, s));
+        }
     }
 
     fn sign_extend_half_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit!(self, sign_extend_half_word(d, s));
+        if self.module.blob().is_64_bit() {
+            emit!(self, sign_extend_half_word_64(d, s));
+        } else {
+            emit!(self, sign_extend_half_word_32(d, s));
+        }
     }
 
     fn zero_extend_half_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit!(self, zero_extend_half_word(d, s));
+        if self.module.blob().is_64_bit() {
+            emit!(self, zero_extend_half_word_64(d, s));
+        } else {
+            emit!(self, zero_extend_half_word_32(d, s));
+        }
     }
 
     fn or_combine_byte(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit!(self, or_combine_byte(d, s));
+        if self.module.blob().is_64_bit() {
+            emit!(self, or_combine_byte_64(d, s));
+        } else {
+            emit!(self, or_combine_byte_32(d, s));
+        }
     }
 
     fn reverse_byte(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit!(self, reverse_byte(d, s));
+        if self.module.blob().is_64_bit() {
+            emit!(self, reverse_byte_64(d, s));
+        } else {
+            emit!(self, reverse_byte_32(d, s));
+        }
     }
 
     fn cmov_if_zero(&mut self, d: RawReg, s: RawReg, c: RawReg) -> Self::ReturnTy {
@@ -3771,19 +4090,35 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
     }
 
     fn rotate_right_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
-        emit!(self, rotate_right_imm(d, s1, s2));
+        if self.module.blob().is_64_bit() {
+            emit!(self, rotate_right_imm_64(d, s1, s2));
+        } else {
+            emit!(self, rotate_right_imm_32(d, s1, s2));
+        }
     }
 
     fn rotate_right_imm_alt(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
-        emit!(self, rotate_right_imm_alt(d, s2, s1));
+        if self.module.blob().is_64_bit() {
+            emit!(self, rotate_right_imm_alt_64(d, s2, s1));
+        } else {
+            emit!(self, rotate_right_imm_alt_32(d, s2, s1));
+        }
     }
 
     fn rotate_right_word_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
-        emit!(self, rotate_right_word_imm(d, s1, s2));
+        if self.module.blob().is_64_bit() {
+            emit!(self, rotate_right_word_imm_64(d, s1, s2));
+        } else {
+            emit!(self, rotate_right_word_imm_32(d, s1, s2));
+        }
     }
 
     fn rotate_right_word_imm_alt(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
-        emit!(self, rotate_right_word_imm_alt(d, s2, s1));
+        if self.module.blob().is_64_bit() {
+            emit!(self, rotate_right_word_imm_alt_64(d, s2, s1));
+        } else {
+            emit!(self, rotate_right_word_imm_alt_32(d, s2, s1));
+        }
     }
 
     fn add_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
