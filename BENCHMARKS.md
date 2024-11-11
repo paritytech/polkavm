@@ -1,7 +1,6 @@
 # Benchmark: pinky
 
-This benchmark is a cycle-accurate NES emulator, running a real, homebrew NES game. ([source code](https://github.com/koute/polkavm/blob/9e7eba782ad094b0f465dcd375a48781ef661f55
-/guest-programs/bench-pinky/src/main.rs))
+This benchmark is a cycle-accurate NES emulator, running a real, homebrew NES game. ([source code](https://github.com/koute/polkavm/blob/190ea5ac10344714b914230974bb9cb12bef56d6/guest-programs/bench-pinky/src/main.rs))
 
 ## Oneshot execution (for pinky)
 
@@ -87,8 +86,7 @@ These benchmarks measure the time it takes to compile a given program by the VM.
 
 # Benchmark: prime-sieve
 
-This benchmark is a prime sieve, searching for subsequent prime numbers. ([source code](https://github.com/koute/polkavm/tree/9e7eba782ad094b0f465dcd375a48781ef661f55
-/guest-programs/bench-prime-sieve))
+This benchmark is a prime sieve, searching for subsequent prime numbers. ([source code](https://github.com/koute/polkavm/tree/190ea5ac10344714b914230974bb9cb12bef56d6/guest-programs/bench-prime-sieve))
 
 ## Oneshot execution (for prime-sieve)
 
@@ -174,8 +172,7 @@ These benchmarks measure the time it takes to compile a given program by the VM.
 
 # Benchmark: minimal
 
-This benchmark is a tiny, minimal program which doesn't do much work; it just increments a global variable and returns immediately. It is a good test case for measuring constant-time overhead. ([source code](https://github.com/koute/polkavm/blob/9e7eba782ad094b0f465dcd375a48781ef661f55
-/guest-programs/bench-minimal/src/main.rs))
+This benchmark is a tiny, minimal program which doesn't do much work; it just increments a global variable and returns immediately. It is a good test case for measuring constant-time overhead. ([source code](https://github.com/koute/polkavm/blob/190ea5ac10344714b914230974bb9cb12bef56d6/guest-programs/bench-minimal/src/main.rs))
 
 ## Oneshot execution (for minimal)
 
@@ -267,9 +264,7 @@ CPU: AMD Ryzen Threadripper 3970X 32-Core Processor
 
 Platform: x86_64-linux
 
-Commit: [9e7eba782ad094b0f465dcd375a48781ef661f55
-](https://github.com/koute/polkavm/tree/9e7eba782ad094b0f465dcd375a48781ef661f55
-)
+Commit: [190ea5ac10344714b914230974bb9cb12bef56d6](https://github.com/koute/polkavm/tree/190ea5ac10344714b914230974bb9cb12bef56d6)
 
 Timestamp: 2024-11-24 03:45:40 UTC
 
@@ -282,8 +277,7 @@ You can replicate these benchmarks as follows:
 ```
 $ git clone https://github.com/koute/polkavm.git
 $ cd polkavm
-$ git checkout 9e7eba782ad094b0f465dcd375a48781ef661f55
-
+$ git checkout 190ea5ac10344714b914230974bb9cb12bef56d6
 $ cd tools/benchtool
 $ ./01-build-benchmarks.sh
 $ ./02-run-benchmarks.rb
