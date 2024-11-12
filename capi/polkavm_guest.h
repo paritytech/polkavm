@@ -121,7 +121,7 @@ struct PolkaVM_Metadata {
 
 #ifdef _LP64
     #define POLKAVM_IMPORT_DEF()  \
-        ".quad 0x0000000b\n" \
+        ".word 0x0000000b\n" \
         ".quad %[metadata]\n"
 #else
     #define POLKAVM_IMPORT_DEF()  \
