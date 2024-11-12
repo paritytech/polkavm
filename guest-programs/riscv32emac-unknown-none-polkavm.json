@@ -10,7 +10,7 @@
   "linker-flavor": "ld.lld",
   "llvm-abiname": "ilp32e",
   "llvm-target": "riscv32",
-  "max-atomic-width": 32,
+  "max-atomic-width": 64,
   "panic-strategy": "abort",
   "relocation-model": "pie",
   "target-pointer-width": "32",
