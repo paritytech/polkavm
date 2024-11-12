@@ -282,3 +282,21 @@ extern "C" fn test_branch_less_than_zero() {
         assert_eq!(output, 1);
     }
 }
+
+static ATOMIC_U64: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+// TODO: The linker should handle this automatically.
+#[cfg(target_pointer_width = "32")]
+#[no_mangle]
+unsafe extern "C" fn __atomic_fetch_add_8(address: *mut u64, new_value: u64) -> u64 {
+    unsafe {
+        let old_value = *address;
+        *address += new_value;
+        old_value
+    }
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn fetch_add_atomic_u64(a0: u64) -> u64 {
+    ATOMIC_U64.fetch_add(a0, core::sync::atomic::Ordering::Relaxed)
+}
