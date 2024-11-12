@@ -101,6 +101,12 @@ where
     pub fn section_and_offset(&self) -> Result<(&Section, u64), ProgramFromElfError> {
         let elf_section_index = match self.elf_symbol.section() {
             object::read::SymbolSection::Section(section_index) => section_index,
+            object::read::SymbolSection::Undefined => {
+                return Err(ProgramFromElfError::other(format!(
+                    "found undefined symbol: '{}'",
+                    self.name().unwrap_or("")
+                )));
+            }
             section => {
                 return Err(ProgramFromElfError::other(format!(
                     "found symbol in an unhandled section: {:?}",
