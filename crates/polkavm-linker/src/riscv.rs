@@ -602,7 +602,7 @@ impl Inst {
 
         match (quadrant, funct3) {
             // Considered the unimplemented instruction by the asm manual:
-            // https://github.com/riscv-non-isa/riscv-asm-manual/blob/master/riscv-asm.md#instruction-aliases
+            // https://github.com/riscv-non-isa/riscv-asm-manual/blob/main/src/asm-manual.adoc#instruction-aliases
             (0b00, 0b000) if op & 0b11111111_11111111 == 0 => Some(Inst::Unimplemented),
 
             // RVC, Quadrant 0
@@ -881,7 +881,7 @@ impl Inst {
         }
 
         // This is mostly unofficial, but it's a defacto standard used by both LLVM and GCC.
-        // https://github.com/riscv-non-isa/riscv-asm-manual/blob/master/riscv-asm.md#instruction-aliases
+        // https://github.com/riscv-non-isa/riscv-asm-manual/blob/main/src/asm-manual.adoc#instruction-aliases
         if op == 0xc0001073 {
             return Some(Inst::Unimplemented);
         }
