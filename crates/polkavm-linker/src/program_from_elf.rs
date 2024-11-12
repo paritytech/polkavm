@@ -2388,7 +2388,7 @@ where
 
             let Some(relocation) = relocations.get(&target_location) else {
                 return Err(ProgramFromElfError::other(format!(
-                    "found an external call without a relocation for a pointer to metadata at {current_location}"
+                    "found an external call without a relocation for a pointer to metadata at {target_location}"
                 )));
             };
 
@@ -2403,7 +2403,7 @@ where
                 } if !elf.is_64() => target,
                 _ => {
                     return Err(ProgramFromElfError::other(format!(
-                        "found an external call with an unexpected relocation at {current_location}: {relocation:?}"
+                        "found an external call with an unexpected relocation at {target_location}: {relocation:?}"
                     )));
                 }
             };
