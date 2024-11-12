@@ -10,6 +10,11 @@ pub struct cast<T>(pub T);
 
 impl cast<i8> {
     #[inline(always)]
+    pub const fn to_unsigned(self) -> u8 {
+        self.0 as u8
+    }
+
+    #[inline(always)]
     pub const fn to_i32_sign_extend(self) -> i32 {
         self.0 as i32
     }
@@ -21,6 +26,11 @@ impl cast<i8> {
 }
 
 impl cast<i16> {
+    #[inline(always)]
+    pub const fn to_unsigned(self) -> u16 {
+        self.0 as u16
+    }
+
     #[inline(always)]
     pub const fn to_i32_sign_extend(self) -> i32 {
         self.0 as i32
