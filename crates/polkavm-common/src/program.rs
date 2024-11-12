@@ -1,6 +1,6 @@
 use crate::abi::{VM_CODE_ADDRESS_ALIGNMENT, VM_MAXIMUM_CODE_SIZE, VM_MAXIMUM_IMPORT_COUNT, VM_MAXIMUM_JUMP_TABLE_ENTRIES};
 use crate::utils::ArcBytes;
-use crate::varint::{read_simple_varint, read_varint, write_simple_varint, write_simple_varint64, MAX_VARINT_LENGTH};
+use crate::varint::{read_simple_varint, read_varint, write_simple_varint, MAX_VARINT_LENGTH};
 use core::fmt::Write;
 use core::ops::Range;
 
@@ -514,17 +514,9 @@ pub fn read_args_regs2_imm2(chunk: u128, skip: u32) -> (RawReg, RawReg, u32, u32
 }
 
 #[inline(always)]
-pub fn read_args_reg_imm64(chunk: u128, skip: u32) -> (RawReg, u64) {
+pub fn read_args_reg_imm64(chunk: u128, _skip: u32) -> (RawReg, u64) {
     let reg = RawReg(chunk as u32);
-    let chunk = (chunk >> 8) as u64;
-    let imm_length = ((skip as i32) - 1).max(0).min(8) as u32;
-    let mut imm = chunk;
-    if imm_length == 0 {
-        imm = 0;
-    } else {
-        let bits_to_cut = (8 - imm_length) * 8;
-        imm = ((imm << bits_to_cut) as i64).wrapping_shr(bits_to_cut) as u64;
-    }
+    let imm = (chunk >> 8) as u64;
     (reg, imm)
 }
 
@@ -1702,7 +1694,8 @@ impl Instruction {
     fn serialize_reg_imm64(buffer: &mut [u8], opcode: Opcode, reg: RawReg, imm: u64) -> usize {
         buffer[0] = opcode as u8;
         buffer[1] = reg.0 as u8;
-        write_simple_varint64(imm, &mut buffer[2..]) + 2
+        buffer[2..10].copy_from_slice(&imm.to_le_bytes());
+        10
     }
 
     fn serialize_reg_reg_reg(buffer: &mut [u8], opcode: Opcode, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> usize {
