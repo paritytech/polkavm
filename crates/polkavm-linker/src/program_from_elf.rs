@@ -2171,7 +2171,7 @@ where
             let operand_regimm = operand.map_or(RegImm::Imm(0), RegImm::Reg);
             let (old_value, new_value, output) = match cast_reg_non_zero(old_value)? {
                 None => (Reg::E0, Reg::E0, None),
-                Some(old_value) if old_value == addr => (Reg::E0, Reg::E1, Some(old_value)),
+                Some(old_value) if old_value == addr || Some(old_value) == operand => (Reg::E0, Reg::E1, Some(old_value)),
                 Some(old_value) => (old_value, Reg::E0, None),
             };
 
