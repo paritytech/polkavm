@@ -7447,7 +7447,7 @@ where
                 continue;
             }
             [(_, Kind::Mut(MutOp::Add, size_1, target_1)), (_, Kind::Mut(MutOp::Sub, size_2, target_2))]
-                if size_1 == size_2 && (target_1.section_index == target_2.section_index && target_1.offset >= target_2.offset) =>
+                if size_1 == size_2 && (target_1.section_index == target_2.section_index) =>
             {
                 relocations.insert(
                     current_location,
@@ -8755,7 +8755,7 @@ where
                 size,
             } => {
                 // These relocations should only be used in debug info sections.
-                if reachability_graph.is_data_section_reachable(section.index()) {
+                if reachability_graph.is_data_section_reachable(section.index()) && !matches!(size, SizeRelocationSize::Generic(..)) {
                     return Err(ProgramFromElfError::other(format!(
                         "relocation was not expected in section '{name}': {relocation:?}",
                         name = section.name(),
@@ -8763,7 +8763,7 @@ where
                 }
 
                 let data = elf.section_data_mut(relocation_target.section_index);
-                let value = range.end - range.start;
+                let mut value = range.end.wrapping_sub(range.start);
                 match size {
                     SizeRelocationSize::Uleb128 => {
                         overwrite_uleb128(data, relocation_target.offset as usize, value)?;
@@ -8778,6 +8778,30 @@ where
                         data[relocation_target.offset as usize] = output as u8;
                     }
                     SizeRelocationSize::Generic(size) => {
+                        if range.end < range.start {
+                            match size {
+                                RelocationSize::U8 => {
+                                    if let Ok(new_value) = cast(value).to_signed().try_into() {
+                                        let new_value: i8 = new_value;
+                                        value = cast(cast(new_value).to_unsigned()).to_u64();
+                                    }
+                                }
+                                RelocationSize::U16 => {
+                                    if let Ok(new_value) = cast(value).to_signed().try_into() {
+                                        let new_value: i16 = new_value;
+                                        value = cast(cast(new_value).to_unsigned()).to_u64();
+                                    }
+                                }
+                                RelocationSize::U32 => {
+                                    if let Ok(new_value) = cast(value).to_signed().try_into() {
+                                        let new_value: i32 = new_value;
+                                        value = cast(cast(new_value).to_unsigned()).to_u64();
+                                    }
+                                }
+                                RelocationSize::U64 => {}
+                            }
+                        }
+
                         write_generic(size, data, relocation_target.offset, value)?;
                     }
                 }
