@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 polkavm-linux-raw = { path = "../polkavm-linux-raw" }
 polkavm-common = { path = "../polkavm-common", features = ["regmap"] }
+spin = { version = "0.9.8", default-features = false, features = ["lock_api", "spin_mutex", "rwlock", "lazy"] }
 
 [build-dependencies]
 polkavm-common = { path = "../polkavm-common" }

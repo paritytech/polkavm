@@ -12,6 +12,7 @@ description = "The common crate for PolkaVM"
 log = { workspace = true, optional = true }
 polkavm-assembler = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
+spin = { workspace = true }
 
 [features]
 default = []

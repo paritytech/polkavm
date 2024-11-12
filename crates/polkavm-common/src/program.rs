@@ -4,6 +4,13 @@ use crate::varint::{read_simple_varint, read_varint, write_simple_varint, write_
 use core::fmt::Write;
 use core::ops::Range;
 
+#[cfg(feature = "unique-id")]
+use spin::RwLock;
+#[cfg(feature = "unique-id")]
+struct UniqueId(u64);
+#[cfg(feature = "unique-id")]
+static ID_COUNTER: RwLock<UniqueId> = RwLock::new(UniqueId(0));
+
 #[derive(Copy, Clone)]
 #[repr(transparent)]
 pub struct RawReg(u32);
@@ -3980,8 +3987,10 @@ impl ProgramBlob {
 
         #[cfg(feature = "unique-id")]
         {
-            static ID_COUNTER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-            blob.unique_id = ID_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let mut counter = ID_COUNTER.write();
+            *counter = UniqueId(counter.0 + 1);
+            blob.unique_id = counter.0;
+            // The lock is dropper here.
         }
 
         Ok(blob)

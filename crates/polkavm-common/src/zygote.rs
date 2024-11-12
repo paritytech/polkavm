@@ -3,8 +3,7 @@
 //! In general everything here can be modified at will, provided the zygote
 //! is recompiled.
 
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64};
+use core::sync::atomic::{AtomicBool, AtomicU32};
 
 // Due to the limitations of Rust's compile time constant evaluation machinery
 // we need to define this struct multiple times.
@@ -137,24 +136,24 @@ pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = 2176 * 1024 * 1024 - 1;
 
 #[repr(C)]
 pub struct JmpBuf {
-    pub rip: AtomicU64,
-    pub rbx: AtomicU64,
-    pub rsp: AtomicU64,
-    pub rbp: AtomicU64,
-    pub r12: AtomicU64,
-    pub r13: AtomicU64,
-    pub r14: AtomicU64,
-    pub r15: AtomicU64,
+    pub rip: u64,
+    pub rbx: u64,
+    pub rsp: u64,
+    pub rbp: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
 }
 
 #[repr(C)]
 pub struct VmInit {
-    pub stack_address: AtomicU64,
-    pub stack_length: AtomicU64,
-    pub vdso_address: AtomicU64,
-    pub vdso_length: AtomicU64,
-    pub vvar_address: AtomicU64,
-    pub vvar_length: AtomicU64,
+    pub stack_address: u64,
+    pub stack_length: u64,
+    pub vdso_address: u64,
+    pub vdso_length: u64,
+    pub vvar_address: u64,
+    pub vvar_length: u64,
 
     /// Whether userfaultfd-based memory management is available.
     pub uffd_available: AtomicBool,
@@ -190,16 +189,16 @@ impl<T> core::ops::DerefMut for CacheAligned<T> {
 
 #[repr(C)]
 pub struct VmCtxHeapInfo {
-    pub heap_top: UnsafeCell<u64>,
-    pub heap_threshold: UnsafeCell<u64>,
+    pub heap_top: u64,
+    pub heap_threshold: u64,
 }
 
 const REG_COUNT: usize = crate::program::Reg::ALL.len();
 
 #[repr(C)]
 pub struct VmCtxCounters {
-    pub syscall_wait_loop_start: UnsafeCell<u64>,
-    pub syscall_futex_wait: UnsafeCell<u64>,
+    pub syscall_wait_loop_start: u64,
+    pub syscall_futex_wait: u64,
 }
 
 #[repr(C)]
@@ -230,7 +229,7 @@ pub struct VmCtx {
     _align_1: CacheAligned<()>,
 
     /// The current gas counter.
-    pub gas: AtomicI64,
+    pub gas: i64,
 
     _align_2: CacheAligned<()>,
 
@@ -238,7 +237,7 @@ pub struct VmCtx {
     pub futex: AtomicU32,
 
     /// Address to which to jump to.
-    pub jump_into: AtomicU64,
+    pub jump_into: u64,
 
     /// The address of the instruction currently being executed.
     pub program_counter: AtomicU32,
@@ -253,10 +252,10 @@ pub struct VmCtx {
     pub arg: AtomicU32,
 
     /// A dump of all of the registers of the VM.
-    pub regs: [AtomicU64; REG_COUNT],
+    pub regs: [u64; REG_COUNT],
 
     /// The address of the native code to call inside of the VM process, if non-zero.
-    pub next_native_program_counter: AtomicU64,
+    pub next_native_program_counter: u64,
 
     /// The state of the program's heap.
     pub heap_info: VmCtxHeapInfo,
@@ -264,35 +263,35 @@ pub struct VmCtx {
     pub arg2: AtomicU32,
 
     /// Offset in shared memory to this sandbox's memory map.
-    pub shm_memory_map_offset: AtomicU64,
+    pub shm_memory_map_offset: u64,
     /// Number of maps to map.
-    pub shm_memory_map_count: AtomicU64,
+    pub shm_memory_map_count: u64,
     /// Offset in shared memory to this sandbox's code.
-    pub shm_code_offset: AtomicU64,
+    pub shm_code_offset: u64,
     /// Length this sandbox's code.
-    pub shm_code_length: AtomicU64,
+    pub shm_code_length: u64,
     /// Offset in shared memory to this sandbox's jump table.
-    pub shm_jump_table_offset: AtomicU64,
+    pub shm_jump_table_offset: u64,
     /// Length of sandbox's jump table, in bytes.
-    pub shm_jump_table_length: AtomicU64,
+    pub shm_jump_table_length: u64,
 
     /// Address of the sysreturn routine.
-    pub sysreturn_address: AtomicU64,
+    pub sysreturn_address: u64,
 
     /// Whether userfaultfd-based memory management is enabled.
     pub uffd_enabled: AtomicBool,
 
     /// Address to the base of the heap.
-    pub heap_base: UnsafeCell<u32>,
+    pub heap_base: u32,
 
     /// The initial heap growth threshold.
-    pub heap_initial_threshold: UnsafeCell<u32>,
+    pub heap_initial_threshold: u32,
 
     /// The maximum heap size.
-    pub heap_max_size: UnsafeCell<u32>,
+    pub heap_max_size: u32,
 
     /// The page size.
-    pub page_size: UnsafeCell<u32>,
+    pub page_size: u32,
 
     /// Performance counters. Only for debugging.
     pub counters: CacheAligned<VmCtxCounters>,
@@ -301,9 +300,10 @@ pub struct VmCtx {
     pub init: VmInit,
 
     /// Length of the message in the message buffer.
-    pub message_length: UnsafeCell<u32>,
+    pub message_length: u32,
+
     /// A buffer used to marshal error messages.
-    pub message_buffer: UnsafeCell<[u8; MESSAGE_BUFFER_SIZE]>,
+    pub message_buffer: [u8; MESSAGE_BUFFER_SIZE],
 }
 
 // Make sure it fits within a single page on amd64.
@@ -328,7 +328,7 @@ pub const VMCTX_FUTEX_GUEST_SIGNAL: u32 = VMCTX_FUTEX_IDLE | (3 << 1);
 pub const VMCTX_FUTEX_GUEST_STEP: u32 = VMCTX_FUTEX_IDLE | (4 << 1);
 
 #[allow(clippy::declare_interior_mutable_const)]
-const ATOMIC_U64_ZERO: AtomicU64 = AtomicU64::new(0);
+const ATOMIC_U64_ZERO: u64 = 0;
 
 #[allow(clippy::new_without_default)]
 impl VmCtx {
@@ -338,64 +338,64 @@ impl VmCtx {
             _align_1: CacheAligned(()),
             _align_2: CacheAligned(()),
 
-            gas: AtomicI64::new(0),
+            gas: 0,
             program_counter: AtomicU32::new(0),
             next_program_counter: AtomicU32::new(0),
             arg: AtomicU32::new(0),
             arg2: AtomicU32::new(0),
             regs: [ATOMIC_U64_ZERO; REG_COUNT],
-            jump_into: AtomicU64::new(0),
-            next_native_program_counter: AtomicU64::new(0),
+            jump_into: 0,
+            next_native_program_counter: 0,
 
             futex: AtomicU32::new(VMCTX_FUTEX_BUSY),
 
-            shm_memory_map_offset: AtomicU64::new(0),
-            shm_memory_map_count: AtomicU64::new(0),
-            shm_code_offset: AtomicU64::new(0),
-            shm_code_length: AtomicU64::new(0),
-            shm_jump_table_offset: AtomicU64::new(0),
-            shm_jump_table_length: AtomicU64::new(0),
+            shm_memory_map_offset: 0,
+            shm_memory_map_count: 0,
+            shm_code_offset: 0,
+            shm_code_length: 0,
+            shm_jump_table_offset: 0,
+            shm_jump_table_length: 0,
             uffd_enabled: AtomicBool::new(false),
-            sysreturn_address: AtomicU64::new(0),
-            heap_base: UnsafeCell::new(0),
-            heap_initial_threshold: UnsafeCell::new(0),
-            heap_max_size: UnsafeCell::new(0),
-            page_size: UnsafeCell::new(0),
+            sysreturn_address: 0,
+            heap_base: 0,
+            heap_initial_threshold: 0,
+            heap_max_size: 0,
+            page_size: 0,
 
             heap_info: VmCtxHeapInfo {
-                heap_top: UnsafeCell::new(0),
-                heap_threshold: UnsafeCell::new(0),
+                heap_top: 0,
+                heap_threshold: 0,
             },
 
             counters: CacheAligned(VmCtxCounters {
-                syscall_wait_loop_start: UnsafeCell::new(0),
-                syscall_futex_wait: UnsafeCell::new(0),
+                syscall_wait_loop_start: 0,
+                syscall_futex_wait: 0,
             }),
 
             init: VmInit {
-                stack_address: AtomicU64::new(0),
-                stack_length: AtomicU64::new(0),
-                vdso_address: AtomicU64::new(0),
-                vdso_length: AtomicU64::new(0),
-                vvar_address: AtomicU64::new(0),
-                vvar_length: AtomicU64::new(0),
+                stack_address: 0,
+                stack_length: 0,
+                vdso_address: 0,
+                vdso_length: 0,
+                vvar_address: 0,
+                vvar_length: 0,
                 uffd_available: AtomicBool::new(false),
                 sandbox_disabled: AtomicBool::new(false),
                 logging_enabled: AtomicBool::new(false),
                 idle_regs: JmpBuf {
-                    rip: AtomicU64::new(0),
-                    rbx: AtomicU64::new(0),
-                    rsp: AtomicU64::new(0),
-                    rbp: AtomicU64::new(0),
-                    r12: AtomicU64::new(0),
-                    r13: AtomicU64::new(0),
-                    r14: AtomicU64::new(0),
-                    r15: AtomicU64::new(0),
+                    rip: 0,
+                    rbx: 0,
+                    rsp: 0,
+                    rbp: 0,
+                    r12: 0,
+                    r13: 0,
+                    r14: 0,
+                    r15: 0,
                 },
             },
 
-            message_length: UnsafeCell::new(0),
-            message_buffer: UnsafeCell::new([0; MESSAGE_BUFFER_SIZE]),
+            message_length: 0,
+            message_buffer: [0; MESSAGE_BUFFER_SIZE],
         }
     }
 

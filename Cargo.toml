@@ -60,6 +60,7 @@ ruzstd = { version = "0.4.0", default-features = false }
 schnellru = { version = "0.2.3" }
 serde = { version = "1.0.203", features = ["derive"] }
 serde_json = { version = "1.0.117" }
+spin = { version = "0.9.8", default-features = false, features = ["lock_api", "spin_mutex", "rwlock", "lazy"] }
 syn = "2.0.25"
 yansi = "0.5.1"
 
