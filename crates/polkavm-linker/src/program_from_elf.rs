@@ -101,6 +101,7 @@ impl Reg {
             13 => Some(Reg::E0),
             14 => Some(Reg::E1),
             15 => Some(Reg::E2),
+            16 => Some(Reg::E3),
             _ => None,
         }
     }
