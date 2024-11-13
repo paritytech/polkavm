@@ -225,22 +225,22 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
-    fn rotate_left(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+    fn rotate_left_32(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn rotate_left_word(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+    fn rotate_left_64(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn rotate_right(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+    fn rotate_right_32(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn rotate_right_word(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+    fn rotate_right_64(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
@@ -430,22 +430,22 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
-    fn rotate_right_imm(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
+    fn rotate_right_32_imm(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn rotate_right_imm_alt(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
+    fn rotate_right_32_imm_alt(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn rotate_right_word_imm(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
+    fn rotate_right_64_imm(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn rotate_right_word_imm_alt(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
+    fn rotate_right_64_imm_alt(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 

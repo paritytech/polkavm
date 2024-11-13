@@ -201,8 +201,9 @@ pub enum RegImmKind {
     ShiftArithmeticRight32AndSignExtend,
     ShiftArithmeticRight64,
 
-    RotateRight,
-    RotateRightWord,
+    RotateRight32,
+    RotateRight32AndSignExtend,
+    RotateRight64,
 }
 
 impl RegImmKind {
@@ -282,10 +283,12 @@ pub enum RegRegKind {
     MaximumUnsigned,
     Minimum,
     MinimumUnsigned,
-    RotateLeft,
-    RotateLeftWord,
-    RotateRight,
-    RotateRightWord,
+    RotateLeft32,
+    RotateLeft32AndSignExtend,
+    RotateLeft64,
+    RotateRight32,
+    RotateRight32AndSignExtend,
+    RotateRight64,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
@@ -1058,13 +1061,13 @@ impl Inst {
                             imm: bits(0, 5, op, 20) as i32,
                         }),
                         (0b0110000, _) if !config.rv64 => Some(Inst::RegImm {
-                            kind: RegImmKind::RotateRight,
+                            kind: RegImmKind::RotateRight32,
                             dst,
                             src,
                             imm: bits(0, 4, op, 20) as i32,
                         }),
                         (0b0110000, _) | (0b0110001, _) if config.rv64 => Some(Inst::RegImm {
-                            kind: RegImmKind::RotateRight,
+                            kind: RegImmKind::RotateRight64,
                             dst,
                             src,
                             imm: bits(0, 5, op, 20) as i32,
@@ -1147,7 +1150,7 @@ impl Inst {
                         imm: bits(0, 5, op, 20) as i32,
                     }),
                     0b0110000 => Some(Inst::RegImm {
-                        kind: RegImmKind::RotateRightWord,
+                        kind: RegImmKind::RotateRight32AndSignExtend,
                         dst: Reg::decode(op >> 7),
                         src: Reg::decode(op >> 15),
                         imm: bits(0, 5, op, 20) as i32,
@@ -1198,8 +1201,8 @@ impl Inst {
                     0b0100000_00000_00000_110_00000_0000000 => RegRegKind::OrInverted,
                     0b0100000_00000_00000_111_00000_0000000 => RegRegKind::AndInverted,
 
-                    0b0110000_00000_00000_001_00000_0000000 => RegRegKind::RotateLeft,
-                    0b0110000_00000_00000_101_00000_0000000 => RegRegKind::RotateRight,
+                    0b0110000_00000_00000_001_00000_0000000 => xlen!(RegRegKind, RotateLeft32, RotateLeft64),
+                    0b0110000_00000_00000_101_00000_0000000 => xlen!(RegRegKind, RotateRight32, RotateRight64),
 
                     _ => return None,
                 };
@@ -1233,8 +1236,8 @@ impl Inst {
                     0b0100000_00000_00000_000_00000_0000000 if config.rv64 => RegRegKind::Sub32AndSignExtend,
                     0b0100000_00000_00000_101_00000_0000000 if config.rv64 => RegRegKind::ShiftArithmeticRight32AndSignExtend,
 
-                    0b0110000_00000_00000_001_00000_0000000 => RegRegKind::RotateLeftWord,
-                    0b0110000_00000_00000_101_00000_0000000 => RegRegKind::RotateRightWord,
+                    0b0110000_00000_00000_001_00000_0000000 => RegRegKind::RotateLeft32AndSignExtend,
+                    0b0110000_00000_00000_101_00000_0000000 => RegRegKind::RotateRight32AndSignExtend,
 
                     _ => return None,
                 };

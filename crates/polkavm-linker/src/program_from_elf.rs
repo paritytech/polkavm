@@ -1792,6 +1792,16 @@ fn resolve_simple_zero_register_usage(
         return true;
     }
 
+    if matches!(kind, K::RotateLeft32AndSignExtend | K::RotateRight32AndSignExtend) && src1 != RReg::Zero && src2 == RReg::Zero {
+        emit(InstExt::Basic(BasicInst::AnyAny {
+            kind: AnyAnyKind::Add32AndSignExtend,
+            dst,
+            src1: cast_reg_any(src1).unwrap(),
+            src2: RegImm::Imm(0),
+        }));
+        return true;
+    }
+
     false
 }
 
@@ -1947,8 +1957,9 @@ where
                 RegImmKind::ShiftArithmeticRight32 => AnyAnyKind::ShiftArithmeticRight32,
                 RegImmKind::ShiftArithmeticRight32AndSignExtend => AnyAnyKind::ShiftArithmeticRight32AndSignExtend,
                 RegImmKind::ShiftArithmeticRight64 => AnyAnyKind::ShiftArithmeticRight64,
-                RegImmKind::RotateRight => AnyAnyKind::RotateRight,
-                RegImmKind::RotateRightWord => AnyAnyKind::RotateRightWord,
+                RegImmKind::RotateRight32 => AnyAnyKind::RotateRight32,
+                RegImmKind::RotateRight32AndSignExtend => AnyAnyKind::RotateRight32AndSignExtend,
+                RegImmKind::RotateRight64 => AnyAnyKind::RotateRight64,
             };
 
             match src {
@@ -2127,10 +2138,12 @@ where
                 K::MaximumUnsigned => regreg!(MaximumUnsigned),
                 K::Minimum => regreg!(Minimum),
                 K::MinimumUnsigned => regreg!(MinimumUnsigned),
-                K::RotateLeft => regreg!(RotateLeft),
-                K::RotateLeftWord => regreg!(RotateLeftWord),
-                K::RotateRight => anyany!(RotateRight),
-                K::RotateRightWord => anyany!(RotateRightWord),
+                K::RotateLeft32 => regreg!(RotateLeft32),
+                K::RotateLeft32AndSignExtend => regreg!(RotateLeft32AndSignExtend),
+                K::RotateLeft64 => regreg!(RotateLeft64),
+                K::RotateRight32 => anyany!(RotateRight32),
+                K::RotateRight32AndSignExtend => anyany!(RotateRight32AndSignExtend),
+                K::RotateRight64 => anyany!(RotateRight64),
             };
 
             emit(InstExt::Basic(instruction));
@@ -3656,8 +3669,9 @@ pub enum AnyAnyKind {
     Mul32,
     Mul32AndSignExtend,
     Mul64,
-    RotateRight,
-    RotateRightWord,
+    RotateRight32,
+    RotateRight32AndSignExtend,
+    RotateRight64,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -3703,8 +3717,9 @@ pub enum RegRegKind {
     MaximumUnsigned,
     Minimum,
     MinimumUnsigned,
-    RotateLeft,
-    RotateLeftWord,
+    RotateLeft32,
+    RotateLeft32AndSignExtend,
+    RotateLeft64,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -3773,10 +3788,12 @@ enum OperationKind {
     MaximumUnsigned,
     Minimum,
     MinimumUnsigned,
-    RotateLeft,
-    RotateLeftWord,
-    RotateRight,
-    RotateRightWord,
+    RotateLeft32,
+    RotateLeft32AndSignExtend,
+    RotateLeft64,
+    RotateRight32,
+    RotateRight32AndSignExtend,
+    RotateRight64,
 }
 
 impl From<AnyAnyKind> for OperationKind {
@@ -3810,8 +3827,9 @@ impl From<AnyAnyKind> for OperationKind {
             AnyAnyKind::Mul32 => Self::Mul32,
             AnyAnyKind::Mul32AndSignExtend => Self::Mul32AndSignExtend,
             AnyAnyKind::Mul64 => Self::Mul64,
-            AnyAnyKind::RotateRight => Self::RotateRight,
-            AnyAnyKind::RotateRightWord => Self::RotateRightWord,
+            AnyAnyKind::RotateRight32 => Self::RotateRight32,
+            AnyAnyKind::RotateRight32AndSignExtend => Self::RotateRight32AndSignExtend,
+            AnyAnyKind::RotateRight64 => Self::RotateRight64,
         }
     }
 }
@@ -3844,8 +3862,9 @@ impl From<RegRegKind> for OperationKind {
             RegRegKind::MaximumUnsigned => Self::MaximumUnsigned,
             RegRegKind::Minimum => Self::Minimum,
             RegRegKind::MinimumUnsigned => Self::MinimumUnsigned,
-            RegRegKind::RotateLeft => Self::RotateLeft,
-            RegRegKind::RotateLeftWord => Self::RotateLeftWord,
+            RegRegKind::RotateLeft32 => Self::RotateLeft32,
+            RegRegKind::RotateLeft32AndSignExtend => Self::RotateLeft32AndSignExtend,
+            RegRegKind::RotateLeft64 => Self::RotateLeft64,
         }
     }
 }
@@ -4072,10 +4091,28 @@ impl OperationKind {
             Self::MaximumUnsigned => (lhs as u64).max(rhs as u64) as i64,
             Self::Minimum => lhs.min(rhs),
             Self::MinimumUnsigned => (lhs as u64).min(rhs as u64) as i64,
-            Self::RotateLeft => cast((lhs as u32).rotate_left(rhs as u32) as i32).to_i64_sign_extend(),
-            Self::RotateLeftWord => cast((lhs as u32).rotate_left(rhs as u32) as i32).to_i64_sign_extend(),
-            Self::RotateRight => cast((lhs as u32).rotate_right(rhs as u32) as i32).to_i64_sign_extend(),
-            Self::RotateRightWord => cast((lhs as u32).rotate_right(rhs as u32) as i32).to_i64_sign_extend(),
+            Self::RotateLeft32 => {
+                op32!(|lhs, rhs| lhs.rotate_left(rhs as u32))
+            },
+            Self::RotateLeft32AndSignExtend => {
+                op32_on_64!(|lhs, rhs| lhs.rotate_left(rhs as u32))
+            },
+            Self::RotateLeft64 => {
+                let rhs = cast(rhs).to_unsigned();
+                let rhs = cast(rhs).truncate_to_u32();
+                lhs.rotate_left(rhs)
+            },
+            Self::RotateRight32 => {
+                op32!(|lhs, rhs| lhs.rotate_right(rhs as u32))
+            },
+            Self::RotateRight32AndSignExtend => {
+                op32_on_64!(|lhs, rhs| lhs.rotate_right(rhs as u32))
+            },
+            Self::RotateRight64 => {
+                let rhs = cast(rhs).to_unsigned();
+                let rhs = cast(rhs).truncate_to_u32();
+                lhs.rotate_right(rhs)
+            },
         }
     }
 
@@ -4208,17 +4245,21 @@ impl OperationKind {
             (O::MinimumUnsigned, C(0), _rhs) => C(0),
             (O::MinimumUnsigned, _lhs, C(0)) => C(0),
 
-            (O::RotateLeft, lhs, C(0)) => lhs,
-            (O::RotateLeft, C(0), _) => C(0),
+            (O::RotateLeft32, lhs, C(0)) => lhs,
+            (O::RotateLeft32, C(0), _) => C(0),
 
-            (O::RotateLeftWord, lhs, C(0)) => lhs,
-            (O::RotateLeftWord, C(0), _) => C(0),
+            (O::RotateLeft32AndSignExtend, C(0), _) => C(0),
 
-            (O::RotateRight, lhs, C(0)) => lhs,
-            (O::RotateRight, C(0), _) => C(0),
+            (O::RotateLeft64, lhs, C(0)) => lhs,
+            (O::RotateLeft64, C(0), _) => C(0),
 
-            (O::RotateRightWord, lhs, C(0)) => lhs,
-            (O::RotateRightWord, C(0), _) => C(0),
+            (O::RotateRight32, lhs, C(0)) => lhs,
+            (O::RotateRight32, C(0), _) => C(0),
+
+            (O::RotateRight32AndSignExtend, C(0), _) => C(0),
+
+            (O::RotateRight64, lhs, C(0)) => lhs,
+            (O::RotateRight64, C(0), _) => C(0),
 
             _ => return None,
         };
@@ -6265,6 +6306,9 @@ fn replace_immediates_with_registers(
                             | AnyAnyKind::ShiftLogicalLeft32AndSignExtend
                             | AnyAnyKind::ShiftLogicalRight32AndSignExtend
                             | AnyAnyKind::ShiftArithmeticRight32AndSignExtend
+                            | AnyAnyKind::RotateRight32
+                            | AnyAnyKind::RotateRight32AndSignExtend
+                            | AnyAnyKind::RotateRight64
                     ) {
                         replace!(src2);
                     }
@@ -7175,8 +7219,9 @@ fn emit_code(
                             K::MaximumUnsigned => maximum_unsigned,
                             K::Minimum => minimum,
                             K::MinimumUnsigned => minimum_unsigned,
-                            K::RotateLeft => rotate_left,
-                            K::RotateLeftWord => rotate_left_word,
+                            K::RotateLeft32 => rotate_left_32,
+                            K::RotateLeft32AndSignExtend => rotate_left_32,
+                            K::RotateLeft64 => rotate_left_64,
                         }
                     }
                 }
@@ -7219,8 +7264,9 @@ fn emit_code(
                                     K::Mul32 => mul_32,
                                     K::Mul32AndSignExtend => mul_32,
                                     K::Mul64 => mul_64,
-                                    K::RotateRight => rotate_right,
-                                    K::RotateRightWord => rotate_right_word,
+                                    K::RotateRight32 => rotate_right_32,
+                                    K::RotateRight32AndSignExtend => rotate_right_32,
+                                    K::RotateRight64 => rotate_right_64,
                                 }
                             }
                         }
@@ -7253,8 +7299,9 @@ fn emit_code(
                                 K::Mul32 => I::mul_imm_32(dst, src1, src2),
                                 K::Mul32AndSignExtend => I::mul_imm_32(dst, src1, src2),
                                 K::Mul64 => I::mul_imm_64(dst, src1, src2),
-                                K::RotateRight => I::rotate_right_imm(dst, src1, src2),
-                                K::RotateRightWord => I::rotate_right_word_imm(dst, src1, src2),
+                                K::RotateRight32 => I::rotate_right_32_imm(dst, src1, src2),
+                                K::RotateRight32AndSignExtend => I::rotate_right_32_imm(dst, src1, src2),
+                                K::RotateRight64 => I::rotate_right_64_imm(dst, src1, src2),
                             }
                         }
                         (RegImm::Imm(src1), RegImm::Reg(src2)) => {
@@ -7288,8 +7335,9 @@ fn emit_code(
                                 K::ShiftArithmeticRight32AndSignExtend => I::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
                                 K::ShiftArithmeticRight64 => I::shift_arithmetic_right_imm_alt_64(dst, src2, src1),
 
-                                K::RotateRight => I::rotate_right_imm_alt(dst, src2, src1),
-                                K::RotateRightWord => I::rotate_right_word_imm_alt(dst, src2, src1),
+                                K::RotateRight32 => I::rotate_right_32_imm_alt(dst, src2, src1),
+                                K::RotateRight32AndSignExtend => I::rotate_right_32_imm_alt(dst, src2, src1),
+                                K::RotateRight64 => I::rotate_right_64_imm_alt(dst, src2, src1),
                             }
                         }
                         (RegImm::Imm(src1), RegImm::Imm(src2)) => {

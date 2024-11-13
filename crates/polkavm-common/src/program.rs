@@ -1508,10 +1508,10 @@ define_opcodes! {
         [I_64, I_32] cmov_if_zero_imm                         = 85,
         [I_64, I_32] cmov_if_not_zero_imm                     = 86,
 
-        [I_64, I_32] rotate_right_imm                         = 158,
-        [I_64, I_32] rotate_right_imm_alt                     = 159,
-        [I_64, I_32] rotate_right_word_imm                    = 160,
-        [I_64, I_32] rotate_right_word_imm_alt                = 161,
+        [I_64, I_32] rotate_right_32_imm                      = 158,
+        [I_64, I_32] rotate_right_32_imm_alt                  = 159,
+        [I_64]       rotate_right_64_imm                      = 160,
+        [I_64]       rotate_right_64_imm_alt                  = 161,
     ]
 
     // Instructions with args: reg, reg, offset
@@ -1565,10 +1565,10 @@ define_opcodes! {
         [I_64, I_32] maximum_unsigned                         = 146,
         [I_64, I_32] minimum                                  = 147,
         [I_64, I_32] minimum_unsigned                         = 148,
-        [I_64, I_32] rotate_left                              = 152,
-        [I_64, I_32] rotate_left_word                         = 153,
-        [I_64, I_32] rotate_right                             = 154,
-        [I_64, I_32] rotate_right_word                        = 155,
+        [I_64, I_32] rotate_left_32                           = 152,
+        [I_64]       rotate_left_64                           = 153,
+        [I_64, I_32] rotate_right_32                          = 154,
+        [I_64]       rotate_right_64                          = 155,
     ]
 
     // Instructions with args: offset
@@ -2104,32 +2104,32 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "{d} = min({s1} %u, {s2} %u)")
     }
 
-    fn rotate_left(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        let d = self.format_reg(d);
-        let s1 = self.format_reg(s1);
-        let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} <<rotate {s2}")
-    }
-
-    fn rotate_left_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rotate_left_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
         write!(self, "{d} = {s1} <<rotate.32 {s2}")
     }
 
-    fn rotate_right(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rotate_left_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} >>rotate {s2}")
+        write!(self, "{d} = {s1} <<rotate.64 {s2}")
     }
 
-    fn rotate_right_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rotate_right_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
         write!(self, "{d} = {s1} >>rotate.32 {s2}")
+    }
+
+    fn rotate_right_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "{d} = {s1} >>rotate.64 {s2}")
     }
 
     fn set_less_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
@@ -2354,28 +2354,28 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "{d} = {s} if {c} != 0")
     }
 
-    fn rotate_right_imm(&mut self, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
-        let d = self.format_reg(d);
-        let s = self.format_reg(s);
-        write!(self, "{d} = {s} >>rotate.imm {c}")
-    }
-
-    fn rotate_right_imm_alt(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
-        let d = self.format_reg(d);
-        let c = self.format_reg(c);
-        write!(self, "{d} = {s} >>rotate.imm {c}")
-    }
-
-    fn rotate_right_word_imm(&mut self, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
+    fn rotate_right_32_imm(&mut self, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
         write!(self, "{d} = {s} >>rotate.imm.32 {c}")
     }
 
-    fn rotate_right_word_imm_alt(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
+    fn rotate_right_32_imm_alt(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let c = self.format_reg(c);
         write!(self, "{d} = {s} >>rotate.imm.32 {c}")
+    }
+
+    fn rotate_right_64_imm(&mut self, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s = self.format_reg(s);
+        write!(self, "{d} = {s} >>rotate.imm {c}")
+    }
+
+    fn rotate_right_64_imm_alt(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let c = self.format_reg(c);
+        write!(self, "{d} = {s} >>rotate.imm {c}")
     }
 
     fn add_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {

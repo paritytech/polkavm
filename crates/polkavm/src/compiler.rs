@@ -597,31 +597,31 @@ where
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
-    fn rotate_left(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rotate_left_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.rotate_left(d, s1, s2);
-        ArchVisitor(self).rotate_left(d, s1, s2);
+        self.gas_visitor.rotate_left_32(d, s1, s2);
+        ArchVisitor(self).rotate_left_32(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
-    fn rotate_left_word(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rotate_left_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.rotate_left_word(d, s1, s2);
-        ArchVisitor(self).rotate_left_word(d, s1, s2);
+        self.gas_visitor.rotate_left_64(d, s1, s2);
+        ArchVisitor(self).rotate_left_64(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
-    fn rotate_right(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rotate_right_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.rotate_right(d, s1, s2);
-        ArchVisitor(self).rotate_right(d, s1, s2);
+        self.gas_visitor.rotate_right_32(d, s1, s2);
+        ArchVisitor(self).rotate_right_32(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
-    fn rotate_right_word(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rotate_right_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.rotate_right_word(d, s1, s2);
-        ArchVisitor(self).rotate_right_word(d, s1, s2);
+        self.gas_visitor.rotate_right_64(d, s1, s2);
+        ArchVisitor(self).rotate_right_64(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
@@ -1192,34 +1192,34 @@ where
     }
 
     #[inline(always)]
-    fn rotate_right_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
+    fn rotate_right_32_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.rotate_right_imm(d, s, c);
-        ArchVisitor(self).rotate_right_imm(d, s, c);
+        self.gas_visitor.rotate_right_32_imm(d, s, c);
+        ArchVisitor(self).rotate_right_32_imm(d, s, c);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn rotate_right_imm_alt(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
+    fn rotate_right_32_imm_alt(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.rotate_right_imm_alt(d, s, c);
-        ArchVisitor(self).rotate_right_imm_alt(d, s, c);
+        self.gas_visitor.rotate_right_32_imm_alt(d, s, c);
+        ArchVisitor(self).rotate_right_32_imm_alt(d, s, c);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn rotate_right_word_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
+    fn rotate_right_64_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.rotate_right_word_imm(d, s, c);
-        ArchVisitor(self).rotate_right_word_imm(d, s, c);
+        self.gas_visitor.rotate_right_64_imm(d, s, c);
+        ArchVisitor(self).rotate_right_64_imm(d, s, c);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn rotate_right_word_imm_alt(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
+    fn rotate_right_64_imm_alt(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.rotate_right_word_imm_alt(d, s, c);
-        ArchVisitor(self).rotate_right_word_imm_alt(d, s, c);
+        self.gas_visitor.rotate_right_64_imm_alt(d, s, c);
+        ArchVisitor(self).rotate_right_64_imm_alt(d, s, c);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 

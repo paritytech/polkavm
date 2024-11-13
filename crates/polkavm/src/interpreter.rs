@@ -2258,7 +2258,7 @@ define_interpreter! {
 
     fn rotate_left_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_left(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_left_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_left)
@@ -2266,31 +2266,15 @@ define_interpreter! {
 
     fn rotate_left_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_left(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_left_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::rotate_left(s1, cast(s2).truncate_to_u32()))
     }
 
-    fn rotate_left_word_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_left_word(d, s1, s2));
-        }
-
-        visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_left)
-    }
-
-    fn rotate_left_word_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_left_word(d, s1, s2));
-        }
-
-        visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_left)
-    }
-
     fn rotate_right_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
@@ -2298,26 +2282,10 @@ define_interpreter! {
 
     fn rotate_right_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::rotate_right(s1, cast(s2).truncate_to_u32()))
-    }
-
-    fn rotate_right_word_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_word(d, s1, s2));
-        }
-
-        visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
-    }
-
-    fn rotate_right_word_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_word(d, s1, s2));
-        }
-
-        visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
     }
 
     fn set_less_than_unsigned_imm<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
@@ -2773,68 +2741,36 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn rotate_right_imm_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn rotate_right_32_imm<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_imm(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_32_imm(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
     }
 
-    fn rotate_right_imm_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn rotate_right_32_imm_alt<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_imm(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_32_imm_alt(d, s1, s2));
+        }
+
+        visitor.set3_32::<DEBUG>(d, s2, s1, u32::rotate_right)
+    }
+
+    fn rotate_right_64_imm<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_64_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::rotate_right(s1, cast(s2).truncate_to_u32()))
     }
 
-    fn rotate_right_imm_alt_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn rotate_right_64_imm_alt<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_imm(d, s1, s2));
-        }
-
-        visitor.set3_32::<DEBUG>(d, s2, s1, u32::rotate_right)
-    }
-
-    fn rotate_right_imm_alt_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_imm(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_64_imm_alt(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s2, s1, |s2, s1| u64::rotate_right(s2, cast(s1).truncate_to_u32()))
-    }
-
-    fn rotate_right_word_imm_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_word_imm(d, s1, s2));
-        }
-
-        visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
-    }
-
-    fn rotate_right_word_imm_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_word_imm(d, s1, s2));
-        }
-
-        visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
-    }
-
-    fn rotate_right_word_imm_alt_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_word_imm(d, s1, s2));
-        }
-
-        visitor.set3_32::<DEBUG>(d, s2, s1, u32::rotate_right)
-    }
-
-    fn rotate_right_word_imm_alt_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_word_imm(d, s1, s2));
-        }
-
-        visitor.set3_32::<DEBUG>(d, s2, s1, u32::rotate_right)
     }
 
     fn add_imm_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
@@ -3862,36 +3798,22 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
         }
     }
 
-    fn rotate_left(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, rotate_left_64(d, s1, s2));
-        } else {
-            emit!(self, rotate_left_32(d, s1, s2));
-        }
+    fn rotate_left_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit!(self, rotate_left_32(d, s1, s2));
     }
 
-    fn rotate_left_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, rotate_left_word_64(d, s1, s2));
-        } else {
-            emit!(self, rotate_left_word_32(d, s1, s2));
-        }
+    fn rotate_left_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.assert_64_bit();
+        emit!(self, rotate_left_64(d, s1, s2));
     }
 
-    fn rotate_right(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, rotate_right_64(d, s1, s2));
-        } else {
-            emit!(self, rotate_right_32(d, s1, s2));
-        }
+    fn rotate_right_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit!(self, rotate_right_32(d, s1, s2));
     }
 
-    fn rotate_right_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, rotate_right_word_64(d, s1, s2));
-        } else {
-            emit!(self, rotate_right_word_32(d, s1, s2));
-        }
+    fn rotate_right_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.assert_64_bit();
+        emit!(self, rotate_right_64(d, s1, s2));
     }
 
     fn set_less_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
@@ -4089,36 +4011,22 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
         emit!(self, cmov_if_not_zero_imm(d, c, s));
     }
 
-    fn rotate_right_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, rotate_right_imm_64(d, s1, s2));
-        } else {
-            emit!(self, rotate_right_imm_32(d, s1, s2));
-        }
+    fn rotate_right_32_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+        emit!(self, rotate_right_32_imm(d, s1, s2));
     }
 
-    fn rotate_right_imm_alt(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, rotate_right_imm_alt_64(d, s2, s1));
-        } else {
-            emit!(self, rotate_right_imm_alt_32(d, s2, s1));
-        }
+    fn rotate_right_32_imm_alt(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+        emit!(self, rotate_right_32_imm_alt(d, s2, s1));
     }
 
-    fn rotate_right_word_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, rotate_right_word_imm_64(d, s1, s2));
-        } else {
-            emit!(self, rotate_right_word_imm_32(d, s1, s2));
-        }
+    fn rotate_right_64_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+        self.assert_64_bit();
+        emit!(self, rotate_right_64_imm(d, s1, s2));
     }
 
-    fn rotate_right_word_imm_alt(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, rotate_right_word_imm_alt_64(d, s2, s1));
-        } else {
-            emit!(self, rotate_right_word_imm_alt_32(d, s2, s1));
-        }
+    fn rotate_right_64_imm_alt(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+        self.assert_64_bit();
+        emit!(self, rotate_right_64_imm_alt(d, s2, s1));
     }
 
     fn add_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {

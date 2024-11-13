@@ -915,7 +915,7 @@ where
     }
 
     #[inline(always)]
-    pub fn maximum(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+    pub fn min_max_generic(&mut self, c: Condition, d: RawReg, s1: RawReg, s2: RawReg) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
@@ -924,101 +924,40 @@ where
         let asm = self.asm.reserve::<U3>();
         if d == s1 {
             let asm = asm.push(cmp((reg_size, s2, s1)));
-            asm.push(cmov(Condition::Greater, reg_size, d, s2)).push_none()
+            asm.push(cmov(c, reg_size, d, s2)).push_none()
         } else if d == s2 {
             let asm = asm.push(cmp((reg_size, s1, s2)));
-            asm.push(cmov(Condition::Greater, reg_size, d, s1)).push_none()
+            asm.push(cmov(c, reg_size, d, s1)).push_none()
         } else {
             let asm = asm.push(mov(reg_size, d, s1));
             let asm = asm.push(cmp((reg_size, s2, s1)));
-            asm.push(cmov(Condition::Greater, reg_size, d, s2))
+            asm.push(cmov(c, reg_size, d, s2))
         }
         .assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn maximum(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        self.min_max_generic(Condition::Greater, d, s1, s2);
     }
 
     #[inline(always)]
     pub fn maximum_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
-        let reg_size = self.reg_size();
-        let d = conv_reg(d);
-        let s1 = conv_reg(s1);
-        let s2 = conv_reg(s2);
-
-        let asm = self.asm.reserve::<U3>();
-        if d == s1 {
-            let asm = asm.push(cmp((reg_size, s2, s1)));
-            asm.push(cmov(Condition::Above, reg_size, d, s2)).push_none()
-        } else if d == s2 {
-            let asm = asm.push(cmp((reg_size, s1, s2)));
-            asm.push(cmov(Condition::Above, reg_size, d, s1)).push_none()
-        } else {
-            let asm = asm.push(mov(reg_size, d, s1));
-            let asm = asm.push(cmp((reg_size, s2, s1)));
-            asm.push(cmov(Condition::Above, reg_size, d, s2))
-        }
-        .assert_reserved_exactly_as_needed();
+        self.min_max_generic(Condition::Above, d, s1, s2);
     }
 
     #[inline(always)]
     pub fn minimum(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
-        let reg_size = self.reg_size();
-        let d = conv_reg(d);
-        let s1 = conv_reg(s1);
-        let s2 = conv_reg(s2);
-
-        let asm = self.asm.reserve::<U3>();
-        if d == s1 {
-            let asm = asm.push(cmp((reg_size, s2, s1)));
-            asm.push(cmov(Condition::Less, reg_size, d, s2)).push_none()
-        } else if d == s2 {
-            let asm = asm.push(cmp((reg_size, s1, s2)));
-            asm.push(cmov(Condition::Less, reg_size, d, s1)).push_none()
-        } else {
-            let asm = asm.push(mov(reg_size, d, s1));
-            let asm = asm.push(cmp((reg_size, s2, s1)));
-            asm.push(cmov(Condition::Less, reg_size, d, s2))
-        }
-        .assert_reserved_exactly_as_needed();
+        self.min_max_generic(Condition::Less, d, s1, s2);
     }
 
     #[inline(always)]
     pub fn minimum_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
-        let reg_size = self.reg_size();
-        let d = conv_reg(d);
-        let s1 = conv_reg(s1);
-        let s2 = conv_reg(s2);
-
-        let asm = self.asm.reserve::<U3>();
-        if d == s1 {
-            let asm = asm.push(cmp((reg_size, s2, s1)));
-            asm.push(cmov(Condition::Below, reg_size, d, s2)).push_none()
-        } else if d == s2 {
-            let asm = asm.push(cmp((reg_size, s1, s2)));
-            asm.push(cmov(Condition::Below, reg_size, d, s1)).push_none()
-        } else {
-            let asm = asm.push(mov(reg_size, d, s1));
-            let asm = asm.push(cmp((reg_size, s2, s1)));
-            asm.push(cmov(Condition::Below, reg_size, d, s2))
-        }
-        .assert_reserved_exactly_as_needed();
+        self.min_max_generic(Condition::Below, d, s1, s2);
     }
 
     #[inline(always)]
-    pub fn rotate_left(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
-        let reg_size = self.reg_size();
-        let d = conv_reg(d);
-        let s1 = conv_reg(s1);
-        let s2 = conv_reg(s2);
-
-        let asm = self.asm.reserve::<polkavm_assembler::U3>();
-        let asm = asm.push(mov(reg_size, rcx, s2));
-        let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
-        let asm = asm.push(rol_cl(reg_size, d));
-        asm.assert_reserved_exactly_as_needed();
-    }
-
-    #[inline(always)]
-    pub fn rotate_left_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
-        let reg_size = RegSize::R32;
+    pub fn rotate_left_generic(&mut self, reg_size: RegSize, d: RawReg, s1: RawReg, s2: RawReg) {
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
         let s2 = conv_reg(s2);
@@ -1028,7 +967,7 @@ where
         let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
         let asm = asm.push(rol_cl(reg_size, d));
 
-        let asm = if B::BITNESS == Bitness::B64 {
+        let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
             asm.push(movsxd_32_to_64(d, d))
         } else {
             asm.push_none()
@@ -1038,22 +977,18 @@ where
     }
 
     #[inline(always)]
-    pub fn rotate_right(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
-        let reg_size = self.reg_size();
-        let d = conv_reg(d);
-        let s1 = conv_reg(s1);
-        let s2 = conv_reg(s2);
-
-        let asm = self.asm.reserve::<polkavm_assembler::U3>();
-        let asm = asm.push(mov(reg_size, rcx, s2));
-        let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
-        let asm = asm.push(ror_cl(reg_size, d));
-        asm.assert_reserved_exactly_as_needed();
+    pub fn rotate_left_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        self.rotate_left_generic(RegSize::R32, d, s1, s2);
     }
 
     #[inline(always)]
-    pub fn rotate_right_word(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
-        let reg_size = RegSize::R32;
+    pub fn rotate_left_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.rotate_left_generic(RegSize::R64, d, s1, s2);
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_generic(&mut self, reg_size: RegSize, d: RawReg, s1: RawReg, s2: RawReg) {
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
         let s2 = conv_reg(s2);
@@ -1063,13 +998,24 @@ where
         let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
         let asm = asm.push(ror_cl(reg_size, d));
 
-        let asm = if B::BITNESS == Bitness::B64 {
+        let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
             asm.push(movsxd_32_to_64(d, d))
         } else {
             asm.push_none()
         };
 
         asm.assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        self.rotate_right_generic(RegSize::R32, d, s1, s2);
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.rotate_right_generic(RegSize::R64, d, s1, s2);
     }
 
     #[inline(always)]
@@ -1814,12 +1760,12 @@ where
 
     #[inline(always)]
     pub fn sign_extend_byte(&mut self, d: RawReg, s: RawReg) {
-        self.push(movsx_8_to_64(conv_reg(d), conv_reg(s)))
+        self.push(movsx_8_to_64(self.reg_size(), conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]
     pub fn sign_extend_half_word(&mut self, d: RawReg, s: RawReg) {
-        self.push(movsx_16_to_64(conv_reg(d), conv_reg(s)))
+        self.push(movsx_16_to_64(self.reg_size(), conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]
@@ -1834,9 +1780,11 @@ where
         let s = conv_reg(s);
         let or_combine_label = self.or_combine_label;
 
-        self.push(mov(reg_size, TMP_REG, s));
-        self.call_to_label(or_combine_label);
-        self.push(mov(reg_size, d, TMP_REG));
+        let asm = self.asm.reserve::<U3>();
+        let asm = asm.push(mov(reg_size, TMP_REG, s));
+        let asm = asm.push(call_label32(or_combine_label));
+        let asm = asm.push(mov(reg_size, d, TMP_REG));
+        asm.assert_reserved_exactly_as_needed();
     }
 
     #[inline(always)]
@@ -1869,34 +1817,7 @@ where
     }
 
     #[inline(always)]
-    pub fn rotate_right_imm(&mut self, d: RawReg, s: RawReg, c: u32) {
-        let reg_size = self.reg_size();
-        let d = conv_reg(d);
-        let s = conv_reg(s);
-
-        let asm = self.asm.reserve::<polkavm_assembler::U3>();
-        let asm = asm.push(mov_imm(rcx, imm32(c)));
-        let asm = asm.push_if(d != s, mov(reg_size, d, s));
-        let asm = asm.push(ror_cl(reg_size, d));
-        asm.assert_reserved_exactly_as_needed();
-    }
-
-    #[inline(always)]
-    pub fn rotate_right_imm_alt(&mut self, d: RawReg, s: RawReg, c: u32) {
-        let reg_size = self.reg_size();
-        let d = conv_reg(d);
-        let s = conv_reg(s);
-
-        let asm = self.asm.reserve::<polkavm_assembler::U3>();
-        let asm = asm.push(mov(reg_size, rcx, s));
-        let asm = asm.push(mov_imm(d, imm32(c)));
-        let asm = asm.push(ror_cl(reg_size, d));
-        asm.assert_reserved_exactly_as_needed();
-    }
-
-    #[inline(always)]
-    pub fn rotate_right_word_imm(&mut self, d: RawReg, s: RawReg, c: u32) {
-        let reg_size = RegSize::R32;
+    pub fn rotate_right_imm_generic(&mut self, reg_size: RegSize, d: RawReg, s: RawReg, c: u32) {
         let d = conv_reg(d);
         let s = conv_reg(s);
 
@@ -1905,7 +1826,7 @@ where
         let asm = asm.push_if(d != s, mov(reg_size, d, s));
         let asm = asm.push(ror_cl(reg_size, d));
 
-        let asm = if B::BITNESS == Bitness::B64 {
+        let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
             asm.push(movsxd_32_to_64(d, d))
         } else {
             asm.push_none()
@@ -1915,8 +1836,18 @@ where
     }
 
     #[inline(always)]
-    pub fn rotate_right_word_imm_alt(&mut self, d: RawReg, s: RawReg, c: u32) {
-        let reg_size = RegSize::R32;
+    pub fn rotate_right_32_imm(&mut self, d: RawReg, s: RawReg, c: u32) {
+        self.rotate_right_imm_generic(RegSize::R32, d, s, c);
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_64_imm(&mut self, d: RawReg, s: RawReg, c: u32) {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.rotate_right_imm_generic(RegSize::R64, d, s, c);
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_imm_alt_generic(&mut self, reg_size: RegSize, d: RawReg, s: RawReg, c: u32) {
         let d = conv_reg(d);
         let s = conv_reg(s);
 
@@ -1925,13 +1856,24 @@ where
         let asm = asm.push(mov_imm(d, imm32(c)));
         let asm = asm.push(ror_cl(reg_size, d));
 
-        let asm = if B::BITNESS == Bitness::B64 {
+        let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
             asm.push(movsxd_32_to_64(d, d))
         } else {
             asm.push_none()
         };
 
         asm.assert_reserved_exactly_as_needed();
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_32_imm_alt(&mut self, d: RawReg, s: RawReg, c: u32) {
+        self.rotate_right_imm_alt_generic(RegSize::R32, d, s, c);
+    }
+
+    #[inline(always)]
+    pub fn rotate_right_64_imm_alt(&mut self, d: RawReg, s: RawReg, c: u32) {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.rotate_right_imm_alt_generic(RegSize::R64, d, s, c);
     }
 
     #[inline(always)]
