@@ -1770,7 +1770,7 @@ where
 
     #[inline(always)]
     pub fn zero_extend_half_word(&mut self, d: RawReg, s: RawReg) {
-        self.push(movzx_16_to_64(conv_reg(d), conv_reg(s)))
+        self.push(movzx_16_to_64(self.reg_size(), conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]

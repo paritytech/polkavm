@@ -1295,20 +1295,20 @@ pub mod inst {
             None,
             (fmt.write_fmt(core::format_args!("mov {}, {}", self.1.name_from(self.0), self.2.name_from(self.0)))),
 
-        movsx_8_to_64(Size, Reg, Reg) =>
+        movsx_8_to_64(RegSize, Reg, Reg) =>
             Inst::new(0xbe).op_alt().rex_64b().modrm_rm_direct(self.2).modrm_reg(self.1).encode(),
             None,
-            (fmt.write_fmt(core::format_args!("movsx {}, {}", self.1.name(), self.2.name32()))),
+            (fmt.write_fmt(core::format_args!("movsx {}, {}", self.1.name(), self.2.name8()))),
 
-        movsx_16_to_64(Size, Reg, Reg) =>
+        movsx_16_to_64(RegSize, Reg, Reg) =>
             Inst::new(0xbf).op_alt().rex_64b().modrm_rm_direct(self.2).modrm_reg(self.1).encode(),
             None,
-            (fmt.write_fmt(core::format_args!("movsx {}, {}", self.1.name(), self.2.name32()))),
+            (fmt.write_fmt(core::format_args!("movsx {}, {}", self.1.name(), self.2.name16()))),
 
-        movzx_16_to_64(Reg, Reg) =>
-            Inst::new(0xb7).op_alt().rex_64b().modrm_rm_direct(self.1).modrm_reg(self.0).encode(),
+        movzx_16_to_64(RegSize, Reg, Reg) =>
+            Inst::new(0xb7).op_alt().rex_64b().modrm_rm_direct(self.2).modrm_reg(self.1).encode(),
             None,
-            (fmt.write_fmt(core::format_args!("movzx {}, {}", self.0.name(), self.1.name32()))),
+            (fmt.write_fmt(core::format_args!("movzx {}, {}", self.1.name(), self.2.name16()))),
 
         movsxd_32_to_64(Reg, Reg) =>
             Inst::new(0x63).rex_64b().modrm_rm_direct(self.1).modrm_reg(self.0).encode(),
@@ -2342,6 +2342,9 @@ mod tests {
         mov_imm,
         mov_imm64,
         mov,
+        movsx_8_to_64,
+        movsx_16_to_64,
+        movzx_16_to_64,
         movsxd_32_to_64,
         mul,
         neg,
