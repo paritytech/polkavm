@@ -596,6 +596,11 @@ impl Module {
         Ok(Module(Some(module)))
     }
 
+    /// Returns whether the module is 64-bit.
+    pub fn is_64_bit(&self) -> bool {
+        self.state().blob.is_64_bit()
+    }
+
     /// Fetches a cached module for the given `blob`.
     #[cfg_attr(not(feature = "module-cache"), allow(unused_variables))]
     pub fn from_cache(engine: &Engine, config: &ModuleConfig, blob: &ProgramBlob) -> Option<Self> {
@@ -900,6 +905,11 @@ impl RawInstance {
     /// Returns the module from which this instance was created.
     pub fn module(&self) -> &Module {
         &self.module
+    }
+
+    /// Returns whether we're running a 64-bit program.
+    pub fn is_64_bit(&self) -> bool {
+        self.module.is_64_bit()
     }
 
     /// Starts or resumes the execution.
