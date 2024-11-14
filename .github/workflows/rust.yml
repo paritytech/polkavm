@@ -43,6 +43,14 @@ jobs:
     - name: Build and test
       shell: bash
       run: ./ci/jobs/build-and-test.sh
+  build-guests:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install LLD
+      run: sudo apt-get install -y lld
+    - name: Build guests
+      run: ./ci/jobs/build-guests.sh
   kani:
     runs-on: ubuntu-22.04
     steps:
