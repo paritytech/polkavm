@@ -8,6 +8,14 @@ use polkavm_disassembler::DisassemblyFormat;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum Bitness {
+    #[clap(name = "32")]
+    B32,
+    #[clap(name = "64")]
+    B64,
+}
+
 #[derive(Parser, Debug)]
 #[clap(version)]
 enum Args {
@@ -66,6 +74,12 @@ enum Args {
         /// The input files.
         inputs: Vec<PathBuf>,
     },
+
+    /// Writes a path to a JSON target file for rustc to stdout.
+    GetTargetJsonPath {
+        #[clap(short = 'b', long, value_enum, default_value_t = Bitness::B64)]
+        bitness: Bitness,
+    },
 }
 
 macro_rules! bail {
@@ -95,6 +109,14 @@ fn main() {
         } => main_disassemble(input, format, display_gas, show_raw_bytes, output),
         Args::Assemble { input, output } => main_assemble(input, output),
         Args::Stats { inputs } => main_stats(inputs),
+        Args::GetTargetJsonPath { bitness } => {
+            let result = match bitness {
+                Bitness::B32 => polkavm_linker::target_json_32_path(),
+                Bitness::B64 => polkavm_linker::target_json_64_path(),
+            };
+
+            result.map(|path| print!("{}", path.to_str().unwrap()))
+        }
     };
 
     if let Err(error) = result {

@@ -19,7 +19,7 @@ cd guest-programs
 RUSTFLAGS="-D warnings" \
 cargo clippy  \
     -Z build-std=core,alloc \
-    --target "$PWD/riscv32emac-unknown-none-polkavm.json" \
+    --target "$PWD/../crates/polkavm-linker/riscv32emac-unknown-none-polkavm.json" \
     --all
 
 cd ../..

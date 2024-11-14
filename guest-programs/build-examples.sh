@@ -3,8 +3,11 @@
 set -euo pipefail
 
 cd "${0%/*}/"
-
 source build-common.sh
+
+pushd ..
+TARGET_JSON_PATH="$(cargo run -p polkatool get-target-json-path --bitness 32)"
+popd
 
 function build_example () {
     output_path="output/$1.polkavm"
@@ -14,7 +17,7 @@ function build_example () {
     RUSTFLAGS="--remap-path-prefix=$(pwd)= --remap-path-prefix=$HOME=~" \
     cargo build  \
         -Z build-std=core,alloc \
-        --target "$PWD/riscv32emac-unknown-none-polkavm.json" \
+        --target $TARGET_JSON_PATH \
         -q --release --bin $1 -p $1
 
     pushd ..
