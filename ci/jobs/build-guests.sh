@@ -8,4 +8,5 @@ cd ../..
 echo ">> cargo build (guests)"
 cd guest-programs
 ./build-examples.sh
+./build-benchmarks.sh
 cd ..
