@@ -7287,10 +7287,9 @@ pub(crate) enum RelocationKind {
         target_code: SectionTarget,
         target_base: SectionTarget,
     },
-
-    Size {
-        section_index: SectionIndex,
-        range: AddressRange,
+    Offset {
+        origin: SectionTarget,
+        target: SectionTarget,
         size: SizeRelocationSize,
     },
 }
@@ -7299,16 +7298,7 @@ impl RelocationKind {
     fn targets(&self) -> [Option<SectionTarget>; 2] {
         match self {
             RelocationKind::Abs { target, .. } => [Some(*target), None],
-            RelocationKind::Size { section_index, range, .. } => [
-                Some(SectionTarget {
-                    section_index: *section_index,
-                    offset: range.start,
-                }),
-                Some(SectionTarget {
-                    section_index: *section_index,
-                    offset: range.end,
-                }),
-            ],
+            RelocationKind::Offset { origin, target, .. } => [Some(*origin), Some(*target)],
             RelocationKind::JumpTable { target_code, target_base } => [Some(*target_code), Some(*target_base)],
         }
     }
@@ -7448,13 +7438,26 @@ where
                 continue;
             }
             [(_, Kind::Mut(MutOp::Add, size_1, target_1)), (_, Kind::Mut(MutOp::Sub, size_2, target_2))]
-                if size_1 == size_2 && (target_1.section_index == target_2.section_index) =>
+                if size_1 == size_2
+                    && *size_1 == RelocationSize::U32
+                    && code_sections_set.contains(&target_1.section_index)
+                    && !code_sections_set.contains(&target_2.section_index) =>
             {
                 relocations.insert(
                     current_location,
-                    RelocationKind::Size {
-                        section_index: target_1.section_index,
-                        range: (target_2.offset..target_1.offset).into(),
+                    RelocationKind::JumpTable {
+                        target_code: *target_1,
+                        target_base: *target_2,
+                    },
+                );
+                continue;
+            }
+            [(_, Kind::Mut(MutOp::Add, size_1, target_1)), (_, Kind::Mut(MutOp::Sub, size_2, target_2))] if size_1 == size_2 => {
+                relocations.insert(
+                    current_location,
+                    RelocationKind::Offset {
+                        origin: *target_2,
+                        target: *target_1,
                         size: SizeRelocationSize::Generic(*size_1),
                     },
                 );
@@ -7467,55 +7470,36 @@ where
                     size: size_1,
                 }),
             ), (_, Kind::Mut(MutOp::Sub, size_2, target_2))]
-                if size_1 == size_2 && target_1.section_index == target_2.section_index && target_1.offset >= target_2.offset =>
+                if size_1 == size_2 =>
             {
                 relocations.insert(
                     current_location,
-                    RelocationKind::Size {
-                        section_index: target_1.section_index,
-                        range: (target_2.offset..target_1.offset).into(),
+                    RelocationKind::Offset {
+                        origin: *target_2,
+                        target: *target_1,
                         size: SizeRelocationSize::Generic(*size_1),
                     },
                 );
                 continue;
             }
-            [(_, Kind::Set6 { target: target_1 }), (_, Kind::Sub6 { target: target_2 })]
-                if target_1.section_index == target_2.section_index && target_1.offset >= target_2.offset =>
-            {
+            [(_, Kind::Set6 { target: target_1 }), (_, Kind::Sub6 { target: target_2 })] => {
                 relocations.insert(
                     current_location,
-                    RelocationKind::Size {
-                        section_index: target_1.section_index,
-                        range: (target_2.offset..target_1.offset).into(),
+                    RelocationKind::Offset {
+                        origin: *target_2,
+                        target: *target_1,
                         size: SizeRelocationSize::SixBits,
                     },
                 );
                 continue;
             }
-            [(_, Kind::SetUleb128 { target: target_1 }), (_, Kind::SubUleb128 { target: target_2 })]
-                if target_1.section_index == target_2.section_index && target_1.offset >= target_2.offset =>
-            {
+            [(_, Kind::SetUleb128 { target: target_1 }), (_, Kind::SubUleb128 { target: target_2 })] => {
                 relocations.insert(
                     current_location,
-                    RelocationKind::Size {
-                        section_index: target_1.section_index,
-                        range: (target_2.offset..target_1.offset).into(),
+                    RelocationKind::Offset {
+                        origin: *target_2,
+                        target: *target_1,
                         size: SizeRelocationSize::Uleb128,
-                    },
-                );
-                continue;
-            }
-            [(_, Kind::Mut(MutOp::Add, size_1, target_1)), (_, Kind::Mut(MutOp::Sub, size_2, target_2))]
-                if size_1 == size_2
-                    && *size_1 == RelocationSize::U32
-                    && code_sections_set.contains(&target_1.section_index)
-                    && !code_sections_set.contains(&target_2.section_index) =>
-            {
-                relocations.insert(
-                    current_location,
-                    RelocationKind::JumpTable {
-                        target_code: *target_1,
-                        target_base: *target_2,
                     },
                 );
                 continue;
@@ -8750,12 +8734,8 @@ where
         }
 
         match relocation {
-            RelocationKind::Size {
-                section_index: _,
-                range,
-                size,
-            } => {
-                // These relocations should only be used in debug info sections.
+            RelocationKind::Offset { origin, target, size } => {
+                // These relocations should only be used in debug info sections and RO data sections.
                 if reachability_graph.is_data_section_reachable(section.index()) && !matches!(size, SizeRelocationSize::Generic(..)) {
                     return Err(ProgramFromElfError::other(format!(
                         "relocation was not expected in section '{name}': {relocation:?}",
@@ -8763,6 +8743,25 @@ where
                     )));
                 }
 
+                let Some(&origin_section_address) = base_address_for_section.get(&origin.section_index) else {
+                    return Err(ProgramFromElfError::other(format!(
+                        "internal error: relocation in '{name}' ({relocation_target}) refers to an origin section that doesn't have a base address assigned: origin = '{origin_name}' ({origin}), target = '{target_name}' ({target}), size = {size:?}",
+                        name = section.name(),
+                        origin_name = elf.section_by_index(origin.section_index).name(),
+                        target_name = elf.section_by_index(target.section_index).name(),
+                    )));
+                };
+
+                let Some(&target_section_address) = base_address_for_section.get(&target.section_index) else {
+                    return Err(ProgramFromElfError::other(format!(
+                        "internal error: relocation in '{name}' ({relocation_target}) refers to a target section that doesn't have a base address assigned: origin = '{origin_name}' ({origin}), target = '{target_name}' ({target}), size = {size:?}",
+                        name = section.name(),
+                        origin_name = elf.section_by_index(origin.section_index).name(),
+                        target_name = elf.section_by_index(target.section_index).name(),
+                    )));
+                };
+
+                let range = target_section_address.wrapping_add(target.offset)..origin_section_address.wrapping_add(origin.offset);
                 let data = elf.section_data_mut(relocation_target.section_index);
                 let mut value = range.end.wrapping_sub(range.start);
                 match size {

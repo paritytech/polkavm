@@ -618,11 +618,13 @@ fn try_fetch_size_relocation(
     };
 
     match relocation {
-        RelocationKind::Size {
-            section_index,
-            range,
+        RelocationKind::Offset {
+            origin,
+            target,
             size: SizeRelocationSize::Generic(..),
-        } => Ok(Some((*section_index, *range))),
+        } if origin.section_index == target.section_index && target.offset >= origin.offset => {
+            Ok(Some((origin.section_index, (origin.offset..target.offset).into())))
+        }
         RelocationKind::Abs {
             target,
             size: RelocationSize::U32,
