@@ -7439,10 +7439,18 @@ where
             }
             [(_, Kind::Mut(MutOp::Add, size_1, target_1)), (_, Kind::Mut(MutOp::Sub, size_2, target_2))]
                 if size_1 == size_2
-                    && *size_1 == RelocationSize::U32
+                    && matches!(*size_1, RelocationSize::U32 | RelocationSize::U64)
                     && code_sections_set.contains(&target_1.section_index)
                     && !code_sections_set.contains(&target_2.section_index) =>
             {
+                if *size_1 == RelocationSize::U64 {
+                    // We could support this, but I'm not sure if anything ever emits this,
+                    // so let's return an error for now until somebody complains.
+                    return Err(ProgramFromElfError::other(
+                        "internal error: found 64-bit jump table relocation; please report this",
+                    ));
+                }
+
                 relocations.insert(
                     current_location,
                     RelocationKind::JumpTable {
