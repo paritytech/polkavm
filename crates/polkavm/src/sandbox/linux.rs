@@ -21,7 +21,7 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::Ordering;
 use core::time::Duration;
 use linux_raw::{abort, cstr, syscall_readonly, Fd, Mmap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use super::{get_native_page_size, OffsetTable, SandboxInit, SandboxKind, WorkerCache, WorkerCacheKind};
@@ -972,7 +972,7 @@ enum SandboxState {
 
 pub struct Sandbox {
     _lifetime_pipe: Fd,
-    vmctx_mmap: Mmap,
+    vmctx: Mutex<Arc<VmCtx>>,
     memory_mmap: Mmap,
     iouring: Option<linux_raw::IoUring>,
     iouring_futex_wait_queued: bool,
@@ -999,7 +999,7 @@ pub struct Sandbox {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
-        let vmctx = self.vmctx();
+        let vmctx = self.vmctx.lock().unwrap();
         let child_futex_wait = unsafe { *vmctx.counters.syscall_futex_wait.get() };
         let child_loop_start = unsafe { *vmctx.counters.syscall_wait_loop_start.get() };
         log::debug!(
@@ -1217,9 +1217,9 @@ impl super::Sandbox for Sandbox {
         };
         // TODO: If not using userfaultfd then don't mmap all of this immediately.
         let (memory_memfd, memory_mmap) = prepare_memory()?;
-
         let (vmctx_memfd, vmctx_mmap) = prepare_vmctx()?;
-        let vmctx = unsafe { &*vmctx_mmap.as_ptr().cast::<VmCtx>() };
+        let vmctx_pin = Mutex::new(unsafe { Arc::from_raw(vmctx_mmap.as_mut_ptr().cast::<VmCtx>()) });
+        let vmctx = vmctx_pin.lock().unwrap();
         vmctx.init.logging_enabled.store(config.enable_logger, Ordering::Relaxed);
         vmctx.init.uffd_available.store(global.uffd_available, Ordering::Relaxed);
         vmctx.init.sandbox_disabled.store(cfg!(polkavm_dev_debug_zygote), Ordering::Relaxed);
@@ -1465,7 +1465,7 @@ impl super::Sandbox for Sandbox {
         }
 
         // Wait until the child process receives the vmctx memfd.
-        wait_for_futex(vmctx, &mut child, VMCTX_FUTEX_BUSY, VMCTX_FUTEX_IDLE)?;
+        wait_for_futex(&vmctx, &mut child, VMCTX_FUTEX_BUSY, VMCTX_FUTEX_IDLE)?;
 
         // Grab the child process' maps and see what we can unmap.
         //
@@ -1510,7 +1510,7 @@ impl super::Sandbox for Sandbox {
 
             let userfaultfd = linux_raw::recvfd(socket.borrow()).map_err(|error| {
                 let mut error = format!("failed to fetch the userfaultfd from the child process: {error}");
-                if let Some(message) = get_message(vmctx) {
+                if let Some(message) = get_message(&vmctx) {
                     use core::fmt::Write;
                     write!(&mut error, " (root cause: {message})").unwrap();
                 }
@@ -1537,7 +1537,7 @@ impl super::Sandbox for Sandbox {
         socket.close()?;
 
         // Wait for the child to finish initialization.
-        wait_for_futex(vmctx, &mut child, VMCTX_FUTEX_BUSY, VMCTX_FUTEX_IDLE)?;
+        wait_for_futex(&vmctx, &mut child, VMCTX_FUTEX_BUSY, VMCTX_FUTEX_IDLE)?;
 
         let mut idle_regs = linux_raw::user_regs_struct::default();
         if global.uffd_available {
@@ -1559,7 +1559,7 @@ impl super::Sandbox for Sandbox {
             vmctx.jump_into.store(ZYGOTE_TABLES.1.ext_fetch_idle_regs, Ordering::Relaxed);
             vmctx.futex.store(VMCTX_FUTEX_BUSY, Ordering::Release);
             linux_raw::sys_futex_wake_one(&vmctx.futex)?;
-            wait_for_futex(vmctx, &mut child, VMCTX_FUTEX_BUSY, VMCTX_FUTEX_IDLE)?;
+            wait_for_futex(&vmctx, &mut child, VMCTX_FUTEX_BUSY, VMCTX_FUTEX_IDLE)?;
 
             idle_regs.rax = 1;
             idle_regs.rip = vmctx.init.idle_regs.rip.load(Ordering::Relaxed);
@@ -1572,9 +1572,10 @@ impl super::Sandbox for Sandbox {
             idle_regs.r15 = vmctx.init.idle_regs.r15.load(Ordering::Relaxed);
         }
 
+        drop(vmctx);
         Ok(Sandbox {
             _lifetime_pipe: lifetime_pipe_host,
-            vmctx_mmap,
+            vmctx: vmctx_pin,
             memory_mmap,
             iouring,
             iouring_futex_wait_queued: false,
@@ -1648,7 +1649,9 @@ impl super::Sandbox for Sandbox {
                 };
             }
 
-            self.vmctx()
+            self.vmctx
+                .lock()
+                .unwrap()
                 .shm_memory_map_count
                 .store(program.memory_map.len() as u64, Ordering::Relaxed);
             memory_map
@@ -1667,41 +1670,61 @@ impl super::Sandbox for Sandbox {
                 fd_offset: 0x10000,
             };
 
-            self.vmctx().shm_memory_map_count.store(1, Ordering::Relaxed);
+            self.vmctx.lock().unwrap().shm_memory_map_count.store(1, Ordering::Relaxed);
             memory_map
         };
 
-        self.vmctx()
+        self.vmctx
+            .lock()
+            .unwrap()
             .shm_memory_map_offset
             .store(memory_map.offset() as u64, Ordering::Relaxed);
 
         unsafe {
-            *self.vmctx().heap_info.heap_top.get() = u64::from(module.memory_map().heap_base());
-            *self.vmctx().heap_info.heap_threshold.get() = u64::from(module.memory_map().rw_data_range().end);
-            *self.vmctx().heap_base.get() = module.memory_map().heap_base();
-            *self.vmctx().heap_initial_threshold.get() = module.memory_map().rw_data_range().end;
-            *self.vmctx().heap_max_size.get() = module.memory_map().max_heap_size();
-            *self.vmctx().page_size.get() = module.memory_map().page_size();
+            *self.vmctx.lock().unwrap().heap_info.heap_top.get() = u64::from(module.memory_map().heap_base());
+            *self.vmctx.lock().unwrap().heap_info.heap_threshold.get() = u64::from(module.memory_map().rw_data_range().end);
+            *self.vmctx.lock().unwrap().heap_base.get() = module.memory_map().heap_base();
+            *self.vmctx.lock().unwrap().heap_initial_threshold.get() = module.memory_map().rw_data_range().end;
+            *self.vmctx.lock().unwrap().heap_max_size.get() = module.memory_map().max_heap_size();
+            *self.vmctx.lock().unwrap().page_size.get() = module.memory_map().page_size();
         }
 
-        self.vmctx()
+        self.vmctx
+            .lock()
+            .unwrap()
             .shm_code_offset
             .store(program.shm_code.offset() as u64, Ordering::Relaxed);
-        self.vmctx().shm_code_length.store(program.shm_code.len() as u64, Ordering::Relaxed);
-        self.vmctx()
+        self.vmctx
+            .lock()
+            .unwrap()
+            .shm_code_length
+            .store(program.shm_code.len() as u64, Ordering::Relaxed);
+        self.vmctx
+            .lock()
+            .unwrap()
             .shm_jump_table_offset
             .store(program.shm_jump_table.offset() as u64, Ordering::Relaxed);
-        self.vmctx()
+        self.vmctx
+            .lock()
+            .unwrap()
             .shm_jump_table_length
             .store(program.shm_jump_table.len() as u64, Ordering::Relaxed);
-        self.vmctx().sysreturn_address.store(program.sysreturn_address, Ordering::Relaxed);
+        self.vmctx
+            .lock()
+            .unwrap()
+            .sysreturn_address
+            .store(program.sysreturn_address, Ordering::Relaxed);
 
-        self.vmctx().program_counter.store(0, Ordering::Relaxed);
-        self.vmctx().next_program_counter.store(0, Ordering::Relaxed);
-        self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
-        self.vmctx().jump_into.store(ZYGOTE_TABLES.1.ext_load_program, Ordering::Relaxed);
-        self.vmctx().gas.store(0, Ordering::Relaxed);
-        for reg in &self.vmctx().regs {
+        self.vmctx.lock().unwrap().program_counter.store(0, Ordering::Relaxed);
+        self.vmctx.lock().unwrap().next_program_counter.store(0, Ordering::Relaxed);
+        self.vmctx.lock().unwrap().next_native_program_counter.store(0, Ordering::Relaxed);
+        self.vmctx
+            .lock()
+            .unwrap()
+            .jump_into
+            .store(ZYGOTE_TABLES.1.ext_load_program, Ordering::Relaxed);
+        self.vmctx.lock().unwrap().gas.store(0, Ordering::Relaxed);
+        for reg in &self.vmctx.lock().unwrap().regs {
             reg.store(0, Ordering::Relaxed);
         }
 
@@ -1743,7 +1766,11 @@ impl super::Sandbox for Sandbox {
             self.cancel_pagefault()?;
             Ok(())
         } else {
-            self.vmctx().jump_into.store(ZYGOTE_TABLES.1.ext_recycle, Ordering::Relaxed);
+            self.vmctx
+                .lock()
+                .unwrap()
+                .jump_into
+                .store(ZYGOTE_TABLES.1.ext_recycle, Ordering::Relaxed);
             self.wake_oneshot_and_expect_idle()
         }
     }
@@ -1762,27 +1789,33 @@ impl super::Sandbox for Sandbox {
             let Some(address) = compiled_module.lookup_native_code_address(pc) else {
                 log::debug!("Tried to call into {pc} which doesn't have any native code associated with it");
                 self.is_program_counter_valid = true;
-                self.vmctx().program_counter.store(pc.0, Ordering::Relaxed);
+                self.vmctx.lock().unwrap().program_counter.store(pc.0, Ordering::Relaxed);
                 if self.module.as_ref().unwrap().is_step_tracing() {
-                    self.vmctx().next_program_counter.store(pc.0, Ordering::Relaxed);
-                    self.vmctx()
+                    self.vmctx.lock().unwrap().next_program_counter.store(pc.0, Ordering::Relaxed);
+                    self.vmctx
+                        .lock()
+                        .unwrap()
                         .next_native_program_counter
                         .store(compiled_module.invalid_code_offset_address, Ordering::Relaxed);
                     return Ok(InterruptKind::Step);
                 } else {
-                    self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
+                    self.vmctx.lock().unwrap().next_native_program_counter.store(0, Ordering::Relaxed);
                     return Ok(InterruptKind::Trap);
                 }
             };
 
             log::trace!("Jumping into: {pc} (0x{address:x})");
-            self.vmctx().next_program_counter.store(pc.0, Ordering::Relaxed);
-            self.vmctx().next_native_program_counter.store(address, Ordering::Relaxed);
+            self.vmctx.lock().unwrap().next_program_counter.store(pc.0, Ordering::Relaxed);
+            self.vmctx
+                .lock()
+                .unwrap()
+                .next_native_program_counter
+                .store(address, Ordering::Relaxed);
         } else {
             log::trace!(
                 "Resuming into: {} (0x{:x})",
-                self.vmctx().next_program_counter.load(Ordering::Relaxed),
-                self.vmctx().next_native_program_counter.load(Ordering::Relaxed)
+                self.vmctx.lock().unwrap().next_program_counter.load(Ordering::Relaxed),
+                self.vmctx.lock().unwrap().next_native_program_counter.load(Ordering::Relaxed)
             );
         };
 
@@ -1800,8 +1833,10 @@ impl super::Sandbox for Sandbox {
             linux_raw::sys_ptrace_continue(self.child.pid, None)?;
         } else {
             let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
-            debug_assert_eq!(self.vmctx().futex.load(Ordering::Relaxed) & 1, VMCTX_FUTEX_IDLE);
-            self.vmctx()
+            debug_assert_eq!(self.vmctx.lock().unwrap().futex.load(Ordering::Relaxed) & 1, VMCTX_FUTEX_IDLE);
+            self.vmctx
+                .lock()
+                .unwrap()
                 .jump_into
                 .store(compiled_module.sandbox_program.0.sysenter_address, Ordering::Relaxed);
             self.wake_worker()?;
@@ -1811,7 +1846,7 @@ impl super::Sandbox for Sandbox {
         let result = self.wait()?;
         if self.module.as_ref().unwrap().gas_metering() == Some(GasMeteringKind::Async) && self.gas() < 0 {
             self.is_program_counter_valid = false;
-            self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
+            self.vmctx.lock().unwrap().next_native_program_counter.store(0, Ordering::Relaxed);
             return Ok(InterruptKind::NotEnoughGas);
         }
 
@@ -1835,7 +1870,7 @@ impl super::Sandbox for Sandbox {
     }
 
     fn reg(&self, reg: Reg) -> RegValue {
-        let mut value = self.vmctx().regs[reg as usize].load(Ordering::Relaxed);
+        let mut value = self.vmctx.lock().unwrap().regs[reg as usize].load(Ordering::Relaxed);
         let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
         if compiled_module.bitness == Bitness::B32 {
             value &= 0xffffffff;
@@ -1854,15 +1889,15 @@ impl super::Sandbox for Sandbox {
             value &= 0xffffffff;
         }
 
-        self.vmctx().regs[reg as usize].store(value, Ordering::Relaxed)
+        self.vmctx.lock().unwrap().regs[reg as usize].store(value, Ordering::Relaxed)
     }
 
     fn gas(&self) -> Gas {
-        self.vmctx().gas.load(Ordering::Relaxed)
+        self.vmctx.lock().unwrap().gas.load(Ordering::Relaxed)
     }
 
     fn set_gas(&mut self, gas: Gas) {
-        self.vmctx().gas.store(gas, Ordering::Relaxed)
+        self.vmctx.lock().unwrap().gas.store(gas, Ordering::Relaxed)
     }
 
     fn program_counter(&self) -> Option<ProgramCounter> {
@@ -1870,7 +1905,7 @@ impl super::Sandbox for Sandbox {
             return None;
         }
 
-        Some(ProgramCounter(self.vmctx().program_counter.load(Ordering::Relaxed)))
+        Some(ProgramCounter(self.vmctx.lock().unwrap().program_counter.load(Ordering::Relaxed)))
     }
 
     fn next_program_counter(&self) -> Option<ProgramCounter> {
@@ -1878,10 +1913,12 @@ impl super::Sandbox for Sandbox {
             return self.next_program_counter;
         }
 
-        if self.vmctx().next_native_program_counter.load(Ordering::Relaxed) == 0 {
+        if self.vmctx.lock().unwrap().next_native_program_counter.load(Ordering::Relaxed) == 0 {
             None
         } else {
-            Some(ProgramCounter(self.vmctx().next_program_counter.load(Ordering::Relaxed)))
+            Some(ProgramCounter(
+                self.vmctx.lock().unwrap().next_program_counter.load(Ordering::Relaxed),
+            ))
         }
     }
 
@@ -1896,7 +1933,7 @@ impl super::Sandbox for Sandbox {
             return compiled_module.lookup_native_code_address(pc).map(|value| value as usize);
         }
 
-        let value = self.vmctx().next_native_program_counter.load(Ordering::Relaxed);
+        let value = self.vmctx.lock().unwrap().next_native_program_counter.load(Ordering::Relaxed);
         if value == 0 {
             None
         } else {
@@ -1910,7 +1947,11 @@ impl super::Sandbox for Sandbox {
         };
 
         if !self.dynamic_paging_enabled {
-            self.vmctx().jump_into.store(ZYGOTE_TABLES.1.ext_reset_memory, Ordering::Relaxed);
+            self.vmctx
+                .lock()
+                .unwrap()
+                .jump_into
+                .store(ZYGOTE_TABLES.1.ext_reset_memory, Ordering::Relaxed);
             self.wake_oneshot_and_expect_idle()
         } else {
             self.free_pages(0x10000, 0xffff0000)
@@ -1979,7 +2020,7 @@ impl super::Sandbox for Sandbox {
             } else if address >= memory_map.stack_address_low() {
                 u64::from(address) + data.len() as u64 <= u64::from(memory_map.stack_range().end)
             } else if address >= memory_map.rw_data_address() {
-                let end = unsafe { *self.vmctx().heap_info.heap_threshold.get() };
+                let end = unsafe { *self.vmctx.lock().unwrap().heap_info.heap_threshold.get() };
                 u64::from(address) + data.len() as u64 <= end
             } else {
                 false
@@ -2028,7 +2069,7 @@ impl super::Sandbox for Sandbox {
             } else if address >= memory_map.stack_address_low() {
                 u64::from(address) + u64::from(length) <= u64::from(memory_map.stack_range().end)
             } else if address >= memory_map.rw_data_address() {
-                let end = unsafe { *self.vmctx().heap_info.heap_threshold.get() };
+                let end = unsafe { *self.vmctx.lock().unwrap().heap_info.heap_threshold.get() };
                 u64::from(address) + u64::from(length) <= end
             } else {
                 false
@@ -2041,9 +2082,11 @@ impl super::Sandbox for Sandbox {
                 });
             }
 
-            self.vmctx().arg.store(address, Ordering::Relaxed);
-            self.vmctx().arg2.store(length, Ordering::Relaxed);
-            self.vmctx()
+            self.vmctx.lock().unwrap().arg.store(address, Ordering::Relaxed);
+            self.vmctx.lock().unwrap().arg2.store(length, Ordering::Relaxed);
+            self.vmctx
+                .lock()
+                .unwrap()
                 .jump_into
                 .store(ZYGOTE_TABLES.1.ext_zero_memory_chunk, Ordering::Relaxed);
             if let Err(error) = self.wake_oneshot_and_expect_idle() {
@@ -2106,22 +2149,26 @@ impl super::Sandbox for Sandbox {
     }
 
     fn heap_size(&self) -> u32 {
-        let heap_base = unsafe { *self.vmctx().heap_base.get() };
-        let heap_top = unsafe { *self.vmctx().heap_info.heap_top.get() };
+        let heap_base = unsafe { *self.vmctx.lock().unwrap().heap_base.get() };
+        let heap_top = unsafe { *self.vmctx.lock().unwrap().heap_info.heap_top.get() };
         (heap_top - u64::from(heap_base)) as u32
     }
 
     fn sbrk(&mut self, size: u32) -> Result<Option<u32>, Error> {
         if size == 0 {
-            return Ok(Some(unsafe { *self.vmctx().heap_info.heap_top.get() as u32 }));
+            return Ok(Some(unsafe { *self.vmctx.lock().unwrap().heap_info.heap_top.get() as u32 }));
         }
 
-        self.vmctx().jump_into.store(ZYGOTE_TABLES.1.ext_sbrk, Ordering::Relaxed);
-        self.vmctx().arg.store(size, Ordering::Relaxed);
+        self.vmctx
+            .lock()
+            .unwrap()
+            .jump_into
+            .store(ZYGOTE_TABLES.1.ext_sbrk, Ordering::Relaxed);
+        self.vmctx.lock().unwrap().arg.store(size, Ordering::Relaxed);
         self.wake_worker()?;
         self.wait()?.expect_idle()?;
 
-        let result = self.vmctx().arg.load(Ordering::Relaxed);
+        let result = self.vmctx.lock().unwrap().arg.load(Ordering::Relaxed);
         if result == 0 {
             Ok(None)
         } else {
@@ -2179,14 +2226,9 @@ impl Interrupt {
 }
 
 impl Sandbox {
-    #[inline]
-    fn vmctx(&self) -> &VmCtx {
-        unsafe { &*self.vmctx_mmap.as_ptr().cast::<VmCtx>() }
-    }
-
     fn wake_worker(&self) -> Result<(), Error> {
-        self.vmctx().futex.store(VMCTX_FUTEX_BUSY, Ordering::Release);
-        linux_raw::sys_futex_wake_one(&self.vmctx().futex).map(|_| ())
+        self.vmctx.lock().unwrap().futex.store(VMCTX_FUTEX_BUSY, Ordering::Release);
+        linux_raw::sys_futex_wake_one(&self.vmctx.lock().unwrap().futex).map(|_| ())
     }
 
     fn wake_oneshot_and_expect_idle(&mut self) -> Result<(), Error> {
@@ -2202,7 +2244,7 @@ impl Sandbox {
         'outer: loop {
             self.count_wait_loop_start += 1;
 
-            let state = self.vmctx().futex.load(Ordering::Relaxed);
+            let state = self.vmctx.lock().unwrap().futex.load(Ordering::Relaxed);
             if state == VMCTX_FUTEX_IDLE {
                 core::sync::atomic::fence(Ordering::Acquire);
                 return Ok(Interrupt::Idle);
@@ -2213,13 +2255,13 @@ impl Sandbox {
 
                 let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
                 if compiled_module.bitness == Bitness::B32 {
-                    for reg_value in &self.vmctx().regs {
+                    for reg_value in &self.vmctx.lock().unwrap().regs {
                         reg_value.fetch_and(0xffffffff, Ordering::Relaxed);
                     }
                 }
 
-                let address = self.vmctx().next_native_program_counter.load(Ordering::Relaxed);
-                let gas = self.vmctx().gas.load(Ordering::Relaxed);
+                let address = self.vmctx.lock().unwrap().next_native_program_counter.load(Ordering::Relaxed);
+                let gas = self.vmctx.lock().unwrap().gas.load(Ordering::Relaxed);
                 if gas < 0 {
                     // Read the gas cost from the machine code.
                     let gas_metering_trap_offset = match compiled_module.bitness {
@@ -2231,7 +2273,9 @@ impl Sandbox {
                         return Err(Error::from_str("internal error: address underflow after a trap"));
                     };
 
-                    self.vmctx()
+                    self.vmctx
+                        .lock()
+                        .unwrap()
                         .next_native_program_counter
                         .store(compiled_module.native_code_origin + offset, Ordering::Relaxed);
 
@@ -2252,15 +2296,23 @@ impl Sandbox {
                     };
 
                     let gas_cost = u32::from_le_bytes([gas_cost[0], gas_cost[1], gas_cost[2], gas_cost[3]]);
-                    let gas = self.vmctx().gas.fetch_add(i64::from(gas_cost), Ordering::Relaxed);
+                    let gas = self.vmctx.lock().unwrap().gas.fetch_add(i64::from(gas_cost), Ordering::Relaxed);
                     log::trace!(
                         "Out of gas; program counter = {program_counter}, reverting gas: {gas} -> {new_gas} (gas cost: {gas_cost})",
                         new_gas = gas + i64::from(gas_cost)
                     );
 
                     self.is_program_counter_valid = true;
-                    self.vmctx().program_counter.store(program_counter.0, Ordering::Relaxed);
-                    self.vmctx().next_program_counter.store(program_counter.0, Ordering::Relaxed);
+                    self.vmctx
+                        .lock()
+                        .unwrap()
+                        .program_counter
+                        .store(program_counter.0, Ordering::Relaxed);
+                    self.vmctx
+                        .lock()
+                        .unwrap()
+                        .next_program_counter
+                        .store(program_counter.0, Ordering::Relaxed);
 
                     return Ok(Interrupt::NotEnoughGas);
                 } else {
@@ -2270,8 +2322,12 @@ impl Sandbox {
                     };
 
                     self.is_program_counter_valid = true;
-                    self.vmctx().program_counter.store(program_counter.0, Ordering::Relaxed);
-                    self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
+                    self.vmctx
+                        .lock()
+                        .unwrap()
+                        .program_counter
+                        .store(program_counter.0, Ordering::Relaxed);
+                    self.vmctx.lock().unwrap().next_native_program_counter.store(0, Ordering::Relaxed);
 
                     return Ok(Interrupt::Trap);
                 }
@@ -2279,7 +2335,7 @@ impl Sandbox {
 
             if state == VMCTX_FUTEX_GUEST_ECALLI {
                 core::sync::atomic::fence(Ordering::Acquire);
-                let hostcall = self.vmctx().arg.load(Ordering::Relaxed);
+                let hostcall = self.vmctx.lock().unwrap().arg.load(Ordering::Relaxed);
                 return Ok(Interrupt::Ecalli(hostcall));
             }
 
@@ -2307,9 +2363,8 @@ impl Sandbox {
 
                 if !self.iouring_futex_wait_queued {
                     self.count_futex_wait += 1;
-                    let vmctx = unsafe { &*self.vmctx_mmap.as_ptr().cast::<VmCtx>() };
                     iouring
-                        .queue_futex_wait(IO_URING_JOB_FUTEX_WAIT, &vmctx.futex, VMCTX_FUTEX_BUSY)
+                        .queue_futex_wait(IO_URING_JOB_FUTEX_WAIT, &self.vmctx.lock().unwrap().futex, VMCTX_FUTEX_BUSY)
                         .expect("internal error: io_uring queue overflow");
                     self.iouring_futex_wait_queued = true;
                 }
@@ -2404,24 +2459,27 @@ impl Sandbox {
 
                 for _ in 0..spin_target {
                     core::hint::spin_loop();
-                    if self.vmctx().futex.load(Ordering::Relaxed) != VMCTX_FUTEX_BUSY {
+                    if self.vmctx.lock().unwrap().futex.load(Ordering::Relaxed) != VMCTX_FUTEX_BUSY {
                         continue 'outer;
                     }
                 }
 
                 for _ in 0..yield_target {
                     let _ = linux_raw::sys_sched_yield();
-                    if self.vmctx().futex.load(Ordering::Relaxed) != VMCTX_FUTEX_BUSY {
+                    if self.vmctx.lock().unwrap().futex.load(Ordering::Relaxed) != VMCTX_FUTEX_BUSY {
                         continue 'outer;
                     }
                 }
 
+                let vmctx = self.vmctx.lock().unwrap();
                 self.count_futex_wait += 1;
-                match linux_raw::sys_futex_wait(&self.vmctx().futex, VMCTX_FUTEX_BUSY, Some(Duration::from_millis(100))) {
+
+                match linux_raw::sys_futex_wait(&vmctx.futex, VMCTX_FUTEX_BUSY, Some(Duration::from_millis(100))) {
                     Ok(()) => continue,
                     Err(error) if error.errno() == linux_raw::EAGAIN || error.errno() == linux_raw::EINTR => continue,
                     Err(error) if error.errno() == linux_raw::ETIMEDOUT => {
                         log::trace!("Timeout expired while waiting for child #{}...", self.child.pid);
+                        drop(vmctx);
                         self.check_child_status()?;
                     }
                     Err(error) => return Err(error),
@@ -2437,7 +2495,9 @@ impl Sandbox {
         }
 
         log::trace!("Child #{} is not running anymore: {status}", self.child.pid);
-        let message = get_message(self.vmctx());
+
+        let vmctx = self.vmctx.lock().unwrap();
+        let message = get_message(&vmctx);
         if let Some(message) = message {
             Err(Error::from(format!("{status}: {message}")))
         } else {
@@ -2457,9 +2517,21 @@ impl Sandbox {
         };
 
         self.is_program_counter_valid = true;
-        self.vmctx().program_counter.store(program_counter.0, Ordering::Relaxed);
-        self.vmctx().next_program_counter.store(program_counter.0, Ordering::Relaxed);
-        self.vmctx().next_native_program_counter.store(regs.rip, Ordering::Relaxed);
+        self.vmctx
+            .lock()
+            .unwrap()
+            .program_counter
+            .store(program_counter.0, Ordering::Relaxed);
+        self.vmctx
+            .lock()
+            .unwrap()
+            .next_program_counter
+            .store(program_counter.0, Ordering::Relaxed);
+        self.vmctx
+            .lock()
+            .unwrap()
+            .next_native_program_counter
+            .store(regs.rip, Ordering::Relaxed);
 
         for reg in Reg::ALL {
             use polkavm_common::regmap::NativeReg::*;
@@ -2487,7 +2559,7 @@ impl Sandbox {
                 value &= 0xffffffff;
             }
 
-            self.vmctx().regs[reg as usize].store(value, Ordering::Relaxed);
+            self.vmctx.lock().unwrap().regs[reg as usize].store(value, Ordering::Relaxed);
         }
 
         Ok(())
@@ -2517,7 +2589,7 @@ impl Sandbox {
                 r15 => &mut regs.r15,
             };
 
-            *value = self.vmctx().regs[reg as usize].load(Ordering::Relaxed);
+            *value = self.vmctx.lock().unwrap().regs[reg as usize].load(Ordering::Relaxed);
         }
 
         linux_raw::sys_ptrace_setregs(self.child.pid, &regs)?;
@@ -2529,13 +2601,13 @@ impl Sandbox {
         log::trace!("Cancelling pending page fault...");
 
         // This will cancel *our own* `futex_wait` which we've queued up with iouring.
-        linux_raw::sys_futex_wake_one(&self.vmctx().futex)?;
+        linux_raw::sys_futex_wake_one(&self.vmctx.lock().unwrap().futex)?;
 
         // Forcibly return the worker to the idle state.
         //
         // The worker's currently stuck in a page fault somewhere inside guest code,
         // so it can't do this by itself.
-        self.vmctx().futex.store(VMCTX_FUTEX_IDLE, Ordering::Release);
+        self.vmctx.lock().unwrap().futex.store(VMCTX_FUTEX_IDLE, Ordering::Release);
         linux_raw::sys_ptrace_setregs(self.child.pid, &self.idle_regs)?;
         linux_raw::sys_ptrace_continue(self.child.pid, None)
     }
