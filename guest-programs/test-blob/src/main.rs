@@ -300,3 +300,37 @@ unsafe extern "C" fn __atomic_fetch_add_8(address: *mut u64, new_value: u64) -> 
 extern "C" fn fetch_add_atomic_u64(a0: u64) -> u64 {
     ATOMIC_U64.fetch_add(a0, core::sync::atomic::Ordering::Relaxed)
 }
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn cmov_if_zero_with_zero_reg() {
+    unsafe {
+        let output: usize;
+        core::arch::asm!(
+            // th.mveqz
+            "li a0, 1",
+            "li a1, 2",
+            // a0 = a1 if zero == 0
+            ".insn r 11, 1, 32, a0, a1, zero",
+            out("a0") output,
+            out("a1") _,
+        );
+        assert_eq!(output, 2);
+    }
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn cmov_if_not_zero_with_zero_reg() {
+    unsafe {
+        let output: usize;
+        core::arch::asm!(
+            // th.mvnez
+            "li a0, 1",
+            "li a1, 2",
+            // a0 = a1 if zero != 0
+            ".insn r 11, 1, 33, a0, a1, zero",
+            out("a0") output,
+            out("a1") _,
+        );
+        assert_eq!(output, 1);
+    }
+}

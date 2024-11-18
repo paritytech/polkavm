@@ -2218,6 +2218,16 @@ fn test_blob_fetch_add_atomic_u64(config: Config, optimize: bool, is_64_bit: boo
     assert_eq!(i.call::<(u64,), u64>("fetch_add_atomic_u64", (0,)).unwrap(), 0x100000000);
 }
 
+fn test_blob_cmov_if_zero_with_zero_reg(config: Config, optimize: bool, is_64_bit: bool) {
+    let mut i = TestInstance::new(&config, optimize, is_64_bit);
+    i.call::<(), ()>("cmov_if_zero_with_zero_reg", ()).unwrap();
+}
+
+fn test_blob_cmov_if_not_zero_with_zero_reg(config: Config, optimize: bool, is_64_bit: bool) {
+    let mut i = TestInstance::new(&config, optimize, is_64_bit);
+    i.call::<(), ()>("cmov_if_not_zero_with_zero_reg", ()).unwrap();
+}
+
 fn basic_gas_metering(config: Config, gas_metering_kind: GasMeteringKind) {
     let _ = env_logger::try_init();
 
@@ -2736,6 +2746,8 @@ run_test_blob_tests! {
     test_blob_xor_imm_u32
     test_blob_branch_less_than_zero
     test_blob_fetch_add_atomic_u64
+    test_blob_cmov_if_zero_with_zero_reg
+    test_blob_cmov_if_not_zero_with_zero_reg
 }
 
 macro_rules! assert_impl {

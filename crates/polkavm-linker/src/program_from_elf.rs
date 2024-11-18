@@ -2010,18 +2010,29 @@ where
                 return Ok(());
             };
 
-            let Some(cond) = cast_reg_non_zero(cond)? else {
-                return Err(ProgramFromElfError::other(
-                    "found a conditional move with a zero register as the condition",
-                ));
+            match cast_reg_non_zero(cond)? {
+                Some(cond) => {
+                    emit(InstExt::Basic(BasicInst::Cmov {
+                        kind,
+                        dst,
+                        src: cast_reg_any(src)?,
+                        cond,
+                    }));
+                }
+                None => match kind {
+                    CmovKind::EqZero => {
+                        if let Some(src) = cast_reg_non_zero(src)? {
+                            emit(InstExt::Basic(BasicInst::MoveReg { dst, src }));
+                        } else {
+                            emit(InstExt::Basic(BasicInst::LoadImmediate { dst, imm: 0 }));
+                        }
+                    }
+                    CmovKind::NotEqZero => {
+                        emit(InstExt::nop());
+                    }
+                },
             };
 
-            emit(InstExt::Basic(BasicInst::Cmov {
-                kind,
-                dst,
-                src: cast_reg_any(src)?,
-                cond,
-            }));
             Ok(())
         }
         Inst::LoadReserved32 { dst, src, .. } => {
