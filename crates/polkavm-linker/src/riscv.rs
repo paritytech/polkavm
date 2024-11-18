@@ -163,17 +163,17 @@ impl StoreKind {
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 pub enum RegKind {
-    CountLeadingZeroBits,
-    CountLeadingZeroBitsWord,
-    CountSetBits,
-    CountSetBitsWord,
-    CountTrailingZeroBits,
-    CountTrailingZeroBitsWord,
+    CountLeadingZeroBits32,
+    CountLeadingZeroBits64,
+    CountSetBits32,
+    CountSetBits64,
+    CountTrailingZeroBits32,
+    CountTrailingZeroBits64,
     OrCombineByte,
     ReverseByte,
-    SignExtendByte,
-    SignExtendHalfWord,
-    ZeroExtendHalfWord,
+    SignExtend8,
+    SignExtend16,
+    ZeroExtend16,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
@@ -1002,27 +1002,27 @@ impl Inst {
                             imm: bits(0, 5, op, 20) as i32,
                         }),
                         (0b0110000, 0b00000) => Some(Inst::Reg {
-                            kind: RegKind::CountLeadingZeroBits,
+                            kind: xlen!(RegKind, CountLeadingZeroBits32, CountLeadingZeroBits64),
                             dst,
                             src: src1,
                         }),
                         (0b0110000, 0b00001) => Some(Inst::Reg {
-                            kind: RegKind::CountTrailingZeroBits,
+                            kind: xlen!(RegKind, CountTrailingZeroBits32, CountTrailingZeroBits64),
                             dst,
                             src: src1,
                         }),
                         (0b0110000, 0b00010) => Some(Inst::Reg {
-                            kind: RegKind::CountSetBits,
+                            kind: xlen!(RegKind, CountSetBits32, CountSetBits64),
                             dst,
                             src: src1,
                         }),
                         (0b0110000, 0b00100) => Some(Inst::Reg {
-                            kind: RegKind::SignExtendByte,
+                            kind: RegKind::SignExtend8,
                             dst,
                             src: src1,
                         }),
                         (0b0110000, 0b00101) => Some(Inst::Reg {
-                            kind: RegKind::SignExtendHalfWord,
+                            kind: RegKind::SignExtend16,
                             dst,
                             src: src1,
                         }),
@@ -1118,17 +1118,17 @@ impl Inst {
                             imm: bits(0, 5, op, 20) as i32,
                         }),
                         (0b0110000, 0b00000) => Some(Inst::Reg {
-                            kind: RegKind::CountLeadingZeroBitsWord,
+                            kind: RegKind::CountLeadingZeroBits32,
                             dst,
                             src,
                         }),
                         (0b0110000, 0b00001) => Some(Inst::Reg {
-                            kind: RegKind::CountTrailingZeroBitsWord,
+                            kind: RegKind::CountTrailingZeroBits32,
                             dst,
                             src,
                         }),
                         (0b0110000, 0b00010) => Some(Inst::Reg {
-                            kind: RegKind::CountSetBitsWord,
+                            kind: RegKind::CountSetBits32,
                             dst,
                             src,
                         }),
@@ -1166,7 +1166,7 @@ impl Inst {
 
                 if !config.rv64 && (op & 0xfff07000) == 0x8004000 {
                     return Some(Inst::Reg {
-                        kind: RegKind::ZeroExtendHalfWord,
+                        kind: RegKind::ZeroExtend16,
                         dst,
                         src: src1,
                     });
@@ -1216,7 +1216,7 @@ impl Inst {
 
                 if config.rv64 && (op & 0xfff07000) == 0x8004000 {
                     return Some(Inst::Reg {
-                        kind: RegKind::ZeroExtendHalfWord,
+                        kind: RegKind::ZeroExtend16,
                         dst,
                         src: src1,
                     });

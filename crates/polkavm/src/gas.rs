@@ -355,47 +355,47 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
-    fn count_leading_zero_bits(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+    fn count_leading_zero_bits_32(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn count_leading_zero_bits_word(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+    fn count_leading_zero_bits_64(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn count_trailing_zero_bits(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+    fn count_trailing_zero_bits_32(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn count_trailing_zero_bits_word(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+    fn count_trailing_zero_bits_64(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn count_set_bits(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+    fn count_set_bits_32(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn count_set_bits_word(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+    fn count_set_bits_64(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn sign_extend_byte(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+    fn sign_extend_8(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn sign_extend_half_word(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+    fn sign_extend_16(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn zero_extend_half_word(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+    fn zero_extend_16(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 

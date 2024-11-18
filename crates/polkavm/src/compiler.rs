@@ -1082,66 +1082,66 @@ where
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
-    fn count_leading_zero_bits(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_leading_zero_bits_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.count_leading_zero_bits(d, s);
-        ArchVisitor(self).count_leading_zero_bits(d, s);
+        self.gas_visitor.count_leading_zero_bits_32(d, s);
+        ArchVisitor(self).count_leading_zero_bits_32(d, s);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
-    fn count_leading_zero_bits_word(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_leading_zero_bits_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.count_leading_zero_bits_word(d, s);
-        ArchVisitor(self).count_leading_zero_bits_word(d, s);
+        self.gas_visitor.count_leading_zero_bits_64(d, s);
+        ArchVisitor(self).count_leading_zero_bits_64(d, s);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
-    fn count_trailing_zero_bits(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_trailing_zero_bits_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.count_trailing_zero_bits(d, s);
-        ArchVisitor(self).count_trailing_zero_bits(d, s);
+        self.gas_visitor.count_trailing_zero_bits_32(d, s);
+        ArchVisitor(self).count_trailing_zero_bits_32(d, s);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
-    fn count_trailing_zero_bits_word(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_trailing_zero_bits_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.count_trailing_zero_bits_word(d, s);
-        ArchVisitor(self).count_trailing_zero_bits_word(d, s);
+        self.gas_visitor.count_trailing_zero_bits_64(d, s);
+        ArchVisitor(self).count_trailing_zero_bits_64(d, s);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
-    fn count_set_bits(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_set_bits_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.count_set_bits(d, s);
-        ArchVisitor(self).count_set_bits(d, s);
+        self.gas_visitor.count_set_bits_32(d, s);
+        ArchVisitor(self).count_set_bits_32(d, s);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
-    fn count_set_bits_word(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_set_bits_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.count_set_bits_word(d, s);
-        ArchVisitor(self).count_set_bits_word(d, s);
+        self.gas_visitor.count_set_bits_64(d, s);
+        ArchVisitor(self).count_set_bits_64(d, s);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
-    fn sign_extend_byte(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn sign_extend_8(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.sign_extend_byte(d, s);
-        ArchVisitor(self).sign_extend_byte(d, s);
+        self.gas_visitor.sign_extend_8(d, s);
+        ArchVisitor(self).sign_extend_8(d, s);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
-    fn sign_extend_half_word(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn sign_extend_16(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.sign_extend_half_word(d, s);
-        ArchVisitor(self).sign_extend_half_word(d, s);
+        self.gas_visitor.sign_extend_16(d, s);
+        ArchVisitor(self).sign_extend_16(d, s);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
-    fn zero_extend_half_word(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn zero_extend_16(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.zero_extend_half_word(d, s);
-        ArchVisitor(self).zero_extend_half_word(d, s);
+        self.gas_visitor.zero_extend_16(d, s);
+        ArchVisitor(self).zero_extend_16(d, s);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 

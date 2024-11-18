@@ -1729,47 +1729,47 @@ where
     }
 
     #[inline(always)]
-    pub fn count_leading_zero_bits(&mut self, d: RawReg, s: RawReg) {
-        self.push(lzcnt(self.reg_size(), conv_reg(d), conv_reg(s)))
-    }
-
-    #[inline(always)]
-    pub fn count_leading_zero_bits_word(&mut self, d: RawReg, s: RawReg) {
+    pub fn count_leading_zero_bits_32(&mut self, d: RawReg, s: RawReg) {
         self.push(lzcnt(RegSize::R32, conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]
-    pub fn count_trailing_zero_bits(&mut self, d: RawReg, s: RawReg) {
-        self.push(tzcnt(self.reg_size(), conv_reg(d), conv_reg(s)))
+    pub fn count_leading_zero_bits_64(&mut self, d: RawReg, s: RawReg) {
+        self.push(lzcnt(self.reg_size(), conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]
-    pub fn count_trailing_zero_bits_word(&mut self, d: RawReg, s: RawReg) {
+    pub fn count_trailing_zero_bits_32(&mut self, d: RawReg, s: RawReg) {
         self.push(tzcnt(RegSize::R32, conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]
-    pub fn count_set_bits(&mut self, d: RawReg, s: RawReg) {
-        self.push(popcnt(self.reg_size(), conv_reg(d), conv_reg(s)))
+    pub fn count_trailing_zero_bits_64(&mut self, d: RawReg, s: RawReg) {
+        self.push(tzcnt(self.reg_size(), conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]
-    pub fn count_set_bits_word(&mut self, d: RawReg, s: RawReg) {
+    pub fn count_set_bits_32(&mut self, d: RawReg, s: RawReg) {
         self.push(popcnt(RegSize::R32, conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]
-    pub fn sign_extend_byte(&mut self, d: RawReg, s: RawReg) {
+    pub fn count_set_bits_64(&mut self, d: RawReg, s: RawReg) {
+        self.push(popcnt(self.reg_size(), conv_reg(d), conv_reg(s)))
+    }
+
+    #[inline(always)]
+    pub fn sign_extend_8(&mut self, d: RawReg, s: RawReg) {
         self.push(movsx_8_to_64(self.reg_size(), conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]
-    pub fn sign_extend_half_word(&mut self, d: RawReg, s: RawReg) {
+    pub fn sign_extend_16(&mut self, d: RawReg, s: RawReg) {
         self.push(movsx_16_to_64(self.reg_size(), conv_reg(d), conv_reg(s)))
     }
 
     #[inline(always)]
-    pub fn zero_extend_half_word(&mut self, d: RawReg, s: RawReg) {
+    pub fn zero_extend_16(&mut self, d: RawReg, s: RawReg) {
         self.push(movzx_16_to_64(self.reg_size(), conv_reg(d), conv_reg(s)))
     }
 

@@ -2000,17 +2000,17 @@ where
 
             use crate::riscv::RegKind as K;
             let kind = match kind {
-                K::CountLeadingZeroBits => RegKind::CountLeadingZeroBits,
-                K::CountLeadingZeroBitsWord => RegKind::CountLeadingZeroBitsWord,
-                K::CountSetBits => RegKind::CountSetBits,
-                K::CountSetBitsWord => RegKind::CountSetBitsWord,
-                K::CountTrailingZeroBits => RegKind::CountTrailingZeroBits,
-                K::CountTrailingZeroBitsWord => RegKind::CountTrailingZeroBitsWord,
+                K::CountLeadingZeroBits32 => RegKind::CountLeadingZeroBits32,
+                K::CountLeadingZeroBits64 => RegKind::CountLeadingZeroBits64,
+                K::CountSetBits32 => RegKind::CountSetBits32,
+                K::CountSetBits64 => RegKind::CountSetBits64,
+                K::CountTrailingZeroBits32 => RegKind::CountTrailingZeroBits32,
+                K::CountTrailingZeroBits64 => RegKind::CountTrailingZeroBits64,
                 K::OrCombineByte => RegKind::OrCombineByte,
                 K::ReverseByte => RegKind::ReverseByte,
-                K::SignExtendByte => RegKind::SignExtendByte,
-                K::SignExtendHalfWord => RegKind::SignExtendHalfWord,
-                K::ZeroExtendHalfWord => RegKind::ZeroExtendHalfWord,
+                K::SignExtend8 => RegKind::SignExtend8,
+                K::SignExtend16 => RegKind::SignExtend16,
+                K::ZeroExtend16 => RegKind::ZeroExtend16,
             };
 
             emit(InstExt::Basic(BasicInst::Reg { kind, dst, src }));
@@ -2079,6 +2079,7 @@ where
             }
 
             if resolve_simple_zero_register_usage(kind, dst, src1, src2, &mut emit) {
+                emit(InstExt::nop());
                 return Ok(());
             };
 
@@ -3676,17 +3677,17 @@ pub enum AnyAnyKind {
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum RegKind {
-    CountLeadingZeroBits,
-    CountLeadingZeroBitsWord,
-    CountSetBits,
-    CountSetBitsWord,
-    CountTrailingZeroBits,
-    CountTrailingZeroBitsWord,
+    CountLeadingZeroBits32,
+    CountLeadingZeroBits64,
+    CountSetBits32,
+    CountSetBits64,
+    CountTrailingZeroBits32,
+    CountTrailingZeroBits64,
     OrCombineByte,
     ReverseByte,
-    SignExtendByte,
-    SignExtendHalfWord,
-    ZeroExtendHalfWord,
+    SignExtend8,
+    SignExtend16,
+    ZeroExtend16,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -4237,29 +4238,33 @@ impl OperationKind {
             (O::AndInverted,              lhs, C(0)) => lhs,
             // (0 & ~x) = 0
             (O::AndInverted,              C(0), _) => C(0),
+
+            // (x | ~0) = -1
             (O::OrInverted,               _, C(0)) => C(-1),
 
-            (O::MaximumUnsigned, C(0), rhs) => rhs,
-            (O::MaximumUnsigned, lhs, C(0)) => lhs,
+            // unsigned_max(0, x) = x
+            (O::MaximumUnsigned,          C(0), rhs) => rhs,
+            (O::MaximumUnsigned,          lhs, C(0)) => lhs,
 
-            (O::MinimumUnsigned, C(0), _rhs) => C(0),
-            (O::MinimumUnsigned, _lhs, C(0)) => C(0),
+            // unsigned min(0, x) = 0
+            (O::MinimumUnsigned,          C(0), _) => C(0),
+            (O::MinimumUnsigned,          _, C(0)) => C(0),
 
-            (O::RotateLeft32, lhs, C(0)) => lhs,
-            (O::RotateLeft32, C(0), _) => C(0),
+            // x <<r 0 = x
+            (O::RotateLeft32,             lhs, C(0)) => lhs,
+            (O::RotateLeft32,             C(0), _) => C(0),
+            (O::RotateLeft64,             lhs, C(0)) => lhs,
+            (O::RotateLeft64,             C(0), _) => C(0),
 
-            (O::RotateLeft32AndSignExtend, C(0), _) => C(0),
+            // x >>r 0 = x
+            (O::RotateRight32,            lhs, C(0)) => lhs,
+            (O::RotateRight32,            C(0), _) => C(0),
+            (O::RotateRight64,            lhs, C(0)) => lhs,
+            (O::RotateRight64,            C(0), _) => C(0),
 
-            (O::RotateLeft64, lhs, C(0)) => lhs,
-            (O::RotateLeft64, C(0), _) => C(0),
-
-            (O::RotateRight32, lhs, C(0)) => lhs,
-            (O::RotateRight32, C(0), _) => C(0),
-
+            // (0 <<r 0) or (0 >>r 0) = 0
+            (O::RotateLeft32AndSignExtend,  C(0), _) => C(0),
             (O::RotateRight32AndSignExtend, C(0), _) => C(0),
-
-            (O::RotateRight64, lhs, C(0)) => lhs,
-            (O::RotateRight64, C(0), _) => C(0),
 
             _ => return None,
         };
@@ -7174,17 +7179,17 @@ fn emit_code(
                         args = (conv_reg(dst), conv_reg(src)),
                         kind = kind,
                         {
-                            RegKind::CountLeadingZeroBits => count_leading_zero_bits,
-                            RegKind::CountLeadingZeroBitsWord => count_leading_zero_bits_word,
-                            RegKind::CountSetBits => count_set_bits,
-                            RegKind::CountSetBitsWord => count_set_bits_word,
-                            RegKind::CountTrailingZeroBits => count_trailing_zero_bits,
-                            RegKind::CountTrailingZeroBitsWord => count_trailing_zero_bits_word,
+                            RegKind::CountLeadingZeroBits32 => count_leading_zero_bits_32,
+                            RegKind::CountLeadingZeroBits64 => count_leading_zero_bits_64,
+                            RegKind::CountSetBits32 => count_set_bits_32,
+                            RegKind::CountSetBits64 => count_set_bits_64,
+                            RegKind::CountTrailingZeroBits32 => count_trailing_zero_bits_32,
+                            RegKind::CountTrailingZeroBits64 => count_trailing_zero_bits_64,
                             RegKind::OrCombineByte => or_combine_byte,
                             RegKind::ReverseByte => reverse_byte,
-                            RegKind::SignExtendByte => sign_extend_byte,
-                            RegKind::SignExtendHalfWord => sign_extend_half_word,
-                            RegKind::ZeroExtendHalfWord => zero_extend_half_word,
+                            RegKind::SignExtend8 => sign_extend_8,
+                            RegKind::SignExtend16 => sign_extend_16,
+                            RegKind::ZeroExtend16 => zero_extend_16,
                         }
                     }
                 }

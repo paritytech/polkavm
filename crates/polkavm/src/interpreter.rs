@@ -2471,7 +2471,7 @@ define_interpreter! {
 
     fn count_leading_zero_bits_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_leading_zero_bits(d, s));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_leading_zero_bits_32(d, s));
         }
 
         visitor.set32::<DEBUG>(d, u32::leading_zeros(visitor.get32(s)));
@@ -2480,34 +2480,16 @@ define_interpreter! {
 
     fn count_leading_zero_bits_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_leading_zero_bits(d, s));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_leading_zero_bits_64(d, s));
         }
 
         visitor.set64::<DEBUG>(d, cast(u64::leading_zeros(visitor.get64(s))).to_u64());
         visitor.go_to_next_instruction()
     }
 
-    fn count_leading_zero_bits_word_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_leading_zero_bits_word(d, s));
-        }
-
-        visitor.set32::<DEBUG>(d, u32::leading_zeros(visitor.get32(s)));
-        visitor.go_to_next_instruction()
-    }
-
-    fn count_leading_zero_bits_word_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_leading_zero_bits_word(d, s));
-        }
-
-        visitor.set32::<DEBUG>(d, u32::leading_zeros(visitor.get32(s)));
-        visitor.go_to_next_instruction()
-    }
-
     fn count_trailing_zero_bits_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_trailing_zero_bits(d, s));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_trailing_zero_bits_32(d, s));
         }
 
         visitor.set32::<DEBUG>(d, u32::trailing_zeros(visitor.get32(s)));
@@ -2516,34 +2498,16 @@ define_interpreter! {
 
     fn count_trailing_zero_bits_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_trailing_zero_bits(d, s));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_trailing_zero_bits_64(d, s));
         }
 
         visitor.set64::<DEBUG>(d, cast(u64::trailing_zeros(visitor.get64(s))).to_u64());
         visitor.go_to_next_instruction()
     }
 
-    fn count_trailing_zero_bits_word_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_trailing_zero_bits_word(d, s));
-        }
-
-        visitor.set32::<DEBUG>(d, u32::trailing_zeros(visitor.get32(s)));
-        visitor.go_to_next_instruction()
-    }
-
-    fn count_trailing_zero_bits_word_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_trailing_zero_bits_word(d, s));
-        }
-
-        visitor.set32::<DEBUG>(d, u32::trailing_zeros(visitor.get32(s)));
-        visitor.go_to_next_instruction()
-    }
-
     fn count_set_bits_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_set_bits(d, s));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_set_bits_32(d, s));
         }
 
         visitor.set32::<DEBUG>(d, u32::count_ones(visitor.get32(s)));
@@ -2552,34 +2516,16 @@ define_interpreter! {
 
     fn count_set_bits_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_set_bits(d, s));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_set_bits_64(d, s));
         }
 
         visitor.set64::<DEBUG>(d, cast(u64::count_ones(visitor.get64(s))).to_u64());
         visitor.go_to_next_instruction()
     }
 
-    fn count_set_bits_word_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn sign_extend_8_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_set_bits_word(d, s));
-        }
-
-        visitor.set32::<DEBUG>(d, u32::count_ones(visitor.get32(s)));
-        visitor.go_to_next_instruction()
-    }
-
-    fn count_set_bits_word_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_set_bits_word(d, s));
-        }
-
-        visitor.set32::<DEBUG>(d, u32::count_ones(visitor.get32(s)));
-        visitor.go_to_next_instruction()
-    }
-
-    fn sign_extend_byte_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_byte(d, s));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_8(d, s));
         }
 
         let byte = cast(cast(visitor.get32(s)).truncate_to_u8()).to_signed();
@@ -2587,9 +2533,9 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn sign_extend_byte_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn sign_extend_8_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_byte(d, s));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_8(d, s));
         }
 
         let byte = cast(cast(visitor.get64(s)).truncate_to_u8()).to_signed();
@@ -2597,9 +2543,9 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn sign_extend_half_word_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn sign_extend_16_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_half_word(d, s));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_16(d, s));
         }
 
         let hword = cast(cast(visitor.get32(s)).truncate_to_u16()).to_signed();
@@ -2607,9 +2553,9 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn sign_extend_half_word_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn sign_extend_16_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_half_word(d, s));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_16(d, s));
         }
 
         let hword = cast(cast(visitor.get64(s)).truncate_to_u16()).to_signed();
@@ -2617,9 +2563,9 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn zero_extend_half_word_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn zero_extend_16_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::zero_extend_half_word(d, s));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::zero_extend_16(d, s));
         }
 
         let hword = cast(visitor.get32(s)).truncate_to_u16();
@@ -2627,9 +2573,9 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn zero_extend_half_word_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn zero_extend_16_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::zero_extend_half_word(d, s));
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::zero_extend_16(d, s));
         }
 
         let hword = cast(visitor.get64(s)).truncate_to_u16();
@@ -3907,75 +3853,54 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
         emit!(self, move_reg(d, s));
     }
 
-    fn count_leading_zero_bits(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_leading_zero_bits_32(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit!(self, count_leading_zero_bits_32(d, s));
+    }
+
+    fn count_leading_zero_bits_64(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.assert_64_bit();
+        emit!(self, count_leading_zero_bits_64(d, s));
+    }
+
+    fn count_trailing_zero_bits_32(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit!(self, count_trailing_zero_bits_32(d, s));
+    }
+
+    fn count_trailing_zero_bits_64(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.assert_64_bit();
+        emit!(self, count_trailing_zero_bits_64(d, s));
+    }
+
+    fn count_set_bits_32(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit!(self, count_set_bits_32(d, s));
+    }
+
+    fn count_set_bits_64(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.assert_64_bit();
+        emit!(self, count_set_bits_64(d, s));
+    }
+
+    fn sign_extend_8(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         if self.module.blob().is_64_bit() {
-            emit!(self, count_leading_zero_bits_64(d, s));
+            emit!(self, sign_extend_8_64(d, s));
         } else {
-            emit!(self, count_leading_zero_bits_32(d, s));
+            emit!(self, sign_extend_8_32(d, s));
         }
     }
 
-    fn count_leading_zero_bits_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn sign_extend_16(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         if self.module.blob().is_64_bit() {
-            emit!(self, count_leading_zero_bits_word_64(d, s));
+            emit!(self, sign_extend_16_64(d, s));
         } else {
-            emit!(self, count_leading_zero_bits_word_32(d, s));
+            emit!(self, sign_extend_16_32(d, s));
         }
     }
 
-    fn count_trailing_zero_bits(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn zero_extend_16(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         if self.module.blob().is_64_bit() {
-            emit!(self, count_trailing_zero_bits_64(d, s));
+            emit!(self, zero_extend_16_64(d, s));
         } else {
-            emit!(self, count_trailing_zero_bits_32(d, s));
-        }
-    }
-
-    fn count_trailing_zero_bits_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, count_trailing_zero_bits_word_64(d, s));
-        } else {
-            emit!(self, count_trailing_zero_bits_word_32(d, s));
-        }
-    }
-
-    fn count_set_bits(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, count_set_bits_64(d, s));
-        } else {
-            emit!(self, count_set_bits_32(d, s));
-        }
-    }
-
-    fn count_set_bits_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, count_set_bits_word_64(d, s));
-        } else {
-            emit!(self, count_set_bits_word_32(d, s));
-        }
-    }
-
-    fn sign_extend_byte(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, sign_extend_byte_64(d, s));
-        } else {
-            emit!(self, sign_extend_byte_32(d, s));
-        }
-    }
-
-    fn sign_extend_half_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, sign_extend_half_word_64(d, s));
-        } else {
-            emit!(self, sign_extend_half_word_32(d, s));
-        }
-    }
-
-    fn zero_extend_half_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, zero_extend_half_word_64(d, s));
-        } else {
-            emit!(self, zero_extend_half_word_32(d, s));
+            emit!(self, zero_extend_16_32(d, s));
         }
     }
 

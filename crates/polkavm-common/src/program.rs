@@ -1593,15 +1593,15 @@ define_opcodes! {
     [
         [I_64, I_32] move_reg                                 = 82,
         [I_SBRK]     sbrk                                     = 87,
-        [I_64, I_32] count_leading_zero_bits                  = 139,
-        [I_64]       count_leading_zero_bits_word             = 140,
-        [I_64, I_32] count_trailing_zero_bits                 = 141,
-        [I_64]       count_trailing_zero_bits_word            = 142,
-        [I_64, I_32] count_set_bits                           = 143,
-        [I_64]       count_set_bits_word                      = 144,
-        [I_64, I_32] sign_extend_byte                         = 149,
-        [I_64, I_32] sign_extend_half_word                    = 150,
-        [I_64, I_32] zero_extend_half_word                    = 151,
+        [I_64, I_32] count_leading_zero_bits_32               = 139,
+        [I_64]       count_leading_zero_bits_64               = 140,
+        [I_64, I_32] count_trailing_zero_bits_32              = 141,
+        [I_64]       count_trailing_zero_bits_64              = 142,
+        [I_64, I_32] count_set_bits_32                        = 143,
+        [I_64]       count_set_bits_64                        = 144,
+        [I_64, I_32] sign_extend_8                            = 149,
+        [I_64, I_32] sign_extend_16                           = 150,
+        [I_64, I_32] zero_extend_16                           = 151,
         [I_64, I_32] or_combine_byte                          = 156,
         [I_64, I_32] reverse_byte                             = 157,
     ]
@@ -2262,55 +2262,55 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "{d} = {s}")
     }
 
-    fn count_leading_zero_bits(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_leading_zero_bits_32(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = clz {s}")
+        write!(self, "{d} = clz.32 {s}")
     }
 
-    fn count_leading_zero_bits_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_leading_zero_bits_64(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = clz.w {s}")
+        write!(self, "{d} = clz.64 {s}")
     }
 
-    fn count_trailing_zero_bits(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_trailing_zero_bits_32(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = ctz {s}")
+        write!(self, "{d} = ctz.32 {s}")
     }
 
-    fn count_trailing_zero_bits_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_trailing_zero_bits_64(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = ctz.w {s}")
+        write!(self, "{d} = ctz.64 {s}")
     }
 
-    fn count_set_bits(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_set_bits_32(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = cpop {s}")
+        write!(self, "{d} = cpop.32 {s}")
     }
 
-    fn count_set_bits_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_set_bits_64(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = cpop.w {s}")
+        write!(self, "{d} = cpop.64 {s}")
     }
 
-    fn sign_extend_byte(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn sign_extend_8(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
         write!(self, "{d} = sext.b {s}")
     }
 
-    fn sign_extend_half_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn sign_extend_16(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
         write!(self, "{d} = sext.h {s}")
     }
 
-    fn zero_extend_half_word(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn zero_extend_16(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
         write!(self, "{d} = zext.h {s}")
