@@ -1564,7 +1564,7 @@ pub mod inst {
                     .rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2).encode()
             },
             None,
-            (fmt.write_fmt(core::format_args!("popcnt {}, {}", self.1.name_from(self.0), self.2.display(Size::from(self.0))))),
+            (fmt.write_fmt(core::format_args!("popcnt {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0))))),
 
         // https://www.felixcloutier.com/x86/lzcnt
         lzcnt(RegSize, Reg, RegMem) =>
@@ -1575,7 +1575,7 @@ pub mod inst {
                 .rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2).encode()
         },
         None,
-        (fmt.write_fmt(core::format_args!("lzcnt {}, {}", self.1.name_from(self.0), self.2.display(Size::from(self.0))))),
+        (fmt.write_fmt(core::format_args!("lzcnt {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0))))),
 
         // https://www.felixcloutier.com/x86/tzcnt
         tzcnt(RegSize, Reg, RegMem) =>
@@ -1586,7 +1586,7 @@ pub mod inst {
                 .rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2).encode()
         },
         None,
-        (fmt.write_fmt(core::format_args!("tzcnt {}, {}", self.1.name_from(self.0), self.2.display(Size::from(self.0))))),
+        (fmt.write_fmt(core::format_args!("tzcnt {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0))))),
 
         // https://www.felixcloutier.com/x86/bswap
         bswap(RegSize, Reg) =>
@@ -2370,7 +2370,11 @@ mod tests {
         ror_cl,
         sar_cl,
         sar_imm,
+        popcnt,
+        lzcnt,
+        tzcnt,
         setcc,
+        bswap,
         shl_cl,
         shl_imm,
         shr_cl,
