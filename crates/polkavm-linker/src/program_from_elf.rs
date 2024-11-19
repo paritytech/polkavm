@@ -1592,7 +1592,13 @@ fn check_imports_and_assign_indexes(imports: &mut Vec<Import>, used_imports: &Ha
     }
 
     for import in imports {
-        log::trace!("Import: {:?}", import.metadata);
+        log::debug!(
+            "Import: '{}', index = {:?}, input regs = {}, output regs = {}",
+            String::from_utf8_lossy(&import.metadata.symbol),
+            import.metadata.index,
+            import.metadata.input_regs,
+            import.metadata.output_regs
+        );
     }
 
     Ok(())
