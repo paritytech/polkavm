@@ -1263,7 +1263,7 @@ where
     Ok(memory_config)
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 struct ExternMetadata {
     index: Option<u32>,
     symbol: Vec<u8>,
@@ -2511,12 +2511,14 @@ fn read_instruction_bytes(text: &[u8], relative_offset: usize) -> (u64, u32) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_code_section<H>(
     elf: &Elf<H>,
     section: &Section,
     decoder_config: &DecoderConfig,
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     imports: &mut Vec<Import>,
+    metadata_to_nth_import: &mut HashMap<ExternMetadata, usize>,
     instruction_overrides: &mut HashMap<SectionTarget, InstExt<SectionTarget, SectionTarget>>,
     output: &mut Vec<(Source, InstExt<SectionTarget, SectionTarget>)>,
 ) -> Result<(), ProgramFromElfError>
@@ -2581,8 +2583,19 @@ where
             };
 
             let metadata = parse_extern_metadata(elf, relocations, *metadata_location)?;
-            let nth_import = imports.len();
-            imports.push(Import { metadata });
+
+            // The same import can be inlined in multiple places, so deduplicate those here.
+            let nth_import = match metadata_to_nth_import.entry(metadata) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let nth_import = imports.len();
+                    imports.push(Import {
+                        metadata: entry.key().clone(),
+                    });
+                    entry.insert(nth_import);
+                    nth_import
+                }
+                std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            };
 
             output.push((
                 Source {
@@ -8767,6 +8780,7 @@ where
 
     let mut instructions = Vec::new();
     let mut imports = Vec::new();
+    let mut metadata_to_nth_import = HashMap::new();
 
     for &section_index in &sections_code {
         let section = elf.section_by_index(section_index);
@@ -8777,6 +8791,7 @@ where
             &decoder_config,
             &relocations,
             &mut imports,
+            &mut metadata_to_nth_import,
             &mut instruction_overrides,
             &mut instructions,
         )?;
