@@ -8,6 +8,10 @@ use polkavm_disassembler::DisassemblyFormat;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
 enum Bitness {
     #[clap(name = "32")]

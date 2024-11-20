@@ -61,6 +61,7 @@ schnellru = { version = "0.2.3" }
 serde = { version = "1.0.203", features = ["derive"] }
 serde_json = { version = "1.0.117" }
 syn = "2.0.25"
+tikv-jemallocator = "0.6.0"
 yansi = "0.5.1"
 
 [workspace.lints.rust]
