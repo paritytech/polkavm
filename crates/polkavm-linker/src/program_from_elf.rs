@@ -8898,6 +8898,13 @@ where
         let expected_reachability_graph =
             calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations)?;
         if reachability_graph != expected_reachability_graph {
+            if std::env::var("POLKAVM_LINKER_DUMP_REACHABILITY_GRAPH")
+                .map(|value| value == "1")
+                .unwrap_or(false)
+            {
+                let _ = std::fs::write("/tmp/reachability_graph_actual.txt", format!("{reachability_graph:#?}"));
+                let _ = std::fs::write("/tmp/reachability_graph_expected.txt", format!("{expected_reachability_graph:#?}"));
+            }
             panic!("internal error: inconsistent reachability after optimization; this is a bug, please report it!");
         }
     } else {
