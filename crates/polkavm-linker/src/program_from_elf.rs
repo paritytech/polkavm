@@ -5835,10 +5835,13 @@ fn merge_consecutive_fallthrough_blocks(
     for nth_block in 0..used_blocks.len() - 1 {
         let current = used_blocks[nth_block];
         let next = used_blocks[nth_block + 1];
+
+        // Find blocks which are empty...
         if !all_blocks[current.index()].ops.is_empty() {
             continue;
         }
 
+        // ...and which immediately jump somewhere else.
         {
             let ControlInst::Jump { target } = all_blocks[current.index()].next.instruction else {
                 continue;
@@ -5853,6 +5856,9 @@ fn merge_consecutive_fallthrough_blocks(
             continue;
         }
 
+        removed.insert(current);
+
+        // Gather all other basic blocks which reference this block.
         let referenced_by_code: BTreeSet<BlockTarget> = current_reachability
             .reachable_from
             .iter()
@@ -5860,37 +5866,7 @@ fn merge_consecutive_fallthrough_blocks(
             .chain(current_reachability.address_taken_in.iter().copied())
             .collect();
 
-        let referenced_by_data: BTreeSet<SectionIndex> = if !current_reachability.referenced_by_data.is_empty() {
-            let section_targets: Vec<SectionTarget> = section_to_block
-                .iter()
-                .filter(|&(_, block_target)| *block_target == current)
-                .map(|(section_target, _)| *section_target)
-                .collect();
-            for section_target in section_targets {
-                section_to_block.insert(section_target, next);
-            }
-
-            let referenced_by_data = core::mem::take(&mut current_reachability.referenced_by_data);
-            for section_index in &referenced_by_data {
-                if let Some(list) = reachability_graph.code_references_in_data_section.get_mut(section_index) {
-                    list.retain(|&target| target != current);
-                }
-            }
-
-            remove_code_if_globally_unreachable(all_blocks, reachability_graph, None, current);
-
-            reachability_graph
-                .for_code
-                .get_mut(&next)
-                .unwrap()
-                .referenced_by_data
-                .extend(referenced_by_data.iter().copied());
-
-            referenced_by_data
-        } else {
-            Default::default()
-        };
-
+        // Replace code references to this block.
         for dep in referenced_by_code {
             let references = gather_references(&all_blocks[dep.index()]);
             for (_, op) in &mut all_blocks[dep.index()].ops {
@@ -5914,16 +5890,57 @@ fn merge_consecutive_fallthrough_blocks(
             update_references(all_blocks, reachability_graph, None, dep, references);
         }
 
-        for section_index in referenced_by_data {
-            remove_if_data_is_globally_unreachable(all_blocks, reachability_graph, None, section_index);
+        // Remove it from the graph if it's globally unreachable now.
+        remove_code_if_globally_unreachable(all_blocks, reachability_graph, None, current);
+
+        let Some(current_reachability) = reachability_graph.for_code.get_mut(&current) else {
+            continue;
+        };
+
+        if !current_reachability.referenced_by_data.is_empty() {
+            // Find all section targets which correspond to this block...
+            let section_targets: Vec<SectionTarget> = section_to_block
+                .iter()
+                .filter(|&(_, block_target)| *block_target == current)
+                .map(|(section_target, _)| *section_target)
+                .collect();
+
+            // ...then make them to point to the new block.
+            for section_target in section_targets {
+                section_to_block.insert(section_target, next);
+            }
+
+            // Grab all of the data sections which reference the current block.
+            let referenced_by_data = core::mem::take(&mut current_reachability.referenced_by_data);
+
+            // Mark the next block as referenced by all of the data sections which reference the current block.
+            reachability_graph
+                .for_code
+                .get_mut(&next)
+                .unwrap()
+                .referenced_by_data
+                .extend(referenced_by_data.iter().copied());
+
+            // Mark the data sections as NOT referencing the current block, and make them reference the next block.
+            for section_index in &referenced_by_data {
+                if let Some(list) = reachability_graph.code_references_in_data_section.get_mut(section_index) {
+                    list.retain(|&target| target != current);
+                    list.push(next);
+                    list.sort_unstable();
+                    list.dedup();
+                }
+            }
         }
 
+        remove_code_if_globally_unreachable(all_blocks, reachability_graph, None, current);
+    }
+
+    for &current in &removed {
         assert!(
             !reachability_graph.is_code_reachable(current),
             "block {current:?} still reachable: {:#?}",
             reachability_graph.for_code.get(&current)
         );
-        removed.insert(current);
     }
 
     used_blocks.retain(|current| !removed.contains(current));
