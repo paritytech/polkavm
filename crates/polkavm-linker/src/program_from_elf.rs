@@ -4386,14 +4386,18 @@ impl BlockRegs {
         self.regs[reg.to_usize()] = value;
     }
 
-    fn simplify_control_instruction<H>(&self, elf: &Elf<H>, instruction: ControlInst<BlockTarget>) -> Option<ControlInst<BlockTarget>>
+    fn simplify_control_instruction<H>(
+        &self,
+        elf: &Elf<H>,
+        instruction: ControlInst<BlockTarget>,
+    ) -> Option<(Option<BasicInst<AnyTarget>>, ControlInst<BlockTarget>)>
     where
         H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
     {
         match instruction {
             ControlInst::JumpIndirect { base, offset: 0 } => {
                 if let RegValue::CodeAddress(target) = self.get_reg(base) {
-                    return Some(ControlInst::Jump { target });
+                    return Some((None, ControlInst::Jump { target }));
                 }
             }
             ControlInst::Branch {
@@ -4404,7 +4408,7 @@ impl BlockRegs {
                 target_false,
             } => {
                 if target_true == target_false {
-                    return Some(ControlInst::Jump { target: target_true });
+                    return Some((None, ControlInst::Jump { target: target_true }));
                 }
 
                 let src1_value = self.get_reg(src1);
@@ -4412,10 +4416,10 @@ impl BlockRegs {
                 if let Some(value) = OperationKind::from(kind).apply(elf, src1_value, src2_value) {
                     match value {
                         RegValue::Constant(0) => {
-                            return Some(ControlInst::Jump { target: target_false });
+                            return Some((None, ControlInst::Jump { target: target_false }));
                         }
                         RegValue::Constant(1) => {
-                            return Some(ControlInst::Jump { target: target_true });
+                            return Some((None, ControlInst::Jump { target: target_true }));
                         }
                         _ => unreachable!("internal error: constant evaluation of branch operands returned a non-boolean value"),
                     }
@@ -4424,13 +4428,16 @@ impl BlockRegs {
                 if let RegImm::Reg(_) = src1 {
                     if let RegValue::Constant(src1_value) = src1_value {
                         if let Ok(src1_value) = src1_value.try_into() {
-                            return Some(ControlInst::Branch {
-                                kind,
-                                src1: RegImm::Imm(src1_value),
-                                src2,
-                                target_true,
-                                target_false,
-                            });
+                            return Some((
+                                None,
+                                ControlInst::Branch {
+                                    kind,
+                                    src1: RegImm::Imm(src1_value),
+                                    src2,
+                                    target_true,
+                                    target_false,
+                                },
+                            ));
                         }
                     }
                 }
@@ -4438,15 +4445,33 @@ impl BlockRegs {
                 if let RegImm::Reg(_) = src2 {
                     if let RegValue::Constant(src2_value) = src2_value {
                         if let Ok(src2_value) = src2_value.try_into() {
-                            return Some(ControlInst::Branch {
-                                kind,
-                                src1,
-                                src2: RegImm::Imm(src2_value),
-                                target_true,
-                                target_false,
-                            });
+                            return Some((
+                                None,
+                                ControlInst::Branch {
+                                    kind,
+                                    src1,
+                                    src2: RegImm::Imm(src2_value),
+                                    target_true,
+                                    target_false,
+                                },
+                            ));
                         }
                     }
+                }
+            }
+            ControlInst::CallIndirect {
+                ra,
+                base,
+                offset: 0,
+                target_return,
+            } => {
+                if let RegValue::CodeAddress(target) = self.get_reg(base) {
+                    let instruction_1 = BasicInst::LoadAddress {
+                        dst: ra,
+                        target: AnyTarget::Code(target_return),
+                    };
+                    let instruction_2 = ControlInst::Jump { target };
+                    return Some((Some(instruction_1), instruction_2));
                 }
             }
             _ => {}
@@ -4634,6 +4659,20 @@ impl BlockRegs {
             },
         );
         *unknown_counter += 1;
+    }
+
+    fn set_reg_from_control_instruction(&mut self, imports: &[Import], unknown_counter: &mut u64, instruction: ControlInst<BlockTarget>) {
+        #[allow(clippy::single_match)]
+        match instruction {
+            ControlInst::CallIndirect { ra, target_return, .. } => {
+                let implicit_instruction = BasicInst::LoadAddress {
+                    dst: ra,
+                    target: AnyTarget::Code(target_return),
+                };
+                self.set_reg_from_instruction(imports, unknown_counter, implicit_instruction);
+            }
+            _ => {}
+        }
     }
 
     fn set_reg_from_instruction(&mut self, imports: &[Import], unknown_counter: &mut u64, instruction: BasicInst<AnyTarget>) {
@@ -4933,6 +4972,33 @@ where
         regs.set_reg_from_instruction(imports, unknown_counter, instruction);
     }
 
+    if let Some((extra_instruction, new_instruction)) = regs.simplify_control_instruction(elf, all_blocks[current.index()].next.instruction)
+    {
+        log::trace!("Simplifying end of {current:?}");
+        log::trace!("     {:?}", all_blocks[current.index()].next.instruction);
+        if let Some(ref extra_instruction) = extra_instruction {
+            log::trace!("  -> {extra_instruction:?}");
+        }
+        log::trace!("  -> {new_instruction:?}");
+
+        if !modified_this_block {
+            references = gather_references(&all_blocks[current.index()]);
+            modified_this_block = true;
+            modified = true;
+        }
+
+        if let Some(extra_instruction) = extra_instruction {
+            regs.set_reg_from_instruction(imports, unknown_counter, extra_instruction);
+
+            all_blocks[current.index()]
+                .ops
+                .push((all_blocks[current.index()].next.source.clone(), extra_instruction));
+        }
+        all_blocks[current.index()].next.instruction = new_instruction;
+    }
+
+    regs.set_reg_from_control_instruction(imports, unknown_counter, all_blocks[current.index()].next.instruction);
+
     for reg in Reg::ALL {
         if let RegValue::Unknown { bits_used, .. } = regs.get_reg(reg) {
             regs.set_reg(
@@ -4950,48 +5016,6 @@ where
     if output_regs_modified {
         output_regs_for_block[current.index()] = regs.clone();
         modified = true;
-    }
-
-    if let ControlInst::CallIndirect {
-        ra,
-        base,
-        offset: 0,
-        target_return,
-    } = all_blocks[current.index()].next.instruction
-    {
-        if let RegValue::CodeAddress(target) = regs.get_reg(base) {
-            if !modified_this_block {
-                references = gather_references(&all_blocks[current.index()]);
-                modified_this_block = true;
-                modified = true;
-            }
-
-            all_blocks[current.index()].ops.push((
-                all_blocks[current.index()].next.source.clone(),
-                BasicInst::LoadAddress {
-                    dst: ra,
-                    target: AnyTarget::Code(target_return),
-                },
-            ));
-
-            all_blocks[current.index()].next.instruction = ControlInst::Jump { target };
-        }
-    }
-
-    while let Some(new_instruction) = regs.simplify_control_instruction(elf, all_blocks[current.index()].next.instruction) {
-        log::trace!(
-            "Simplifying end of {current:?}: {:?} -> {:?}",
-            all_blocks[current.index()].next.instruction,
-            new_instruction
-        );
-
-        if !modified_this_block {
-            references = gather_references(&all_blocks[current.index()]);
-            modified_this_block = true;
-            modified = true;
-        }
-
-        all_blocks[current.index()].next.instruction = new_instruction;
     }
 
     if modified_this_block {
