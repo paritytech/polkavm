@@ -9,7 +9,7 @@ use polkavm_common::writer::{ProgramBlobBuilder, Writer};
 
 use core::ops::Range;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use crate::dwarf::Location;
@@ -5146,9 +5146,6 @@ fn optimize_program<H>(
         optimize_queue.push(current);
     }
 
-    optimize_queue.vec.sort_by_key(|current| all_blocks[current.index()].ops.len());
-    optimize_queue.vec.reverse();
-
     let mut unknown_counter = 0;
     let mut input_regs_for_block = Vec::with_capacity(all_blocks.len());
     let mut output_regs_for_block = Vec::with_capacity(all_blocks.len());
@@ -5162,95 +5159,102 @@ fn optimize_program<H>(
         registers_needed_for_block.push(RegMask::all())
     }
 
-    let opt_minimum_iteration_count = reachability_graph.reachable_block_count();
-    let mut opt_iteration_count = 0;
-    let mut inline_history = HashSet::new(); // Necessary to prevent infinite loops.
-    while let Some(current) = optimize_queue.pop_non_unique() {
-        if !reachability_graph.is_code_reachable(current) {
-            continue;
-        }
+    let mut count_inline = 0;
+    let mut count_dce = 0;
+    let mut count_cp = 0;
 
+    let mut inline_history: HashSet<(BlockTarget, BlockTarget)> = HashSet::new(); // Necessary to prevent infinite loops.
+    macro_rules! run_optimizations {
+        ($current:expr, $optimize_queue:expr) => {{
+            let mut modified = false;
+            if reachability_graph.is_code_reachable($current) {
+                perform_nop_elimination(all_blocks, $current);
+
+                if perform_inlining(
+                    all_blocks,
+                    reachability_graph,
+                    exports,
+                    $optimize_queue,
+                    &mut inline_history,
+                    config.inline_threshold,
+                    $current,
+                ) {
+                    count_inline += 1;
+                    modified |= true;
+                }
+
+                if perform_dead_code_elimination(
+                    config,
+                    imports,
+                    all_blocks,
+                    &mut registers_needed_for_block,
+                    reachability_graph,
+                    $optimize_queue,
+                    $current,
+                ) {
+                    count_dce += 1;
+                    modified |= true;
+                }
+
+                if perform_constant_propagation(
+                    imports,
+                    elf,
+                    all_blocks,
+                    &mut input_regs_for_block,
+                    &mut output_regs_for_block,
+                    &mut unknown_counter,
+                    reachability_graph,
+                    $optimize_queue,
+                    $current,
+                ) {
+                    count_cp += 1;
+                    modified |= true;
+                }
+            }
+
+            modified
+        }};
+    }
+
+    for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
+        run_optimizations!(current, None);
+    }
+
+    garbage_collect_reachability(all_blocks, reachability_graph);
+
+    let timestamp = std::time::Instant::now();
+    let mut opt_iteration_count = 0;
+    while let Some(current) = optimize_queue.pop_non_unique() {
+        loop {
+            if !run_optimizations!(current, Some(&mut optimize_queue)) {
+                break;
+            }
+        }
         opt_iteration_count += 1;
-        perform_nop_elimination(all_blocks, current);
-        perform_inlining(
-            all_blocks,
-            reachability_graph,
-            exports,
-            Some(&mut optimize_queue),
-            &mut inline_history,
-            config.inline_threshold,
-            current,
-        );
-        perform_dead_code_elimination(
-            config,
-            imports,
-            all_blocks,
-            &mut registers_needed_for_block,
-            reachability_graph,
-            Some(&mut optimize_queue),
-            current,
-        );
-        perform_constant_propagation(
-            imports,
-            elf,
-            all_blocks,
-            &mut input_regs_for_block,
-            &mut output_regs_for_block,
-            &mut unknown_counter,
-            reachability_graph,
-            Some(&mut optimize_queue),
-            current,
-        );
     }
 
     log::debug!(
-        "Optimizing the program took {} iteration(s)",
-        opt_iteration_count - opt_minimum_iteration_count
+        "Optimizing the program took {opt_iteration_count} iteration(s) and {}ms",
+        timestamp.elapsed().as_millis()
     );
+    log::debug!("             Inlinining: {count_inline}");
+    log::debug!("  Dead code elimination: {count_dce}");
+    log::debug!("   Constant propagation: {count_cp}");
     garbage_collect_reachability(all_blocks, reachability_graph);
 
     inline_history.clear();
+    count_inline = 0;
+    count_dce = 0;
+    count_cp = 0;
+
+    let timestamp = std::time::Instant::now();
     let mut opt_brute_force_iterations = 0;
     let mut modified = true;
     while modified {
         opt_brute_force_iterations += 1;
         modified = false;
         for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
-            if !reachability_graph.is_code_reachable(current) {
-                continue;
-            }
-
-            perform_nop_elimination(all_blocks, current);
-
-            modified |= perform_inlining(
-                all_blocks,
-                reachability_graph,
-                exports,
-                None,
-                &mut inline_history,
-                config.inline_threshold,
-                current,
-            );
-            modified |= perform_dead_code_elimination(
-                config,
-                imports,
-                all_blocks,
-                &mut registers_needed_for_block,
-                reachability_graph,
-                None,
-                current,
-            );
-            modified |= perform_constant_propagation(
-                imports,
-                elf,
-                all_blocks,
-                &mut input_regs_for_block,
-                &mut output_regs_for_block,
-                &mut unknown_counter,
-                reachability_graph,
-                None,
-                current,
-            );
+            modified |= run_optimizations!(current, None);
         }
 
         if modified {
@@ -5261,9 +5265,13 @@ fn optimize_program<H>(
     perform_load_address_and_jump_fusion(all_blocks, reachability_graph);
 
     log::debug!(
-        "Optimizing the program took {} brute force iteration(s)",
-        opt_brute_force_iterations - 1
+        "Optimizing the program took {} brute force iteration(s) and {} ms",
+        opt_brute_force_iterations - 1,
+        timestamp.elapsed().as_millis()
     );
+    log::debug!("             Inlinining: {count_inline}");
+    log::debug!("  Dead code elimination: {count_dce}");
+    log::debug!("   Constant propagation: {count_cp}");
 }
 
 #[cfg(test)]
@@ -6477,27 +6485,29 @@ where
 }
 
 struct VecSet<T> {
-    vec: Vec<T>,
+    vec: VecDeque<T>,
     set: HashSet<T>,
 }
 
 impl<T> VecSet<T> {
     fn new() -> Self {
         Self {
-            vec: Vec::new(),
+            vec: VecDeque::new(),
             set: HashSet::new(),
         }
     }
 
     fn pop_unique(&mut self) -> Option<T> {
-        self.vec.pop()
+        self.vec.pop_front()
     }
 
     fn pop_non_unique(&mut self) -> Option<T>
     where
         T: core::hash::Hash + Eq,
     {
-        let value = self.vec.pop()?;
+        // Popping from the front instead of the back cuts down on the time
+        // the optimizer takes for the Westend runtime from ~53s down to ~2.6s
+        let value = self.vec.pop_front()?;
         self.set.remove(&value);
         Some(value)
     }
@@ -6507,7 +6517,7 @@ impl<T> VecSet<T> {
         T: core::hash::Hash + Eq + Clone,
     {
         if self.set.insert(value.clone()) {
-            self.vec.push(value);
+            self.vec.push_back(value);
         }
     }
 
@@ -6529,10 +6539,6 @@ struct ReachabilityGraph {
 }
 
 impl ReachabilityGraph {
-    fn reachable_block_count(&self) -> usize {
-        self.for_code.len()
-    }
-
     fn is_code_reachable(&self, block_target: BlockTarget) -> bool {
         if let Some(reachability) = self.for_code.get(&block_target) {
             assert!(
