@@ -577,7 +577,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "polkatool"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "clap",
  "env_logger",
@@ -626,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-derive"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "polkavm-derive-impl-macro",
 ]
@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-linker"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "diff",
  "dirs",
