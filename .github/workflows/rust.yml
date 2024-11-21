@@ -91,6 +91,12 @@ jobs:
       run: sudo apt-get install -y lld
     - name: Build and test
       run: ./ci/jobs/build-and-test-pallet-revive.sh
+  link-westend-runtime-blob:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build and test
+      run: ./ci/jobs/link-westend-runtime-blob.sh
   fuzz:
     runs-on: ubuntu-22.04
     steps:
