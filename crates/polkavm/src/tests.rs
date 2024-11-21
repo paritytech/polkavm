@@ -2228,6 +2228,11 @@ fn test_blob_cmov_if_not_zero_with_zero_reg(config: Config, optimize: bool, is_6
     i.call::<(), ()>("cmov_if_not_zero_with_zero_reg", ()).unwrap();
 }
 
+fn test_blob_min_stack_size(config: Config, optimize: bool, is_64_bit: bool) {
+    let i = TestInstance::new(&config, optimize, is_64_bit);
+    assert_eq!(i.instance.module().memory_map().stack_size(), 65536);
+}
+
 fn basic_gas_metering(config: Config, gas_metering_kind: GasMeteringKind) {
     let _ = env_logger::try_init();
 
@@ -2748,6 +2753,7 @@ run_test_blob_tests! {
     test_blob_fetch_add_atomic_u64
     test_blob_cmov_if_zero_with_zero_reg
     test_blob_cmov_if_not_zero_with_zero_reg
+    test_blob_min_stack_size
 }
 
 macro_rules! assert_impl {

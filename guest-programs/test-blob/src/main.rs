@@ -4,6 +4,10 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+polkavm_derive::min_stack_size!(1);
+polkavm_derive::min_stack_size!(65536);
+polkavm_derive::min_stack_size!(2);
+
 #[global_allocator]
 static mut GLOBAL_ALLOC: simplealloc::SimpleAlloc<{ 1024 * 1024 }> = simplealloc::SimpleAlloc::new();
 

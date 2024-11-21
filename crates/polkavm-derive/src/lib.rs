@@ -50,3 +50,17 @@ unsafe impl core::alloc::GlobalAlloc for LeakingAllocator {
     #[inline]
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
 }
+
+/// Sets the minimum stack size.
+#[cfg(any(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"), doc))]
+#[macro_export]
+macro_rules! min_stack_size {
+    ($size:expr) => {
+        ::core::arch::global_asm!(
+            ".pushsection .polkavm_min_stack_size,\"R\",@note\n",
+            ".4byte {size}",
+            ".popsection\n",
+            size = const $size,
+        );
+    }
+}
