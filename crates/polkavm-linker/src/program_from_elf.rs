@@ -5254,7 +5254,15 @@ fn optimize_program<H>(
         opt_brute_force_iterations += 1;
         modified = false;
         for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
-            modified |= run_optimizations!(current, None);
+            modified |= run_optimizations!(current, Some(&mut optimize_queue));
+        }
+
+        while let Some(current) = optimize_queue.pop_non_unique() {
+            loop {
+                if !run_optimizations!(current, Some(&mut optimize_queue)) {
+                    break;
+                }
+            }
         }
 
         if modified {
