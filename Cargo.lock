@@ -591,7 +591,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "env_logger",
  "image",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-assembler"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "iced-x86",
  "log",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-common"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "blake3",
  "log",
@@ -626,14 +626,14 @@ dependencies = [
 
 [[package]]
 name = "polkavm-derive"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "polkavm-derive-impl-macro",
 ]
 
 [[package]]
 name = "polkavm-derive-impl"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "polkavm-common",
  "proc-macro2",
@@ -643,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-derive-impl-macro"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "polkavm-derive-impl",
  "syn 2.0.63",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-disassembler"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "clap",
  "iced-x86",
@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-linker"
-version = "0.17.1"
+version = "0.18.0"
 dependencies = [
  "diff",
  "dirs",
@@ -683,7 +683,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-linux-raw"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "polkavm-linux-raw-generate"
@@ -979,7 +979,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "simplealloc"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "slice-group-by"
