@@ -1474,6 +1474,10 @@ fn doom_o3_dwarf2(config: Config) {
     doom(config, include_bytes!("../../../test-data/doom_O3_dwarf2.elf.zst"));
 }
 
+fn doom_64(config: Config) {
+    doom(config, include_bytes!("../../../test-data/doom_64.elf.zst"));
+}
+
 fn pinky_dynamic_paging_32(mut config: Config) {
     config.set_allow_dynamic_paging(true);
     pinky_impl(config, false);
@@ -2718,6 +2722,7 @@ run_tests! {
     doom_o3_dwarf5
     doom_o1_dwarf5
     doom_o3_dwarf2
+    doom_64
     pinky_standard_32
     pinky_standard_64
     pinky_dynamic_paging_32
