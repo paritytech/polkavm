@@ -74,8 +74,8 @@ macro_rules! define_benchmark {
 #[no_mangle]
 extern "C" fn sol_memcpy_(dst: *mut u8, src: *const u8, n: usize) {
     unsafe {
-        for _ in 0..n {
-            *dst.add(n) = *src.add(n);
+        for offset in 0..n {
+            *dst.add(offset) = *src.add(offset);
         }
     }
 }
@@ -84,8 +84,8 @@ extern "C" fn sol_memcpy_(dst: *mut u8, src: *const u8, n: usize) {
 #[no_mangle]
 extern "C" fn sol_memset_(dst: *mut u8, value: u8, n: usize) {
     unsafe {
-        for _ in 0..n {
-            *dst.add(n) = value;
+        for offset in 0..n {
+            *dst.add(offset) = value;
         }
     }
 }
