@@ -338,3 +338,19 @@ extern "C" fn cmov_if_not_zero_with_zero_reg() {
         assert_eq!(output, 1);
     }
 }
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn negate_and_add(mut a0: isize, a1: isize) -> isize {
+    unsafe {
+        core::arch::asm!(
+            "li a2, 16",
+            "sub a0, a2, a1",
+            "li a2, 0",
+            inout("a0") a0 => a0,
+            in("a1") a1,
+            out("a2") _,
+        );
+    }
+
+    a0
+}

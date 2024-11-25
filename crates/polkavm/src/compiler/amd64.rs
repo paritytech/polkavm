@@ -1342,7 +1342,7 @@ where
             } else {
                 let asm = match reg_size {
                     RegSize::R32 => asm.push(mov_imm(d, imm32(s2))),
-                    RegSize::R64 => asm.push(add((d, imm64(cast(s2).to_signed())))),
+                    RegSize::R64 => asm.push(mov_imm(d, imm64(cast(s2).to_signed()))),
                 };
                 asm.push(sub((reg_size, d, s1)))
             }

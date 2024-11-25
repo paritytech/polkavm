@@ -2233,6 +2233,15 @@ fn test_blob_min_stack_size(config: Config, optimize: bool, is_64_bit: bool) {
     assert_eq!(i.instance.module().memory_map().stack_size(), 65536);
 }
 
+fn test_blob_negate_and_add(config: Config, optimize: bool, is_64_bit: bool) {
+    let mut i = TestInstance::new(&config, optimize, is_64_bit);
+    if !is_64_bit {
+        assert_eq!(i.call::<(u32, u32), u32>("negate_and_add", (123, 1,)).unwrap(), 15);
+    } else {
+        assert_eq!(i.call::<(u64, u64), u64>("negate_and_add", (123, 1,)).unwrap(), 15);
+    }
+}
+
 fn basic_gas_metering(config: Config, gas_metering_kind: GasMeteringKind) {
     let _ = env_logger::try_init();
 
@@ -2754,6 +2763,7 @@ run_test_blob_tests! {
     test_blob_cmov_if_zero_with_zero_reg
     test_blob_cmov_if_not_zero_with_zero_reg
     test_blob_min_stack_size
+    test_blob_negate_and_add
 }
 
 macro_rules! assert_impl {
