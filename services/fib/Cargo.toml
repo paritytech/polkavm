@@ -1,0 +1,16 @@
+cargo-features = ["edition2024"]
+
+[package]
+name = "fib"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "fib"
+path = "src/main.rs"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+polkavm-derive = { git = "https://github.com/koute/polkavm", package = "polkavm-derive", branch = "master" }
+simplealloc = { git = "https://github.com/koute/polkavm", package = "simplealloc", branch = "master" }
