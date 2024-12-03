@@ -1,0 +1,5 @@
+[build]
+target = ["../crates/polkavm-linker/riscv32emac-unknown-none-polkavm.json", "../crates/polkavm-linker/riscv64emac-unknown-none-polkavm.json"]
+
+[unstable]
+build-std = ["core", "alloc"]
