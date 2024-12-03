@@ -49,7 +49,7 @@ extern "C" {
 
     #[polkavm_import(index = 9)]
     pub fn new(o: u32, l: u32, gl: u32, gh: u32, ml: u32, mh: u32) -> u32;
-
+    
 
 
     #[polkavm_import(index = 10)]
@@ -58,8 +58,13 @@ extern "C" {
     pub fn transfer(d: u32, a: u64, g: u64, out: *mut u8) -> u32;
     #[polkavm_import(index = 12)]
     pub fn quit(d: u32, a: u64, g: u64, out: *mut u8) -> u32;
+
+    // #[polkavm_import(index = 13)]
+    // pub fn solicit(hash_ptr: *const u8, z: u32) -> u32;
+
     #[polkavm_import(index = 13)]
-    pub fn solicit(hash_ptr: *const u8, z: u32) -> u32;
+    pub fn solicit(o: u32, z: u32) -> u32;
+
     #[polkavm_import(index = 14)]
     pub fn forget(hash_ptr: *const u8, z: u32) -> u32;
     #[polkavm_import(index = 15)]
@@ -98,7 +103,7 @@ extern "C" fn refine() -> u32 {
     unsafe {
         core::arch::asm!(
             "li a3, 0xFEFF0004",
-            "li a4, 0x20",
+            "li a4, 0x24", 
         );
     }
     0
@@ -107,7 +112,8 @@ extern "C" fn refine() -> u32 {
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate() -> u32 {
     let mut omega_7: u32 = 0xFEFF0000;
-    let omega_8: u32 = 206;
+    // let omega_8: u32 = 206;
+    let omega_8: u32 = unsafe { *(0xFEFF0020 as *const u32) };
     let omega_9: u32 = 0x2000;
     let omega_10: u32 = 0x1000;
     let omega_11: u32 = 0x3000;
@@ -115,6 +121,8 @@ extern "C" fn accumulate() -> u32 {
 
     let result = unsafe { new(omega_7, omega_8, omega_9, omega_10, omega_11, omega_12) };
 
+    // let solicit_result = unsafe { solicit(omega_7, omega_8) };
+    
     unsafe {
         let ptr1 = 0xFEFF0000 as *mut u32;
         *ptr1 = 0;
@@ -122,13 +130,14 @@ extern "C" fn accumulate() -> u32 {
         let ptr2 = 0xFEFF0004 as *mut u32;
         *ptr2 = result;
     }
-
+    
     let mut omega_7: u32 = 0xFEFF0000;
     let omega_8: u32 = 4;
     let omega_9: u32 = 0xFEFF0004;
     let omega_10: u32 = 4;
 
     let result = unsafe { write(omega_7, omega_8, omega_9, omega_10) };
+
     omega_7 = result;
     result
 }
