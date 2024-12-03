@@ -23,7 +23,7 @@ enum Bitness {
 #[derive(Parser, Debug)]
 #[clap(version)]
 enum Args {
-    /// Links a given ELF file into a `.polkavm` program blob.
+    /// Links a given ELF file into a .polkavm program blob.
     Link {
         /// The output file.
         #[clap(short = 'o', long)]
@@ -88,6 +88,24 @@ enum Args {
         #[clap(short = 'b', long, value_enum, default_value_t = Bitness::B64)]
         bitness: Bitness,
     },
+
+    /// Builds JAM-ready polkavm file
+    JAMService {
+        /// The input file (compiled Rust)
+        input: PathBuf,
+
+        /// The output file (JAM-Ready)
+        #[clap(short = 'o', long)]
+        output: Option<PathBuf>,
+
+        /// The raw code blob (can be disassembled with cargo run -p polkatool disassemble --show-raw-bytes {..})
+        #[clap(short = 'd', long)]
+        dump: Option<PathBuf>,
+            
+        /// Specify the output architecture (32-bit or 64-bit)
+        #[clap(short = 'b', long, value_enum, default_value_t = Bitness::B64)]
+        bitness: Bitness,
+    },
 }
 
 macro_rules! bail {
@@ -124,8 +142,11 @@ fn main() {
                 Bitness::B64 => polkavm_linker::target_json_64_path(),
             };
 
-            result.map(|path| print!("{}", path.to_str().unwrap()))
+            result.map(|path| print!("{}", path.to_str().unwrap()))  
         }
+
+        // For JAM service
+        Args::JAMService { input, output, dump, bitness} => main_jam_service(input, output, dump, bitness),
     };
 
     if let Err(error) = result {
@@ -284,4 +305,106 @@ fn main_assemble(input_path: PathBuf, output_path: PathBuf) -> Result<(), String
     }
 
     Ok(())
+}
+
+fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path: Option<PathBuf>, bitness: Bitness) -> Result<(), String> {
+    if !input_path.exists() {
+        return Err(format!("File does not exist: {:?}", input_path));
+    }
+
+    use std::fs;
+
+    let mut config = polkavm_linker::Config::default();
+    config.set_strip(true);
+    config.set_dispatch_table(vec![
+        b"is_authorized".into(),
+        b"refine".into(),
+        b"accumulate".into(),
+        b"on_transfer".into(),
+    ]);
+
+    let elf = fs::read(&input_path).map_err(|err| format!("Failed to read ELF file: {}", err))?;
+
+    let raw_blob =
+        polkavm_linker::program_from_elf(config, elf.as_ref()).map_err(|err| format!("Failed to create program from ELF: {}", err))?;
+    let parts = polkavm_linker::ProgramParts::from_bytes(raw_blob.clone().into())
+        .map_err(|err| format!("Failed to parse program parts: {}", err))?;
+    
+    let blob = polkavm_linker::ProgramBlob::from_parts(parts.clone())
+        .map_err(|err| format!("Failed to create ProgramBlob: {}", err))?;
+
+    let is_64_bit = blob.is_64_bit();
+    println!(
+        "Generated blob is {}-bit.",
+        if is_64_bit { "64" } else { "32" }
+    );
+
+    let o_size = e_l(blob.ro_data().len().try_into().unwrap(), 3);
+    let w_size = e_l(blob.rw_data().len().try_into().unwrap(), 3);
+    let z = e_l(blob.jump_table_entry_size() as u32, 2);
+    let s = e_l(blob.stack_size(), 3);
+    let o_byte = blob.ro_data();
+    let w_byte = blob.rw_data();
+    let c_size = e_l(parts.code_and_jump_table.len() as u32, 4);
+    let c = parts.code_and_jump_table.clone();
+
+    println!("o_size: {:?}", o_size);
+    println!("w_size: {:?}", w_size);
+    println!("z: {:?}", z);
+    println!("s: {:?}", s);
+    println!("c_size: {:?}", c_size);
+
+    let mut new_blob: Vec<u8> = Vec::new();
+    new_blob.extend_from_slice(&o_size);
+    new_blob.extend_from_slice(&w_size);
+    new_blob.extend_from_slice(&z);
+    new_blob.extend_from_slice(&s);
+    new_blob.extend_from_slice(&o_byte);
+    new_blob.extend_from_slice(&w_byte);
+    new_blob.extend_from_slice(&c_size);
+    new_blob.extend_from_slice(&c);
+
+    let suffix = match bitness {
+        Bitness::B32 => "32",
+        Bitness::B64 => "64",
+    };
+
+    let adjust_filename = |path: PathBuf| -> PathBuf {
+        let mut new_path = path.clone();
+        if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+            let parts: Vec<&str> = file_name.rsplitn(2, '.').collect();
+            let new_file_name = if parts.len() == 2 {
+                format!("{}_{}.{}", parts[1], suffix, parts[0])
+            } else {
+                format!("{}_{}", file_name, suffix)
+            };
+            new_path.set_file_name(new_file_name);
+        }
+        new_path
+    };
+
+    let output_path = output_path.map(adjust_filename);
+    let dump_path = dump_path.map(adjust_filename);
+
+    if let Some(output_path) = output_path {
+        println!("Writing JAM-ready code blob {:?}", output_path);
+        fs::write(&output_path, &new_blob).map_err(|err| format!("Failed to write output: {}", err))?;
+    }
+
+    if let Some(dump_path) = dump_path {
+        println!("Writing raw code {:?}", dump_path);
+        fs::write(dump_path, &raw_blob).map_err(|err| format!("Failed to write dump: {}", err))?;
+    }
+
+    Ok(())
+}
+
+fn e_l(x: u32, l: u32) -> Vec<u8> {
+    if l == 0 {
+        Vec::new()
+    } else {
+        let mut encoded = vec![(x % 256) as u8];
+        encoded.extend(e_l(x / 256, l - 1));
+        encoded
+    }
 }
