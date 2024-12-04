@@ -682,6 +682,7 @@ unsafe fn initialize(mut stack: *mut usize) {
             (if a == linux_raw::SYS_rt_sigreturn => jump @1),
             (if a == linux_raw::SYS_sched_yield => jump @1),
             (if a == linux_raw::SYS_exit => jump @1),
+            (if a == linux_raw::SYS_mprotect => jump @7),
             (seccomp_return_eperm),
 
             // SYS_write
@@ -703,6 +704,13 @@ unsafe fn initialize(mut stack: *mut usize) {
             // SYS_mmap + PROT_EXEC
             ([6]: a = syscall_arg[2]),
             (if a != linux_raw::PROT_EXEC => jump @0),
+            (seccomp_allow),
+
+            // SYS_mprotect
+            ([7]: a = syscall_arg[2]),
+            (if a != linux_raw::PROT_READ => jump @8),
+            (seccomp_allow),
+            ([8]: if a != 0 => jump @0),
             (seccomp_allow),
 
             ([0]: seccomp_return_eperm),
@@ -913,6 +921,7 @@ pub static EXT_TABLE: ExtTableRaw = ExtTableRaw {
     ext_load_program,
     ext_recycle,
     ext_fetch_idle_regs,
+    ext_set_accessible_aux_size,
 };
 
 #[inline(always)]
@@ -1100,6 +1109,42 @@ pub unsafe extern "C" fn ext_fetch_idle_regs() -> ! {
         r14,
         r15
     }
+
+    signal_host_and_longjmp(VMCTX_FUTEX_IDLE);
+}
+
+#[inline(never)]
+pub unsafe extern "C" fn ext_set_accessible_aux_size() -> ! {
+    trace!("Entry point: ext_set_accessible_aux_size");
+    let address = VMCTX.arg.load(Ordering::Relaxed) as usize;
+    let length_accessible = VMCTX.arg2.load(Ordering::Relaxed) as usize;
+    let length_full = VMCTX.arg3.load(Ordering::Relaxed) as usize;
+
+    trace!(
+        "Setting inaccessible: ",
+        Hex(address),
+        "-",
+        Hex(address + length_full),
+        " (",
+        Hex(length_full),
+        ")"
+    );
+
+    linux_raw::sys_mprotect(address as *mut core::ffi::c_void, length_full, 0)
+        .unwrap_or_else(|error| abort_with_error("failed to set accessible aux size: failed to set the region inaccessible", error));
+
+    trace!(
+        "Setting accessible: ",
+        Hex(address),
+        "-",
+        Hex(address + length_accessible),
+        " (",
+        Hex(length_accessible),
+        ")"
+    );
+
+    linux_raw::sys_mprotect(address as *mut core::ffi::c_void, length_accessible, linux_raw::PROT_READ)
+        .unwrap_or_else(|error| abort_with_error("failed to set accessible aux size: failed to set the region read-only", error));
 
     signal_host_and_longjmp(VMCTX_FUTEX_IDLE);
 }

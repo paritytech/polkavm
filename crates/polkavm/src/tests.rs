@@ -1823,6 +1823,56 @@ fn aux_data_works(config: Config) {
     assert_eq!(instance.read_u32(module.memory_map().aux_data_address()).unwrap(), 0);
 }
 
+fn aux_data_accessible_area(config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_indirect_i32(Reg::A1, Reg::A0, 0), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().into()).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_aux_data_size(2_u32.pow(24));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let offsets: Vec<_> = module
+        .blob()
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.offset)
+        .collect();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_accessible_aux_size(1).unwrap();
+    instance.write_u32(module.memory_map().aux_data_address(), 0x12345678).unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+
+    instance.set_reg(Reg::A0, u64::from(module.memory_map().aux_data_address()));
+    instance.set_next_program_counter(offsets[0]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A1), 0x12345678);
+
+    instance.set_reg(Reg::A0, u64::from(module.memory_map().aux_data_address() + page_size - 4));
+    instance.set_next_program_counter(offsets[0]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+
+    assert!(instance.read_u32(module.memory_map().aux_data_address() + page_size - 4).is_ok());
+
+    instance.set_reg(Reg::A0, u64::from(module.memory_map().aux_data_address() + page_size - 3));
+    instance.set_next_program_counter(offsets[0]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+    assert!(instance.read_u32(module.memory_map().aux_data_address() + page_size - 3).is_err());
+
+    instance.set_accessible_aux_size(page_size + 1).unwrap();
+
+    instance.set_reg(Reg::A0, u64::from(module.memory_map().aux_data_address() + page_size - 3));
+    instance.set_next_program_counter(offsets[0]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+
+    assert!(instance.read_u32(module.memory_map().aux_data_address() + page_size - 3).is_ok());
+}
+
 fn access_memory_from_host(config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
@@ -2733,6 +2783,7 @@ run_tests! {
     invalid_instruction_after_fallthrough
     invalid_branch_target
     aux_data_works
+    aux_data_accessible_area
     access_memory_from_host
     sbrk_knob_works
 

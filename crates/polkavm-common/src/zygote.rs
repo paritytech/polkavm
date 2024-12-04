@@ -71,6 +71,7 @@ define_address_table! {
     ext_load_program: unsafe extern "C" fn() -> !,
     ext_recycle: unsafe extern "C" fn() -> !,
     ext_fetch_idle_regs: unsafe extern "C" fn() -> !,
+    ext_set_accessible_aux_size: unsafe extern "C" fn() -> !,
 }
 
 pub const FD_DUMMY_STDIN: i32 = 0;
@@ -262,6 +263,7 @@ pub struct VmCtx {
     pub heap_info: VmCtxHeapInfo,
 
     pub arg2: AtomicU32,
+    pub arg3: AtomicU32,
 
     /// Offset in shared memory to this sandbox's memory map.
     pub shm_memory_map_offset: AtomicU64,
@@ -343,6 +345,7 @@ impl VmCtx {
             next_program_counter: AtomicU32::new(0),
             arg: AtomicU32::new(0),
             arg2: AtomicU32::new(0),
+            arg3: AtomicU32::new(0),
             regs: [ATOMIC_U64_ZERO; REG_COUNT],
             jump_into: AtomicU64::new(0),
             next_native_program_counter: AtomicU64::new(0),

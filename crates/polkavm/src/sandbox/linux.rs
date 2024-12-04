@@ -995,6 +995,8 @@ pub struct Sandbox {
     page_set: PageSet,
     dynamic_paging_enabled: bool,
     idle_regs: linux_raw::user_regs_struct,
+    aux_data_address: u32,
+    aux_data_length: u32,
 }
 
 impl Drop for Sandbox {
@@ -1598,6 +1600,8 @@ impl super::Sandbox for Sandbox {
             page_set: PageSet::new(),
             dynamic_paging_enabled: false,
             idle_regs,
+            aux_data_address: 0,
+            aux_data_length: 0,
         })
     }
 
@@ -1705,6 +1709,8 @@ impl super::Sandbox for Sandbox {
             reg.store(0, Ordering::Relaxed);
         }
 
+        self.aux_data_address = module.memory_map().aux_data_address();
+        self.aux_data_length = module.memory_map().aux_data_size();
         self.dynamic_paging_enabled = module.is_dynamic_paging();
         self.is_program_counter_valid = false;
         self.gas_metering = module.gas_metering();
@@ -1902,6 +1908,20 @@ impl super::Sandbox for Sandbox {
         } else {
             Some(value as usize)
         }
+    }
+
+    fn set_accessible_aux_size(&mut self, size: u32) -> Result<(), Error> {
+        assert!(!self.dynamic_paging_enabled);
+
+        let module = self.module.as_ref().unwrap();
+        self.aux_data_length = size;
+        self.vmctx().arg.store(self.aux_data_address, Ordering::Relaxed);
+        self.vmctx().arg2.store(size, Ordering::Relaxed);
+        self.vmctx().arg3.store(module.memory_map().aux_data_size(), Ordering::Relaxed);
+        self.vmctx()
+            .jump_into
+            .store(ZYGOTE_TABLES.1.ext_set_accessible_aux_size, Ordering::Relaxed);
+        self.wake_oneshot_and_expect_idle()
     }
 
     fn reset_memory(&mut self) -> Result<(), Error> {

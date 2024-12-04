@@ -336,6 +336,10 @@ impl Module {
         value & !self.state().page_size_mask
     }
 
+    pub(crate) fn round_to_page_size_up(&self, value: u32) -> u32 {
+        self.round_to_page_size_down(value) + (u32::from((value & self.state().page_size_mask) != 0) << self.state().page_shift)
+    }
+
     pub(crate) fn address_to_page(&self, address: u32) -> u32 {
         address >> self.state().page_shift
     }
@@ -1032,6 +1036,31 @@ impl RawInstance {
         for reg in Reg::ALL {
             self.set_reg(reg, 0);
         }
+    }
+
+    /// Sets the accessible region of the aux data, rounded up to the nearest page size.
+    pub fn set_accessible_aux_size(&mut self, size: u32) -> Result<(), Error> {
+        if self.module.is_dynamic_paging() {
+            return Err("setting accessible aux size is only possible on modules without dynamic paging".into());
+        }
+
+        if size > self.module.memory_map().aux_data_size() {
+            return Err(format!(
+                "cannot set accessible aux size: the maximum is {}, while tried to set {}",
+                self.module.memory_map().aux_data_size(),
+                size
+            )
+            .into());
+        }
+
+        let size = self.module.round_to_page_size_up(size);
+        if let Some(ref mut crosscheck) = self.crosscheck_instance {
+            crosscheck.set_accessible_aux_size(size);
+        }
+
+        access_backend!(self.backend, |mut backend| backend
+            .set_accessible_aux_size(size)
+            .into_result("failed to set accessible aux size"))
     }
 
     /// Resets the VM's memory to its initial state.

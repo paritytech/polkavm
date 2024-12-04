@@ -83,6 +83,7 @@ pub(crate) struct BasicMemory {
     aux: Vec<u8>,
     is_memory_dirty: bool,
     heap_size: u32,
+    accessible_aux_size: usize,
 }
 
 impl BasicMemory {
@@ -93,6 +94,7 @@ impl BasicMemory {
             aux: Vec::new(),
             is_memory_dirty: false,
             heap_size: 0,
+            accessible_aux_size: usize::MAX,
         }
     }
 
@@ -116,6 +118,7 @@ impl BasicMemory {
         self.aux.clear();
         self.heap_size = 0;
         self.is_memory_dirty = false;
+        self.accessible_aux_size = 0;
 
         if let Some(interpreted_module) = module.interpreted_module().as_ref() {
             self.rw_data.extend_from_slice(&interpreted_module.rw_data);
@@ -124,21 +127,26 @@ impl BasicMemory {
 
             // TODO: Do this lazily?
             self.aux.resize(cast(module.memory_map().aux_data_size()).to_usize(), 0);
+            self.accessible_aux_size = cast(module.memory_map().aux_data_size()).to_usize();
         }
+    }
+
+    fn set_accessible_aux_size(&mut self, size: u32) {
+        self.accessible_aux_size = cast(size).to_usize();
     }
 
     #[inline]
     fn get_memory_slice<'a>(&'a self, module: &'a Module, address: u32, length: u32) -> Option<&'a [u8]> {
         let memory_map = module.memory_map();
         let (start, memory_slice) = if address >= memory_map.aux_data_address() {
-            (memory_map.aux_data_address(), &self.aux)
+            (memory_map.aux_data_address(), &self.aux[..self.accessible_aux_size])
         } else if address >= memory_map.stack_address_low() {
-            (memory_map.stack_address_low(), &self.stack)
+            (memory_map.stack_address_low(), &self.stack[..])
         } else if address >= memory_map.rw_data_address() {
-            (memory_map.rw_data_address(), &self.rw_data)
+            (memory_map.rw_data_address(), &self.rw_data[..])
         } else if address >= memory_map.ro_data_address() {
             let module = module.interpreted_module().unwrap();
-            (memory_map.ro_data_address(), &module.ro_data)
+            (memory_map.ro_data_address(), &module.ro_data[..])
         } else {
             return None;
         };
@@ -153,11 +161,11 @@ impl BasicMemory {
     fn get_memory_slice_mut<const IS_EXTERNAL: bool>(&mut self, module: &Module, address: u32, length: u32) -> Option<&mut [u8]> {
         let memory_map = module.memory_map();
         let (start, memory_slice) = if IS_EXTERNAL && address >= memory_map.aux_data_address() {
-            (memory_map.aux_data_address(), &mut self.aux)
+            (memory_map.aux_data_address(), &mut self.aux[..self.accessible_aux_size])
         } else if address >= memory_map.stack_address_low() {
-            (memory_map.stack_address_low(), &mut self.stack)
+            (memory_map.stack_address_low(), &mut self.stack[..])
         } else if address >= memory_map.rw_data_address() {
-            (memory_map.rw_data_address(), &mut self.rw_data)
+            (memory_map.rw_data_address(), &mut self.rw_data[..])
         } else {
             return None;
         };
@@ -438,6 +446,11 @@ impl InterpretedInstance {
         self.program_counter_valid = false;
         self.next_program_counter = Some(pc);
         self.next_program_counter_changed = true;
+    }
+
+    pub fn set_accessible_aux_size(&mut self, size: u32) {
+        assert!(!self.module.is_dynamic_paging());
+        self.basic_memory.set_accessible_aux_size(size);
     }
 
     #[allow(clippy::unused_self)]
