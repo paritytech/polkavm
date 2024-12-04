@@ -372,6 +372,7 @@ impl Module {
             .ro_data_size(blob.ro_data_size())
             .rw_data_size(blob.rw_data_size())
             .stack_size(blob.stack_size())
+            .aux_data_size(config.aux_data_size())
             .build()
             .map_err(Error::from_static_str)?;
 
