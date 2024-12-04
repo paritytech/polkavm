@@ -144,7 +144,9 @@ impl BasicMemory {
         };
 
         let offset = address - start;
-        memory_slice.get(cast(offset).to_usize()..cast(offset).to_usize() + cast(length).to_usize())
+        let offset = cast(offset).to_usize();
+        let offset_end = offset + cast(length).to_usize();
+        memory_slice.get(offset..offset_end)
     }
 
     #[inline]
@@ -162,7 +164,8 @@ impl BasicMemory {
 
         self.is_memory_dirty = true;
         let offset = cast(address - start).to_usize();
-        memory_slice.get_mut(offset..offset + cast(length).to_usize())
+        let offset_end = offset + cast(length).to_usize();
+        memory_slice.get_mut(offset..offset_end)
     }
 
     fn sbrk(&mut self, module: &Module, size: u32) -> Option<u32> {
