@@ -101,9 +101,9 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
     - uses: actions/checkout@v4
+    - name: Install toolchain
+      run: rustup toolchain install nightly-2024-07-10
     - name: Install cargo fuzz
-      run: |
-        rustup toolchain install 1.83.0
-        rustup run 1.83.0 cargo install cargo-fuzz
+      run: rustup run nightly-2024-07-10 cargo install --locked --version 0.12.0 cargo-fuzz
     - name: Fuzz
       run: ./ci/jobs/fuzz.sh
