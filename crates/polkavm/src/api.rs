@@ -1074,6 +1074,56 @@ impl RawInstance {
             .into_result("failed to reset the instance's memory"))
     }
 
+    /// Returns whether a given chunk of memory is accessible through [`read_memory_into`](Self::read_memory_into)/[`write_memory`](Self::write_memory).
+    ///
+    /// If `size` is zero then this will always return `true`.
+    pub fn is_memory_accessible(&self, address: u32, size: u32, is_writable: bool) -> bool {
+        if size == 0 {
+            return true;
+        }
+
+        if address < 0x10000 {
+            return false;
+        }
+
+        if u64::from(address) + cast(size).to_u64() > 0x100000000 {
+            return false;
+        }
+
+        #[inline]
+        fn is_within(range: core::ops::Range<u32>, address: u32, size: u32) -> bool {
+            let address_end = u64::from(address) + cast(size).to_u64();
+            address >= range.start && address_end <= u64::from(range.end)
+        }
+
+        if !self.module.is_dynamic_paging() {
+            let map = self.module.memory_map();
+            if is_within(map.stack_range(), address, size) {
+                return true;
+            }
+
+            let heap_size = self.heap_size();
+            let heap_top = map.heap_base() + heap_size;
+            let heap_top = self.module.round_to_page_size_up(heap_top);
+            if is_within(map.rw_data_address()..heap_top, address, size) {
+                return true;
+            }
+
+            let aux_size = access_backend!(self.backend, |backend| backend.accessible_aux_size());
+            if is_within(map.aux_data_address()..map.aux_data_address() + aux_size, address, size) {
+                return true;
+            }
+
+            if !is_writable && is_within(map.ro_data_range(), address, size) {
+                return true;
+            }
+
+            false
+        } else {
+            access_backend!(self.backend, |backend| backend.is_memory_accessible(address, size, is_writable))
+        }
+    }
+
     /// Reads the VM's memory.
     pub fn read_memory_into<'slice, B>(&self, address: u32, buffer: &'slice mut B) -> Result<&'slice mut [u8], MemoryAccessError>
     where
@@ -1124,6 +1174,21 @@ impl RawInstance {
                 panic!("read_memory: crosscheck mismatch, range = 0x{address:x}..0x{address_end:x}, interpreter = {expected_success}, backend = {success}");
             }
         }
+
+        #[cfg(debug_assertions)]
+        {
+            let is_accessible = self.is_memory_accessible(address, cast(length).assert_always_fits_in_u32(), false);
+            if is_accessible != result.is_ok() {
+                panic!(
+                    "'read_memory_into' doesn't match with 'is_memory_accessible' for 0x{:x}-0x{:x} (read_memory_into = {}, is_memory_accessible = {})",
+                    address,
+                    cast(address).to_usize() + length,
+                    result.is_ok(),
+                    is_accessible,
+                );
+            }
+        }
+
         result
     }
 
@@ -1158,6 +1223,20 @@ impl RawInstance {
             if success != expected_success {
                 let address_end = u64::from(address) + cast(data.len()).to_u64();
                 panic!("write_memory: crosscheck mismatch, range = 0x{address:x}..0x{address_end:x}, interpreter = {expected_success}, backend = {success}");
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            let is_accessible = self.is_memory_accessible(address, cast(data.len()).assert_always_fits_in_u32(), true);
+            if is_accessible != result.is_ok() {
+                panic!(
+                    "'write_memory' doesn't match with 'is_memory_accessible' for 0x{:x}-0x{:x} (write_memory = {}, is_memory_accessible = {})",
+                    address,
+                    cast(address).to_usize() + data.len(),
+                    result.is_ok(),
+                    is_accessible,
+                );
             }
         }
 

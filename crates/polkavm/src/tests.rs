@@ -927,7 +927,7 @@ fn dynamic_paging_reading_does_not_resolve_segfaults(mut engine_config: Config) 
     instance.set_next_program_counter(offsets[0]);
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x10000);
-    assert_eq!(instance.read_u32(0x10000).unwrap(), 0x00000000);
+    assert!(instance.read_u32(0x10000).is_err());
 
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x10000);
@@ -1175,7 +1175,11 @@ fn dynamic_paging_worker_recycle_turn_dynamic_paging_on_and_off(mut engine_confi
             module_static.instantiate().unwrap()
         };
 
-        assert_eq!(instance.read_u32(0x20000).unwrap(), 0);
+        if !is_dynamic {
+            assert_eq!(instance.read_u32(0x20000).unwrap(), 0);
+        } else {
+            assert!(instance.read_u32(0x20000).is_err());
+        }
 
         instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
         instance.set_next_program_counter(ProgramCounter(0));

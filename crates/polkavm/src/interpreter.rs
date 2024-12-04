@@ -131,6 +131,10 @@ impl BasicMemory {
         }
     }
 
+    fn accessible_aux_size(&self) -> u32 {
+        cast(self.accessible_aux_size).assert_always_fits_in_u32()
+    }
+
     fn set_accessible_aux_size(&mut self, size: u32) {
         self.accessible_aux_size = cast(size).to_usize();
     }
@@ -253,30 +257,35 @@ macro_rules! emit_branch {
     };
 }
 
-fn each_page(module: &Module, address: u32, length: u32, callback: impl FnMut(u32, usize, usize, usize)) {
+fn each_page<E>(
+    module: &Module,
+    address: u32,
+    length: u32,
+    callback: impl FnMut(u32, usize, usize, usize) -> Result<(), E>,
+) -> Result<(), E> {
     let page_size = module.memory_map().page_size();
     let page_address_lo = module.round_to_page_size_down(address);
     let page_address_hi = module.round_to_page_size_down(address + (length - 1));
     each_page_impl(page_size, page_address_lo, page_address_hi, address, length, callback)
 }
 
-fn each_page_impl(
+fn each_page_impl<E>(
     page_size: u32,
     page_address_lo: u32,
     page_address_hi: u32,
     address: u32,
     length: u32,
-    mut callback: impl FnMut(u32, usize, usize, usize),
-) {
+    mut callback: impl FnMut(u32, usize, usize, usize) -> Result<(), E>,
+) -> Result<(), E> {
     let page_size = cast(page_size).to_usize();
     let length = cast(length).to_usize();
 
     let initial_page_offset = cast(address).to_usize() - cast(page_address_lo).to_usize();
     let initial_chunk_length = core::cmp::min(length, page_size - initial_page_offset);
-    callback(page_address_lo, initial_page_offset, 0, initial_chunk_length);
+    callback(page_address_lo, initial_page_offset, 0, initial_chunk_length)?;
 
     if page_address_lo == page_address_hi {
-        return;
+        return Ok(());
     }
 
     let mut page_address_lo = cast(page_address_lo).to_u64();
@@ -284,7 +293,7 @@ fn each_page_impl(
     page_address_lo += cast(page_size).to_u64();
     let mut buffer_offset = initial_chunk_length;
     while page_address_lo < page_address_hi {
-        callback(cast(page_address_lo).assert_always_fits_in_u32(), 0, buffer_offset, page_size);
+        callback(cast(page_address_lo).assert_always_fits_in_u32(), 0, buffer_offset, page_size)?;
         buffer_offset += page_size;
         page_address_lo += cast(page_size).to_u64();
     }
@@ -304,7 +313,7 @@ fn test_each_page() {
         let page_address_lo = address / page_size * page_size;
         let page_address_hi = (address + (length - 1)) / page_size * page_size;
         let mut output = Vec::new();
-        each_page_impl(
+        each_page_impl::<()>(
             page_size,
             page_address_lo,
             page_address_hi,
@@ -312,8 +321,10 @@ fn test_each_page() {
             length,
             |page_address, page_offset, buffer_offset, length| {
                 output.push((page_address, page_offset, buffer_offset, length));
+                Ok(())
             },
-        );
+        )
+        .unwrap();
         output
     }
 
@@ -448,6 +459,11 @@ impl InterpretedInstance {
         self.next_program_counter_changed = true;
     }
 
+    pub fn accessible_aux_size(&self) -> u32 {
+        assert!(!self.module.is_dynamic_paging());
+        self.basic_memory.accessible_aux_size()
+    }
+
     pub fn set_accessible_aux_size(&mut self, size: u32) {
         assert!(!self.module.is_dynamic_paging());
         self.basic_memory.set_accessible_aux_size(size);
@@ -456,6 +472,21 @@ impl InterpretedInstance {
     #[allow(clippy::unused_self)]
     pub fn next_native_program_counter(&self) -> Option<usize> {
         None
+    }
+
+    pub fn is_memory_accessible(&self, address: u32, size: u32, _is_writable: bool) -> bool {
+        assert!(self.module.is_dynamic_paging());
+
+        // TODO: This is very slow.
+        let result = each_page(&self.module, address, size, |page_address, _, _, _| {
+            if !self.dynamic_memory.pages.contains_key(&page_address) {
+                Err(())
+            } else {
+                Ok(())
+            }
+        });
+
+        result.is_ok()
     }
 
     pub fn read_memory_into<'slice>(
@@ -491,12 +522,16 @@ impl InterpretedInstance {
                         if let Some(page) = page {
                             let src = page.as_ptr().add(page_offset);
                             core::ptr::copy_nonoverlapping(src, dst, length);
+                            Ok(())
                         } else {
-                            core::ptr::write_bytes(dst, 0, length);
+                            Err(MemoryAccessError::OutOfRangeAccess {
+                                address: page_address + cast(page_offset).assert_always_fits_in_u32(),
+                                length: cast(length).to_u64(),
+                            })
                         }
                     }
                 },
-            );
+            )?;
 
             // SAFETY: The buffer was initialized.
             Ok(unsafe { slice_assume_init_mut(buffer) })
@@ -519,15 +554,17 @@ impl InterpretedInstance {
         } else {
             let dynamic_memory = &mut self.dynamic_memory;
             let page_size = self.module.memory_map().page_size();
-            each_page(
+            each_page::<()>(
                 &self.module,
                 address,
                 cast(data.len()).assert_always_fits_in_u32(),
                 move |page_address, page_offset, buffer_offset, length| {
                     let page = dynamic_memory.pages.entry(page_address).or_insert_with(|| empty_page(page_size));
                     page[page_offset..page_offset + length].copy_from_slice(&data[buffer_offset..buffer_offset + length]);
+                    Ok(())
                 },
-            );
+            )
+            .unwrap();
         }
 
         Ok(())
@@ -546,7 +583,7 @@ impl InterpretedInstance {
         } else {
             let dynamic_memory = &mut self.dynamic_memory;
             let page_size = self.module.memory_map().page_size();
-            each_page(
+            each_page::<()>(
                 &self.module,
                 address,
                 length,
@@ -554,12 +591,15 @@ impl InterpretedInstance {
                     Entry::Occupied(mut entry) => {
                         let page = entry.get_mut();
                         page[page_offset..page_offset + length].fill(0);
+                        Ok(())
                     }
                     Entry::Vacant(entry) => {
                         entry.insert(empty_page(page_size));
+                        Ok(())
                     }
                 },
-            );
+            )
+            .unwrap();
         }
 
         Ok(())
@@ -573,9 +613,11 @@ impl InterpretedInstance {
             todo!()
         } else {
             let dynamic_memory = &mut self.dynamic_memory;
-            each_page(&self.module, address, length, move |page_address, _, _, _| {
+            each_page::<()>(&self.module, address, length, move |page_address, _, _, _| {
                 dynamic_memory.pages.remove(&page_address);
-            });
+                Ok(())
+            })
+            .unwrap();
         }
     }
 

@@ -1910,6 +1910,11 @@ impl super::Sandbox for Sandbox {
         }
     }
 
+    fn accessible_aux_size(&self) -> u32 {
+        assert!(!self.dynamic_paging_enabled);
+        self.aux_data_length
+    }
+
     fn set_accessible_aux_size(&mut self, size: u32) -> Result<(), Error> {
         assert!(!self.dynamic_paging_enabled);
 
@@ -1922,6 +1927,15 @@ impl super::Sandbox for Sandbox {
             .jump_into
             .store(ZYGOTE_TABLES.1.ext_set_accessible_aux_size, Ordering::Relaxed);
         self.wake_oneshot_and_expect_idle()
+    }
+
+    fn is_memory_accessible(&self, address: u32, size: u32, _is_writable: bool) -> bool {
+        assert!(self.dynamic_paging_enabled);
+
+        let module = self.module.as_ref().unwrap();
+        let page_start = module.address_to_page(module.round_to_page_size_down(address));
+        let page_end = module.address_to_page(module.round_to_page_size_down(address + size));
+        self.page_set.contains((page_start, page_end))
     }
 
     fn reset_memory(&mut self) -> Result<(), Error> {
@@ -1957,9 +1971,7 @@ impl super::Sandbox for Sandbox {
             let page_start = module.address_to_page(module.round_to_page_size_down(address));
             let page_end = module.address_to_page(module.round_to_page_size_down(address + slice.len() as u32));
             if !self.page_set.contains((page_start, page_end)) {
-                unsafe {
-                    core::ptr::write_bytes(slice.as_mut_ptr().cast::<u8>(), 0, slice.len());
-                }
+                return Err(MemoryAccessError::Error("incomplete read".into()));
             } else {
                 let memory: &[core::mem::MaybeUninit<u8>] =
                     unsafe { core::slice::from_raw_parts(self.memory_mmap.as_ptr().cast(), self.memory_mmap.len()) };
