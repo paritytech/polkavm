@@ -354,3 +354,35 @@ extern "C" fn negate_and_add(mut a0: isize, a1: isize) -> isize {
 
     a0
 }
+
+#[cfg(target_pointer_width = "32")]
+#[polkavm_derive::polkavm_import]
+extern "C" {
+    fn return_tuple_u32() -> (u32, u32);
+}
+
+#[cfg(target_pointer_width = "64")]
+#[polkavm_derive::polkavm_import]
+extern "C" {
+    fn return_tuple_u64() -> (u64, u64);
+}
+
+#[polkavm_derive::polkavm_import]
+extern "C" {
+    fn return_tuple_usize() -> (usize, usize);
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn test_return_tuple() {
+    #[cfg(target_pointer_width = "32")]
+    {
+        assert_eq!(unsafe { return_tuple_u32() }, (0x12345678, 0x9abcdefe));
+        assert_eq!(unsafe { return_tuple_usize() }, (0x12345678, 0x9abcdefe));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    {
+        assert_eq!(unsafe { return_tuple_u64() }, (0x123456789abcdefe, 0x1122334455667788));
+        assert_eq!(unsafe { return_tuple_usize() }, (0x123456789abcdefe, 0x1122334455667788));
+    }
+}

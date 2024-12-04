@@ -2038,6 +2038,36 @@ impl TestInstance {
             })
             .unwrap();
 
+        linker
+            .define_untyped("return_tuple_u32", |caller: Caller<()>| {
+                caller.instance.set_reg(Reg::A0, 0x12345678);
+                caller.instance.set_reg(Reg::A1, 0x9abcdefe);
+                Ok(())
+            })
+            .unwrap();
+
+        linker
+            .define_untyped("return_tuple_u64", |caller: Caller<()>| {
+                caller.instance.set_reg(Reg::A0, 0x123456789abcdefe);
+                caller.instance.set_reg(Reg::A1, 0x1122334455667788);
+                Ok(())
+            })
+            .unwrap();
+
+        linker
+            .define_untyped("return_tuple_usize", move |caller: Caller<()>| {
+                if is_64_bit {
+                    caller.instance.set_reg(Reg::A0, 0x123456789abcdefe);
+                    caller.instance.set_reg(Reg::A1, 0x1122334455667788);
+                } else {
+                    caller.instance.set_reg(Reg::A0, 0x12345678);
+                    caller.instance.set_reg(Reg::A1, 0x9abcdefe);
+                }
+
+                Ok(())
+            })
+            .unwrap();
+
         let instance_pre = linker.instantiate_pre(&module).unwrap();
         let instance = instance_pre.instantiate().unwrap();
 
@@ -2298,6 +2328,11 @@ fn test_blob_negate_and_add(config: Config, optimize: bool, is_64_bit: bool) {
     } else {
         assert_eq!(i.call::<(u64, u64), u64>("negate_and_add", (123, 1,)).unwrap(), 15);
     }
+}
+
+fn test_blob_return_tuple(config: Config, optimize: bool, is_64_bit: bool) {
+    let mut i = TestInstance::new(&config, optimize, is_64_bit);
+    i.call::<(), ()>("test_return_tuple", ()).unwrap();
 }
 
 fn basic_gas_metering(config: Config, gas_metering_kind: GasMeteringKind) {
@@ -2824,6 +2859,7 @@ run_test_blob_tests! {
     test_blob_cmov_if_not_zero_with_zero_reg
     test_blob_min_stack_size
     test_blob_negate_and_add
+    test_blob_return_tuple
 }
 
 macro_rules! assert_impl {
