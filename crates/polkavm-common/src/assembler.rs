@@ -780,17 +780,23 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 #[track_caller]
 fn assert_assembler(input: &str, expected_output: &str) {
+    use crate::program::InstructionFormat;
     use alloc::string::ToString;
 
     let expected_output_clean: Vec<_> = expected_output.trim().split('\n').map(|line| line.trim()).collect();
     let expected_output_clean = expected_output_clean.join("\n");
+
+    let format = InstructionFormat {
+        is_64_bit: false,
+        ..InstructionFormat::default()
+    };
 
     let blob = assemble(input).expect("failed to assemble");
     let program = crate::program::ProgramBlob::parse(blob.into()).unwrap();
     let output: Vec<_> = program
         .instructions(crate::program::DefaultInstructionSet::default())
         .take_while(|inst| (inst.offset.0 as usize) < program.code().len())
-        .map(|inst| inst.kind.to_string())
+        .map(|inst| inst.kind.display(&format).to_string())
         .collect();
     let output = output.join("\n");
     assert_eq!(output, expected_output_clean);

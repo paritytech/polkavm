@@ -1782,12 +1782,23 @@ impl Instruction {
 
 pub const MAX_INSTRUCTION_LENGTH: usize = 2 + MAX_VARINT_LENGTH * 2;
 
-#[derive(Default)]
 #[non_exhaustive]
 pub struct InstructionFormat<'a> {
     pub prefer_non_abi_reg_names: bool,
     pub prefer_unaliased: bool,
     pub jump_target_formatter: Option<&'a dyn Fn(u32, &mut core::fmt::Formatter) -> core::fmt::Result>,
+    pub is_64_bit: bool,
+}
+
+impl<'a> Default for InstructionFormat<'a> {
+    fn default() -> Self {
+        InstructionFormat {
+            prefer_non_abi_reg_names: false,
+            prefer_unaliased: false,
+            jump_target_formatter: None,
+            is_64_bit: true,
+        }
+    }
 }
 
 struct InstructionFormatter<'a, 'b, 'c> {
@@ -1865,42 +1876,54 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} >>64 {s2}")
+        write!(self, "{d} = {s1} >> {s2}")
     }
 
     fn shift_arithmetic_right_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} >>a64 {s2}")
+        write!(self, "{d} = {s1} >>a {s2}")
     }
 
     fn shift_logical_left_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} <<64 {s2}")
+        write!(self, "{d} = {s1} << {s2}")
     }
 
     fn shift_logical_right_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} >> {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} >> {s2}")
+        } else {
+            write!(self, "{d} = {s1} >> {s2}")
+        }
     }
 
     fn shift_arithmetic_right_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} >>a {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} >>a {s2}")
+        } else {
+            write!(self, "{d} = {s1} >>a {s2}")
+        }
     }
 
     fn shift_logical_left_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} << {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} << {s2}")
+        } else {
+            write!(self, "{d} = {s1} << {s2}")
+        }
     }
 
     fn xor(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
@@ -1928,145 +1951,177 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} + {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} + {s2}")
+        } else {
+            write!(self, "{d} = {s1} + {s2}")
+        }
     }
 
     fn add_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "i64 {d} = {s1} + {s2}")
+        write!(self, "{d} = {s1} + {s2}")
     }
 
     fn sub_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} - {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} - {s2}")
+        } else {
+            write!(self, "{d} = {s1} - {s2}")
+        }
     }
 
     fn sub_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "i64 {d} = i64 {s1} - i64 {s2}")
+        write!(self, "{d} = {s1} - {s2}")
     }
 
     fn mul_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} * {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} * {s2}")
+        } else {
+            write!(self, "{d} = {s1} * {s2}")
+        }
     }
 
     fn mul_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "i64 {d} = i64 {s1} * i64 {s2}")
+        write!(self, "{d} = {s1} * {s2}")
     }
 
     fn mul_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        write!(self, "{d} = {s1} * {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} * {s2}")
+        } else {
+            write!(self, "{d} = {s1} * {s2}")
+        }
     }
 
     fn mul_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        write!(self, "i64 {d} = {s1} * {s2}")
+        write!(self, "{d} = {s1} * {s2}")
     }
 
     fn mul_upper_signed_signed(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = ({s1} as i64 * {s2} as i64) >> 32")
+        write!(self, "{d} = {s1} mulh {s2}")
     }
 
     fn mul_upper_unsigned_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = ({s1} as u64 * {s2} as u64) >> 32")
+        write!(self, "{d} = {s1} mulhu {s2}")
     }
 
     fn mul_upper_signed_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = ({s1} as i64 * {s2} as u64) >> 32")
+        write!(self, "{d} = {s1} mulhsu {s2}")
     }
 
     fn div_unsigned_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} /u {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} /u {s2}")
+        } else {
+            write!(self, "{d} = {s1} /u {s2}")
+        }
     }
 
     fn div_signed_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} /s {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} /s {s2}")
+        } else {
+            write!(self, "{d} = {s1} /s {s2}")
+        }
     }
 
     fn rem_unsigned_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} %u {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} %u {s2}")
+        } else {
+            write!(self, "{d} = {s1} %u {s2}")
+        }
     }
 
     fn rem_signed_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} %s {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} %s {s2}")
+        } else {
+            write!(self, "{d} = {s1} %s {s2}")
+        }
     }
 
     fn div_unsigned_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "i64 {d} = i64 {s1} /u i64 {s2}")
+        write!(self, "{d} = {s1} /u {s2}")
     }
 
     fn div_signed_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "i32 {d} = i64 {s1} /s i64 {s2}")
+        write!(self, "{d} = {s1} /s {s2}")
     }
 
     fn rem_unsigned_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "i64 {d} = i64 {s1} %u i64 {s2}")
+        write!(self, "{d} = {s1} %u {s2}")
     }
 
     fn rem_signed_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "i64 {d} = i64 {s1} %s i64 {s2}")
+        write!(self, "{d} = {s1} %s {s2}")
     }
 
     fn and_inverted(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = ({s1} & ~{s2})")
+        write!(self, "{d} = {s1} & ~{s2}")
     }
 
     fn or_inverted(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = ({s1} | ~{s2})")
+        write!(self, "{d} = {s1} | ~{s2}")
     }
 
     fn xnor(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
@@ -2080,56 +2135,64 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = max({s1}, {s2})")
+        write!(self, "{d} = maxs({s1}, {s2})")
     }
 
     fn maximum_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = max({s1} % u, {s2} % u)")
+        write!(self, "{d} = maxu({s1}, {s2})")
     }
 
     fn minimum(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = min({s1}, {s2})")
+        write!(self, "{d} = mins({s1}, {s2})")
     }
 
     fn minimum_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = min({s1} %u, {s2} %u)")
+        write!(self, "{d} = minu({s1}, {s2})")
     }
 
     fn rotate_left_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} <<rotate.32 {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} <<r {s2}")
+        } else {
+            write!(self, "{d} = {s1} <<r {s2}")
+        }
     }
 
     fn rotate_left_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} <<rotate.64 {s2}")
+        write!(self, "{d} = {s1} <<r {s2}")
     }
 
     fn rotate_right_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} >>rotate.32 {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} >>r {s2}")
+        } else {
+            write!(self, "{d} = {s1} >>r {s2}")
+        }
     }
 
     fn rotate_right_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} >>rotate.64 {s2}")
+        write!(self, "{d} = {s1} >>r {s2}")
     }
 
     fn set_less_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
@@ -2159,73 +2222,97 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn shift_logical_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        write!(self, "{d} = {s1} >> {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} >> {s2}")
+        } else {
+            write!(self, "{d} = {s1} >> {s2}")
+        }
     }
 
     fn shift_logical_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} >> {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} >> {s2}")
+        } else {
+            write!(self, "{d} = {s1} >> {s2}")
+        }
     }
 
     fn shift_arithmetic_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        write!(self, "{d} = {s1} >>a {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} >>a {s2}")
+        } else {
+            write!(self, "{d} = {s1} >>a {s2}")
+        }
     }
 
     fn shift_logical_right_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        write!(self, "{d} = {s1} >>64 {s2}")
+        write!(self, "{d} = {s1} >> {s2}")
     }
 
     fn shift_logical_right_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} >>64 {s2}")
+        write!(self, "{d} = {s1} >> {s2}")
     }
 
     fn shift_arithmetic_right_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        write!(self, "{d} = {s1} >>a64 {s2}")
+        write!(self, "{d} = {s1} >>a {s2}")
     }
 
     fn shift_arithmetic_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} >>a {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} >>a {s2}")
+        } else {
+            write!(self, "{d} = {s1} >>a {s2}")
+        }
     }
 
     fn shift_logical_left_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        write!(self, "{d} = {s1} << {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} << {s2}")
+        } else {
+            write!(self, "{d} = {s1} << {s2}")
+        }
     }
 
     fn shift_logical_left_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} << {s2}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s1} << {s2}")
+        } else {
+            write!(self, "{d} = {s1} << {s2}")
+        }
     }
 
     fn shift_arithmetic_right_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} >>a64 {s2}")
+        write!(self, "{d} = {s1} >>a {s2}")
     }
 
     fn shift_logical_left_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        write!(self, "{d} = {s1} <<64 {s2}")
+        write!(self, "{d} = {s1} << {s2}")
     }
 
     fn shift_logical_left_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s2 = self.format_reg(s2);
-        write!(self, "{d} = {s1} <<64 {s2}")
+        write!(self, "{d} = {s1} << {s2}")
     }
 
     fn or_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
@@ -2265,37 +2352,49 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn count_leading_zero_bits_32(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = clz.32 {s}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = clz {s}")
+        } else {
+            write!(self, "{d} = clz {s}")
+        }
     }
 
     fn count_leading_zero_bits_64(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = clz.64 {s}")
+        write!(self, "{d} = clz {s}")
     }
 
     fn count_trailing_zero_bits_32(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = ctz.32 {s}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = ctz {s}")
+        } else {
+            write!(self, "{d} = ctz {s}")
+        }
     }
 
     fn count_trailing_zero_bits_64(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = ctz.64 {s}")
+        write!(self, "{d} = ctz {s}")
     }
 
     fn count_set_bits_32(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = cpop.32 {s}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = cpop {s}")
+        } else {
+            write!(self, "{d} = cpop {s}")
+        }
     }
 
     fn count_set_bits_64(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = cpop.64 {s}")
+        write!(self, "{d} = cpop {s}")
     }
 
     fn sign_extend_8(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
@@ -2357,38 +2456,36 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn rotate_right_32_imm(&mut self, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = {s} >>rotate.imm.32 {c}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s} >>r {c}")
+        } else {
+            write!(self, "{d} = {s} >> {c}")
+        }
     }
 
     fn rotate_right_32_imm_alt(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let c = self.format_reg(c);
-        write!(self, "{d} = {s} >>rotate.imm.32 {c}")
+        if self.format.is_64_bit {
+            write!(self, "i32 {d} = {s} >>r {c}")
+        } else {
+            write!(self, "{d} = {s} >> {c}")
+        }
     }
 
     fn rotate_right_64_imm(&mut self, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = {s} >>rotate.imm {c}")
+        write!(self, "{d} = {s} >>r {c}")
     }
 
     fn rotate_right_64_imm_alt(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let c = self.format_reg(c);
-        write!(self, "{d} = {s} >>rotate.imm {c}")
+        write!(self, "{d} = {s} >>r {c}")
     }
 
     fn add_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
-        let d = self.format_reg(d);
-        let s1 = self.format_reg(s1);
-        if !self.format.prefer_unaliased && (s2 as i32) < 0 && (s2 as i32) > -4096 {
-            write!(self, "i64 {d} = i64 {s1} - i64 {s2}", s2 = -(s2 as i32))
-        } else {
-            write!(self, "i64 {d} = i64 {s1} + 0x{s2:x}")
-        }
-    }
-
-    fn add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         if !self.format.prefer_unaliased && (s2 as i32) < 0 && (s2 as i32) > -4096 {
@@ -2398,13 +2495,25 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
+    fn add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let prefix = if self.format.is_64_bit { "i32 " } else { "" };
+        if !self.format.prefer_unaliased && (s2 as i32) < 0 && (s2 as i32) > -4096 {
+            write!(self, "{prefix}{d} = {s1} - {s2}", s2 = -(s2 as i32))
+        } else {
+            write!(self, "{prefix}{d} = {s1} + 0x{s2:x}")
+        }
+    }
+
     fn negate_and_add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
+        let prefix = if self.format.is_64_bit { "i32 " } else { "" };
         if !self.format.prefer_unaliased && s2 == 0 {
-            write!(self, "{d} = -{s1}")
+            write!(self, "{prefix}{d} = -{s1}")
         } else {
-            write!(self, "{d} = -{s1} + {s2}")
+            write!(self, "{prefix}{d} = {s2} - {s1}")
         }
     }
 
@@ -2412,9 +2521,9 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         if !self.format.prefer_unaliased && s2 == 0 {
-            write!(self, "{d} = u64 -{s1}")
+            write!(self, "{d} = -{s1}")
         } else {
-            write!(self, "{d} = u64 -{s1} + {s2}")
+            write!(self, "{d} = {s2} - {s1}")
         }
     }
 

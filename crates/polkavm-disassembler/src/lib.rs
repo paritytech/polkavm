@@ -311,6 +311,7 @@ impl<'a> Disassembler<'a> {
         let mut disassembly_format = polkavm_common::program::InstructionFormat::default();
         disassembly_format.prefer_non_abi_reg_names = self.prefer_non_abi_reg_names;
         disassembly_format.prefer_unaliased = self.prefer_unaliased;
+        disassembly_format.is_64_bit = self.blob.is_64_bit();
 
         let jump_target_formatter = |target: u32, fmt: &mut core::fmt::Formatter| {
             if prefer_offset_jump_targets {
