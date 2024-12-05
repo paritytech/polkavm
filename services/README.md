@@ -1,4 +1,21 @@
-# JAM Service Setup Guide (FIB)
+# JAM Service Setup Guide
+
+## Table of Contents
+1. [Download and Set Up the Toolchain](#step-1-download-and-set-up-the-toolchain)
+2. [Build the JAM FIB Service](#step-2-build-the-jam-fib-service)
+3. [Build the Polkatool](#step-3-build-the-polkatool)
+4. [Generate the FIB Service and Blob](#step-4-generate-the-fib-service-and-blob)
+5. [Create a New Service Similar to FIB](#step-5-create-a-new-service-similar-to-fib)
+6. [Optional: Download Generated `.pvm` Files to Local](#optional-download-generated-pvm-files-to-local)
+7. [Optional: Fix OpenSSL Version Error](#optional-fix-openssl-version-error-version-openssl_1_1_1-not-found)
+8. [FIB Code Explanation](#fib-code-explanation)
+9. [Complete Code](#complete-code)
+10. [Instructions for Setting Up Other Services](#instructions-for-setting-up-other-services)
+    - [Bootstrap](#bootstrap)
+    - [Tribonacci](#tribonacci)
+    - [Megatron](#megatron)
+
+---
 
 ## Step 1: Download and Set Up the Toolchain
 
@@ -73,25 +90,19 @@
 2. **Generate the JAM FIB Service and Blob**  
    Use `polkatool` to generate the JAM FIB service and blob file:
 
-   To generate `32-bit` version blob, set: `riscv32emac-unknown-none-polkavm/release/fib` and `-b 32` :
    ```bash
-    cargo run -p polkatool jam-service services/fib/target/riscv32emac-unknown-none-polkavm/release/fib -o services/fib/fib.pvm -d services/fib/blob.pvm -b 32
-   ```
-
-   To generate `64-bit` version blob, set: `riscv64emac-unknown-none-polkavm/release/fib` and `-b 64` :
-   ```bash
-    cargo run -p polkatool jam-service services/fib/target/riscv64emac-unknown-none-polkavm/release/fib -o services/fib/fib.pvm -d services/fib/blob.pvm -b 64
+    cargo run -p polkatool jam-service services/fib/target/riscv64emac-unknown-none-polkavm/release/fib -o services/fib/fib.pvm -d services/fib/fib_blob.pvm
    ```
 
 3. **Generated Output Files**  
    After running the above command, two files will be created:
-   - `fib_32.pvm`: JAM-ready top-level service blob. (`32-bit` ver)
-   - `blob_32.pvm`: This file can be disassembled with `polkatool`. (`32-bit` ver)
+   - `fib.pvm`: JAM-ready top-level service blob. (`64-bit` ver)
+   - `fib_blob.pvm`: This file can be disassembled with `polkatool`. (`64-bit` ver)
 
 4. **Disassemble the Code**  
    To compile and disassemble the code, use:
    ```bash
-   cargo run -p polkatool disassemble services/fib/blob_32.pvm --show-raw-bytes
+   cargo run -p polkatool disassemble services/fib/fib_blob.pvm --show-raw-bytes
    ```
 
 ---
@@ -177,13 +188,13 @@
 9. **Generate the Service and Blob Files**  
    Use `polkatool` to generate the new service and blob file:
    ```bash
-   cargo run -p polkatool jam-service services/your_new_service/target/riscv32ema-unknown-none-elf/release/your_new_service -o services/your_new_service/your_new_service.pvm -d services/your_new_service/blob.pvm
+   cargo run -p polkatool jam-service services/your_new_service/target/riscv64emac-unknown-none-polkavm/release/your_new_service -o services/your_new_service/your_new_service.pvm -d services/your_new_service/your_new_service_blob.pvm
    ```
 
 10. **Disassemble the Service Code**  
     Disassemble the newly created service:
     ```bash
-    cargo run -p polkatool disassemble services/your_new_service/blob.pvm --show-raw-bytes
+    cargo run -p polkatool disassemble services/your_new_service/your_new_service_blob.pvm --show-raw-bytes
     ```
 
 ---
@@ -236,7 +247,7 @@ If you encounter the `version OPENSSL_1_1_1' not found` error, follow these step
 
 ### Initialize a Buffer
 
-The program starts by initializing a buffer to hold the Fibonacci calculation data. It is 12 bytes long, representing the three numbers required by the FIB array (each stored in 4 bytes):
+The program starts by initializing a buffer to hold the Fibonacci calculation data. It is 12 bytes long, representing the three numbers required by the FIB array (each stored in 2 bytes):
 
 ```rust=
 let mut buffer = [0u8; 12];
@@ -256,13 +267,13 @@ let result = unsafe { import(0, buffer.as_mut_ptr(), buffer.len() as u32) };
 ### Parse and Calculate the Fibonacci Term
 
 If the data import is successful (i.e., `result` is `0`), the program:
-1. Extracts little-endian data from the buffer and converts it to `u32`.
+1. Extracts little-endian data from the buffer and converts it to `u16`.
 2. Calculates the next term in the Fibonacci sequence by adding the previous two terms.
 
 ```rust=
-let n = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
-let fib_n = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
-let fib_n_minus_1 = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
+let n = u16::from_le_bytes(buffer[0..2].try_into().unwrap());
+let fib_n = u16::from_le_bytes(buffer[2..4].try_into().unwrap());
+let fib_n_minus_1 = u16::from_le_bytes(buffer[4..6].try_into().unwrap());
 
 let new_fib_n = fib_n + fib_n_minus_1;
 ```
@@ -272,9 +283,9 @@ let new_fib_n = fib_n + fib_n_minus_1;
 The calculated result is converted back into little-endian bytes and stored in the buffer.
 
 ```rust=
-buffer[0..4].copy_from_slice(&(n + 1).to_le_bytes());
-buffer[4..8].copy_from_slice(&new_fib_n.to_le_bytes());
-buffer[8..12].copy_from_slice(&fib_n.to_le_bytes());
+buffer[0..2].copy_from_slice(&(n + 1).to_le_bytes());
+buffer[2..4].copy_from_slice(&new_fib_n.to_le_bytes());
+buffer[4..6].copy_from_slice(&fib_n.to_le_bytes());
 ```
 
 ### Export the Buffer Data
@@ -304,8 +315,6 @@ unsafe {
 }
 ```
 
-
-
 ## Complete Code
 
 Below is the full Rust code for the Fibonacci sequence calculation:
@@ -313,8 +322,6 @@ Below is the full Rust code for the Fibonacci sequence calculation:
 ```rust=
 #[polkavm_derive::polkavm_export]
 extern "C" fn is_authorized() -> u32 {
-
-
     0
 }
 
@@ -324,17 +331,18 @@ extern "C" fn refine() -> u32 {
     let result = unsafe { import(0, buffer.as_mut_ptr(), buffer.len() as u32) };
 
     if result == 0 {
-        let n = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
-        let fib_n = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
-        let fib_n_minus_1 = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
+        let n = u16::from_le_bytes(buffer[0..2].try_into().unwrap());
+        let fib_n = u16::from_le_bytes(buffer[2..4].try_into().unwrap());
+        let fib_n_minus_1 = u16::from_le_bytes(buffer[4..6].try_into().unwrap());
     
         let new_fib_n = fib_n + fib_n_minus_1;
     
-        buffer[0..4].copy_from_slice(&(n + 1).to_le_bytes());
-        buffer[4..8].copy_from_slice(&new_fib_n.to_le_bytes());
-        buffer[8..12].copy_from_slice(&fib_n.to_le_bytes());
+        buffer[0..2].copy_from_slice(&(n + 1).to_le_bytes());
+        buffer[2..4].copy_from_slice(&new_fib_n.to_le_bytes());
+        buffer[4..6].copy_from_slice(&fib_n.to_le_bytes());
+    
     } else {
-        buffer.copy_from_slice(&[1u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]);
+        buffer.copy_from_slice(&[1u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]);
     }
 
     unsafe {
@@ -352,21 +360,103 @@ extern "C" fn refine() -> u32 {
     }
     0
 }
-
-#[polkavm_derive::polkavm_export]
-extern "C" fn accumulate() -> u32 {
-    let buffer = [0u8; 12];
-    let key = [0u8; 1];
-
-    unsafe {
-        write(key.as_ptr(), 1, buffer.as_ptr(), buffer.len() as u32);
-    }
-
-    0
-}
-
-#[polkavm_derive::polkavm_export]
-extern "C" fn on_transfer() -> u32 {
-    0
-}
 ```
+
+## Instructions for setting up other services
+### bootstrap
+1. **Go to the `bootstrap` Directory**  
+   ```bash
+   cd ./services/bootstrap
+   ```
+
+2. Build the service
+   ```bash
+   cargo build --release --target-dir ./target
+   ```
+
+3. Go back to root directory
+   ```bash
+   cd ../../
+   ```
+
+4. **Generate blob**  
+   ```bash
+   cargo run -p polkatool jam-service services/bootstrap/target/riscv64emac-unknown-none-polkavm/release/bootstrap -o services/bootstrap/bootstrap.pvm -d services/bootstrap/bootstrap_blob.pvm
+   ```
+
+5. **Generated Output Files**  
+   After running the above command, two files will be created:
+   - `bootstrap.pvm`: JAM-ready top-level service blob.
+   - `bootstrap_blob.pvm`: This file can be disassembled with `polkatool`.
+
+6. **Disassemble the Code**  
+   To compile and disassemble the code, use:
+   ```bash
+   cargo run -p polkatool disassemble services/bootstrap/bootstrap_blob.pvm --show-raw-bytes
+   ```
+
+### tribonacci
+
+1. **Go to the `tribonacci` Directory**  
+   ```bash
+   cd ./services/tribonacci
+   ```
+
+2. **Build the Service**  
+   ```bash
+   cargo build --release --target-dir ./target
+   ```
+
+3. **Go Back to Root Directory**  
+   ```bash
+   cd ../../
+   ```
+
+4. **Generate Blob**  
+   ```bash
+   cargo run -p polkatool jam-service services/tribonacci/target/riscv64emac-unknown-none-polkavm/release/tribonacci -o services/tribonacci/tribonacci.pvm -d services/tribonacci/tribonacci_blob.pvm
+   ```
+
+5. **Generated Output Files**  
+   After running the above command, two files will be created:
+   - `tribonacci.pvm`: JAM-ready top-level service blob.
+   - `tribonacci_blob.pvm`: This file can be disassembled with `polkatool`.
+
+6. **Disassemble the Code**  
+   To compile and disassemble the code, use:
+   ```bash
+   cargo run -p polkatool disassemble services/tribonacci/tribonacci_blob.pvm --show-raw-bytes
+   ```
+
+### megatron
+
+1. **Go to the `megatron` Directory**  
+   ```bash
+   cd ./services/megatron
+   ```
+
+2. **Build the Service**  
+   ```bash
+   cargo build --release --target-dir ./target
+   ```
+
+3. **Go Back to Root Directory**  
+   ```bash
+   cd ../../
+   ```
+
+4. **Generate Blob**  
+   ```bash
+   cargo run -p polkatool jam-service services/megatron/target/riscv64emac-unknown-none-polkavm/release/megatron -o services/megatron/megatron.pvm -d services/megatron/megatron_blob.pvm
+   ```
+
+5. **Generated Output Files**  
+   After running the above command, two files will be created:
+   - `megatron.pvm`: JAM-ready top-level service blob.
+   - `megatron_blob.pvm`: This file can be disassembled with `polkatool`.
+
+6. **Disassemble the Code**  
+   To compile and disassemble the code, use:
+   ```bash
+   cargo run -p polkatool disassemble services/megatron/megatron_blob.pvm --show-raw-bytes
+   ``` 

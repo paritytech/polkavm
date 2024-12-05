@@ -101,10 +101,6 @@ enum Args {
         /// The raw code blob (can be disassembled with cargo run -p polkatool disassemble --show-raw-bytes {..})
         #[clap(short = 'd', long)]
         dump: Option<PathBuf>,
-            
-        /// Specify the output architecture (32-bit or 64-bit)
-        #[clap(short = 'b', long, value_enum, default_value_t = Bitness::B64)]
-        bitness: Bitness,
     },
 }
 
@@ -146,7 +142,7 @@ fn main() {
         }
 
         // For JAM service
-        Args::JAMService { input, output, dump, bitness} => main_jam_service(input, output, dump, bitness),
+        Args::JAMService { input, output, dump} => main_jam_service(input, output, dump),
     };
 
     if let Err(error) = result {
@@ -307,7 +303,7 @@ fn main_assemble(input_path: PathBuf, output_path: PathBuf) -> Result<(), String
     Ok(())
 }
 
-fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path: Option<PathBuf>, bitness: Bitness) -> Result<(), String> {
+fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path: Option<PathBuf>) -> Result<(), String> {
     if !input_path.exists() {
         return Err(format!("File does not exist: {:?}", input_path));
     }
@@ -352,7 +348,10 @@ fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path
     println!("w_size: {:?}", w_size);
     println!("z: {:?}", z);
     println!("s: {:?}", s);
+    println!("o_byte: {:?}", o_byte);
+    println!("w_byte: {:?}", w_byte);
     println!("c_size: {:?}", c_size);
+    println!("c (code_and_jump_table): {:?}", c);
 
     let mut new_blob: Vec<u8> = Vec::new();
     new_blob.extend_from_slice(&o_size);
@@ -364,38 +363,21 @@ fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path
     new_blob.extend_from_slice(&c_size);
     new_blob.extend_from_slice(&c);
 
-    let suffix = match bitness {
-        Bitness::B32 => "32",
-        Bitness::B64 => "64",
-    };
-
-    let adjust_filename = |path: PathBuf| -> PathBuf {
-        let mut new_path = path.clone();
-        if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
-            let parts: Vec<&str> = file_name.rsplitn(2, '.').collect();
-            let new_file_name = if parts.len() == 2 {
-                format!("{}_{}.{}", parts[1], suffix, parts[0])
-            } else {
-                format!("{}_{}", file_name, suffix)
-            };
-            new_path.set_file_name(new_file_name);
+    match output_path {
+        Some(output_path) => {
+            println!("Writing JAM-ready code blob {:?}", output_path);
+            fs::write(&output_path, &new_blob).map_err(|err| format!("Failed to write output: {}", err))?;
         }
-        new_path
-    };
-
-    let output_path = output_path.map(adjust_filename);
-    let dump_path = dump_path.map(adjust_filename);
-
-    if let Some(output_path) = output_path {
-        println!("Writing JAM-ready code blob {:?}", output_path);
-        fs::write(&output_path, &new_blob).map_err(|err| format!("Failed to write output: {}", err))?;
+        None => {}
     }
 
-    if let Some(dump_path) = dump_path {
-        println!("Writing raw code {:?}", dump_path);
-        fs::write(dump_path, &raw_blob).map_err(|err| format!("Failed to write dump: {}", err))?;
+    match dump_path {
+        Some(dump_path) => {
+            println!("Writing raw code {:?}", dump_path);
+            fs::write(dump_path, &raw_blob).unwrap();
+        }
+        None => {}
     }
-
     Ok(())
 }
 
