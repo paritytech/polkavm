@@ -1,0 +1,67 @@
+// RO data = 0/0 bytes
+// RW data = 0/0 bytes
+// Stack size = 8192 bytes
+// Jump table entry point size = 0 bytes
+// RO data = []
+// RW data = []
+// Instructions = 50
+// Code size = 154 bytes
+
+      :                          @0
+     0: 28 12 00 00 00           jump @4
+      :                          @1
+     5: 28 11 00 00 00           jump @5
+      :                          @2
+    10: 28 1d 00 00 00           jump @6
+      :                          @3
+    15: 28 87 00                 jump @7
+      :                          @4 [export #0: 'is_authorized']
+    18: 33 07                    a0 = 0x0
+    20: 32 00                    ret
+      :                          @5 [export #1: 'refine']
+    22: 14 0a 04 00 ff fe 00 00 00 00 a3 = 0xfeff0004
+    32: 33 0b 24                 a4 = 0x24
+    35: 33 07                    a0 = 0x0
+    37: 32 00                    ret
+      :                          @6 [export #2: 'accumulate']
+    39: 8b 11 c0                 i64 sp = i64 sp - i64 64
+    42: 71 10 38                 u64 [sp + 56] = ra
+    45: 71 15 30                 u64 [sp + 48] = s0
+    48: 48 11 08                 u32 [sp + 8] = 0
+    51: 49 01                    u64 [sp + 0] = 0
+    53: 48 11 18                 u32 [sp + 24] = 0
+    56: 49 11 10                 u64 [sp + 16] = 0
+    59: 46 11 1f                 u8 [sp + 31] = 0
+    62: 14 08 00 00 ff fe 00 00 00 00 a1 = 0xfeff0000
+    72: 76 87                    a0 = u32 [a1]
+    74: 76 85 04                 s0 = u32 [a1 + 4]
+    77: 8b 18 1f                 i64 a1 = i64 sp + 0x1f
+    80: 33 09 01                 a2 = 0x1
+    83: 64 1a                    a3 = sp
+    85: 33 0b 0c                 a4 = 0xc
+    88: 0a 02                    ecalli 2 // 'read'
+    90: 8b 18 1f                 i64 a1 = i64 sp + 0x1f
+    93: 33 09 01                 a2 = 0x1
+    96: 8b 1a 10                 i64 a3 = i64 sp + 0x10
+    99: 33 0b 0c                 a4 = 0xc
+   102: 64 57                    a0 = s0
+   104: 0a 02                    ecalli 2 // 'read'
+   106: 77 17 04                 a0 = i32 [sp + 4]
+   109: 77 18 08                 a1 = i32 [sp + 8]
+   112: 77 19 14                 a2 = i32 [sp + 20]
+   115: 77 1a 18                 a3 = i32 [sp + 24]
+   118: 77 1b                    a4 = i32 [sp]
+   120: aa 97 07                 a0 = a0 + a2
+   123: aa a8 08                 a1 = a1 + a3
+   126: 70 1b 20                 u32 [sp + 32] = a4
+   129: 70 17 24                 u32 [sp + 36] = a0
+   132: 70 18 28                 u32 [sp + 40] = a1
+   135: 8b 17 1f                 i64 a0 = i64 sp + 0x1f
+   138: 33 08 01                 a1 = 0x1
+   141: 8b 19 20                 i64 a2 = i64 sp + 0x20
+   144: 33 0a 0c                 a3 = 0xc
+   147: 0a 03                    ecalli 3 // 'write'
+   149: 00                       trap
+      :                          @7 [export #3: 'on_transfer']
+   150: 33 07                    a0 = 0x0
+   152: 32 00                    ret
