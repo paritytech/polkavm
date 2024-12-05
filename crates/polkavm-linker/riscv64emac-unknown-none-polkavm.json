@@ -5,7 +5,7 @@
   "data-layout": "e-m:e-p:64:64-i64:64-i128:128-n32:64-S64",
   "eh-frame-header": false,
   "emit-debug-gdb-scripts": false,
-  "features": "+e,+m,+a,+c,+zbb,+auipc-addi-fusion,+ld-add-fusion,+lui-addi-fusion,+xtheadcondmov",
+  "features": "+e,+m,+a,+c,+auipc-addi-fusion,+ld-add-fusion,+lui-addi-fusion,+xtheadcondmov",
   "linker": "rust-lld",
   "linker-flavor": "ld.lld",
   "llvm-abiname": "lp64e",
