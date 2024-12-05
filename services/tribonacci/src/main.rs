@@ -85,31 +85,37 @@ extern "C" fn is_authorized() -> u32 {
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine() -> u32 {
-    let mut buffer = [0u8; 12];
+    let mut buffer = [0u8; 16];
     let result = unsafe { import(0, buffer.as_mut_ptr(), buffer.len() as u32) };
 
     if result == 0 {
         let n = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
-        let fib_n = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
-        let fib_n_minus_1 = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
-    
-        let new_fib_n = fib_n + fib_n_minus_1;
-    
-        buffer[0..4].copy_from_slice(&(n + 1).to_le_bytes());
-        buffer[4..8].copy_from_slice(&new_fib_n.to_le_bytes());
-        buffer[8..12].copy_from_slice(&fib_n.to_le_bytes());
-    
+        let t_n = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
+        let t_n_minus_1 = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
+        let t_n_minus_2 = u32::from_le_bytes(buffer[12..16].try_into().unwrap());
+
+        let new_t_n = t_n + t_n_minus_1 + t_n_minus_2;
+
+        let n_new = n + 1;
+
+        buffer[0..4].copy_from_slice(&n_new.to_le_bytes());
+        buffer[4..8].copy_from_slice(&new_t_n.to_le_bytes());
+        buffer[8..12].copy_from_slice(&t_n.to_le_bytes());
+        buffer[12..16].copy_from_slice(&t_n_minus_1.to_le_bytes());
     } else {
         buffer[0..4].copy_from_slice(&1_i32.to_le_bytes());
         buffer[4..8].copy_from_slice(&1_i32.to_le_bytes());
         buffer[8..12].copy_from_slice(&0_i32.to_le_bytes());
+        buffer[12..16].copy_from_slice(&0_i32.to_le_bytes());
     }
 
     unsafe {
         export(buffer.as_mut_ptr(), buffer.len() as u32);
     }
+
     let buffer_addr = buffer.as_ptr() as u32;
     let buffer_len = buffer.len() as u32;
+
     unsafe {
         core::arch::asm!(
             "mv a3, {0}",
@@ -118,6 +124,7 @@ extern "C" fn refine() -> u32 {
             in(reg) buffer_len,
         );
     }
+
     0
 }
 

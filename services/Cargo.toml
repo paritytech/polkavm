@@ -16,6 +16,8 @@ members = [
     "bootstrap",
     "sp1",
     "sp1verifier",
+    "tribonacci",
+    "megatron"
 
  #   "tokens",
 ]
