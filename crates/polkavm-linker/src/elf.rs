@@ -37,6 +37,7 @@ pub struct Section<'a> {
     data: Cow<'a, [u8]>,
     flags: u64,
     raw_section_index: Option<ElfSectionIndex>,
+    relocations: Vec<(u64, Relocation)>,
 }
 
 impl<'a> Section<'a> {
@@ -70,6 +71,10 @@ impl<'a> Section<'a> {
 
     pub fn data(&self) -> &[u8] {
         &self.data
+    }
+
+    pub fn relocations(&'_ self) -> impl Iterator<Item = (u64, Relocation)> + '_ {
+        self.relocations.iter().copied()
     }
 }
 
@@ -138,6 +143,47 @@ where
     }
 }
 
+#[derive(Copy, Clone, Debug)]
+pub struct Relocation {
+    kind: object::RelocationKind,
+    encoding: object::RelocationEncoding,
+    flags: object::RelocationFlags,
+    target: object::RelocationTarget,
+    size: u8,
+    addend: i64,
+}
+
+impl Relocation {
+    pub fn kind(&self) -> object::RelocationKind {
+        self.kind
+    }
+
+    pub fn encoding(&self) -> object::RelocationEncoding {
+        self.encoding
+    }
+
+    pub fn size(&self) -> u8 {
+        self.size
+    }
+
+    pub fn target(&self) -> object::RelocationTarget {
+        self.target
+    }
+
+    pub fn addend(&self) -> i64 {
+        self.addend
+    }
+
+    pub fn flags(&self) -> object::RelocationFlags {
+        self.flags
+    }
+
+    #[allow(clippy::unused_self)]
+    pub fn has_implicit_addend(&self) -> bool {
+        false
+    }
+}
+
 pub struct Elf<'data, H>
 where
     H: object::read::elf::FileHeader,
@@ -147,6 +193,7 @@ where
     section_index_map: HashMap<ElfSectionIndex, SectionIndex>,
     // TODO: Always have a dummy ELF file for testing?
     raw_elf: Option<ElfFile<'data, H>>,
+    is_64_bit: bool,
 }
 
 #[cfg(test)]
@@ -160,6 +207,7 @@ where
             section_index_by_name: Default::default(),
             section_index_map: Default::default(),
             raw_elf: Default::default(),
+            is_64_bit: false,
         }
     }
 }
@@ -187,6 +235,10 @@ where
             return Err(ProgramFromElfError::other("file is not a RISC-V file (EM_RISCV)"));
         }
 
+        let is_64_bit = elf.is_64();
+
+        let mut relocation_sections_for_section = HashMap::new();
+        let mut relocations_in_section = HashMap::new();
         let mut sections = Vec::new();
         let mut section_index_by_name = HashMap::new();
         let mut section_index_map = HashMap::new();
@@ -219,6 +271,81 @@ where
             };
 
             let index = SectionIndex(sections.len());
+
+            // The way the 'object' crate handles relocations is broken if there are multiple
+            // '.rela' sections per section, so let's just manually parse the relocations ourselves.
+            use object::read::elf::SectionHeader;
+            if section.elf_section_header().sh_type(LittleEndian) == object::elf::SHT_RELA {
+                use object::read::elf::Rela;
+
+                // '.rela' sections have the index of the section they should be applied to in their 'sh_type'.
+                let info = section.elf_section_header().sh_info(LittleEndian);
+                relocation_sections_for_section
+                    .entry(info as usize)
+                    .or_insert_with(Vec::new)
+                    .push(index);
+
+                let mut relocations: Vec<(u64, Relocation)> = Vec::new();
+                let section_data = section.data()?;
+                let mut struct_offset = 0;
+                while struct_offset < section_data.len() {
+                    let struct_size = if is_64_bit {
+                        core::mem::size_of::<object::elf::Rela64<LittleEndian>>()
+                    } else {
+                        core::mem::size_of::<object::elf::Rela32<LittleEndian>>()
+                    };
+                    let rela = section_data
+                        .get(struct_offset..struct_offset + struct_size)
+                        .ok_or_else(|| ProgramFromElfError::other("failed to parse relocations"))?;
+                    struct_offset += struct_size;
+
+                    let r_type;
+                    let symbol;
+                    let addend;
+                    let offset;
+                    if is_64_bit {
+                        // SAFETY: The pointer is always within bounds since we used '.get'.
+                        let rela = unsafe { rela.as_ptr().cast::<object::elf::Rela64<LittleEndian>>().read_unaligned() };
+                        r_type = rela.r_type(LittleEndian, false);
+                        symbol = rela.symbol(LittleEndian, false);
+                        addend = rela.r_addend(LittleEndian);
+                        offset = rela.r_offset(LittleEndian);
+                    } else {
+                        // SAFETY: The pointer is always within bounds since we used '.get'.
+                        let rela = unsafe { rela.as_ptr().cast::<object::elf::Rela32<LittleEndian>>().read_unaligned() };
+                        r_type = rela.r_type(LittleEndian);
+                        symbol = rela.symbol(LittleEndian, false);
+                        addend = i64::from(rela.r_addend(LittleEndian));
+                        offset = u64::from(rela.r_offset(LittleEndian));
+                    }
+                    let (kind, encoding, size) = match r_type {
+                        object::elf::R_RISCV_32 => (object::RelocationKind::Absolute, object::RelocationEncoding::Generic, 32),
+                        object::elf::R_RISCV_64 => (object::RelocationKind::Absolute, object::RelocationEncoding::Generic, 64),
+                        _ => (object::RelocationKind::Unknown, object::RelocationEncoding::Generic, 0),
+                    };
+
+                    let flags = object::RelocationFlags::Elf { r_type };
+                    let target = match symbol {
+                        None => object::RelocationTarget::Absolute,
+                        Some(symbol) => object::RelocationTarget::Symbol(symbol),
+                    };
+
+                    relocations.push((
+                        offset,
+                        Relocation {
+                            kind,
+                            encoding,
+                            flags,
+                            target,
+                            size,
+                            addend,
+                        },
+                    ));
+                }
+
+                relocations_in_section.insert(index, relocations);
+            }
+
             sections.push(Section {
                 index,
                 name: name.to_owned(),
@@ -228,6 +355,7 @@ where
                 data: Cow::Borrowed(file_data),
                 flags,
                 raw_section_index: Some(section.index()),
+                relocations: Vec::new(),
             });
 
             section_index_by_name.entry(name.to_owned()).or_insert_with(Vec::new).push(index);
@@ -236,11 +364,23 @@ where
             }
         }
 
+        for section_index in (0..sections.len()).map(SectionIndex) {
+            let elf_section_index = sections[section_index.raw()].raw_section_index.unwrap();
+            if let Some(relocation_sections) = relocation_sections_for_section.remove(&elf_section_index.0) {
+                for relocation_section in relocation_sections {
+                    sections[section_index.raw()]
+                        .relocations
+                        .extend(relocations_in_section.remove(&relocation_section).unwrap());
+                }
+            }
+        }
+
         Ok(Elf {
             sections,
             section_index_by_name,
             section_index_map,
             raw_elf: Some(elf),
+            is_64_bit,
         })
     }
 
@@ -294,6 +434,7 @@ where
             data: Cow::Owned(Vec::new()),
             flags: u64::from(object::elf::SHF_ALLOC),
             raw_section_index: None,
+            relocations: Vec::new(),
         });
 
         index
@@ -310,15 +451,7 @@ where
         section.data.to_mut()
     }
 
-    pub fn relocations<'r>(&'r self, section: &Section) -> impl Iterator<Item = (u64, object::read::Relocation)> + 'r {
-        section
-            .raw_section_index
-            .and_then(move |index| self.raw_elf.as_ref().unwrap().section_by_index(index).ok())
-            .into_iter()
-            .flat_map(|raw_section| raw_section.relocations())
-    }
-
     pub fn is_64(&self) -> bool {
-        self.raw_elf.as_ref().map_or(false, |elf| elf.is_64())
+        self.is_64_bit
     }
 }

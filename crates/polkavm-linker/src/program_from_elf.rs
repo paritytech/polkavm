@@ -1604,7 +1604,7 @@ fn check_imports_and_assign_indexes(imports: &mut Vec<Import>, used_imports: &Ha
     Ok(())
 }
 
-fn get_relocation_target<H>(elf: &Elf<H>, relocation: &object::read::Relocation) -> Result<Option<SectionTarget>, ProgramFromElfError>
+fn get_relocation_target<H>(elf: &Elf<H>, relocation: &crate::elf::Relocation) -> Result<Option<SectionTarget>, ProgramFromElfError>
 where
     H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
 {
@@ -7732,7 +7732,7 @@ where
         SubUleb128 { target: SectionTarget },
     }
 
-    if elf.relocations(section).next().is_none() {
+    if section.relocations().next().is_none() {
         return Ok(());
     }
 
@@ -7740,7 +7740,7 @@ where
     log::trace!("Harvesting data relocations from section: {}", section_name);
 
     let mut for_address = BTreeMap::new();
-    for (absolute_address, relocation) in elf.relocations(section) {
+    for (absolute_address, relocation) in section.relocations() {
         let Some(relative_address) = absolute_address.checked_sub(section.original_address()) else {
             return Err(ProgramFromElfError::other("invalid relocation offset"));
         };
@@ -8054,7 +8054,7 @@ where
         reloc_pcrel_lo12: BTreeMap<u64, (&'static str, u64)>,
     }
 
-    if elf.relocations(section).next().is_none() {
+    if section.relocations().next().is_none() {
         return Ok(());
     }
 
@@ -8064,7 +8064,7 @@ where
     log::trace!("Harvesting code relocations from section: {}", section_name);
 
     let section_data = section.data();
-    for (absolute_address, relocation) in elf.relocations(section) {
+    for (absolute_address, relocation) in section.relocations() {
         let Some(relative_address) = absolute_address.checked_sub(section.original_address()) else {
             return Err(ProgramFromElfError::other("invalid relocation offset"));
         };
