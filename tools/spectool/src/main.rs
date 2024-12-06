@@ -118,9 +118,8 @@ fn parse_pre_post(line: &str, output: &mut PrePost) {
         output.pc = Some((label.to_owned(), offset));
     } else {
         let lhs = polkavm_common::utils::parse_reg(lhs).expect("invalid 'pre' / 'post' directive: failed to parse lhs");
-        let rhs = polkavm_common::utils::parse_imm(rhs).expect("invalid 'pre' / 'post' directive: failed to parse rhs");
+        let rhs = polkavm_common::utils::parse_imm64(rhs).expect("invalid 'pre' / 'post' directive: failed to parse rhs");
         let rhs = cast(rhs).to_unsigned();
-        let rhs = cast(rhs).to_u64();
         output.regs[lhs as usize] = Some(rhs);
     }
 }
