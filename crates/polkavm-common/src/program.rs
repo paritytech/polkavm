@@ -1435,7 +1435,7 @@ define_opcodes! {
         [I_64, I_32] load_u16                                 = 54,
         [I_64, I_32] load_i16                                 = 55,
         [I_64, I_32] load_i32                                 = 57,
-        [I_64, I_32] load_u32                                 = 56,
+        [I_64]       load_u32                                 = 56,
         [I_64]       load_u64                                 = 58,
         [I_64, I_32] store_u8                                 = 59,
         [I_64, I_32] store_u16                                = 60,
