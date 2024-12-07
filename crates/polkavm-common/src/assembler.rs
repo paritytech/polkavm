@@ -75,9 +75,11 @@ fn parse_load_imm_and_jump_indirect_with_tmp(line: &str) -> Option<(Reg, Reg, i3
 pub enum LoadKind {
     I8,
     I16,
-    U32,
+    I32,
     U8,
     U16,
+    U32,
+    U64,
 }
 
 #[derive(Copy, Clone)]
@@ -85,6 +87,7 @@ pub enum StoreKind {
     U8,
     U16,
     U32,
+    U64,
 }
 
 #[derive(Copy, Clone)]
@@ -586,10 +589,14 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                     Some((LoadKind::U16, rhs))
                 } else if let Some(rhs) = rhs.strip_prefix("u32") {
                     Some((LoadKind::U32, rhs))
+                } else if let Some(rhs) = rhs.strip_prefix("u64") {
+                    Some((LoadKind::U64, rhs))
                 } else if let Some(rhs) = rhs.strip_prefix("i8") {
                     Some((LoadKind::I8, rhs))
                 } else if let Some(rhs) = rhs.strip_prefix("i16") {
                     Some((LoadKind::I16, rhs))
+                } else if let Some(rhs) = rhs.strip_prefix("i32") {
+                    Some((LoadKind::I32, rhs))
                 } else {
                     None
                 };
@@ -602,9 +609,11 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                         emit_and_continue!(match kind {
                             LoadKind::I8 => Instruction::load_indirect_i8(dst, base, offset),
                             LoadKind::I16 => Instruction::load_indirect_i16(dst, base, offset),
-                            LoadKind::U32 => Instruction::load_indirect_i32(dst, base, offset),
+                            LoadKind::I32 => Instruction::load_indirect_i32(dst, base, offset),
                             LoadKind::U8 => Instruction::load_indirect_u8(dst, base, offset),
                             LoadKind::U16 => Instruction::load_indirect_u16(dst, base, offset),
+                            LoadKind::U32 => Instruction::load_indirect_u32(dst, base, offset),
+                            LoadKind::U64 => Instruction::load_indirect_u64(dst, base, offset),
                         });
                     } else if let Some(offset) = parse_absolute_memory_access(rhs) {
                         let dst = dst.into();
@@ -612,9 +621,11 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                         emit_and_continue!(match kind {
                             LoadKind::I8 => Instruction::load_i8(dst, offset),
                             LoadKind::I16 => Instruction::load_i16(dst, offset),
-                            LoadKind::U32 => Instruction::load_i32(dst, offset),
+                            LoadKind::I32 => Instruction::load_i32(dst, offset),
                             LoadKind::U8 => Instruction::load_u8(dst, offset),
                             LoadKind::U16 => Instruction::load_u16(dst, offset),
+                            LoadKind::U32 => Instruction::load_u32(dst, offset),
+                            LoadKind::U64 => Instruction::load_u64(dst, offset),
                         });
                     }
                 }
@@ -627,6 +638,8 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                 Some((StoreKind::U16, lhs))
             } else if let Some(lhs) = lhs.strip_prefix("u32") {
                 Some((StoreKind::U32, lhs))
+            } else if let Some(lhs) = lhs.strip_prefix("u64") {
+                Some((StoreKind::U64, lhs))
             } else {
                 None
             };
@@ -640,6 +653,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                             StoreKind::U8 => Instruction::store_u8(rhs, offset),
                             StoreKind::U16 => Instruction::store_u16(rhs, offset),
                             StoreKind::U32 => Instruction::store_u32(rhs, offset),
+                            StoreKind::U64 => Instruction::store_u64(rhs, offset),
                         });
                     } else if let Some(rhs) = parse_imm(rhs) {
                         let rhs = rhs as u32;
@@ -653,6 +667,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                 Err(_) => return Err(format!("cannot parse line {nth_line}: immediate larger than u16")),
                             },
                             StoreKind::U32 => Instruction::store_imm_u32(offset, rhs),
+                            StoreKind::U64 => Instruction::store_imm_u64(offset, rhs),
                         });
                     }
                 } else if let Some((base, offset)) = parse_indirect_memory_access(lhs) {
@@ -664,6 +679,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                             StoreKind::U8 => Instruction::store_indirect_u8(rhs, base, offset),
                             StoreKind::U16 => Instruction::store_indirect_u16(rhs, base, offset),
                             StoreKind::U32 => Instruction::store_indirect_u32(rhs, base, offset),
+                            StoreKind::U64 => Instruction::store_indirect_u64(rhs, base, offset),
                         });
                     } else if let Some(rhs) = parse_imm(rhs) {
                         let rhs = rhs as u32;
@@ -677,6 +693,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                 Err(_) => return Err(format!("cannot parse line {nth_line}: immediate larger than u16")),
                             },
                             StoreKind::U32 => Instruction::store_imm_indirect_u32(base, offset, rhs),
+                            StoreKind::U64 => Instruction::store_imm_indirect_u64(base, offset, rhs),
                         });
                     }
                 }
@@ -763,7 +780,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
         };
     }
 
-    let mut builder = crate::writer::ProgramBlobBuilder::new();
+    let mut builder = crate::writer::ProgramBlobBuilder::new_64bit();
     builder.set_ro_data(ro_data);
     builder.set_ro_data_size(ro_data_size);
     builder.set_rw_data(rw_data);
