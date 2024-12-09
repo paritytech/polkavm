@@ -1,9 +1,5 @@
 [build]
-target = "riscv32ema-unknown-none-elf"
+target = "../crates/polkavm-linker/riscv32emac-unknown-none-polkavm.json"
 
-[target.riscv32ema-unknown-none-elf]
-rustflags = [
-    "-C", "relocation-model=pie",
-    "-C", "link-arg=--emit-relocs",
-    "-C", "link-arg=--unique",
-]
+[unstable]
+build-std = ["core", "alloc"]

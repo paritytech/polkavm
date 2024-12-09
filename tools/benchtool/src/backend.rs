@@ -232,13 +232,21 @@ macro_rules! define_backends {
 
 define_backends! {
     #[cfg(not(dummy))] // A dummy cfg since the macro requires it.
-    PolkaVM_Compiler_NoGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, None),
+    PolkaVM_Compiler32_NoGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, None, false),
     #[cfg(not(dummy))]
-    PolkaVM_Compiler_AsyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async)),
+    PolkaVM_Compiler32_AsyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async), false),
     #[cfg(not(dummy))]
-    PolkaVM_Compiler_SyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync)),
+    PolkaVM_Compiler32_SyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), false),
     #[cfg(not(dummy))]
-    PolkaVM_Interpreter => backend_polkavm::PolkaVM(polkavm::BackendKind::Interpreter, None),
+    PolkaVM_Compiler64_NoGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, None, true),
+    #[cfg(not(dummy))]
+    PolkaVM_Compiler64_AsyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async), true),
+    #[cfg(not(dummy))]
+    PolkaVM_Compiler64_SyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), true),
+    #[cfg(not(dummy))]
+    PolkaVM_Interpreter32 => backend_polkavm::PolkaVM(polkavm::BackendKind::Interpreter, None, false),
+    #[cfg(not(dummy))]
+    PolkaVM_Interpreter64 => backend_polkavm::PolkaVM(polkavm::BackendKind::Interpreter, None, true),
 
     #[cfg(all(feature = "wasmtime", any(target_arch = "x86_64", target_arch = "aarch64")))]
     Wasmtime_Cranelift =>
@@ -294,16 +302,27 @@ impl BenchmarkKind {
     pub fn matching_backends(self) -> Vec<BackendKind> {
         let mut output = Vec::new();
         match self {
-            BenchmarkKind::PolkaVM => {
+            BenchmarkKind::PolkaVM32 => {
                 if polkavm::BackendKind::Compiler.is_supported() {
                     output.extend([
-                        BackendKind::PolkaVM_Compiler_NoGas,
-                        BackendKind::PolkaVM_Compiler_AsyncGas,
-                        BackendKind::PolkaVM_Compiler_SyncGas,
+                        BackendKind::PolkaVM_Compiler32_NoGas,
+                        BackendKind::PolkaVM_Compiler32_AsyncGas,
+                        BackendKind::PolkaVM_Compiler32_SyncGas,
                     ]);
                 }
 
-                output.push(BackendKind::PolkaVM_Interpreter);
+                output.push(BackendKind::PolkaVM_Interpreter32);
+            }
+            BenchmarkKind::PolkaVM64 => {
+                if polkavm::BackendKind::Compiler.is_supported() {
+                    output.extend([
+                        BackendKind::PolkaVM_Compiler64_NoGas,
+                        BackendKind::PolkaVM_Compiler64_AsyncGas,
+                        BackendKind::PolkaVM_Compiler64_SyncGas,
+                    ]);
+                }
+
+                output.push(BackendKind::PolkaVM_Interpreter64);
             }
             BenchmarkKind::WebAssembly => {
                 #[cfg(feature = "wasmi")]

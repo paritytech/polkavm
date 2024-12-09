@@ -27,14 +27,14 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 #[cfg(not(any(target_os = "solana", target_ckb_vm)))]
-#[polkavm_derive::polkavm_export]
+#[cfg_attr(target_env = "polkavm", polkavm_derive::polkavm_export)]
 #[no_mangle]
 pub extern "C" fn initialize() {
     benchmark_initialize(unsafe { &mut STATE });
 }
 
 #[cfg(not(any(target_os = "solana", target_ckb_vm)))]
-#[polkavm_derive::polkavm_export]
+#[cfg_attr(target_env = "polkavm", polkavm_derive::polkavm_export)]
 #[no_mangle]
 pub extern "C" fn run() {
     benchmark_run(unsafe { &mut STATE });
@@ -74,8 +74,8 @@ macro_rules! define_benchmark {
 #[no_mangle]
 extern "C" fn sol_memcpy_(dst: *mut u8, src: *const u8, n: usize) {
     unsafe {
-        for _ in 0..n {
-            *dst.add(n) = *src.add(n);
+        for offset in 0..n {
+            *dst.add(offset) = *src.add(offset);
         }
     }
 }
@@ -84,8 +84,8 @@ extern "C" fn sol_memcpy_(dst: *mut u8, src: *const u8, n: usize) {
 #[no_mangle]
 extern "C" fn sol_memset_(dst: *mut u8, value: u8, n: usize) {
     unsafe {
-        for _ in 0..n {
-            *dst.add(n) = value;
+        for offset in 0..n {
+            *dst.add(offset) = value;
         }
     }
 }

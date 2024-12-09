@@ -13,8 +13,13 @@ env_logger = { workspace = true }
 iced-x86 = { workspace = true, features = ["code_asm"] }
 polkavm = { workspace = true }
 polkavm-common = { workspace = true }
-polkavm-linker = { workspace = true }
 polkavm-disassembler = { workspace = true }
+polkavm-linker = { workspace = true }
+tikv-jemallocator = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+[features]
+default = []
+jemalloc = ["dep:tikv-jemallocator"]

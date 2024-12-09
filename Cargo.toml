@@ -22,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.13.0"
+version = "0.18.0"
 authors = ["Jan Bujak <jan@parity.io>", "Parity Technologies <admin@parity.io>"]
 license = "MIT/Apache-2.0"
 edition = "2021"
@@ -30,21 +30,21 @@ rust-version = "1.75.0"
 repository = "https://github.com/koute/polkavm"
 
 [workspace.dependencies]
-polkavm                   = { version = "0.13.0", path = "crates/polkavm" }
-polkavm-assembler         = { version = "0.13.0", path = "crates/polkavm-assembler" }
-polkavm-disassembler      = { version = "0.13.0", path = "crates/polkavm-disassembler" }
-polkavm-common            = { version = "0.13.0", path = "crates/polkavm-common" }
-polkavm-derive            = { version = "0.13.0", path = "crates/polkavm-derive" }
-polkavm-derive-impl       = { version = "0.13.0", path = "crates/polkavm-derive-impl" }
-polkavm-derive-impl-macro = { version = "0.13.0", path = "crates/polkavm-derive-impl-macro" }
-polkavm-linker            = { version = "0.13.0", path = "crates/polkavm-linker" }
-polkavm-linux-raw         = { version = "0.13.0", path = "crates/polkavm-linux-raw" }
+polkavm                   = { version = "0.18.0", path = "crates/polkavm" }
+polkavm-assembler         = { version = "0.18.0", path = "crates/polkavm-assembler" }
+polkavm-disassembler      = { version = "0.18.0", path = "crates/polkavm-disassembler" }
+polkavm-common            = { version = "0.18.0", path = "crates/polkavm-common" }
+polkavm-derive            = { version = "0.18.0", path = "crates/polkavm-derive" }
+polkavm-derive-impl       = { version = "0.18.0", path = "crates/polkavm-derive-impl" }
+polkavm-derive-impl-macro = { version = "0.18.0", path = "crates/polkavm-derive-impl-macro" }
+polkavm-linker            = { version = "0.18.0", path = "crates/polkavm-linker" }
+polkavm-linux-raw         = { version = "0.18.0", path = "crates/polkavm-linux-raw" }
 
 blake3 = { version = "1.5.4", default-features = false }
 clap = "4.4.6"
 diff = "0.1.13"
 env_logger = { version = "0.10.0", default-features = false }
-gimli = { version = "0.28.0", default-features = false }
+gimli = { version = "0.31.1", default-features = false }
 hashbrown = { version = "0.14.1", default-features = false }
 iced-x86 = "1.20.0"
 image = { version = "0.24.7", default-features = false }
@@ -61,6 +61,7 @@ schnellru = { version = "0.2.3" }
 serde = { version = "1.0.203", features = ["derive"] }
 serde_json = { version = "1.0.117" }
 syn = "2.0.25"
+tikv-jemallocator = "0.6.0"
 yansi = "0.5.1"
 
 [workspace.lints.rust]

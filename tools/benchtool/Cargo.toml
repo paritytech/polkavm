@@ -11,7 +11,7 @@ libc = { version = "0.2.149" }
 libloading = { version = "0.8.1", optional = true }
 log = { version = "0.4.20" }
 object = { version = "0.32.1", default-features = false, features = ["std", "elf"], optional = true }
-wasmi = { version = "0.32.2", features = ["no-hash-maps"], optional = true }
+wasmi = { version = "0.39.1", optional = true }
 polkavm = { path = "../../crates/polkavm" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
@@ -23,8 +23,11 @@ wasm3 = { git = "https://github.com/wasm3/wasm3-rs.git", rev = "df74c2a17ed88315
 solana_rbpf = { version = "0.8.1", optional = true }
 
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
-wasmer = { version = "4.3.2", default-features = false, features = ["std", "singlepass"], optional = true }
-wasmtime = { version = "21.0.1", default-features = false, features = ["cranelift", "winch", "runtime"], optional = true }
+wasmer = { version = "5.0.0", default-features = false, features = ["std", "singlepass"], optional = true }
+wasmtime = { version = "26.0.1", default-features = false, features = ["cranelift", "winch", "runtime"], optional = true }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(dummy)'] }
 
 [features]
 default = [

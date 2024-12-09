@@ -107,7 +107,7 @@ pub const fn mulhu(lhs: u32, rhs: u32) -> u32 {
 
 #[inline]
 pub const fn mulhu64(lhs: u64, rhs: u64) -> u64 {
-    ((lhs as i128).wrapping_mul(rhs as i128) >> 32) as u64
+    ((lhs as i128).wrapping_mul(rhs as i128) >> 64) as u64
 }
 
 #[test]

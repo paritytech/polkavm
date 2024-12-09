@@ -71,6 +71,7 @@ define_address_table! {
     ext_load_program: unsafe extern "C" fn() -> !,
     ext_recycle: unsafe extern "C" fn() -> !,
     ext_fetch_idle_regs: unsafe extern "C" fn() -> !,
+    ext_set_accessible_aux_size: unsafe extern "C" fn() -> !,
 }
 
 pub const FD_DUMMY_STDIN: i32 = 0;
@@ -121,7 +122,7 @@ pub const VM_SHARED_MEMORY_SIZE: u64 = u32::MAX as u64;
 ///
 /// This does *not* affect the VM ABI and can be changed at will,
 /// but should be high enough that it's never hit.
-pub const VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH: u32 = 53;
+pub const VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH: u32 = 67;
 
 /// The maximum number of bytes the jump table can be.
 pub const VM_SANDBOX_MAXIMUM_JUMP_TABLE_SIZE: u64 = (crate::abi::VM_MAXIMUM_JUMP_TABLE_ENTRIES as u64 + 1)
@@ -133,7 +134,7 @@ pub const VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE: u64 = 0x100000000 * core::
 
 // TODO: Make this smaller.
 /// The maximum number of bytes the native code can be.
-pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = 2048 * 1024 * 1024 - 1;
+pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = 2176 * 1024 * 1024 - 1;
 
 #[repr(C)]
 pub struct JmpBuf {
@@ -253,7 +254,7 @@ pub struct VmCtx {
     pub arg: AtomicU32,
 
     /// A dump of all of the registers of the VM.
-    pub regs: [AtomicU32; REG_COUNT],
+    pub regs: [AtomicU64; REG_COUNT],
 
     /// The address of the native code to call inside of the VM process, if non-zero.
     pub next_native_program_counter: AtomicU64,
@@ -262,6 +263,7 @@ pub struct VmCtx {
     pub heap_info: VmCtxHeapInfo,
 
     pub arg2: AtomicU32,
+    pub arg3: AtomicU32,
 
     /// Offset in shared memory to this sandbox's memory map.
     pub shm_memory_map_offset: AtomicU64,
@@ -328,7 +330,7 @@ pub const VMCTX_FUTEX_GUEST_SIGNAL: u32 = VMCTX_FUTEX_IDLE | (3 << 1);
 pub const VMCTX_FUTEX_GUEST_STEP: u32 = VMCTX_FUTEX_IDLE | (4 << 1);
 
 #[allow(clippy::declare_interior_mutable_const)]
-const ATOMIC_U32_ZERO: AtomicU32 = AtomicU32::new(0);
+const ATOMIC_U64_ZERO: AtomicU64 = AtomicU64::new(0);
 
 #[allow(clippy::new_without_default)]
 impl VmCtx {
@@ -343,7 +345,8 @@ impl VmCtx {
             next_program_counter: AtomicU32::new(0),
             arg: AtomicU32::new(0),
             arg2: AtomicU32::new(0),
-            regs: [ATOMIC_U32_ZERO; REG_COUNT],
+            arg3: AtomicU32::new(0),
+            regs: [ATOMIC_U64_ZERO; REG_COUNT],
             jump_into: AtomicU64::new(0),
             next_native_program_counter: AtomicU64::new(0),
 

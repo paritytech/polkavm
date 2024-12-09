@@ -49,12 +49,12 @@ impl Backend for Wasmi {
     fn name(&self) -> &'static str {
         use wasmi::CompilationMode;
         match (self.0.compilation_mode(), self.0.validation()) {
-            (CompilationMode::Eager, Validation::Checked) => "wasmi.eager.checked",
-            (CompilationMode::Eager, Validation::Unchecked) => "wasmi.eager.unchecked",
-            (CompilationMode::Lazy, Validation::Checked) => "wasmi.lazy.checked",
-            (CompilationMode::Lazy, Validation::Unchecked) => "wasmi.lazy.unchecked",
-            (CompilationMode::LazyTranslation, Validation::Checked) => "wasmi.lazy-translation.checked",
-            (CompilationMode::LazyTranslation, Validation::Unchecked) => "wasmi.lazy-translation.unchecked",
+            (CompilationMode::Eager, Validation::Checked) => "wasmi_eager_checked",
+            (CompilationMode::Eager, Validation::Unchecked) => "wasmi_eager_unchecked",
+            (CompilationMode::Lazy, Validation::Checked) => "wasmi_lazy_checked",
+            (CompilationMode::Lazy, Validation::Unchecked) => "wasmi_lazy_unchecked",
+            (CompilationMode::LazyTranslation, Validation::Checked) => "wasmi_lazy_translation_checked",
+            (CompilationMode::LazyTranslation, Validation::Unchecked) => "wasmi_lazy_translation_unchecked",
         }
     }
 

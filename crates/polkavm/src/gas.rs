@@ -61,27 +61,17 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
-    fn set_less_than_unsigned_64(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+    fn shift_logical_right_32(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn set_less_than_signed_64(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+    fn shift_arithmetic_right_32(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn shift_logical_right(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
-        self.cost += 1;
-    }
-
-    #[inline(always)]
-    fn shift_arithmetic_right(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
-        self.cost += 1;
-    }
-
-    #[inline(always)]
-    fn shift_logical_left(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+    fn shift_logical_left_32(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
@@ -115,22 +105,7 @@ impl InstructionVisitor for GasVisitor {
         self.cost += 1;
     }
     #[inline(always)]
-    fn add(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
-        self.cost += 1;
-    }
-
-    #[inline(always)]
-    fn xor_64(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
-        self.cost += 1;
-    }
-
-    #[inline(always)]
-    fn and_64(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
-        self.cost += 1;
-    }
-
-    #[inline(always)]
-    fn or_64(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+    fn add_32(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
@@ -140,7 +115,7 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
-    fn sub(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+    fn sub_32(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
@@ -150,7 +125,7 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
-    fn mul(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+    fn mul_32(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
@@ -174,43 +149,23 @@ impl InstructionVisitor for GasVisitor {
         self.cost += 1;
     }
 
-    fn mul_upper_signed_signed_imm_64(&mut self, _: RawReg, _: RawReg, _: u32) -> <Self as InstructionVisitor>::ReturnTy {
-        self.cost += 1;
-    }
-
-    fn mul_upper_unsigned_unsigned_imm_64(&mut self, _: RawReg, _: RawReg, _: u32) -> <Self as InstructionVisitor>::ReturnTy {
-        self.cost += 1;
-    }
-
-    fn mul_upper_signed_signed_64(&mut self, _: RawReg, _: RawReg, _: RawReg) -> <Self as InstructionVisitor>::ReturnTy {
-        self.cost += 1;
-    }
-
-    fn mul_upper_unsigned_unsigned_64(&mut self, _: RawReg, _: RawReg, _: RawReg) -> <Self as InstructionVisitor>::ReturnTy {
-        self.cost += 1;
-    }
-
-    fn mul_upper_signed_unsigned_64(&mut self, _: RawReg, _: RawReg, _: RawReg) -> <Self as InstructionVisitor>::ReturnTy {
+    #[inline(always)]
+    fn div_unsigned_32(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn div_unsigned(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+    fn div_signed_32(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn div_signed(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+    fn rem_unsigned_32(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn rem_unsigned(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
-        self.cost += 1;
-    }
-
-    #[inline(always)]
-    fn rem_signed(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+    fn rem_signed_32(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
@@ -235,22 +190,67 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
-    fn mul_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
+    fn and_inverted(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn mul_64_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
+    fn or_inverted(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn mul_upper_signed_signed_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
+    fn xnor(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn mul_upper_unsigned_unsigned_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
+    fn maximum(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn maximum_unsigned(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn minimum(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn minimum_unsigned(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn rotate_left_32(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn rotate_left_64(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn rotate_right_32(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn rotate_right_64(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn mul_imm_32(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn mul_imm_64(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
@@ -260,17 +260,7 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
-    fn set_less_than_unsigned_64_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
-        self.cost += 1;
-    }
-
-    #[inline(always)]
     fn set_less_than_signed_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
-        self.cost += 1;
-    }
-
-    #[inline(always)]
-    fn set_less_than_signed_64_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
@@ -280,77 +270,67 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
-    fn set_greater_than_unsigned_64_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
-        self.cost += 1;
-    }
-
-    #[inline(always)]
     fn set_greater_than_signed_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn set_greater_than_signed_64_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_32(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn shift_logical_right_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_32(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_32(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn shift_logical_left_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_alt_32(&mut self, _d: RawReg, _s2: RawReg, _s1: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn shift_logical_right_imm_alt(&mut self, _d: RawReg, _s2: RawReg, _s1: u32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_alt_32(&mut self, _d: RawReg, _s2: RawReg, _s1: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_imm_alt(&mut self, _d: RawReg, _s2: RawReg, _s1: u32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_alt_32(&mut self, _d: RawReg, _s2: RawReg, _s1: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn shift_logical_left_imm_alt(&mut self, _d: RawReg, _s2: RawReg, _s1: u32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_64(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn shift_logical_right_64_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_64(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_64_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_64(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn shift_logical_left_64_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_alt_64(&mut self, _d: RawReg, _s2: RawReg, _s1: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn shift_logical_right_64_imm_alt(&mut self, _d: RawReg, _s2: RawReg, _s1: u32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_alt_64(&mut self, _d: RawReg, _s2: RawReg, _s1: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_64_imm_alt(&mut self, _d: RawReg, _s2: RawReg, _s1: u32) -> Self::ReturnTy {
-        self.cost += 1;
-    }
-
-    #[inline(always)]
-    fn shift_logical_left_64_imm_alt(&mut self, _d: RawReg, _s2: RawReg, _s1: u32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_alt_64(&mut self, _d: RawReg, _s2: RawReg, _s1: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
@@ -370,22 +350,62 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
-    fn or_64_imm(&mut self, _d: RawReg, _s: RawReg, _imm: u32) -> Self::ReturnTy {
-        self.cost += 1;
-    }
-
-    #[inline(always)]
-    fn and_64_imm(&mut self, _d: RawReg, _s: RawReg, _imm: u32) -> Self::ReturnTy {
-        self.cost += 1;
-    }
-
-    #[inline(always)]
-    fn xor_64_imm(&mut self, _d: RawReg, _s: RawReg, _imm: u32) -> Self::ReturnTy {
-        self.cost += 1;
-    }
-
-    #[inline(always)]
     fn move_reg(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn count_leading_zero_bits_32(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn count_leading_zero_bits_64(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn count_trailing_zero_bits_32(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn count_trailing_zero_bits_64(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn count_set_bits_32(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn count_set_bits_64(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn sign_extend_8(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn sign_extend_16(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn zero_extend_16(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn or_combine_byte(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn reverse_byte(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }
 
@@ -410,17 +430,42 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
-    fn add_imm(&mut self, _d: RawReg, _s: RawReg, _imm: u32) -> Self::ReturnTy {
+    fn rotate_right_32_imm(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn add_64_imm(&mut self, _d: RawReg, _s: RawReg, _imm: u32) -> Self::ReturnTy {
+    fn rotate_right_32_imm_alt(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn negate_and_add_imm(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
+    fn rotate_right_64_imm(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn rotate_right_64_imm_alt(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn add_imm_32(&mut self, _d: RawReg, _s: RawReg, _imm: u32) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn add_imm_64(&mut self, _d: RawReg, _s: RawReg, _imm: u32) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn negate_and_add_imm_32(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn negate_and_add_imm_64(&mut self, _d: RawReg, _s1: RawReg, _s2: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
@@ -672,6 +717,11 @@ impl InstructionVisitor for GasVisitor {
 
     #[inline(always)]
     fn load_imm(&mut self, _dst: RawReg, _value: u32) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
+    fn load_imm64(&mut self, _dst: RawReg, _value: u64) -> Self::ReturnTy {
         self.cost += 1;
     }
 

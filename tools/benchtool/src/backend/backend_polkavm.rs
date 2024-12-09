@@ -1,7 +1,7 @@
 use super::backend_prelude::*;
 
 #[derive(Copy, Clone)]
-pub struct PolkaVM(pub polkavm::BackendKind, pub Option<polkavm::GasMeteringKind>);
+pub struct PolkaVM(pub polkavm::BackendKind, pub Option<polkavm::GasMeteringKind>, pub bool);
 
 pub struct Instance {
     ext_initialize: polkavm::ProgramCounter,
@@ -16,11 +16,15 @@ impl Backend for PolkaVM {
     type Instance = Instance;
 
     fn name(&self) -> &'static str {
-        match (self.0, self.1) {
-            (polkavm::BackendKind::Compiler, None) => "polkavm_compiler_no_gas",
-            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async)) => "polkavm_compiler_async_gas",
-            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync)) => "polkavm_compiler_sync_gas",
-            (polkavm::BackendKind::Interpreter, _) => "polkavm_interpreter",
+        match (self.0, self.1, self.2) {
+            (polkavm::BackendKind::Compiler, None, false) => "polkavm32_compiler_no_gas",
+            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async), false) => "polkavm32_compiler_async_gas",
+            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), false) => "polkavm32_compiler_sync_gas",
+            (polkavm::BackendKind::Interpreter, _, false) => "polkavm32_interpreter",
+            (polkavm::BackendKind::Compiler, None, true) => "polkavm64_compiler_no_gas",
+            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async), true) => "polkavm64_compiler_async_gas",
+            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), true) => "polkavm64_compiler_sync_gas",
+            (polkavm::BackendKind::Interpreter, _, true) => "polkavm64_interpreter",
         }
     }
 
@@ -39,6 +43,8 @@ impl Backend for PolkaVM {
 
     fn compile(&self, engine: &mut Self::Engine, blob: &Self::Blob) -> Self::Module {
         let blob = polkavm::ProgramBlob::parse(blob.clone()).unwrap();
+        assert_eq!(blob.is_64_bit(), self.2);
+
         let mut config = polkavm::ModuleConfig::default();
         config.set_gas_metering(self.1);
         polkavm::Module::from_blob(engine, &config, blob).unwrap()
@@ -62,17 +68,11 @@ impl Backend for PolkaVM {
             instance.instance.set_gas(polkavm::Gas::MAX);
         }
 
-        instance
-            .instance
-            .call_typed(&mut (), instance.ext_initialize, ())
-            .unwrap();
+        instance.instance.call_typed(&mut (), instance.ext_initialize, ()).unwrap();
     }
 
     fn run(&self, instance: &mut Self::Instance) {
-        instance
-            .instance
-            .call_typed(&mut (), instance.ext_run, ())
-            .unwrap();
+        instance.instance.call_typed(&mut (), instance.ext_run, ()).unwrap();
     }
 
     fn pid(&self, instance: &Self::Instance) -> Option<u32> {

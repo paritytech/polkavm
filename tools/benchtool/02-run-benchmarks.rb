@@ -1,6 +1,7 @@
 #!/usr/bin/ruby
 
 require "shellwords"
+require "fileutils"
 
 $errors_are_fatal = true
 
@@ -42,16 +43,23 @@ BENCHMARK_VMS = [
     "ckbvm_asm",
     "ckbvm_non_asm",
     "native",
-    "polkavm_compiler_no_gas",
-    "polkavm_compiler_async_gas",
-    "polkavm_compiler_sync_gas",
-    "polkavm_interpreter",
+    "polkavm32_compiler_no_gas",
+    "polkavm32_compiler_async_gas",
+    "polkavm32_compiler_sync_gas",
+    "polkavm32_interpreter",
+    "polkavm64_compiler_no_gas",
+    "polkavm64_compiler_async_gas",
+    "polkavm64_compiler_sync_gas",
+    "polkavm64_interpreter",
     "solana_rbpf",
     "wasm3",
     "wasmer",
-    "wasmi_eager",
-    "wasmi_lazy",
-    "wasmi_lazy_translation",
+    "wasmi_eager_checked",
+    "wasmi_eager_unchecked",
+    "wasmi_lazy_checked",
+    "wasmi_lazy_unchecked",
+    "wasmi_lazy_translation_checked",
+    "wasmi_lazy_translation_unchecked",
     "wasmtime_cranelift_default",
     "wasmtime_cranelift_with_fuel",
     "wasmtime_cranelift_with_epoch",
@@ -70,8 +78,9 @@ end
 system "cargo build --release --features ckb-vm"
 raise "failed to build benchtool" unless $?.exitstatus == 0
 
+FileUtils.mkdir_p "target/criterion"
+
 original_governor = File.read("/sys/devices/system/cpu/cpu1/cpufreq/scaling_governor").strip
-original_numa_writeback = File.read("/sys/bus/workqueue/devices/writeback/numa").strip
 original_sched_rt = File.read("/proc/sys/kernel/sched_rt_runtime_us").strip
 original_watchdog = File.read("/proc/sys/kernel/watchdog").strip
 original_stat_interval = File.read("/proc/sys/vm/stat_interval").strip
@@ -84,7 +93,6 @@ begin
     raise "ERROR: failed to disable turbo boost" if $?.exitstatus != 0
 
     STDERR.puts "Applying misc. tweaks..."
-    sudo_write "0", "/sys/bus/workqueue/devices/writeback/numa"
     sudo_write "-1", "/proc/sys/kernel/sched_rt_runtime_us"
     sudo_write "0", "/proc/sys/kernel/watchdog"
     sudo_write "1000", "/proc/sys/vm/stat_interval"
@@ -125,7 +133,7 @@ begin
             BENCHMARK_PROGRAMS.each do |program|
                 BENCHMARK_VMS.each do |vm|
                     next if File.exist? "target/criterion/#{kind}_#{program}/#{vm}/new/estimates.json"
-                    system "../../target/release/benchtool criterion #{kind}/#{program}/#{vm}"
+                    system "target/release/benchtool criterion #{kind}/#{program}/#{vm}"
                 end
             end
         end
@@ -159,7 +167,6 @@ begin
         sudo_write "ffffffff,ffffffff,ffffffff,ffffffff", "/sys/devices/virtual/workqueue/cpumask"
         sudo_write "ffffffff,ffffffff,ffffffff,ffffffff", "/sys/bus/workqueue/devices/writeback/cpumask"
         sudo_write "ffffffff,ffffffff,ffffffff,ffffffff", "/proc/irq/default_smp_affinity"
-        sudo_write original_numa_writeback, "/sys/bus/workqueue/devices/writeback/numa"
         sudo_write original_sched_rt, "/proc/sys/kernel/sched_rt_runtime_us"
         sudo_write original_watchdog, "/proc/sys/kernel/watchdog"
         sudo_write original_stat_interval, "/proc/sys/vm/stat_interval"

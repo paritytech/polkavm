@@ -3,6 +3,8 @@
 #![forbid(clippy::missing_safety_doc)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 #![deny(clippy::exhaustive_structs)]
+// TODO: Uncomment this once we get rid of all of the `as` casts:
+// #![deny(clippy::as_conversions)]
 
 #[cfg(all(
     not(miri),
@@ -142,7 +144,7 @@ pub use crate::error::Error;
 pub use crate::linker::{CallError, Caller, Instance, InstancePre, Linker};
 pub use crate::utils::{InterruptKind, Segfault};
 
-pub const RETURN_TO_HOST: u32 = polkavm_common::abi::VM_ADDR_RETURN_TO_HOST;
+pub const RETURN_TO_HOST: u64 = polkavm_common::abi::VM_ADDR_RETURN_TO_HOST as u64;
 
 #[cfg(test)]
 mod tests;

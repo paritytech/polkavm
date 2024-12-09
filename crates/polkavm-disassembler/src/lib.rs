@@ -311,6 +311,7 @@ impl<'a> Disassembler<'a> {
         let mut disassembly_format = polkavm_common::program::InstructionFormat::default();
         disassembly_format.prefer_non_abi_reg_names = self.prefer_non_abi_reg_names;
         disassembly_format.prefer_unaliased = self.prefer_unaliased;
+        disassembly_format.is_64_bit = self.blob.is_64_bit();
 
         let jump_target_formatter = |target: u32, fmt: &mut core::fmt::Formatter| {
             if prefer_offset_jump_targets {
@@ -522,9 +523,9 @@ mod tests {
         builder.set_code(
             &[
                 asm::store_imm_u32(memory_map.rw_data_address(), 0x12345678),
-                asm::add(S0, A0, A1),
+                asm::add_32(S0, A0, A1),
                 asm::ecalli(0),
-                asm::add(A0, A0, S0),
+                asm::add_32(A0, A0, S0),
                 asm::ret(),
             ],
             &[],

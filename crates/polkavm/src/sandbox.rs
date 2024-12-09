@@ -115,13 +115,16 @@ pub(crate) trait Sandbox: Sized {
 
     fn run(&mut self) -> Result<InterruptKind, Self::Error>;
     fn reg(&self, reg: Reg) -> RegValue;
-    fn set_reg(&mut self, reg: Reg, value: u32);
+    fn set_reg(&mut self, reg: Reg, value: RegValue);
     fn gas(&self) -> Gas;
     fn set_gas(&mut self, gas: Gas);
     fn program_counter(&self) -> Option<ProgramCounter>;
     fn next_program_counter(&self) -> Option<ProgramCounter>;
     fn next_native_program_counter(&self) -> Option<usize>;
     fn set_next_program_counter(&mut self, pc: ProgramCounter);
+    fn accessible_aux_size(&self) -> u32;
+    fn set_accessible_aux_size(&mut self, size: u32) -> Result<(), Self::Error>;
+    fn is_memory_accessible(&self, address: u32, size: u32, is_writable: bool) -> bool;
     fn reset_memory(&mut self) -> Result<(), Self::Error>;
     fn read_memory_into<'slice>(&self, address: u32, slice: &'slice mut [MaybeUninit<u8>]) -> Result<&'slice mut [u8], MemoryAccessError>;
     fn write_memory(&mut self, address: u32, data: &[u8]) -> Result<(), MemoryAccessError>;

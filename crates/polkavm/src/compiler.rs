@@ -65,9 +65,30 @@ struct Cache {
 #[derive(Clone, Default)]
 pub(crate) struct CompilerCache(Arc<Mutex<Cache>>);
 
-pub(crate) struct CompilerVisitor<'a, S>
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum Bitness {
+    B32,
+    B64,
+}
+
+pub(crate) trait CompilerBitness {
+    const BITNESS: Bitness;
+}
+
+pub(crate) struct B64;
+pub(crate) struct B32;
+
+impl CompilerBitness for B32 {
+    const BITNESS: Bitness = Bitness::B32;
+}
+impl CompilerBitness for B64 {
+    const BITNESS: Bitness = Bitness::B64;
+}
+
+pub(crate) struct CompilerVisitor<'a, S, B>
 where
     S: Sandbox,
+    B: CompilerBitness,
 {
     init: GuestInit<'a>,
     jump_table: JumpTable<'a>,
@@ -91,38 +112,43 @@ where
     step_label: Label,
     trap_label: Label,
     invalid_jump_label: Label,
+    or_combine_label: Label,
     instruction_set: RuntimeInstructionSet,
 
-    _phantom: PhantomData<S>,
+    _phantom: PhantomData<(S, B)>,
 }
 
 #[repr(transparent)]
-pub(crate) struct ArchVisitor<'r, 'a, S>(pub &'r mut CompilerVisitor<'a, S>)
-where
-    S: Sandbox;
-
-impl<'r, 'a, S> core::ops::Deref for ArchVisitor<'r, 'a, S>
+pub(crate) struct ArchVisitor<'r, 'a, S, B>(pub &'r mut CompilerVisitor<'a, S, B>)
 where
     S: Sandbox,
+    B: CompilerBitness;
+
+impl<'r, 'a, S, B> core::ops::Deref for ArchVisitor<'r, 'a, S, B>
+where
+    S: Sandbox,
+    B: CompilerBitness,
 {
-    type Target = CompilerVisitor<'a, S>;
+    type Target = CompilerVisitor<'a, S, B>;
     fn deref(&self) -> &Self::Target {
         self.0
     }
 }
 
-impl<'r, 'a, S> core::ops::DerefMut for ArchVisitor<'r, 'a, S>
+impl<'r, 'a, S, B> core::ops::DerefMut for ArchVisitor<'r, 'a, S, B>
 where
     S: Sandbox,
+    B: CompilerBitness,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0
     }
 }
 
-impl<'a, S> CompilerVisitor<'a, S>
+impl<'a, S, B> CompilerVisitor<'a, S, B>
 where
     S: Sandbox,
+    B: CompilerBitness,
 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -193,6 +219,7 @@ where
         let step_label = asm.forward_declare_label();
         let jump_table_label = asm.forward_declare_label();
         let sbrk_label = asm.forward_declare_label();
+        let or_combine_label = asm.forward_declare_label();
 
         polkavm_common::static_assert!(polkavm_common::zygote::VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE < u32::MAX);
 
@@ -219,6 +246,7 @@ where
             step_label,
             jump_table_label,
             sbrk_label,
+            or_combine_label,
             gas_metering: config.gas_metering,
             step_tracing,
             program_counter_to_machine_code_offset_list,
@@ -233,6 +261,7 @@ where
         ArchVisitor(&mut visitor).emit_trap_trampoline();
         ArchVisitor(&mut visitor).emit_ecall_trampoline();
         ArchVisitor(&mut visitor).emit_sbrk_trampoline();
+        ArchVisitor(&mut visitor).emit_or_combine_trampoline();
 
         if step_tracing {
             ArchVisitor(&mut visitor).emit_step_trampoline();
@@ -333,7 +362,7 @@ where
             SandboxKind::Generic => {
                 let native_page_size = crate::sandbox::get_native_page_size();
                 let padded_length = polkavm_common::utils::align_to_next_page_usize(native_page_size, self.asm.len()).unwrap();
-                self.asm.resize(padded_length, ArchVisitor::<S>::PADDING_BYTE);
+                self.asm.resize(padded_length, ArchVisitor::<S, B>::PADDING_BYTE);
                 self.asm.define_label(self.jump_table_label);
             }
         }
@@ -355,6 +384,7 @@ where
                 program_counter_to_machine_code_offset_map: self.program_counter_to_machine_code_offset_map,
                 cache: cache.clone(),
                 invalid_code_offset_address,
+                bitness: B::BITNESS,
             }
         };
 
@@ -511,140 +541,88 @@ where
     }
 }
 
-impl<'a, S> polkavm_common::program::ParsingVisitor for CompilerVisitor<'a, S>
+impl<'a, S, B> polkavm_common::program::ParsingVisitor for CompilerVisitor<'a, S, B>
 where
     S: Sandbox,
+    B: CompilerBitness,
 {
     type ReturnTy = ();
 
-    fn load_i32(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
+    fn and_inverted(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.and_inverted(d, s1, s2);
+        ArchVisitor(self).and_inverted(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
-    fn load_u64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
+
+    fn or_inverted(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.or_inverted(d, s1, s2);
+        ArchVisitor(self).or_inverted(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
-    fn store_u64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
+
+    fn xnor(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.xnor(d, s1, s2);
+        ArchVisitor(self).xnor(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
-    fn store_imm_indirect_u64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: u32, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
+
+    fn maximum(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.maximum(d, s1, s2);
+        ArchVisitor(self).maximum(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
-    fn store_indirect_u64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
+
+    fn maximum_unsigned(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.maximum_unsigned(d, s1, s2);
+        ArchVisitor(self).maximum_unsigned(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
-    fn load_indirect_i32(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
+
+    fn minimum(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.minimum(d, s1, s2);
+        ArchVisitor(self).minimum(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
-    fn load_indirect_u64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
+
+    fn minimum_unsigned(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.minimum_unsigned(d, s1, s2);
+        ArchVisitor(self).minimum_unsigned(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
-    fn add_64_imm(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
+
+    fn rotate_left_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.rotate_left_32(d, s1, s2);
+        ArchVisitor(self).rotate_left_32(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
-    fn and_64_imm(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
+
+    fn rotate_left_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.rotate_left_64(d, s1, s2);
+        ArchVisitor(self).rotate_left_64(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
-    fn xor_64_imm(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
+
+    fn rotate_right_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.rotate_right_32(d, s1, s2);
+        ArchVisitor(self).rotate_right_32(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
-    fn or_64_imm(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn mul_64_imm(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn mul_upper_signed_signed_imm_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn mul_upper_unsigned_unsigned_imm_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn set_less_than_unsigned_64_imm(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn set_less_than_signed_64_imm(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn shift_logical_left_64_imm(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn shift_logical_right_64_imm(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn shift_arithmetic_right_64_imm(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn set_greater_than_unsigned_64_imm(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn set_greater_than_signed_64_imm(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn shift_logical_right_64_imm_alt(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn shift_arithmetic_right_64_imm_alt(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn shift_logical_left_64_imm_alt(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn add_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn sub_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn and_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn xor_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn or_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn mul_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn mul_upper_signed_signed_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn mul_upper_unsigned_unsigned_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn mul_upper_signed_unsigned_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn set_less_than_unsigned_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn set_less_than_signed_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn shift_logical_left_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn shift_logical_right_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn shift_arithmetic_right_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn div_unsigned_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn div_signed_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn rem_unsigned_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn rem_signed_64(&mut self, code_offset: u32, args_length: u32, _: RawReg, _: RawReg, _: RawReg) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
-    }
-    fn store_imm_u64(&mut self, code_offset: u32, args_length: u32, _: u32, _: u32) -> Self::ReturnTy {
-        self.trap(code_offset, args_length)
+
+    fn rotate_right_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.rotate_right_64(d, s1, s2);
+        ArchVisitor(self).rotate_right_64(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
@@ -704,26 +682,53 @@ where
     }
 
     #[inline(always)]
-    fn shift_logical_right(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn shift_logical_right_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.shift_logical_right(d, s1, s2);
-        ArchVisitor(self).shift_logical_right(d, s1, s2);
+        self.gas_visitor.shift_logical_right_32(d, s1, s2);
+        ArchVisitor(self).shift_logical_right_32(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn shift_logical_right_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
         self.before_instruction(code_offset);
-        self.gas_visitor.shift_arithmetic_right(d, s1, s2);
-        ArchVisitor(self).shift_arithmetic_right(d, s1, s2);
+        self.gas_visitor.shift_logical_right_64(d, s1, s2);
+        ArchVisitor(self).shift_logical_right_64(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn shift_logical_left(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn shift_arithmetic_right_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.shift_logical_left(d, s1, s2);
-        ArchVisitor(self).shift_logical_left(d, s1, s2);
+        self.gas_visitor.shift_arithmetic_right_32(d, s1, s2);
+        ArchVisitor(self).shift_arithmetic_right_32(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn shift_arithmetic_right_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.shift_arithmetic_right_64(d, s1, s2);
+        ArchVisitor(self).shift_arithmetic_right_64(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn shift_logical_left_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.shift_logical_left_32(d, s1, s2);
+        ArchVisitor(self).shift_logical_left_32(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn shift_logical_left_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.shift_logical_left_64(d, s1, s2);
+        ArchVisitor(self).shift_logical_left_64(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
@@ -752,26 +757,53 @@ where
     }
 
     #[inline(always)]
-    fn add(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn add_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.add(d, s1, s2);
-        ArchVisitor(self).add(d, s1, s2);
+        self.gas_visitor.add_32(d, s1, s2);
+        ArchVisitor(self).add_32(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn sub(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn add_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
         self.before_instruction(code_offset);
-        self.gas_visitor.sub(d, s1, s2);
-        ArchVisitor(self).sub(d, s1, s2);
+        self.gas_visitor.add_64(d, s1, s2);
+        ArchVisitor(self).add_64(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn mul(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn sub_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.mul(d, s1, s2);
-        ArchVisitor(self).mul(d, s1, s2);
+        self.gas_visitor.sub_32(d, s1, s2);
+        ArchVisitor(self).sub_32(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn sub_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.sub_64(d, s1, s2);
+        ArchVisitor(self).sub_64(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn mul_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.mul_32(d, s1, s2);
+        ArchVisitor(self).mul_32(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn mul_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.mul_64(d, s1, s2);
+        ArchVisitor(self).mul_64(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
@@ -800,58 +832,87 @@ where
     }
 
     #[inline(always)]
-    fn div_unsigned(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn div_unsigned_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.div_unsigned(d, s1, s2);
-        ArchVisitor(self).div_unsigned(d, s1, s2);
+        self.gas_visitor.div_unsigned_32(d, s1, s2);
+        ArchVisitor(self).div_unsigned_32(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn div_signed(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn div_unsigned_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
         self.before_instruction(code_offset);
-        self.gas_visitor.div_signed(d, s1, s2);
-        ArchVisitor(self).div_signed(d, s1, s2);
+        self.gas_visitor.div_unsigned_64(d, s1, s2);
+        ArchVisitor(self).div_unsigned_64(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn rem_unsigned(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn div_signed_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.rem_unsigned(d, s1, s2);
-        ArchVisitor(self).rem_unsigned(d, s1, s2);
+        self.gas_visitor.div_signed_32(d, s1, s2);
+        ArchVisitor(self).div_signed_32(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn rem_signed(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn div_signed_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
         self.before_instruction(code_offset);
-        self.gas_visitor.rem_signed(d, s1, s2);
-        ArchVisitor(self).rem_signed(d, s1, s2);
+        self.gas_visitor.div_signed_64(d, s1, s2);
+        ArchVisitor(self).div_signed_64(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn mul_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn rem_unsigned_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.mul_imm(d, s1, s2);
-        ArchVisitor(self).mul_imm(d, s1, s2);
+        self.gas_visitor.rem_unsigned_32(d, s1, s2);
+        ArchVisitor(self).rem_unsigned_32(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn mul_upper_signed_signed_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn rem_unsigned_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
         self.before_instruction(code_offset);
-        self.gas_visitor.mul_upper_signed_signed_imm(d, s1, s2);
-        ArchVisitor(self).mul_upper_signed_signed_imm(d, s1, s2);
+        self.gas_visitor.rem_unsigned_64(d, s1, s2);
+        ArchVisitor(self).rem_unsigned_64(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn mul_upper_unsigned_unsigned_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn rem_signed_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.mul_upper_unsigned_unsigned_imm(d, s1, s2);
-        ArchVisitor(self).mul_upper_unsigned_unsigned_imm(d, s1, s2);
+        self.gas_visitor.rem_signed_32(d, s1, s2);
+        ArchVisitor(self).rem_signed_32(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn rem_signed_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.rem_signed_64(d, s1, s2);
+        ArchVisitor(self).rem_signed_64(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn mul_imm_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.mul_imm_32(d, s1, s2);
+        ArchVisitor(self).mul_imm_32(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn mul_imm_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.mul_imm_64(d, s1, s2);
+        ArchVisitor(self).mul_imm_64(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
@@ -888,50 +949,104 @@ where
     }
 
     #[inline(always)]
-    fn shift_logical_right_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.shift_logical_right_imm(d, s1, s2);
-        ArchVisitor(self).shift_logical_right_imm(d, s1, s2);
+        self.gas_visitor.shift_logical_right_imm_32(d, s1, s2);
+        ArchVisitor(self).shift_logical_right_imm_32(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
         self.before_instruction(code_offset);
-        self.gas_visitor.shift_arithmetic_right_imm(d, s1, s2);
-        ArchVisitor(self).shift_arithmetic_right_imm(d, s1, s2);
+        self.gas_visitor.shift_logical_right_imm_64(d, s1, s2);
+        ArchVisitor(self).shift_logical_right_imm_64(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn shift_logical_left_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.shift_logical_left_imm(d, s1, s2);
-        ArchVisitor(self).shift_logical_left_imm(d, s1, s2);
+        self.gas_visitor.shift_arithmetic_right_imm_32(d, s1, s2);
+        ArchVisitor(self).shift_arithmetic_right_imm_32(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn shift_logical_right_imm_alt(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
         self.before_instruction(code_offset);
-        self.gas_visitor.shift_logical_right_imm_alt(d, s2, s1);
-        ArchVisitor(self).shift_logical_right_imm_alt(d, s2, s1);
+        self.gas_visitor.shift_arithmetic_right_imm_64(d, s1, s2);
+        ArchVisitor(self).shift_arithmetic_right_imm_64(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_imm_alt(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.shift_arithmetic_right_imm_alt(d, s2, s1);
-        ArchVisitor(self).shift_arithmetic_right_imm_alt(d, s2, s1);
+        self.gas_visitor.shift_logical_left_imm_32(d, s1, s2);
+        ArchVisitor(self).shift_logical_left_imm_32(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn shift_logical_left_imm_alt(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
         self.before_instruction(code_offset);
-        self.gas_visitor.shift_logical_left_imm_alt(d, s2, s1);
-        ArchVisitor(self).shift_logical_left_imm_alt(d, s2, s1);
+        self.gas_visitor.shift_logical_left_imm_64(d, s1, s2);
+        ArchVisitor(self).shift_logical_left_imm_64(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn shift_logical_right_imm_alt_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.shift_logical_right_imm_alt_32(d, s2, s1);
+        ArchVisitor(self).shift_logical_right_imm_alt_32(d, s2, s1);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn shift_logical_right_imm_alt_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.shift_logical_right_imm_alt_64(d, s2, s1);
+        ArchVisitor(self).shift_logical_right_imm_alt_64(d, s2, s1);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn shift_arithmetic_right_imm_alt_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.shift_arithmetic_right_imm_alt_32(d, s2, s1);
+        ArchVisitor(self).shift_arithmetic_right_imm_alt_32(d, s2, s1);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn shift_arithmetic_right_imm_alt_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.shift_arithmetic_right_imm_alt_64(d, s2, s1);
+        ArchVisitor(self).shift_arithmetic_right_imm_alt_64(d, s2, s1);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn shift_logical_left_imm_alt_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.shift_logical_left_imm_alt_32(d, s2, s1);
+        ArchVisitor(self).shift_logical_left_imm_alt_32(d, s2, s1);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn shift_logical_left_imm_alt_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.shift_logical_left_imm_alt_64(d, s2, s1);
+        ArchVisitor(self).shift_logical_left_imm_alt_64(d, s2, s1);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
@@ -964,6 +1079,83 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor.move_reg(d, s);
         ArchVisitor(self).move_reg(d, s);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    fn count_leading_zero_bits_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.count_leading_zero_bits_32(d, s);
+        ArchVisitor(self).count_leading_zero_bits_32(d, s);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    fn count_leading_zero_bits_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.count_leading_zero_bits_64(d, s);
+        ArchVisitor(self).count_leading_zero_bits_64(d, s);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    fn count_trailing_zero_bits_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.count_trailing_zero_bits_32(d, s);
+        ArchVisitor(self).count_trailing_zero_bits_32(d, s);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    fn count_trailing_zero_bits_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.count_trailing_zero_bits_64(d, s);
+        ArchVisitor(self).count_trailing_zero_bits_64(d, s);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    fn count_set_bits_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.count_set_bits_32(d, s);
+        ArchVisitor(self).count_set_bits_32(d, s);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    fn count_set_bits_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.count_set_bits_64(d, s);
+        ArchVisitor(self).count_set_bits_64(d, s);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    fn sign_extend_8(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.sign_extend_8(d, s);
+        ArchVisitor(self).sign_extend_8(d, s);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    fn sign_extend_16(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.sign_extend_16(d, s);
+        ArchVisitor(self).sign_extend_16(d, s);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    fn zero_extend_16(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.zero_extend_16(d, s);
+        ArchVisitor(self).zero_extend_16(d, s);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    fn or_combine_byte(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.or_combine_byte(d, s);
+        ArchVisitor(self).or_combine_byte(d, s);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    fn reverse_byte(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.reverse_byte(d, s);
+        ArchVisitor(self).reverse_byte(d, s);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
@@ -1000,18 +1192,68 @@ where
     }
 
     #[inline(always)]
-    fn add_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, imm: u32) -> Self::ReturnTy {
+    fn rotate_right_32_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.add_imm(d, s, imm);
-        ArchVisitor(self).add_imm(d, s, imm);
+        self.gas_visitor.rotate_right_32_imm(d, s, c);
+        ArchVisitor(self).rotate_right_32_imm(d, s, c);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
     #[inline(always)]
-    fn negate_and_add_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn rotate_right_32_imm_alt(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.negate_and_add_imm(d, s1, s2);
-        ArchVisitor(self).negate_and_add_imm(d, s1, s2);
+        self.gas_visitor.rotate_right_32_imm_alt(d, s, c);
+        ArchVisitor(self).rotate_right_32_imm_alt(d, s, c);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn rotate_right_64_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.rotate_right_64_imm(d, s, c);
+        ArchVisitor(self).rotate_right_64_imm(d, s, c);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn rotate_right_64_imm_alt(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.rotate_right_64_imm_alt(d, s, c);
+        ArchVisitor(self).rotate_right_64_imm_alt(d, s, c);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn add_imm_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, imm: u32) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.add_imm_32(d, s, imm);
+        ArchVisitor(self).add_imm_32(d, s, imm);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn add_imm_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, imm: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.add_imm_64(d, s, imm);
+        ArchVisitor(self).add_imm_64(d, s, imm);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn negate_and_add_imm_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.negate_and_add_imm_32(d, s1, s2);
+        ArchVisitor(self).negate_and_add_imm_32(d, s1, s2);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn negate_and_add_imm_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.negate_and_add_imm_64(d, s1, s2);
+        ArchVisitor(self).negate_and_add_imm_64(d, s1, s2);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
@@ -1040,6 +1282,15 @@ where
     }
 
     #[inline(always)]
+    fn store_imm_indirect_u64(&mut self, code_offset: u32, args_length: u32, base: RawReg, offset: u32, value: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.store_imm_indirect_u64(base, offset, value);
+        ArchVisitor(self).store_imm_indirect_u64(base, offset, value);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
     fn store_indirect_u8(&mut self, code_offset: u32, args_length: u32, src: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.store_indirect_u8(src, base, offset);
@@ -1060,6 +1311,15 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor.store_indirect_u32(src, base, offset);
         ArchVisitor(self).store_indirect_u32(src, base, offset);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn store_indirect_u64(&mut self, code_offset: u32, args_length: u32, src: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.store_indirect_u64(src, base, offset);
+        ArchVisitor(self).store_indirect_u64(src, base, offset);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
@@ -1088,6 +1348,15 @@ where
     }
 
     #[inline(always)]
+    fn store_imm_u64(&mut self, code_offset: u32, args_length: u32, value: u32, offset: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.store_imm_u64(value, offset);
+        ArchVisitor(self).store_imm_u64(value, offset);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
     fn store_u8(&mut self, code_offset: u32, args_length: u32, src: RawReg, offset: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.store_u8(src, offset);
@@ -1108,6 +1377,15 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor.store_u32(src, offset);
         ArchVisitor(self).store_u32(src, offset);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn store_u64(&mut self, code_offset: u32, args_length: u32, src: RawReg, offset: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.store_u64(src, offset);
+        ArchVisitor(self).store_u64(src, offset);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
@@ -1145,9 +1423,27 @@ where
 
     #[inline(always)]
     fn load_indirect_u32(&mut self, code_offset: u32, args_length: u32, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
         self.before_instruction(code_offset);
         self.gas_visitor.load_indirect_u32(dst, base, offset);
         ArchVisitor(self).load_indirect_u32(dst, base, offset);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn load_indirect_i32(&mut self, code_offset: u32, args_length: u32, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.load_indirect_i32(dst, base, offset);
+        ArchVisitor(self).load_indirect_i32(dst, base, offset);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn load_indirect_u64(&mut self, code_offset: u32, args_length: u32, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.load_indirect_u64(dst, base, offset);
+        ArchVisitor(self).load_indirect_u64(dst, base, offset);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
@@ -1185,9 +1481,27 @@ where
 
     #[inline(always)]
     fn load_u32(&mut self, code_offset: u32, args_length: u32, dst: RawReg, offset: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
         self.before_instruction(code_offset);
         self.gas_visitor.load_u32(dst, offset);
         ArchVisitor(self).load_u32(dst, offset);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn load_i32(&mut self, code_offset: u32, args_length: u32, dst: RawReg, offset: u32) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.load_i32(dst, offset);
+        ArchVisitor(self).load_i32(dst, offset);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn load_u64(&mut self, code_offset: u32, args_length: u32, dst: RawReg, offset: u32) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        self.before_instruction(code_offset);
+        self.gas_visitor.load_u64(dst, offset);
+        ArchVisitor(self).load_u64(dst, offset);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
@@ -1335,6 +1649,14 @@ where
     }
 
     #[inline(always)]
+    fn load_imm64(&mut self, code_offset: u32, args_length: u32, dst: RawReg, value: u64) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.load_imm64(dst, value);
+        ArchVisitor(self).load_imm64(dst, value);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
     fn load_imm_and_jump(&mut self, code_offset: u32, args_length: u32, ra: RawReg, value: u32, target: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.load_imm_and_jump(ra, value, target);
@@ -1388,6 +1710,7 @@ where
     program_counter_to_machine_code_offset_map: HashMap<ProgramCounter, u32>,
     cache: CompilerCache,
     pub(crate) invalid_code_offset_address: u64,
+    pub(crate) bitness: Bitness,
 }
 
 impl<S> CompiledModule<S>

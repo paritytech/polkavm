@@ -4,6 +4,10 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
+polkavm_derive::min_stack_size!(1);
+polkavm_derive::min_stack_size!(65536);
+polkavm_derive::min_stack_size!(2);
+
 #[global_allocator]
 static mut GLOBAL_ALLOC: simplealloc::SimpleAlloc<{ 1024 * 1024 }> = simplealloc::SimpleAlloc::new();
 
@@ -47,7 +51,7 @@ extern "C" fn increment_global() {
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn get_global_address() -> *mut u32 {
-    unsafe { core::ptr::addr_of_mut!(GLOBAL) }
+    core::ptr::addr_of_mut!(GLOBAL)
 }
 
 #[polkavm_derive::polkavm_export]
@@ -231,4 +235,154 @@ fn test_input_registers() {
         unsafe { multiply_all_input_registers(2, 3, 5, 7, 11, 13, 17, 19, 23) },
         2 * 3 * 5 * 7 * 11 * 13 * 17 * 19 * 23
     );
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn add_u32(a0: u32, a1: u32) -> u32 {
+    a0.wrapping_add(a1)
+}
+
+#[cfg(target_pointer_width = "64")]
+#[polkavm_derive::polkavm_export]
+extern "C" fn add_u32_asm(a0: u32, a1: u32) -> u64 {
+    unsafe {
+        let output;
+        core::arch::asm!(
+            "addw a2, a1, a0",
+            in("a0") a0,
+            in("a1") a1,
+            lateout("a2") output,
+        );
+        output
+    }
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn add_u64(a0: u64, a1: u64) -> u64 {
+    a0.wrapping_add(a1)
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn xor_imm_u32(a0: u32) -> u32 {
+    a0 ^ 0xfb8f5c1e
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn test_branch_less_than_zero() {
+    unsafe {
+        #[cfg(target_arch = "riscv64")]
+        let mut output: usize = 0xff00000000000000;
+        #[cfg(target_arch = "riscv32")]
+        let mut output: usize = 0xff000000;
+        core::arch::asm!(
+            "bltz a0, 1f",
+            "li a0, 0",
+            "j 2f",
+            "1:",
+            "li a0, 1",
+            "2:",
+            inout("a0") output,
+        );
+        assert_eq!(output, 1);
+    }
+}
+
+static ATOMIC_U64: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+// TODO: The linker should handle this automatically.
+#[cfg(target_pointer_width = "32")]
+#[no_mangle]
+unsafe extern "C" fn __atomic_fetch_add_8(address: *mut u64, new_value: u64) -> u64 {
+    unsafe {
+        let old_value = *address;
+        *address += new_value;
+        old_value
+    }
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn fetch_add_atomic_u64(a0: u64) -> u64 {
+    ATOMIC_U64.fetch_add(a0, core::sync::atomic::Ordering::Relaxed)
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn cmov_if_zero_with_zero_reg() {
+    unsafe {
+        let output: usize;
+        core::arch::asm!(
+            // th.mveqz
+            "li a0, 1",
+            "li a1, 2",
+            // a0 = a1 if zero == 0
+            ".insn r 11, 1, 32, a0, a1, zero",
+            out("a0") output,
+            out("a1") _,
+        );
+        assert_eq!(output, 2);
+    }
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn cmov_if_not_zero_with_zero_reg() {
+    unsafe {
+        let output: usize;
+        core::arch::asm!(
+            // th.mvnez
+            "li a0, 1",
+            "li a1, 2",
+            // a0 = a1 if zero != 0
+            ".insn r 11, 1, 33, a0, a1, zero",
+            out("a0") output,
+            out("a1") _,
+        );
+        assert_eq!(output, 1);
+    }
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn negate_and_add(mut a0: isize, a1: isize) -> isize {
+    unsafe {
+        core::arch::asm!(
+            "li a2, 16",
+            "sub a0, a2, a1",
+            "li a2, 0",
+            inout("a0") a0 => a0,
+            in("a1") a1,
+            out("a2") _,
+        );
+    }
+
+    a0
+}
+
+#[cfg(target_pointer_width = "32")]
+#[polkavm_derive::polkavm_import]
+extern "C" {
+    fn return_tuple_u32() -> (u32, u32);
+}
+
+#[cfg(target_pointer_width = "64")]
+#[polkavm_derive::polkavm_import]
+extern "C" {
+    fn return_tuple_u64() -> (u64, u64);
+}
+
+#[polkavm_derive::polkavm_import]
+extern "C" {
+    fn return_tuple_usize() -> (usize, usize);
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn test_return_tuple() {
+    #[cfg(target_pointer_width = "32")]
+    {
+        assert_eq!(unsafe { return_tuple_u32() }, (0x12345678, 0x9abcdefe));
+        assert_eq!(unsafe { return_tuple_usize() }, (0x12345678, 0x9abcdefe));
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    {
+        assert_eq!(unsafe { return_tuple_u64() }, (0x123456789abcdefe, 0x1122334455667788));
+        assert_eq!(unsafe { return_tuple_usize() }, (0x123456789abcdefe, 0x1122334455667788));
+    }
 }

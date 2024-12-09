@@ -1,4 +1,5 @@
 use polkavm_common::abi::{MemoryMapBuilder, VM_CODE_ADDRESS_ALIGNMENT, VM_MAX_PAGE_SIZE, VM_MIN_PAGE_SIZE};
+use polkavm_common::cast::cast;
 use polkavm_common::program::{
     self, FrameKind, Instruction, InstructionSet, LineProgramOp, Opcode, ProgramBlob, ProgramCounter, ProgramSymbol,
 };
@@ -8,7 +9,7 @@ use polkavm_common::writer::{ProgramBlobBuilder, Writer};
 
 use core::ops::Range;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use crate::dwarf::Location;
@@ -39,6 +40,13 @@ enum Reg {
     E0 = 13,
     E1 = 14,
     E2 = 15,
+    E3 = 16,
+}
+
+impl Reg {
+    fn to_usize(self) -> usize {
+        self as usize
+    }
 }
 
 impl From<polkavm_common::program::Reg> for Reg {
@@ -93,6 +101,7 @@ impl Reg {
             13 => Some(Reg::E0),
             14 => Some(Reg::E1),
             15 => Some(Reg::E2),
+            16 => Some(Reg::E3),
             _ => None,
         }
     }
@@ -117,6 +126,7 @@ impl Reg {
             E0 => "e0",
             E1 => "e1",
             E2 => "e2",
+            E3 => "e3",
         }
     }
 
@@ -125,16 +135,17 @@ impl Reg {
             Reg::E0 => Some(0),
             Reg::E1 => Some(1),
             Reg::E2 => Some(2),
+            Reg::E3 => Some(3),
             _ => None,
         }
     }
 
-    const ALL: [Reg; 16] = {
+    const ALL: [Reg; 17] = {
         use Reg::*;
-        [RA, SP, T0, T1, T2, S0, S1, A0, A1, A2, A3, A4, A5, E0, E1, E2]
+        [RA, SP, T0, T1, T2, S0, S1, A0, A1, A2, A3, A4, A5, E0, E1, E2, E3]
     };
 
-    const FAKE: [Reg; 3] = { [Reg::E0, Reg::E1, Reg::E2] };
+    const FAKE: [Reg; 4] = { [Reg::E0, Reg::E1, Reg::E2, Reg::E3] };
     const INPUT_REGS: [Reg; 9] = [Reg::A0, Reg::A1, Reg::A2, Reg::A3, Reg::A4, Reg::A5, Reg::T0, Reg::T1, Reg::T2];
     const OUTPUT_REGS: [Reg; 2] = [Reg::A0, Reg::A1];
 }
@@ -346,6 +357,10 @@ impl AddressRange {
     pub(crate) fn is_empty(&self) -> bool {
         self.end == self.start
     }
+
+    pub(crate) const fn is_overlapping(&self, other: &AddressRange) -> bool {
+        !(self.end <= other.start || self.start >= other.end)
+    }
 }
 
 impl core::fmt::Display for AddressRange {
@@ -391,10 +406,6 @@ impl From<SectionTarget> for SectionIndex {
     fn from(target: SectionTarget) -> Self {
         target.section_index
     }
-}
-
-fn i32_to_i64(x: i32) -> i64 {
-    i64::from(x)
 }
 
 fn extract_delimited<'a>(str: &mut &'a str, prefix: &str, suffix: &str) -> Option<(&'a str, &'a str)> {
@@ -479,14 +490,6 @@ impl SectionTarget {
         }
     }
 
-    fn map_offset_i32(self, cb: impl FnOnce(i32) -> i32) -> Self {
-        let offset: u32 = self.offset.try_into().expect("section offset is too large");
-        SectionTarget {
-            section_index: self.section_index,
-            offset: u64::from(cb(offset as i32) as u32),
-        }
-    }
-
     fn map_offset_i64(self, cb: impl FnOnce(i64) -> i64) -> Self {
         let offset = self.offset as i64;
         SectionTarget {
@@ -521,7 +524,7 @@ enum AnyTarget {
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 enum RegImm {
     Reg(Reg),
-    Imm(u32),
+    Imm(i32),
 }
 
 impl RegImm {
@@ -539,8 +542,8 @@ impl From<Reg> for RegImm {
     }
 }
 
-impl From<u32> for RegImm {
-    fn from(value: u32) -> Self {
+impl From<i32> for RegImm {
+    fn from(value: i32) -> Self {
         RegImm::Imm(value)
     }
 }
@@ -587,6 +590,11 @@ enum BasicInst<T> {
         imm: i64,
     },
     MoveReg {
+        dst: Reg,
+        src: Reg,
+    },
+    Reg {
+        kind: RegKind,
         dst: Reg,
         src: Reg,
     },
@@ -642,7 +650,7 @@ impl<T> BasicInst<T> {
             | BasicInst::LoadAbsolute { .. }
             | BasicInst::LoadAddress { .. }
             | BasicInst::LoadAddressIndirect { .. } => RegMask::empty(),
-            BasicInst::MoveReg { src, .. } => RegMask::from(src),
+            BasicInst::MoveReg { src, .. } | BasicInst::Reg { src, .. } => RegMask::from(src),
             BasicInst::StoreAbsolute { src, .. } => RegMask::from(src),
             BasicInst::LoadIndirect { base, .. } => RegMask::from(base),
             BasicInst::StoreIndirect { src, base, .. } => RegMask::from(src) | RegMask::from(base),
@@ -666,6 +674,7 @@ impl<T> BasicInst<T> {
             | BasicInst::LoadIndirect { dst, .. }
             | BasicInst::RegReg { dst, .. }
             | BasicInst::Cmov { dst, .. }
+            | BasicInst::Reg { dst, .. }
             | BasicInst::AnyAny { dst, .. } => RegMask::from(dst),
             BasicInst::Ecalli { nth_import } => imports[nth_import].dst_mask(),
             BasicInst::Sbrk { dst, .. } => RegMask::from(dst),
@@ -678,6 +687,7 @@ impl<T> BasicInst<T> {
             BasicInst::LoadAbsolute { .. } | BasicInst::LoadIndirect { .. } => !config.elide_unnecessary_loads,
             BasicInst::Nop
             | BasicInst::MoveReg { .. }
+            | BasicInst::Reg { .. }
             | BasicInst::LoadImmediate { .. }
             | BasicInst::LoadImmediate64 { .. }
             | BasicInst::LoadAddress { .. }
@@ -728,6 +738,11 @@ impl<T> BasicInst<T> {
                 src: src.map_register(|reg| map(reg, OpKind::Read)),
                 base: map(base, OpKind::Read),
                 offset,
+            }),
+            BasicInst::Reg { kind, dst, src } => Some(BasicInst::Reg {
+                kind,
+                src: map(src, OpKind::Read),
+                dst: map(dst, OpKind::Write),
             }),
             BasicInst::RegReg { kind, dst, src1, src2 } => Some(BasicInst::RegReg {
                 kind,
@@ -818,6 +833,7 @@ impl<T> BasicInst<T> {
             BasicInst::LoadAddressIndirect { dst, target } => BasicInst::LoadAddressIndirect { dst, target: map(target)? },
             BasicInst::LoadIndirect { kind, dst, base, offset } => BasicInst::LoadIndirect { kind, dst, base, offset },
             BasicInst::StoreIndirect { kind, src, base, offset } => BasicInst::StoreIndirect { kind, src, base, offset },
+            BasicInst::Reg { kind, dst, src } => BasicInst::Reg { kind, dst, src },
             BasicInst::RegReg { kind, dst, src1, src2 } => BasicInst::RegReg { kind, dst, src1, src2 },
             BasicInst::AnyAny { kind, dst, src1, src2 } => BasicInst::AnyAny { kind, dst, src1, src2 },
             BasicInst::Cmov { kind, dst, src, cond } => BasicInst::Cmov { kind, dst, src, cond },
@@ -840,6 +856,7 @@ impl<T> BasicInst<T> {
             | BasicInst::LoadImmediate64 { .. }
             | BasicInst::LoadIndirect { .. }
             | BasicInst::StoreIndirect { .. }
+            | BasicInst::Reg { .. }
             | BasicInst::RegReg { .. }
             | BasicInst::AnyAny { .. }
             | BasicInst::Cmov { .. }
@@ -1191,7 +1208,7 @@ where
         sections_rw_data.iter().copied().chain(sections_bss.iter().copied()),
     );
 
-    let mut min_stack_size = VM_MIN_PAGE_SIZE;
+    let mut min_stack_size = VM_MIN_PAGE_SIZE * 2;
     for &section_index in sections_min_stack_size {
         let section = elf.section_by_index(section_index);
         let data = section.data();
@@ -1246,7 +1263,7 @@ where
     Ok(memory_config)
 }
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
 struct ExternMetadata {
     index: Option<u32>,
     symbol: Vec<u8>,
@@ -1417,6 +1434,8 @@ where
 {
     let section = elf.section_by_index(target.section_index);
     let mut b = polkavm_common::elf::Reader::from(section.data());
+
+    // Skip `sh_offset` bytes:
     let _ = b.read(target.offset as usize)?;
 
     let version = b.read_byte()?;
@@ -1573,13 +1592,19 @@ fn check_imports_and_assign_indexes(imports: &mut Vec<Import>, used_imports: &Ha
     }
 
     for import in imports {
-        log::trace!("Import: {:?}", import.metadata);
+        log::debug!(
+            "Import: '{}', index = {:?}, input regs = {}, output regs = {}",
+            String::from_utf8_lossy(&import.metadata.symbol),
+            import.metadata.index,
+            import.metadata.input_regs,
+            import.metadata.output_regs
+        );
     }
 
     Ok(())
 }
 
-fn get_relocation_target<H>(elf: &Elf<H>, relocation: &object::read::Relocation) -> Result<Option<SectionTarget>, ProgramFromElfError>
+fn get_relocation_target<H>(elf: &Elf<H>, relocation: &crate::elf::Relocation) -> Result<Option<SectionTarget>, ProgramFromElfError>
 where
     H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
 {
@@ -1667,11 +1692,10 @@ fn emit_minmax(
     assert_ne!(Some(dst), src2);
 
     let (cmp_src1, cmp_src2, cmp_kind) = match kind {
-        MinMax::MinUnsigned => (src1, src2, AnyAnyKind::SetLessThanUnsigned),
-        MinMax::MaxUnsigned => (src2, src1, AnyAnyKind::SetLessThanUnsigned),
-        MinMax::MinSigned => (src1, src2, AnyAnyKind::SetLessThanSigned),
-        MinMax::MaxSigned => (src2, src1, AnyAnyKind::SetLessThanSigned),
-
+        MinMax::MinUnsigned => (src1, src2, AnyAnyKind::SetLessThanUnsigned32),
+        MinMax::MaxUnsigned => (src2, src1, AnyAnyKind::SetLessThanUnsigned32),
+        MinMax::MinSigned => (src1, src2, AnyAnyKind::SetLessThanSigned32),
+        MinMax::MaxSigned => (src2, src1, AnyAnyKind::SetLessThanSigned32),
         MinMax::MinUnsigned64 => (src1, src2, AnyAnyKind::SetLessThanUnsigned64),
         MinMax::MaxUnsigned64 => (src2, src1, AnyAnyKind::SetLessThanUnsigned64),
         MinMax::MinSigned64 => (src1, src2, AnyAnyKind::SetLessThanSigned64),
@@ -1699,14 +1723,106 @@ fn emit_minmax(
     }));
 }
 
-fn convert_instruction(
+fn resolve_simple_zero_register_usage(
+    kind: crate::riscv::RegRegKind,
+    dst: Reg,
+    src1: RReg,
+    src2: RReg,
+    mut emit: impl FnMut(InstExt<SectionTarget, SectionTarget>),
+) -> bool {
+    use crate::riscv::RegRegKind as K;
+    if kind == K::OrInverted && src1 == RReg::Zero && src2 != RReg::Zero {
+        emit(InstExt::Basic(BasicInst::AnyAny {
+            kind: AnyAnyKind::Xor32,
+            dst,
+            src1: RegImm::Imm(!0),
+            src2: cast_reg_any(src2).unwrap(),
+        }));
+        return true;
+    }
+
+    if kind == K::Xnor && src1 == RReg::Zero && src2 != RReg::Zero {
+        emit(InstExt::Basic(BasicInst::AnyAny {
+            kind: AnyAnyKind::Xor32,
+            dst,
+            src1: RegImm::Imm(!0),
+            src2: cast_reg_any(src2).unwrap(),
+        }));
+        return true;
+    }
+
+    if kind == K::Xnor && src1 != RReg::Zero && src2 == RReg::Zero {
+        emit(InstExt::Basic(BasicInst::AnyAny {
+            kind: AnyAnyKind::Xor32,
+            dst,
+            src1: cast_reg_any(src1).unwrap(),
+            src2: RegImm::Imm(!0),
+        }));
+        return true;
+    }
+
+    if (kind == K::Minimum || kind == K::Maximum) && (src1 == RReg::Zero || src2 == RReg::Zero) {
+        if src1 == RReg::Zero && src2 == RReg::Zero {
+            emit(InstExt::Basic(BasicInst::LoadImmediate { dst, imm: 0 }));
+            return true;
+        }
+
+        let tmp = Reg::E2;
+        let src1 = cast_reg_any(src1).unwrap();
+        let src2 = cast_reg_any(src2).unwrap();
+        let (kind, cmp_src1, cmp_src2) = match kind {
+            K::Minimum => (AnyAnyKind::SetLessThanSigned32, src1, src2),
+            K::Maximum => (AnyAnyKind::SetLessThanSigned32, src2, src1),
+            _ => unreachable!(),
+        };
+
+        emit(InstExt::Basic(BasicInst::AnyAny {
+            kind,
+            dst: tmp,
+            src1: cmp_src1,
+            src2: cmp_src2,
+        }));
+
+        match src1 {
+            RegImm::Reg(src) => emit(InstExt::Basic(BasicInst::MoveReg { dst, src })),
+            RegImm::Imm(imm) => emit(InstExt::Basic(BasicInst::LoadImmediate { dst, imm })),
+        }
+
+        emit(InstExt::Basic(BasicInst::Cmov {
+            kind: CmovKind::EqZero,
+            dst,
+            src: src2,
+            cond: tmp,
+        }));
+
+        return true;
+    }
+
+    if matches!(kind, K::RotateLeft32AndSignExtend | K::RotateRight32AndSignExtend) && src1 != RReg::Zero && src2 == RReg::Zero {
+        emit(InstExt::Basic(BasicInst::AnyAny {
+            kind: AnyAnyKind::Add32AndSignExtend,
+            dst,
+            src1: cast_reg_any(src1).unwrap(),
+            src2: RegImm::Imm(0),
+        }));
+        return true;
+    }
+
+    false
+}
+
+fn convert_instruction<H>(
+    elf: &Elf<H>,
     section: &Section,
     current_location: SectionTarget,
     instruction: Inst,
     instruction_size: u64,
     rv64: bool,
     mut emit: impl FnMut(InstExt<SectionTarget, SectionTarget>),
-) -> Result<(), ProgramFromElfError> {
+) -> Result<(), ProgramFromElfError>
+where
+    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
+{
     match instruction {
         Inst::LoadUpperImmediate { dst, value } => {
             let Some(dst) = cast_reg_non_zero(dst)? else {
@@ -1825,24 +1941,31 @@ fn convert_instruction(
 
             let src = cast_reg_any(src)?;
             let kind = match kind {
-                RegImmKind::Add => AnyAnyKind::Add,
+                RegImmKind::Add32 => AnyAnyKind::Add32,
+                RegImmKind::Add32AndSignExtend => AnyAnyKind::Add32AndSignExtend,
                 RegImmKind::Add64 => AnyAnyKind::Add64,
-                RegImmKind::And => AnyAnyKind::And,
+                RegImmKind::And32 => AnyAnyKind::And32,
                 RegImmKind::And64 => AnyAnyKind::And64,
-                RegImmKind::Or => AnyAnyKind::Or,
+                RegImmKind::Or32 => AnyAnyKind::Or32,
                 RegImmKind::Or64 => AnyAnyKind::Or64,
-                RegImmKind::Xor => AnyAnyKind::Xor,
+                RegImmKind::Xor32 => AnyAnyKind::Xor32,
                 RegImmKind::Xor64 => AnyAnyKind::Xor64,
-                RegImmKind::SetLessThanUnsigned => AnyAnyKind::SetLessThanUnsigned,
+                RegImmKind::SetLessThanUnsigned32 => AnyAnyKind::SetLessThanUnsigned32,
                 RegImmKind::SetLessThanUnsigned64 => AnyAnyKind::SetLessThanUnsigned64,
-                RegImmKind::SetLessThanSigned => AnyAnyKind::SetLessThanSigned,
+                RegImmKind::SetLessThanSigned32 => AnyAnyKind::SetLessThanSigned32,
                 RegImmKind::SetLessThanSigned64 => AnyAnyKind::SetLessThanSigned64,
-                RegImmKind::ShiftLogicalLeft => AnyAnyKind::ShiftLogicalLeft,
+                RegImmKind::ShiftLogicalLeft32 => AnyAnyKind::ShiftLogicalLeft32,
+                RegImmKind::ShiftLogicalLeft32AndSignExtend => AnyAnyKind::ShiftLogicalLeft32AndSignExtend,
                 RegImmKind::ShiftLogicalLeft64 => AnyAnyKind::ShiftLogicalLeft64,
-                RegImmKind::ShiftLogicalRight => AnyAnyKind::ShiftLogicalRight,
+                RegImmKind::ShiftLogicalRight32 => AnyAnyKind::ShiftLogicalRight32,
+                RegImmKind::ShiftLogicalRight32AndSignExtend => AnyAnyKind::ShiftLogicalRight32AndSignExtend,
                 RegImmKind::ShiftLogicalRight64 => AnyAnyKind::ShiftLogicalRight64,
-                RegImmKind::ShiftArithmeticRight => AnyAnyKind::ShiftArithmeticRight,
+                RegImmKind::ShiftArithmeticRight32 => AnyAnyKind::ShiftArithmeticRight32,
+                RegImmKind::ShiftArithmeticRight32AndSignExtend => AnyAnyKind::ShiftArithmeticRight32AndSignExtend,
                 RegImmKind::ShiftArithmeticRight64 => AnyAnyKind::ShiftArithmeticRight64,
+                RegImmKind::RotateRight32 => AnyAnyKind::RotateRight32,
+                RegImmKind::RotateRight32AndSignExtend => AnyAnyKind::RotateRight32AndSignExtend,
+                RegImmKind::RotateRight64 => AnyAnyKind::RotateRight64,
             };
 
             match src {
@@ -1851,12 +1974,12 @@ fn convert_instruction(
                     emit(InstExt::Basic(BasicInst::LoadImmediate {
                         dst,
                         imm: OperationKind::from(kind)
-                            .apply_const(0, i32_to_i64(imm))
+                            .apply_const(0, cast(imm).to_i64_sign_extend())
                             .try_into()
                             .expect("load immediate overflow"),
                     }));
                 }
-                RegImm::Reg(src) if imm == 0 && ((!rv64 && kind == AnyAnyKind::Add) || (rv64 && kind == AnyAnyKind::Add64)) => {
+                RegImm::Reg(src) if imm == 0 && matches!(kind, AnyAnyKind::Add32 | AnyAnyKind::Add64) => {
                     emit(InstExt::Basic(BasicInst::MoveReg { dst, src }));
                 }
                 _ => {
@@ -1864,10 +1987,39 @@ fn convert_instruction(
                         kind,
                         dst,
                         src1: src,
-                        src2: (imm as u32).into(),
+                        src2: imm.into(),
                     }));
                 }
             }
+
+            Ok(())
+        }
+        Inst::Reg { kind, dst, src } => {
+            let Some(dst) = cast_reg_non_zero(dst)? else {
+                emit(InstExt::nop());
+                return Ok(());
+            };
+
+            let Some(src) = cast_reg_non_zero(src)? else {
+                return Err(ProgramFromElfError::other("found an invalid instruction"));
+            };
+
+            use crate::riscv::RegKind as K;
+            let kind = match kind {
+                K::CountLeadingZeroBits32 => RegKind::CountLeadingZeroBits32,
+                K::CountLeadingZeroBits64 => RegKind::CountLeadingZeroBits64,
+                K::CountSetBits32 => RegKind::CountSetBits32,
+                K::CountSetBits64 => RegKind::CountSetBits64,
+                K::CountTrailingZeroBits32 => RegKind::CountTrailingZeroBits32,
+                K::CountTrailingZeroBits64 => RegKind::CountTrailingZeroBits64,
+                K::OrCombineByte => RegKind::OrCombineByte,
+                K::ReverseByte => RegKind::ReverseByte,
+                K::SignExtend8 => RegKind::SignExtend8,
+                K::SignExtend16 => RegKind::SignExtend16,
+                K::ZeroExtend16 => RegKind::ZeroExtend16,
+            };
+
+            emit(InstExt::Basic(BasicInst::Reg { kind, dst, src }));
 
             Ok(())
         }
@@ -1899,18 +2051,27 @@ fn convert_instruction(
                         },
                         (lhs, rhs) => {
                             let lhs = lhs
-                                .map(|reg| RegValue::InputReg(reg, BlockTarget::from_raw(0)))
+                                .map(|reg| RegValue::InputReg {
+                                    reg,
+                                    source_block: BlockTarget::from_raw(0),
+                                    bits_used: u64::MAX,
+                                })
                                 .unwrap_or(RegValue::Constant(0));
 
                             let rhs = rhs
-                                .map(|reg| RegValue::InputReg(reg, BlockTarget::from_raw(0)))
+                                .map(|reg| RegValue::InputReg {
+                                    reg,
+                                    source_block: BlockTarget::from_raw(0),
+                                    bits_used: u64::MAX,
+                                })
                                 .unwrap_or(RegValue::Constant(0));
 
-                            match OperationKind::from(RegRegKind::$kind).apply(lhs, rhs) {
+                            match OperationKind::from(RegRegKind::$kind).apply(elf, lhs, rhs) {
                                 Some(RegValue::Constant(imm)) => {
                                     let imm: i32 = imm.try_into().expect("immediate operand overflow");
                                     BasicInst::LoadImmediate { dst, imm }
                                 }
+                                Some(RegValue::InputReg { reg, .. }) => BasicInst::MoveReg { dst, src: reg },
                                 _ => {
                                     return Err(ProgramFromElfError::other(format!(
                                         "found a {:?} instruction using a zero register",
@@ -1923,45 +2084,73 @@ fn convert_instruction(
                 };
             }
 
+            if resolve_simple_zero_register_usage(kind, dst, src1, src2, &mut emit) {
+                emit(InstExt::nop());
+                return Ok(());
+            };
+
             use crate::riscv::RegRegKind as K;
             let instruction = match kind {
-                K::Add => anyany!(Add),
+                K::Add32 => anyany!(Add32),
+                K::Add32AndSignExtend => anyany!(Add32AndSignExtend),
                 K::Add64 => anyany!(Add64),
-                K::Sub => anyany!(Sub),
+                K::Sub32 => anyany!(Sub32),
+                K::Sub32AndSignExtend => anyany!(Sub32AndSignExtend),
                 K::Sub64 => anyany!(Sub64),
-                K::And => anyany!(And),
+                K::And32 => anyany!(And32),
                 K::And64 => anyany!(And64),
-                K::Or => anyany!(Or),
+                K::Or32 => anyany!(Or32),
                 K::Or64 => anyany!(Or64),
-                K::Xor => anyany!(Xor),
+                K::Xor32 => anyany!(Xor32),
                 K::Xor64 => anyany!(Xor64),
-                K::SetLessThanUnsigned => anyany!(SetLessThanUnsigned),
+                K::SetLessThanUnsigned32 => anyany!(SetLessThanUnsigned32),
                 K::SetLessThanUnsigned64 => anyany!(SetLessThanUnsigned64),
-                K::SetLessThanSigned => anyany!(SetLessThanSigned),
+                K::SetLessThanSigned32 => anyany!(SetLessThanSigned32),
                 K::SetLessThanSigned64 => anyany!(SetLessThanSigned64),
-                K::ShiftLogicalLeft => anyany!(ShiftLogicalLeft),
+                K::ShiftLogicalLeft32 => anyany!(ShiftLogicalLeft32),
+                K::ShiftLogicalLeft32AndSignExtend => anyany!(ShiftLogicalLeft32AndSignExtend),
                 K::ShiftLogicalLeft64 => anyany!(ShiftLogicalLeft64),
-                K::ShiftLogicalRight => anyany!(ShiftLogicalRight),
+                K::ShiftLogicalRight32 => anyany!(ShiftLogicalRight32),
+                K::ShiftLogicalRight32AndSignExtend => anyany!(ShiftLogicalRight32AndSignExtend),
                 K::ShiftLogicalRight64 => anyany!(ShiftLogicalRight64),
-                K::ShiftArithmeticRight => anyany!(ShiftArithmeticRight),
+                K::ShiftArithmeticRight32 => anyany!(ShiftArithmeticRight32),
+                K::ShiftArithmeticRight32AndSignExtend => anyany!(ShiftArithmeticRight32AndSignExtend),
                 K::ShiftArithmeticRight64 => anyany!(ShiftArithmeticRight64),
-                K::Mul => anyany!(Mul),
+                K::Mul32 => anyany!(Mul32),
+                K::Mul32AndSignExtend => anyany!(Mul32AndSignExtend),
                 K::Mul64 => anyany!(Mul64),
-                K::MulUpperSignedSigned => anyany!(MulUpperSignedSigned),
-                K::MulUpperSignedSigned64 => anyany!(MulUpperSignedSigned64),
-                K::MulUpperUnsignedUnsigned => anyany!(MulUpperUnsignedUnsigned),
-                K::MulUpperUnsignedUnsigned64 => anyany!(MulUpperUnsignedUnsigned64),
-
-                K::MulUpperSignedUnsigned => regreg!(MulUpperSignedUnsigned),
+                K::MulUpperSignedSigned32 => regreg!(MulUpperSignedSigned32),
+                K::MulUpperSignedSigned64 => regreg!(MulUpperSignedSigned64),
+                K::MulUpperUnsignedUnsigned32 => regreg!(MulUpperUnsignedUnsigned32),
+                K::MulUpperUnsignedUnsigned64 => regreg!(MulUpperUnsignedUnsigned64),
+                K::MulUpperSignedUnsigned32 => regreg!(MulUpperSignedUnsigned32),
                 K::MulUpperSignedUnsigned64 => regreg!(MulUpperSignedUnsigned64),
-                K::Div => regreg!(Div),
+                K::Div32 => regreg!(Div32),
+                K::Div32AndSignExtend => regreg!(Div32AndSignExtend),
                 K::Div64 => regreg!(Div64),
-                K::DivUnsigned => regreg!(DivUnsigned),
+                K::DivUnsigned32 => regreg!(DivUnsigned32),
+                K::DivUnsigned32AndSignExtend => regreg!(DivUnsigned32AndSignExtend),
                 K::DivUnsigned64 => regreg!(DivUnsigned64),
-                K::Rem => regreg!(Rem),
+                K::Rem32 => regreg!(Rem32),
+                K::Rem32AndSignExtend => regreg!(Rem32AndSignExtend),
                 K::Rem64 => regreg!(Rem64),
-                K::RemUnsigned => regreg!(RemUnsigned),
+                K::RemUnsigned32 => regreg!(RemUnsigned32),
+                K::RemUnsigned32AndSignExtend => regreg!(RemUnsigned32AndSignExtend),
                 K::RemUnsigned64 => regreg!(RemUnsigned64),
+
+                K::AndInverted => regreg!(AndInverted),
+                K::OrInverted => regreg!(OrInverted),
+                K::Xnor => regreg!(Xnor),
+                K::Maximum => regreg!(Maximum),
+                K::MaximumUnsigned => regreg!(MaximumUnsigned),
+                K::Minimum => regreg!(Minimum),
+                K::MinimumUnsigned => regreg!(MinimumUnsigned),
+                K::RotateLeft32 => regreg!(RotateLeft32),
+                K::RotateLeft32AndSignExtend => regreg!(RotateLeft32AndSignExtend),
+                K::RotateLeft64 => regreg!(RotateLeft64),
+                K::RotateRight32 => anyany!(RotateRight32),
+                K::RotateRight32AndSignExtend => anyany!(RotateRight32AndSignExtend),
+                K::RotateRight64 => anyany!(RotateRight64),
             };
 
             emit(InstExt::Basic(instruction));
@@ -1981,21 +2170,32 @@ fn convert_instruction(
                 return Ok(());
             };
 
-            let Some(cond) = cast_reg_non_zero(cond)? else {
-                return Err(ProgramFromElfError::other(
-                    "found a conditional move with a zero register as the condition",
-                ));
+            match cast_reg_non_zero(cond)? {
+                Some(cond) => {
+                    emit(InstExt::Basic(BasicInst::Cmov {
+                        kind,
+                        dst,
+                        src: cast_reg_any(src)?,
+                        cond,
+                    }));
+                }
+                None => match kind {
+                    CmovKind::EqZero => {
+                        if let Some(src) = cast_reg_non_zero(src)? {
+                            emit(InstExt::Basic(BasicInst::MoveReg { dst, src }));
+                        } else {
+                            emit(InstExt::Basic(BasicInst::LoadImmediate { dst, imm: 0 }));
+                        }
+                    }
+                    CmovKind::NotEqZero => {
+                        emit(InstExt::nop());
+                    }
+                },
             };
 
-            emit(InstExt::Basic(BasicInst::Cmov {
-                kind,
-                dst,
-                src: cast_reg_any(src)?,
-                cond,
-            }));
             Ok(())
         }
-        Inst::LoadReserved { dst, src, .. } => {
+        Inst::LoadReserved32 { dst, src, .. } => {
             let Some(dst) = cast_reg_non_zero(dst)? else {
                 return Err(ProgramFromElfError::other(
                     "found an atomic load with a zero register as the destination",
@@ -2009,7 +2209,7 @@ fn convert_instruction(
             };
 
             emit(InstExt::Basic(BasicInst::LoadIndirect {
-                kind: if rv64 { LoadKind::I32 } else { LoadKind::U32 },
+                kind: LoadKind::I32,
                 dst,
                 base: src,
                 offset: 0,
@@ -2039,7 +2239,7 @@ fn convert_instruction(
 
             Ok(())
         }
-        Inst::StoreConditional { src, addr, dst, .. } => {
+        Inst::StoreConditional32 { src, addr, dst, .. } => {
             let Some(addr) = cast_reg_non_zero(addr)? else {
                 return Err(ProgramFromElfError::other(
                     "found an atomic store with a zero register as the address",
@@ -2084,7 +2284,7 @@ fn convert_instruction(
             Ok(())
         }
         Inst::LoadReserved64 { .. } | Inst::StoreConditional64 { .. } => {
-            Err(ProgramFromElfError::other("found a 64bit instruction in a 32bit binary"))
+            unreachable!("64-bit instruction in a 32-bit program: {instruction:?}");
         }
         Inst::Atomic {
             kind,
@@ -2099,16 +2299,56 @@ fn convert_instruction(
                 ));
             };
 
-            let operand = cast_reg_non_zero(operand)?;
+            let is_64_bit = match kind {
+                AtomicKind::Swap32
+                | AtomicKind::Add32
+                | AtomicKind::And32
+                | AtomicKind::Or32
+                | AtomicKind::Xor32
+                | AtomicKind::MaxSigned32
+                | AtomicKind::MinSigned32
+                | AtomicKind::MaxUnsigned32
+                | AtomicKind::MinUnsigned32 => false,
+
+                AtomicKind::Swap64
+                | AtomicKind::Add64
+                | AtomicKind::MaxSigned64
+                | AtomicKind::MinSigned64
+                | AtomicKind::MaxUnsigned64
+                | AtomicKind::MinUnsigned64
+                | AtomicKind::And64
+                | AtomicKind::Or64
+                | AtomicKind::Xor64 => true,
+            };
+
+            let mut operand = cast_reg_non_zero(operand)?;
+            if rv64 && !is_64_bit {
+                // Zero-extend the operand to ignore any bits that might be there.
+                if let Some(src) = operand {
+                    emit(InstExt::Basic(BasicInst::AnyAny {
+                        kind: AnyAnyKind::ShiftLogicalLeft64,
+                        dst: Reg::E3,
+                        src1: RegImm::Reg(src),
+                        src2: RegImm::Imm(32),
+                    }));
+                    emit(InstExt::Basic(BasicInst::AnyAny {
+                        kind: AnyAnyKind::ShiftArithmeticRight64,
+                        dst: Reg::E3,
+                        src1: RegImm::Reg(Reg::E3),
+                        src2: RegImm::Imm(32),
+                    }));
+                }
+                operand = Some(Reg::E3);
+            }
             let operand_regimm = operand.map_or(RegImm::Imm(0), RegImm::Reg);
             let (old_value, new_value, output) = match cast_reg_non_zero(old_value)? {
                 None => (Reg::E0, Reg::E0, None),
-                Some(old_value) if old_value == addr => (Reg::E0, Reg::E1, Some(old_value)),
+                Some(old_value) if old_value == addr || Some(old_value) == operand => (Reg::E0, Reg::E1, Some(old_value)),
                 Some(old_value) => (old_value, Reg::E0, None),
             };
 
             emit(InstExt::Basic(BasicInst::LoadIndirect {
-                kind: LoadKind::U32,
+                kind: if is_64_bit { LoadKind::U64 } else { LoadKind::I32 },
                 dst: old_value,
                 base: addr,
                 offset: 0,
@@ -2123,9 +2363,9 @@ fn convert_instruction(
                         src2: RegImm::Imm(0),
                     }));
                 }
-                AtomicKind::Swap => {
+                AtomicKind::Swap32 => {
                     emit(InstExt::Basic(BasicInst::AnyAny {
-                        kind: AnyAnyKind::Add,
+                        kind: AnyAnyKind::Add32,
                         dst: new_value,
                         src1: operand_regimm,
                         src2: RegImm::Imm(0),
@@ -2139,9 +2379,9 @@ fn convert_instruction(
                         src2: operand_regimm,
                     }));
                 }
-                AtomicKind::Add => {
+                AtomicKind::Add32 => {
                     emit(InstExt::Basic(BasicInst::AnyAny {
-                        kind: AnyAnyKind::Add,
+                        kind: AnyAnyKind::Add32,
                         dst: new_value,
                         src1: old_value.into(),
                         src2: operand_regimm,
@@ -2155,9 +2395,9 @@ fn convert_instruction(
                         src2: operand_regimm,
                     }));
                 }
-                AtomicKind::And => {
+                AtomicKind::And32 => {
                     emit(InstExt::Basic(BasicInst::AnyAny {
-                        kind: AnyAnyKind::And,
+                        kind: AnyAnyKind::And32,
                         dst: new_value,
                         src1: old_value.into(),
                         src2: operand_regimm,
@@ -2171,9 +2411,9 @@ fn convert_instruction(
                         src2: operand_regimm,
                     }));
                 }
-                AtomicKind::Or => {
+                AtomicKind::Or32 => {
                     emit(InstExt::Basic(BasicInst::AnyAny {
-                        kind: AnyAnyKind::Or,
+                        kind: AnyAnyKind::Or32,
                         dst: new_value,
                         src1: old_value.into(),
                         src2: operand_regimm,
@@ -2187,27 +2427,26 @@ fn convert_instruction(
                         src2: operand_regimm,
                     }));
                 }
-                AtomicKind::Xor => {
+                AtomicKind::Xor32 => {
                     emit(InstExt::Basic(BasicInst::AnyAny {
-                        kind: AnyAnyKind::Xor,
+                        kind: AnyAnyKind::Xor32,
                         dst: new_value,
                         src1: old_value.into(),
                         src2: operand_regimm,
                     }));
                 }
-                AtomicKind::MaxSigned => {
+                AtomicKind::MaxSigned32 => {
                     emit_minmax(MinMax::MaxSigned, new_value, Some(old_value), operand, Reg::E2, &mut emit);
                 }
-                AtomicKind::MinSigned => {
+                AtomicKind::MinSigned32 => {
                     emit_minmax(MinMax::MinSigned, new_value, Some(old_value), operand, Reg::E2, &mut emit);
                 }
-                AtomicKind::MaxUnsigned => {
+                AtomicKind::MaxUnsigned32 => {
                     emit_minmax(MinMax::MaxUnsigned, new_value, Some(old_value), operand, Reg::E2, &mut emit);
                 }
-                AtomicKind::MinUnsigned => {
+                AtomicKind::MinUnsigned32 => {
                     emit_minmax(MinMax::MinUnsigned, new_value, Some(old_value), operand, Reg::E2, &mut emit);
                 }
-
                 AtomicKind::MaxSigned64 => {
                     emit_minmax(MinMax::MaxSigned64, new_value, Some(old_value), operand, Reg::E2, &mut emit);
                 }
@@ -2223,7 +2462,7 @@ fn convert_instruction(
             }
 
             emit(InstExt::Basic(BasicInst::StoreIndirect {
-                kind: StoreKind::U32,
+                kind: if is_64_bit { StoreKind::U64 } else { StoreKind::U32 },
                 src: new_value.into(),
                 base: addr,
                 offset: 0,
@@ -2272,12 +2511,14 @@ fn read_instruction_bytes(text: &[u8], relative_offset: usize) -> (u64, u32) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn parse_code_section<H>(
     elf: &Elf<H>,
     section: &Section,
     decoder_config: &DecoderConfig,
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     imports: &mut Vec<Import>,
+    metadata_to_nth_import: &mut HashMap<ExternMetadata, usize>,
     instruction_overrides: &mut HashMap<SectionTarget, InstExt<SectionTarget, SectionTarget>>,
     output: &mut Vec<(Source, InstExt<SectionTarget, SectionTarget>)>,
 ) -> Result<(), ProgramFromElfError>
@@ -2321,7 +2562,7 @@ where
 
             let Some(relocation) = relocations.get(&target_location) else {
                 return Err(ProgramFromElfError::other(format!(
-                    "found an external call without a relocation for a pointer to metadata at {current_location}"
+                    "found an external call without a relocation for a pointer to metadata at {target_location}"
                 )));
             };
 
@@ -2336,14 +2577,25 @@ where
                 } if !elf.is_64() => target,
                 _ => {
                     return Err(ProgramFromElfError::other(format!(
-                        "found an external call with an unexpected relocation at {current_location}: {relocation:?}"
+                        "found an external call with an unexpected relocation at {target_location}: {relocation:?}"
                     )));
                 }
             };
 
             let metadata = parse_extern_metadata(elf, relocations, *metadata_location)?;
-            let nth_import = imports.len();
-            imports.push(Import { metadata });
+
+            // The same import can be inlined in multiple places, so deduplicate those here.
+            let nth_import = match metadata_to_nth_import.entry(metadata) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let nth_import = imports.len();
+                    imports.push(Import {
+                        metadata: entry.key().clone(),
+                    });
+                    entry.insert(nth_import);
+                    nth_import
+                }
+                std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            };
 
             output.push((
                 Source {
@@ -2445,7 +2697,7 @@ where
                                             ra,
                                             target: SectionTarget {
                                                 section_index,
-                                                offset: u64::from(offset as u32),
+                                                offset: u64::from(cast(offset).to_unsigned()),
                                             },
                                             target_return: current_location.add(inst_size + next_inst_size),
                                         }),
@@ -2461,7 +2713,7 @@ where
             }
 
             let original_length = output.len();
-            convert_instruction(section, current_location, original_inst, inst_size, elf.is_64(), |inst| {
+            convert_instruction(elf, section, current_location, original_inst, inst_size, elf.is_64(), |inst| {
                 output.push((source, inst));
             })?;
 
@@ -3005,6 +3257,7 @@ fn perform_nop_elimination(all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>]
     all_blocks[current.index()].ops.retain(|(_, instruction)| !instruction.is_nop());
 }
 
+#[deny(clippy::as_conversions)]
 fn perform_inlining(
     all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>],
     reachability_graph: &mut ReachabilityGraph,
@@ -3178,7 +3431,7 @@ fn perform_inlining(
                 }
             }
         }
-        ControlInst::Call { .. } | ControlInst::CallIndirect { .. } => unreachable!(),
+        ControlInst::Call { .. } => unreachable!(),
         _ => {}
     }
 
@@ -3282,6 +3535,7 @@ fn update_references(
     }
 }
 
+#[deny(clippy::as_conversions)]
 fn perform_dead_code_elimination(
     config: &Config,
     imports: &[Import],
@@ -3332,6 +3586,12 @@ fn perform_dead_code_elimination(
 
         let references = gather_references(&all_blocks[block_target.index()]);
         for nth_instruction in dead_code {
+            log::trace!(
+                "Removing dead instruction in {}: {:?}",
+                all_blocks[block_target.index()].ops[nth_instruction].0,
+                all_blocks[block_target.index()].ops[nth_instruction].1
+            );
+
             // Replace it with a NOP.
             all_blocks[block_target.index()].ops[nth_instruction].1 = BasicInst::Nop;
         }
@@ -3371,8 +3631,8 @@ fn perform_dead_code_elimination(
             target_true, target_false, ..
         } => registers_needed_for_block[target_true.index()] | registers_needed_for_block[target_false.index()],
         // ...otherwise assume it'll need all of them.
-        ControlInst::Call { .. } | ControlInst::CallIndirect { .. } => unreachable!(),
-        ControlInst::JumpIndirect { .. } => RegMask::all(),
+        ControlInst::Call { .. } => unreachable!(),
+        ControlInst::CallIndirect { .. } | ControlInst::JumpIndirect { .. } => RegMask::all(),
     };
 
     let mut modified = false;
@@ -3401,124 +3661,195 @@ fn perform_dead_code_elimination(
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum AnyAnyKind {
-    Add,
+    Add32,
+    Add32AndSignExtend,
     Add64,
-    Sub,
+    Sub32,
+    Sub32AndSignExtend,
     Sub64,
-    And,
+    And32,
     And64,
-    Or,
+    Or32,
     Or64,
-    Xor,
+    Xor32,
     Xor64,
-    SetLessThanUnsigned,
-    SetLessThanSigned,
+    SetLessThanUnsigned32,
     SetLessThanUnsigned64,
+    SetLessThanSigned32,
     SetLessThanSigned64,
-    ShiftLogicalLeft,
-    ShiftLogicalRight,
-    ShiftArithmeticRight,
+    ShiftLogicalLeft32,
+    ShiftLogicalLeft32AndSignExtend,
     ShiftLogicalLeft64,
+    ShiftLogicalRight32,
+    ShiftLogicalRight32AndSignExtend,
     ShiftLogicalRight64,
+    ShiftArithmeticRight32,
+    ShiftArithmeticRight32AndSignExtend,
     ShiftArithmeticRight64,
-
-    Mul,
+    Mul32,
+    Mul32AndSignExtend,
     Mul64,
-    MulUpperSignedSigned,
-    MulUpperSignedSigned64,
-    MulUpperUnsignedUnsigned,
-    MulUpperUnsignedUnsigned64,
+    RotateRight32,
+    RotateRight32AndSignExtend,
+    RotateRight64,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum RegKind {
+    CountLeadingZeroBits32,
+    CountLeadingZeroBits64,
+    CountSetBits32,
+    CountSetBits64,
+    CountTrailingZeroBits32,
+    CountTrailingZeroBits64,
+    OrCombineByte,
+    ReverseByte,
+    SignExtend8,
+    SignExtend16,
+    ZeroExtend16,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum RegRegKind {
-    MulUpperSignedUnsigned,
+    MulUpperSignedSigned32,
+    MulUpperSignedSigned64,
+    MulUpperUnsignedUnsigned32,
+    MulUpperUnsignedUnsigned64,
+    MulUpperSignedUnsigned32,
     MulUpperSignedUnsigned64,
-    Div,
+    Div32,
+    Div32AndSignExtend,
     Div64,
-    DivUnsigned,
+    DivUnsigned32,
+    DivUnsigned32AndSignExtend,
     DivUnsigned64,
-    Rem,
+    Rem32,
+    Rem32AndSignExtend,
     Rem64,
-    RemUnsigned,
+    RemUnsigned32,
+    RemUnsigned32AndSignExtend,
     RemUnsigned64,
+
+    AndInverted,
+    OrInverted,
+    Xnor,
+    Maximum,
+    MaximumUnsigned,
+    Minimum,
+    MinimumUnsigned,
+    RotateLeft32,
+    RotateLeft32AndSignExtend,
+    RotateLeft64,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum OperationKind {
-    Add,
+    Add32,
+    Add32AndSignExtend,
     Add64,
-    Sub,
+    Sub32,
+    Sub32AndSignExtend,
     Sub64,
-    And,
+    And32,
     And64,
-    Or,
+    Or32,
     Or64,
-    Xor,
+    Xor32,
     Xor64,
-    SetLessThanUnsigned,
+    SetLessThanUnsigned32,
     SetLessThanUnsigned64,
-    SetLessThanSigned,
+    SetLessThanSigned32,
     SetLessThanSigned64,
-    ShiftLogicalLeft,
+    ShiftLogicalLeft32,
+    ShiftLogicalLeft32AndSignExtend,
     ShiftLogicalLeft64,
-    ShiftLogicalRight,
+    ShiftLogicalRight32,
+    ShiftLogicalRight32AndSignExtend,
     ShiftLogicalRight64,
-    ShiftArithmeticRight,
+    ShiftArithmeticRight32,
+    ShiftArithmeticRight32AndSignExtend,
     ShiftArithmeticRight64,
 
-    Mul,
+    Mul32,
+    Mul32AndSignExtend,
     Mul64,
-    MulUpperSignedSigned,
+    MulUpperSignedSigned32,
     MulUpperSignedSigned64,
-    MulUpperSignedUnsigned,
+    MulUpperSignedUnsigned32,
     MulUpperSignedUnsigned64,
-    MulUpperUnsignedUnsigned,
+    MulUpperUnsignedUnsigned32,
     MulUpperUnsignedUnsigned64,
-    Div,
+    Div32,
+    Div32AndSignExtend,
     Div64,
-    DivUnsigned,
+    DivUnsigned32,
+    DivUnsigned32AndSignExtend,
     DivUnsigned64,
-    Rem,
+    Rem32,
+    Rem32AndSignExtend,
     Rem64,
-    RemUnsigned,
+    RemUnsigned32,
+    RemUnsigned32AndSignExtend,
     RemUnsigned64,
 
-    Eq,
-    NotEq,
-    SetGreaterOrEqualSigned,
-    SetGreaterOrEqualUnsigned,
+    Eq32,
+    Eq64,
+    NotEq32,
+    NotEq64,
+    SetGreaterOrEqualSigned32,
+    SetGreaterOrEqualSigned64,
+    SetGreaterOrEqualUnsigned32,
+    SetGreaterOrEqualUnsigned64,
+
+    AndInverted,
+    OrInverted,
+    Xnor,
+    Maximum,
+    MaximumUnsigned,
+    Minimum,
+    MinimumUnsigned,
+    RotateLeft32,
+    RotateLeft32AndSignExtend,
+    RotateLeft64,
+    RotateRight32,
+    RotateRight32AndSignExtend,
+    RotateRight64,
 }
 
 impl From<AnyAnyKind> for OperationKind {
     fn from(kind: AnyAnyKind) -> Self {
         match kind {
-            AnyAnyKind::Add => Self::Add,
+            AnyAnyKind::Add32 => Self::Add32,
+            AnyAnyKind::Add32AndSignExtend => Self::Add32AndSignExtend,
             AnyAnyKind::Add64 => Self::Add64,
-            AnyAnyKind::Sub => Self::Sub,
+            AnyAnyKind::Sub32 => Self::Sub32,
+            AnyAnyKind::Sub32AndSignExtend => Self::Sub32AndSignExtend,
             AnyAnyKind::Sub64 => Self::Sub64,
-            AnyAnyKind::And => Self::And,
+            AnyAnyKind::And32 => Self::And32,
             AnyAnyKind::And64 => Self::And64,
-            AnyAnyKind::Or => Self::Or,
+            AnyAnyKind::Or32 => Self::Or32,
             AnyAnyKind::Or64 => Self::Or64,
-            AnyAnyKind::Xor => Self::Xor,
+            AnyAnyKind::Xor32 => Self::Xor32,
             AnyAnyKind::Xor64 => Self::Xor64,
-            AnyAnyKind::SetLessThanUnsigned => Self::SetLessThanUnsigned,
+            AnyAnyKind::SetLessThanUnsigned32 => Self::SetLessThanUnsigned32,
             AnyAnyKind::SetLessThanUnsigned64 => Self::SetLessThanUnsigned64,
-            AnyAnyKind::SetLessThanSigned => Self::SetLessThanSigned,
+            AnyAnyKind::SetLessThanSigned32 => Self::SetLessThanSigned32,
             AnyAnyKind::SetLessThanSigned64 => Self::SetLessThanSigned64,
-            AnyAnyKind::ShiftLogicalLeft => Self::ShiftLogicalLeft,
+            AnyAnyKind::ShiftLogicalLeft32 => Self::ShiftLogicalLeft32,
+            AnyAnyKind::ShiftLogicalLeft32AndSignExtend => Self::ShiftLogicalLeft32AndSignExtend,
             AnyAnyKind::ShiftLogicalLeft64 => Self::ShiftLogicalLeft64,
-            AnyAnyKind::ShiftLogicalRight => Self::ShiftLogicalRight,
+            AnyAnyKind::ShiftLogicalRight32 => Self::ShiftLogicalRight32,
+            AnyAnyKind::ShiftLogicalRight32AndSignExtend => Self::ShiftLogicalRight32AndSignExtend,
             AnyAnyKind::ShiftLogicalRight64 => Self::ShiftLogicalRight64,
-            AnyAnyKind::ShiftArithmeticRight => Self::ShiftArithmeticRight,
+            AnyAnyKind::ShiftArithmeticRight32 => Self::ShiftArithmeticRight32,
+            AnyAnyKind::ShiftArithmeticRight32AndSignExtend => Self::ShiftArithmeticRight32AndSignExtend,
             AnyAnyKind::ShiftArithmeticRight64 => Self::ShiftArithmeticRight64,
-            AnyAnyKind::Mul => Self::Mul,
+            AnyAnyKind::Mul32 => Self::Mul32,
+            AnyAnyKind::Mul32AndSignExtend => Self::Mul32AndSignExtend,
             AnyAnyKind::Mul64 => Self::Mul64,
-            AnyAnyKind::MulUpperSignedSigned => Self::MulUpperSignedSigned,
-            AnyAnyKind::MulUpperSignedSigned64 => Self::MulUpperSignedSigned64,
-            AnyAnyKind::MulUpperUnsignedUnsigned => Self::MulUpperUnsignedUnsigned,
-            AnyAnyKind::MulUpperUnsignedUnsigned64 => Self::MulUpperUnsignedUnsigned64,
+            AnyAnyKind::RotateRight32 => Self::RotateRight32,
+            AnyAnyKind::RotateRight32AndSignExtend => Self::RotateRight32AndSignExtend,
+            AnyAnyKind::RotateRight64 => Self::RotateRight64,
         }
     }
 }
@@ -3526,16 +3857,34 @@ impl From<AnyAnyKind> for OperationKind {
 impl From<RegRegKind> for OperationKind {
     fn from(kind: RegRegKind) -> Self {
         match kind {
-            RegRegKind::MulUpperSignedUnsigned => Self::MulUpperSignedUnsigned,
+            RegRegKind::MulUpperSignedSigned32 => Self::MulUpperSignedSigned32,
+            RegRegKind::MulUpperSignedSigned64 => Self::MulUpperSignedSigned64,
+            RegRegKind::MulUpperUnsignedUnsigned32 => Self::MulUpperUnsignedUnsigned32,
+            RegRegKind::MulUpperUnsignedUnsigned64 => Self::MulUpperUnsignedUnsigned64,
+            RegRegKind::MulUpperSignedUnsigned32 => Self::MulUpperSignedUnsigned32,
             RegRegKind::MulUpperSignedUnsigned64 => Self::MulUpperSignedUnsigned64,
-            RegRegKind::Div => Self::Div,
+            RegRegKind::Div32 => Self::Div32,
+            RegRegKind::Div32AndSignExtend => Self::Div32AndSignExtend,
             RegRegKind::Div64 => Self::Div64,
-            RegRegKind::DivUnsigned => Self::DivUnsigned,
+            RegRegKind::DivUnsigned32 => Self::DivUnsigned32,
+            RegRegKind::DivUnsigned32AndSignExtend => Self::DivUnsigned32AndSignExtend,
             RegRegKind::DivUnsigned64 => Self::DivUnsigned64,
-            RegRegKind::Rem => Self::Rem,
+            RegRegKind::Rem32 => Self::Rem32,
+            RegRegKind::Rem32AndSignExtend => Self::Rem32AndSignExtend,
             RegRegKind::Rem64 => Self::Rem64,
-            RegRegKind::RemUnsigned => Self::RemUnsigned,
+            RegRegKind::RemUnsigned32 => Self::RemUnsigned32,
+            RegRegKind::RemUnsigned32AndSignExtend => Self::RemUnsigned32AndSignExtend,
             RegRegKind::RemUnsigned64 => Self::RemUnsigned64,
+            RegRegKind::AndInverted => Self::AndInverted,
+            RegRegKind::OrInverted => Self::OrInverted,
+            RegRegKind::Xnor => Self::Xnor,
+            RegRegKind::Maximum => Self::Maximum,
+            RegRegKind::MaximumUnsigned => Self::MaximumUnsigned,
+            RegRegKind::Minimum => Self::Minimum,
+            RegRegKind::MinimumUnsigned => Self::MinimumUnsigned,
+            RegRegKind::RotateLeft32 => Self::RotateLeft32,
+            RegRegKind::RotateLeft32AndSignExtend => Self::RotateLeft32AndSignExtend,
+            RegRegKind::RotateLeft64 => Self::RotateLeft64,
         }
     }
 }
@@ -3543,136 +3892,254 @@ impl From<RegRegKind> for OperationKind {
 impl From<BranchKind> for OperationKind {
     fn from(kind: BranchKind) -> Self {
         match kind {
-            BranchKind::Eq => Self::Eq,
-            BranchKind::NotEq => Self::NotEq,
-            BranchKind::LessSigned => Self::SetLessThanSigned,
-            BranchKind::GreaterOrEqualSigned => Self::SetGreaterOrEqualSigned,
-            BranchKind::LessUnsigned => Self::SetLessThanUnsigned,
-            BranchKind::GreaterOrEqualUnsigned => Self::SetGreaterOrEqualUnsigned,
+            BranchKind::Eq32 => Self::Eq32,
+            BranchKind::Eq64 => Self::Eq64,
+            BranchKind::NotEq32 => Self::NotEq32,
+            BranchKind::NotEq64 => Self::NotEq64,
+            BranchKind::LessSigned32 => Self::SetLessThanSigned32,
+            BranchKind::LessSigned64 => Self::SetLessThanSigned64,
+            BranchKind::GreaterOrEqualSigned32 => Self::SetGreaterOrEqualSigned32,
+            BranchKind::GreaterOrEqualSigned64 => Self::SetGreaterOrEqualSigned64,
+            BranchKind::LessUnsigned32 => Self::SetLessThanUnsigned32,
+            BranchKind::LessUnsigned64 => Self::SetLessThanUnsigned64,
+            BranchKind::GreaterOrEqualUnsigned32 => Self::SetGreaterOrEqualUnsigned32,
+            BranchKind::GreaterOrEqualUnsigned64 => Self::SetGreaterOrEqualUnsigned64,
         }
     }
 }
 
 impl OperationKind {
+    #[rustfmt::skip]
     fn apply_const(self, lhs: i64, rhs: i64) -> i64 {
         use polkavm_common::operation::*;
-        #[allow(clippy::unnecessary_cast)]
+        macro_rules! op32 {
+            (|$lhs:ident, $rhs:ident| $e:expr) => {{
+                let $lhs: i32 = lhs.try_into().expect("operand overflow");
+                let $rhs: i32 = rhs.try_into().expect("operand overflow");
+                let out: i32 = $e;
+                cast(out).to_i64_sign_extend()
+            }};
+        }
+
+        macro_rules! op32_on_64 {
+            (|$lhs:ident, $rhs:ident| $e:expr) => {{
+                let $lhs: u64 = cast($lhs).to_unsigned();
+                let $lhs: u32 = cast($lhs).truncate_to_u32();
+                let $lhs: i32 = cast($lhs).to_signed();
+                let $rhs: u64 = cast($rhs).to_unsigned();
+                let $rhs: u32 = cast($rhs).truncate_to_u32();
+                let $rhs: i32 = cast($rhs).to_signed();
+                let out: i32 = $e;
+                cast(out).to_i64_sign_extend()
+            }};
+        }
+
         match self {
-            Self::Add => {
-                let lhs: i32 = lhs.try_into().expect("add operand overflow");
-                let rhs: i32 = rhs.try_into().expect("add operand overflow");
-                i32_to_i64(lhs.wrapping_add(rhs))
+            Self::Add32 => {
+                op32!(|lhs, rhs| lhs.wrapping_add(rhs))
             }
-            Self::Sub => {
-                let lhs: i32 = lhs.try_into().expect("sub operand overflow");
-                let rhs: i32 = rhs.try_into().expect("sub operand overflow");
-                i32_to_i64(lhs.wrapping_sub(rhs))
+            Self::Add32AndSignExtend => {
+                op32_on_64!(|lhs, rhs| lhs.wrapping_add(rhs))
             }
-            Self::And => {
-                let lhs: i32 = lhs.try_into().expect("and operand overflow");
-                let rhs: i32 = rhs.try_into().expect("and operand overflow");
-                i32_to_i64(lhs & rhs)
+            Self::Add64 => {
+                lhs.wrapping_add(rhs)
+            },
+            Self::And32 => {
+                op32!(|lhs, rhs| lhs & rhs)
             }
-            Self::Or => {
-                let lhs: i32 = lhs.try_into().expect("or operand overflow");
-                let rhs: i32 = rhs.try_into().expect("or operand overflow");
-                i32_to_i64(lhs | rhs)
+            Self::And64 => {
+                lhs & rhs
+            },
+            Self::Div32 => {
+                op32!(|lhs, rhs| div(lhs, rhs))
             }
-            Self::Xor => {
-                let lhs: i32 = lhs.try_into().expect("xor operand overflow");
-                let rhs: i32 = rhs.try_into().expect("xor operand overflow");
-                i32_to_i64(lhs ^ rhs)
+            Self::Div32AndSignExtend => {
+                op32_on_64!(|lhs, rhs| div(lhs, rhs))
             }
-            Self::SetLessThanUnsigned => i64::from((lhs as u64) < (rhs as u64)),
-            Self::SetLessThanSigned => i64::from((lhs as i64) < (rhs as i64)),
-            Self::ShiftLogicalLeft => {
-                let lhs: i32 = lhs.try_into().expect("shl operand overflow");
-                let rhs: i32 = rhs.try_into().expect("shl operand overflow");
-                i32_to_i64((lhs as u32).wrapping_shl(rhs as u32) as i32)
+            Self::Div64 => {
+                div64(lhs, rhs)
+            },
+            Self::DivUnsigned32 => {
+                op32!(|lhs, rhs| cast(divu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
             }
-            Self::ShiftLogicalRight => {
-                let lhs: i32 = lhs.try_into().expect("shr operand overflow");
-                let rhs: i32 = rhs.try_into().expect("shr operand overflow");
-                i32_to_i64((lhs as u32).wrapping_shr(rhs as u32) as i32)
+            Self::DivUnsigned32AndSignExtend => {
+                op32_on_64!(|lhs, rhs| cast(divu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
             }
-            Self::ShiftArithmeticRight => {
-                let lhs: i32 = lhs.try_into().expect("sha operand overflow");
-                let rhs: i32 = rhs.try_into().expect("sha operand overflow");
-                i32_to_i64((lhs as i32).wrapping_shr(rhs as u32))
+            Self::DivUnsigned64 => {
+                cast(divu64(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed()
+            },
+            Self::Eq32 => {
+                op32!(|lhs, rhs| i32::from(lhs == rhs))
             }
-
-            Self::Mul => {
-                let lhs: i32 = lhs.try_into().expect("mul operand overflow");
-                let rhs: i32 = rhs.try_into().expect("mul operand overflow");
-                i32_to_i64((lhs as i32).wrapping_mul(rhs as i32))
+            Self::Eq64 => {
+                i64::from(lhs == rhs)
+            },
+            Self::Mul32 => {
+                op32!(|lhs, rhs| lhs.wrapping_mul(rhs))
             }
-            Self::MulUpperSignedSigned => {
-                let lhs: i32 = lhs.try_into().expect("mulh operand overflow");
-                let rhs: i32 = rhs.try_into().expect("mulh operand overflow");
-                i32_to_i64(mulh(lhs, rhs))
+            Self::Mul32AndSignExtend => {
+                op32_on_64!(|lhs, rhs| lhs.wrapping_mul(rhs))
             }
-            Self::MulUpperSignedUnsigned => {
-                let lhs: i32 = lhs.try_into().expect("mulhsu operand overflow");
-                let rhs: i32 = rhs.try_into().expect("mulhsu operand overflow");
-                i32_to_i64(mulhsu(lhs, rhs as u32))
+            Self::Mul64 => {
+                lhs.wrapping_mul(rhs)
+            },
+            Self::MulUpperSignedSigned32 => {
+                op32!(|lhs, rhs| mulh(lhs, rhs))
+            },
+            Self::MulUpperSignedSigned64 => {
+                mulh64(lhs, rhs)
+            },
+            Self::MulUpperSignedUnsigned32 => {
+                op32!(|lhs, rhs| mulhsu(lhs, cast(rhs).to_unsigned()))
+            },
+            Self::MulUpperSignedUnsigned64 => {
+                mulhsu64(lhs, cast(rhs).to_unsigned())
+            },
+            Self::MulUpperUnsignedUnsigned32 => {
+                op32!(|lhs, rhs| cast(mulhu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
+            },
+            Self::MulUpperUnsignedUnsigned64 => {
+                cast(mulhu64(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed()
+            },
+            Self::NotEq32 => {
+                op32!(|lhs, rhs| i32::from(lhs != rhs))
+            },
+            Self::NotEq64 => {
+                i64::from(lhs != rhs)
+            },
+            Self::Or32 => {
+                op32!(|lhs, rhs| lhs | rhs)
+            },
+            Self::Or64 => {
+                lhs | rhs
+            },
+            Self::Rem32 => {
+                op32!(|lhs, rhs| rem(lhs, rhs))
+            },
+            Self::Rem32AndSignExtend => {
+                op32_on_64!(|lhs, rhs| rem(lhs, rhs))
+            },
+            Self::Rem64 => {
+                rem64(lhs, rhs)
+            },
+            Self::RemUnsigned32 => {
+                op32!(|lhs, rhs| cast(remu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
+            },
+            Self::RemUnsigned32AndSignExtend => {
+                op32_on_64!(|lhs, rhs| cast(remu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
             }
-            Self::MulUpperUnsignedUnsigned => {
-                let lhs: i32 = lhs.try_into().expect("mulhu operand overflow");
-                let rhs: i32 = rhs.try_into().expect("mulhu operand overflow");
-                i32_to_i64(mulhu(lhs as u32, rhs as u32) as i32)
+            Self::RemUnsigned64 => {
+                remu64(cast(lhs).to_unsigned(), cast(rhs).to_unsigned()) as i64
+            },
+            Self::SetGreaterOrEqualSigned32 => {
+                op32!(|lhs, rhs| i32::from(lhs >= rhs))
+            },
+            Self::SetGreaterOrEqualSigned64 => {
+                i64::from(lhs >= rhs)
+            },
+            Self::SetGreaterOrEqualUnsigned32 => {
+                op32!(|lhs, rhs| i32::from(cast(lhs).to_unsigned() >= cast(rhs).to_unsigned()))
+            },
+            Self::SetGreaterOrEqualUnsigned64 => {
+                i64::from(cast(lhs).to_unsigned() >= cast(rhs).to_unsigned())
+            },
+            Self::SetLessThanSigned32 => {
+                op32!(|lhs, rhs| i32::from(lhs < rhs))
+            },
+            Self::SetLessThanSigned64 => {
+                i64::from(lhs < rhs)
+            },
+            Self::SetLessThanUnsigned32 => {
+                op32!(|lhs, rhs| i32::from(cast(lhs).to_unsigned() < cast(rhs).to_unsigned()))
+            },
+            Self::SetLessThanUnsigned64 => {
+                i64::from((lhs as u64) < (rhs as u64))
+            },
+            Self::ShiftArithmeticRight32 => {
+                op32!(|lhs, rhs| lhs.wrapping_shr(cast(rhs).to_unsigned()))
+            },
+            Self::ShiftArithmeticRight32AndSignExtend => {
+                op32_on_64!(|lhs, rhs| lhs.wrapping_shr(cast(rhs).to_unsigned()))
+            },
+            Self::ShiftArithmeticRight64 => {
+                let rhs = cast(rhs).to_unsigned();
+                let rhs = cast(rhs).truncate_to_u32();
+                lhs.wrapping_shr(rhs)
+            },
+            Self::ShiftLogicalLeft32 => {
+                op32!(|lhs, rhs| lhs.wrapping_shl(cast(rhs).to_unsigned()))
+            },
+            Self::ShiftLogicalLeft32AndSignExtend => {
+                op32_on_64!(|lhs, rhs| lhs.wrapping_shl(cast(rhs).to_unsigned()))
+            },
+            Self::ShiftLogicalLeft64 => {
+                let rhs = cast(rhs).to_unsigned();
+                let rhs = cast(rhs).truncate_to_u32();
+                (lhs as u64).wrapping_shl(rhs) as i64
+            },
+            Self::ShiftLogicalRight32 => {
+                op32!(|lhs, rhs| cast(cast(lhs).to_unsigned().wrapping_shr(cast(rhs).to_unsigned())).to_signed())
+            },
+            Self::ShiftLogicalRight32AndSignExtend => {
+                op32_on_64!(|lhs, rhs| cast(cast(lhs).to_unsigned().wrapping_shr(cast(rhs).to_unsigned())).to_signed())
             }
-            Self::Div => {
-                let lhs: i32 = lhs.try_into().expect("div operand overflow");
-                let rhs: i32 = rhs.try_into().expect("div operand overflow");
-                i32_to_i64(div(lhs, rhs))
-            }
-            Self::DivUnsigned => {
-                let lhs: i32 = lhs.try_into().expect("divu operand overflow");
-                let rhs: i32 = rhs.try_into().expect("divu operand overflow");
-                i32_to_i64(divu(lhs as u32, rhs as u32) as i32)
-            }
-            Self::Rem => {
-                let lhs: i32 = lhs.try_into().expect("rem operand overflow");
-                let rhs: i32 = rhs.try_into().expect("rem operand overflow");
-                i32_to_i64(rem(lhs, rhs))
-            }
-            Self::RemUnsigned => {
-                let lhs: i32 = lhs.try_into().expect("remu operand overflow");
-                let rhs: i32 = rhs.try_into().expect("remu operand overflow");
-                i32_to_i64(remu(lhs as u32, rhs as u32) as i32)
-            }
-
-            Self::Eq => i64::from(lhs == rhs),
-            Self::NotEq => i64::from(lhs != rhs),
-            Self::SetGreaterOrEqualUnsigned => i64::from((lhs as u64) >= (rhs as u64)),
-            Self::SetGreaterOrEqualSigned => i64::from((lhs as i64) >= (rhs as i64)),
-
+            Self::ShiftLogicalRight64 => {
+                (lhs as u64).wrapping_shr(rhs as u32) as i64
+            },
+            Self::Sub32 => {
+                op32!(|lhs, rhs| lhs.wrapping_sub(rhs))
+            },
+            Self::Sub32AndSignExtend => {
+                op32_on_64!(|lhs, rhs| lhs.wrapping_sub(rhs))
+            },
+            Self::Sub64 => {
+                lhs.wrapping_sub(rhs)
+            },
+            Self::Xor32 => {
+                op32!(|lhs, rhs| lhs ^ rhs)
+            },
+            Self::Xor64 => {
+                lhs ^ rhs
+            },
             //
-            // 64-bit instructions
-            // TODO: Merge 64-bit and 32-bit flavours of Bitwise and Set instructions.
+            // Zbb instructions
             //
-            Self::Add64 => lhs.wrapping_add(rhs),
-            Self::Sub64 => lhs.wrapping_sub(rhs),
-            Self::And64 => lhs & rhs,
-            Self::Or64 => lhs | rhs,
-            Self::Xor64 => lhs ^ rhs,
-            Self::SetLessThanUnsigned64 => i64::from((lhs as u64) < (rhs as u64)),
-            Self::SetLessThanSigned64 => i64::from((lhs as i64) < (rhs as i64)),
-            Self::ShiftLogicalLeft64 => (lhs as u64).wrapping_shl(rhs as u32) as i64,
-            Self::ShiftLogicalRight64 => (lhs as u64).wrapping_shr(rhs as u32) as i64,
-            Self::ShiftArithmeticRight64 => (lhs as i64).wrapping_shr(rhs as u32) as i64,
-            Self::Mul64 => lhs.wrapping_mul(rhs),
-            Self::MulUpperSignedSigned64 => mulh64(lhs, rhs),
-            Self::MulUpperSignedUnsigned64 => mulhsu64(lhs, rhs as u64),
-            Self::MulUpperUnsignedUnsigned64 => mulhu64(lhs as u64, rhs as u64) as i64,
-            Self::Div64 => div64(lhs, rhs),
-            Self::DivUnsigned64 => divu64(lhs as u64, rhs as u64) as i64,
-            Self::Rem64 => rem64(lhs, rhs),
-            Self::RemUnsigned64 => remu64(lhs as u64, rhs as u64) as i64,
+            Self::AndInverted => lhs & (!rhs),
+            Self::OrInverted => lhs | (!rhs),
+            Self::Xnor => !(lhs ^ rhs),
+            Self::Maximum => lhs.max(rhs),
+            Self::MaximumUnsigned => (lhs as u64).max(rhs as u64) as i64,
+            Self::Minimum => lhs.min(rhs),
+            Self::MinimumUnsigned => (lhs as u64).min(rhs as u64) as i64,
+            Self::RotateLeft32 => {
+                op32!(|lhs, rhs| lhs.rotate_left(rhs as u32))
+            },
+            Self::RotateLeft32AndSignExtend => {
+                op32_on_64!(|lhs, rhs| lhs.rotate_left(rhs as u32))
+            },
+            Self::RotateLeft64 => {
+                let rhs = cast(rhs).to_unsigned();
+                let rhs = cast(rhs).truncate_to_u32();
+                lhs.rotate_left(rhs)
+            },
+            Self::RotateRight32 => {
+                op32!(|lhs, rhs| lhs.rotate_right(rhs as u32))
+            },
+            Self::RotateRight32AndSignExtend => {
+                op32_on_64!(|lhs, rhs| lhs.rotate_right(rhs as u32))
+            },
+            Self::RotateRight64 => {
+                let rhs = cast(rhs).to_unsigned();
+                let rhs = cast(rhs).truncate_to_u32();
+                lhs.rotate_right(rhs)
+            },
         }
     }
 
-    fn apply(self, lhs: RegValue, rhs: RegValue) -> Option<RegValue> {
+    fn apply<H>(self, elf: &Elf<H>, lhs: RegValue, rhs: RegValue) -> Option<RegValue>
+    where
+        H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
+    {
         use OperationKind as O;
         use RegValue::Constant as C;
 
@@ -3681,57 +4148,142 @@ impl OperationKind {
             (_, C(lhs), C(rhs)) => {
                 C(self.apply_const(lhs, rhs))
             },
-            (O::Add | O::Sub, RegValue::DataAddress(lhs), C(rhs)) => {
-                RegValue::DataAddress(lhs.map_offset_i64(|lhs| self.apply_const(lhs, rhs)))
-            }
+            (O::Add32, RegValue::DataAddress(lhs), C(rhs)) => {
+                let offset = cast(cast(lhs.offset).to_signed().wrapping_add(rhs)).to_unsigned();
+                if offset <= elf.section_by_index(lhs.section_index).size() {
+                    RegValue::DataAddress(SectionTarget {
+                        section_index: lhs.section_index,
+                        offset,
+                    })
+                } else {
+                    return None;
+                }
+            },
+            (O::Sub32, RegValue::DataAddress(lhs), C(rhs)) => {
+                let offset = cast(lhs.offset).to_signed().wrapping_sub(rhs);
+                if offset >= 0 {
+                    RegValue::DataAddress(SectionTarget {
+                        section_index: lhs.section_index,
+                        offset: cast(offset).to_unsigned(),
+                    })
+                } else {
+                    return None;
+                }
+            },
 
             // (x == x) = 1
-            (O::Eq,                     lhs, rhs) if lhs == rhs => C(1),
+            (O::Eq32,                   lhs, rhs) if lhs == rhs => C(1),
+            (O::Eq64,                   lhs, rhs) if lhs == rhs => C(1),
             // (x != x) = 0
-            (O::NotEq,                  lhs, rhs) if lhs == rhs => C(0),
+            (O::NotEq32,                lhs, rhs) if lhs == rhs => C(0),
+            (O::NotEq64,                lhs, rhs) if lhs == rhs => C(0),
             // x & x = x
-            (O::And,                    lhs, rhs) if lhs == rhs => lhs,
+            (O::And32,                  lhs, rhs) if lhs == rhs => lhs,
+            (O::And64,                  lhs, rhs) if lhs == rhs => lhs,
             // x | x = x
-            (O::Or,                     lhs, rhs) if lhs == rhs => lhs,
+            (O::Or32,                   lhs, rhs) if lhs == rhs => lhs,
+            (O::Or64,                   lhs, rhs) if lhs == rhs => lhs,
 
             // x + 0 = x
-            (O::Add,                    lhs, C(0)) => lhs,
+            (O::Add32,                  lhs, C(0)) => lhs,
+            (O::Add64,                  lhs, C(0)) => lhs,
             // 0 + x = x
-            (O::Add,                    C(0), rhs) => rhs,
+            (O::Add32,                  C(0), rhs) => rhs,
+            (O::Add64,                  C(0), rhs) => rhs,
             // x | 0 = x
-            (O::Or,                     lhs, C(0)) => lhs,
+            (O::Or32,                   lhs, C(0)) => lhs,
+            (O::Or64,                   lhs, C(0)) => lhs,
             // 0 | x = x
-            (O::Or,                     C(0), rhs) => rhs,
+            (O::Or32,                   C(0), rhs) => rhs,
+            (O::Or64,                   C(0), rhs) => rhs,
             // x ^ 0 = x
-            (O::Xor,                    lhs, C(0)) => lhs,
+            (O::Xor32,                  lhs, C(0)) => lhs,
+            (O::Xor64,                  lhs, C(0)) => lhs,
             // 0 ^ x = x
-            (O::Xor,                    C(0), rhs) => rhs,
+            (O::Xor32,                  C(0), rhs) => rhs,
+            (O::Xor64,                  C(0), rhs) => rhs,
 
             // x - 0 = x
-            (O::Sub,                    lhs, C(0)) => lhs,
+            (O::Sub32,                  lhs, C(0)) => lhs,
+            (O::Sub64,                  lhs, C(0)) => lhs,
             // x << 0 = x
-            (O::ShiftLogicalLeft,       lhs, C(0)) => lhs,
+            (O::ShiftLogicalLeft32,     lhs, C(0)) => lhs,
+            (O::ShiftLogicalLeft64,     lhs, C(0)) => lhs,
             // x >> 0 = x
-            (O::ShiftLogicalRight,      lhs, C(0)) => lhs,
+            (O::ShiftLogicalRight32,    lhs, C(0)) => lhs,
+            (O::ShiftLogicalRight64,    lhs, C(0)) => lhs,
             // x >> 0 = x
-            (O::ShiftArithmeticRight,   lhs, C(0)) => lhs,
+            (O::ShiftArithmeticRight32, lhs, C(0)) => lhs,
+            (O::ShiftArithmeticRight64, lhs, C(0)) => lhs,
             // x % 0 = x
-            (O::Rem,                    lhs, C(0)) => lhs,
+            (O::Rem32,                  lhs, C(0)) => lhs,
+            (O::Rem64,                  lhs, C(0)) => lhs,
             // x % 0 = x
-            (O::RemUnsigned,            lhs, C(0)) => lhs,
+            (O::RemUnsigned32,          lhs, C(0)) => lhs,
+            (O::RemUnsigned64,          lhs, C(0)) => lhs,
 
             // x & 0 = 0
-            (O::And,                      _, C(0)) => C(0),
+            (O::And32,                    _, C(0)) => C(0),
+            (O::And64,                    _, C(0)) => C(0),
             // 0 & x = 0
-            (O::And,                      C(0), _) => C(0),
+            (O::And32,                    C(0), _) => C(0),
+            (O::And64,                    C(0), _) => C(0),
             // x * 0 = 0
-            (O::Mul,                      _, C(0)) => C(0),
+            (O::Mul32,                    _, C(0)) => C(0),
+            (O::Mul64,                    _, C(0)) => C(0),
+            (O::MulUpperSignedSigned32,   _, C(0)) => C(0),
+            (O::MulUpperSignedSigned64,   _, C(0)) => C(0),
+            (O::MulUpperSignedUnsigned32, _, C(0)) => C(0),
+            (O::MulUpperSignedUnsigned64, _, C(0)) => C(0),
+            (O::MulUpperUnsignedUnsigned32, _, C(0)) => C(0),
+            (O::MulUpperUnsignedUnsigned64, _, C(0)) => C(0),
             // 0 * x = 0
-            (O::Mul,                      C(0), _) => C(0),
+            (O::Mul32,                    C(0), _) => C(0),
+            (O::Mul64,                    C(0), _) => C(0),
+            (O::MulUpperSignedSigned32,   C(0), _) => C(0),
+            (O::MulUpperSignedSigned64,   C(0), _) => C(0),
+            (O::MulUpperSignedUnsigned32, C(0), _) => C(0),
+            (O::MulUpperSignedUnsigned64, C(0), _) => C(0),
+            (O::MulUpperUnsignedUnsigned32, C(0), _) => C(0),
+            (O::MulUpperUnsignedUnsigned64, C(0), _) => C(0),
 
             // x / 0 = -1
-            (O::Div,                      _, C(0)) => C(-1),
-            (O::DivUnsigned,              _, C(0)) => C(-1),
+            (O::Div32,                    _, C(0)) => C(-1),
+            (O::Div64,                    _, C(0)) => C(-1),
+            (O::DivUnsigned32,            _, C(0)) => C(-1),
+            (O::DivUnsigned64,            _, C(0)) => C(-1),
+
+            // (x & ~0) = x
+            (O::AndInverted,              lhs, C(0)) => lhs,
+            // (0 & ~x) = 0
+            (O::AndInverted,              C(0), _) => C(0),
+
+            // (x | ~0) = -1
+            (O::OrInverted,               _, C(0)) => C(-1),
+
+            // unsigned_max(0, x) = x
+            (O::MaximumUnsigned,          C(0), rhs) => rhs,
+            (O::MaximumUnsigned,          lhs, C(0)) => lhs,
+
+            // unsigned min(0, x) = 0
+            (O::MinimumUnsigned,          C(0), _) => C(0),
+            (O::MinimumUnsigned,          _, C(0)) => C(0),
+
+            // x <<r 0 = x
+            (O::RotateLeft32,             lhs, C(0)) => lhs,
+            (O::RotateLeft32,             C(0), _) => C(0),
+            (O::RotateLeft64,             lhs, C(0)) => lhs,
+            (O::RotateLeft64,             C(0), _) => C(0),
+
+            // x >>r 0 = x
+            (O::RotateRight32,            lhs, C(0)) => lhs,
+            (O::RotateRight32,            C(0), _) => C(0),
+            (O::RotateRight64,            lhs, C(0)) => lhs,
+            (O::RotateRight64,            C(0), _) => C(0),
+
+            // (0 <<r 0) or (0 >>r 0) = 0
+            (O::RotateLeft32AndSignExtend,  C(0), _) => C(0),
+            (O::RotateRight32AndSignExtend, C(0), _) => C(0),
 
             _ => return None,
         };
@@ -3742,7 +4294,11 @@ impl OperationKind {
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum RegValue {
-    InputReg(Reg, BlockTarget),
+    InputReg {
+        reg: Reg,
+        source_block: BlockTarget,
+        bits_used: u64,
+    },
     CodeAddress(BlockTarget),
     DataAddress(SectionTarget),
     Constant(i64),
@@ -3769,14 +4325,12 @@ impl RegValue {
                 target: AnyTarget::Data(target),
             }),
             RegValue::Constant(imm) => {
-                let Ok(imm) = i32::try_from(imm) else {
-                    if is_rv64 {
-                        return Some(BasicInst::LoadImmediate64 { dst, imm });
-                    } else {
-                        panic!("load operand overflow")
-                    }
-                };
-                Some(BasicInst::LoadImmediate { dst, imm })
+                if let Ok(imm) = i32::try_from(imm) {
+                    Some(BasicInst::LoadImmediate { dst, imm })
+                } else {
+                    assert!(is_rv64, "64-bit register value on 32-bit target");
+                    Some(BasicInst::LoadImmediate64 { dst, imm })
+                }
             }
             _ => None,
         }
@@ -3784,9 +4338,9 @@ impl RegValue {
 
     fn bits_used(self) -> u64 {
         match self {
-            RegValue::InputReg(..) | RegValue::CodeAddress(..) | RegValue::DataAddress(..) => u64::MAX,
+            RegValue::CodeAddress(..) | RegValue::DataAddress(..) => u64::from(u32::MAX),
             RegValue::Constant(value) => value as u64,
-            RegValue::Unknown { bits_used, .. } | RegValue::OutputReg { bits_used, .. } => bits_used,
+            RegValue::Unknown { bits_used, .. } | RegValue::InputReg { bits_used, .. } | RegValue::OutputReg { bits_used, .. } => bits_used,
         }
     }
 }
@@ -3797,11 +4351,16 @@ struct BlockRegs {
     regs: [RegValue; Reg::ALL.len()],
 }
 
+#[deny(clippy::as_conversions)]
 impl BlockRegs {
     fn new_input(bitness: Bitness, source_block: BlockTarget) -> Self {
         BlockRegs {
             bitness,
-            regs: Reg::ALL.map(|reg| RegValue::InputReg(reg, source_block)),
+            regs: Reg::ALL.map(|reg| RegValue::InputReg {
+                reg,
+                source_block,
+                bits_used: bitness.bits_used_mask(),
+            }),
         }
     }
 
@@ -3818,20 +4377,27 @@ impl BlockRegs {
 
     fn get_reg(&self, reg: impl Into<RegImm>) -> RegValue {
         match reg.into() {
-            RegImm::Imm(imm) => RegValue::Constant(i32_to_i64(imm as i32)),
-            RegImm::Reg(reg) => self.regs[reg as usize],
+            RegImm::Imm(imm) => RegValue::Constant(cast(imm).to_i64_sign_extend()),
+            RegImm::Reg(reg) => self.regs[reg.to_usize()],
         }
     }
 
     fn set_reg(&mut self, reg: Reg, value: RegValue) {
-        self.regs[reg as usize] = value;
+        self.regs[reg.to_usize()] = value;
     }
 
-    fn simplify_control_instruction(&self, instruction: ControlInst<BlockTarget>) -> Option<ControlInst<BlockTarget>> {
+    fn simplify_control_instruction<H>(
+        &self,
+        elf: &Elf<H>,
+        instruction: ControlInst<BlockTarget>,
+    ) -> Option<(Option<BasicInst<AnyTarget>>, ControlInst<BlockTarget>)>
+    where
+        H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
+    {
         match instruction {
             ControlInst::JumpIndirect { base, offset: 0 } => {
                 if let RegValue::CodeAddress(target) = self.get_reg(base) {
-                    return Some(ControlInst::Jump { target });
+                    return Some((None, ControlInst::Jump { target }));
                 }
             }
             ControlInst::Branch {
@@ -3842,47 +4408,70 @@ impl BlockRegs {
                 target_false,
             } => {
                 if target_true == target_false {
-                    return Some(ControlInst::Jump { target: target_true });
+                    return Some((None, ControlInst::Jump { target: target_true }));
                 }
 
                 let src1_value = self.get_reg(src1);
                 let src2_value = self.get_reg(src2);
-                if let Some(value) = OperationKind::from(kind).apply(src1_value, src2_value) {
+                if let Some(value) = OperationKind::from(kind).apply(elf, src1_value, src2_value) {
                     match value {
                         RegValue::Constant(0) => {
-                            return Some(ControlInst::Jump { target: target_false });
+                            return Some((None, ControlInst::Jump { target: target_false }));
                         }
                         RegValue::Constant(1) => {
-                            return Some(ControlInst::Jump { target: target_true });
+                            return Some((None, ControlInst::Jump { target: target_true }));
                         }
                         _ => unreachable!("internal error: constant evaluation of branch operands returned a non-boolean value"),
                     }
                 }
 
-                if let RegValue::Constant(imm) = src1_value {
-                    let new_src = RegImm::Imm(imm as u32);
-                    if new_src != src1 {
-                        return Some(ControlInst::Branch {
-                            kind,
-                            src1: new_src,
-                            src2,
-                            target_true,
-                            target_false,
-                        });
+                if let RegImm::Reg(_) = src1 {
+                    if let RegValue::Constant(src1_value) = src1_value {
+                        if let Ok(src1_value) = src1_value.try_into() {
+                            return Some((
+                                None,
+                                ControlInst::Branch {
+                                    kind,
+                                    src1: RegImm::Imm(src1_value),
+                                    src2,
+                                    target_true,
+                                    target_false,
+                                },
+                            ));
+                        }
                     }
                 }
 
-                if let RegValue::Constant(imm) = src2_value {
-                    let new_src = RegImm::Imm(imm as u32);
-                    if new_src != src2 {
-                        return Some(ControlInst::Branch {
-                            kind,
-                            src1,
-                            src2: new_src,
-                            target_true,
-                            target_false,
-                        });
+                if let RegImm::Reg(_) = src2 {
+                    if let RegValue::Constant(src2_value) = src2_value {
+                        if let Ok(src2_value) = src2_value.try_into() {
+                            return Some((
+                                None,
+                                ControlInst::Branch {
+                                    kind,
+                                    src1,
+                                    src2: RegImm::Imm(src2_value),
+                                    target_true,
+                                    target_false,
+                                },
+                            ));
+                        }
                     }
+                }
+            }
+            ControlInst::CallIndirect {
+                ra,
+                base,
+                offset: 0,
+                target_return,
+            } => {
+                if let RegValue::CodeAddress(target) = self.get_reg(base) {
+                    let instruction_1 = BasicInst::LoadAddress {
+                        dst: ra,
+                        target: AnyTarget::Code(target_return),
+                    };
+                    let instruction_2 = ControlInst::Jump { target };
+                    return Some((Some(instruction_1), instruction_2));
                 }
             }
             _ => {}
@@ -3891,14 +4480,17 @@ impl BlockRegs {
         None
     }
 
-    fn simplify_instruction(&self, instruction: BasicInst<AnyTarget>) -> Option<BasicInst<AnyTarget>> {
+    fn simplify_instruction<H>(&self, elf: &Elf<H>, instruction: BasicInst<AnyTarget>) -> Option<BasicInst<AnyTarget>>
+    where
+        H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
+    {
         let is_rv64 = self.bitness == Bitness::B64;
 
         match instruction {
             BasicInst::RegReg { kind, dst, src1, src2 } => {
                 let src1_value = self.get_reg(src1);
                 let src2_value = self.get_reg(src2);
-                if let Some(value) = OperationKind::from(kind).apply(src1_value, src2_value) {
+                if let Some(value) = OperationKind::from(kind).apply(elf, src1_value, src2_value) {
                     if let Some(new_instruction) = value.to_instruction(dst, is_rv64) {
                         if new_instruction != instruction {
                             return Some(new_instruction);
@@ -3909,11 +4501,7 @@ impl BlockRegs {
             BasicInst::AnyAny { kind, dst, src1, src2 } => {
                 let src1_value = self.get_reg(src1);
                 let src2_value = self.get_reg(src2);
-                if let Some(value) = OperationKind::from(kind).apply(src1_value, src2_value) {
-                    if value == self.get_reg(dst) {
-                        return Some(BasicInst::Nop);
-                    }
-
+                if let Some(value) = OperationKind::from(kind).apply(elf, src1_value, src2_value) {
                     if let Some(new_instruction) = value.to_instruction(dst, is_rv64) {
                         if new_instruction != instruction {
                             return Some(new_instruction);
@@ -3921,29 +4509,33 @@ impl BlockRegs {
                     }
                 }
 
-                if let RegValue::Constant(value) = src1_value {
-                    if matches!(src1, RegImm::Reg(_)) {
-                        return Some(BasicInst::AnyAny {
-                            kind,
-                            dst,
-                            src1: RegImm::Imm(value as u32),
-                            src2,
-                        });
+                if let RegImm::Reg(_) = src1 {
+                    if let RegValue::Constant(src1_value) = src1_value {
+                        if let Ok(src1_value) = src1_value.try_into() {
+                            return Some(BasicInst::AnyAny {
+                                kind,
+                                dst,
+                                src1: RegImm::Imm(src1_value),
+                                src2,
+                            });
+                        }
                     }
                 }
 
-                if let RegValue::Constant(value) = src2_value {
-                    if matches!(src2, RegImm::Reg(_)) {
-                        return Some(BasicInst::AnyAny {
-                            kind,
-                            dst,
-                            src1,
-                            src2: RegImm::Imm(value as u32),
-                        });
+                if let RegImm::Reg(_) = src2 {
+                    if let RegValue::Constant(src2_value) = src2_value {
+                        if let Ok(src2_value) = src2_value.try_into() {
+                            return Some(BasicInst::AnyAny {
+                                kind,
+                                dst,
+                                src1,
+                                src2: RegImm::Imm(src2_value),
+                            });
+                        }
                     }
                 }
 
-                if (!is_rv64 && kind == AnyAnyKind::Add) || (is_rv64 && kind == AnyAnyKind::Add64) {
+                if matches!(kind, AnyAnyKind::Add32 | AnyAnyKind::Add64) {
                     if src1_value == RegValue::Constant(0) {
                         if let RegImm::Reg(src) = src2 {
                             return Some(BasicInst::MoveReg { dst, src });
@@ -3955,8 +4547,7 @@ impl BlockRegs {
                     }
                 }
 
-                if !is_rv64
-                    && kind == AnyAnyKind::Add
+                if matches!(kind, AnyAnyKind::Add32 | AnyAnyKind::Add64)
                     && src1_value != RegValue::Constant(0)
                     && src2_value != RegValue::Constant(0)
                     && (src1_value.bits_used() & src2_value.bits_used()) == 0
@@ -3965,7 +4556,11 @@ impl BlockRegs {
                     //
                     // Curiously LLVM's RISC-V backend doesn't do this even though its AMD64 backend does.
                     return Some(BasicInst::AnyAny {
-                        kind: AnyAnyKind::Or,
+                        kind: match kind {
+                            AnyAnyKind::Add32 => AnyAnyKind::Or32,
+                            AnyAnyKind::Add64 => AnyAnyKind::Or64,
+                            _ => unreachable!(),
+                        },
                         dst,
                         src1,
                         src2,
@@ -3979,12 +4574,14 @@ impl BlockRegs {
                 cond,
             } => {
                 if let RegValue::Constant(src_value) = self.get_reg(src) {
-                    return Some(BasicInst::Cmov {
-                        kind,
-                        dst,
-                        src: RegImm::Imm(src_value as u32),
-                        cond,
-                    });
+                    if let Ok(src_value) = src_value.try_into() {
+                        return Some(BasicInst::Cmov {
+                            kind,
+                            dst,
+                            src: RegImm::Imm(src_value),
+                            cond,
+                        });
+                    }
                 }
             }
             BasicInst::LoadIndirect { kind, dst, base, offset } => {
@@ -3992,48 +4589,48 @@ impl BlockRegs {
                     return Some(BasicInst::LoadAbsolute {
                         kind,
                         dst,
-                        target: base.map_offset_i32(|base| base.wrapping_add(offset)),
+                        target: base.map_offset_i64(|base| base.wrapping_add(cast(offset).to_i64_sign_extend())),
                     });
                 }
+            }
+            BasicInst::LoadAddressIndirect { dst, target } => {
+                return Some(BasicInst::LoadAddress { dst, target });
             }
             BasicInst::StoreIndirect { kind, src, base, offset } => {
                 if let RegValue::DataAddress(base) = self.get_reg(base) {
                     return Some(BasicInst::StoreAbsolute {
                         kind,
                         src,
-                        target: base.map_offset_i32(|base| base.wrapping_add(offset)),
+                        target: base.map_offset_i64(|base| base.wrapping_add(cast(offset).to_i64_sign_extend())),
                     });
                 }
 
-                let src_value = self.get_reg(src);
-                if let RegValue::Constant(imm) = src_value {
-                    let new_src = RegImm::Imm(imm as u32);
-                    if new_src != src {
-                        return Some(BasicInst::StoreIndirect {
-                            kind,
-                            src: new_src,
-                            base,
-                            offset,
-                        });
+                if let RegImm::Reg(src) = src {
+                    if let RegValue::Constant(src_value) = self.get_reg(src) {
+                        if let Ok(src_value) = src_value.try_into() {
+                            return Some(BasicInst::StoreIndirect {
+                                kind,
+                                src: RegImm::Imm(src_value),
+                                base,
+                                offset,
+                            });
+                        }
                     }
                 }
             }
-            BasicInst::StoreAbsolute { kind, src, target } => {
-                let src_value = self.get_reg(src);
-                if let RegValue::Constant(imm) = src_value {
-                    let new_src = RegImm::Imm(imm as u32);
-                    if new_src != src {
+            BasicInst::StoreAbsolute {
+                kind,
+                src: RegImm::Reg(src),
+                target,
+            } => {
+                if let RegValue::Constant(src_value) = self.get_reg(src) {
+                    if let Ok(src_value) = src_value.try_into() {
                         return Some(BasicInst::StoreAbsolute {
                             kind,
-                            src: new_src,
+                            src: RegImm::Imm(src_value),
                             target,
                         });
                     }
-                }
-            }
-            BasicInst::LoadImmediate { dst, imm } => {
-                if self.get_reg(dst) == RegValue::Constant(i32_to_i64(imm)) {
-                    return Some(BasicInst::Nop);
                 }
             }
             BasicInst::MoveReg { dst, src } => {
@@ -4064,10 +4661,24 @@ impl BlockRegs {
         *unknown_counter += 1;
     }
 
+    fn set_reg_from_control_instruction(&mut self, imports: &[Import], unknown_counter: &mut u64, instruction: ControlInst<BlockTarget>) {
+        #[allow(clippy::single_match)]
+        match instruction {
+            ControlInst::CallIndirect { ra, target_return, .. } => {
+                let implicit_instruction = BasicInst::LoadAddress {
+                    dst: ra,
+                    target: AnyTarget::Code(target_return),
+                };
+                self.set_reg_from_instruction(imports, unknown_counter, implicit_instruction);
+            }
+            _ => {}
+        }
+    }
+
     fn set_reg_from_instruction(&mut self, imports: &[Import], unknown_counter: &mut u64, instruction: BasicInst<AnyTarget>) {
         match instruction {
             BasicInst::LoadImmediate { dst, imm } => {
-                self.set_reg(dst, RegValue::Constant(i32_to_i64(imm)));
+                self.set_reg(dst, RegValue::Constant(cast(imm).to_i64_sign_extend()));
             }
             BasicInst::LoadImmediate64 { dst, imm } => {
                 self.set_reg(dst, RegValue::Constant(imm));
@@ -4096,7 +4707,7 @@ impl BlockRegs {
                 self.set_reg(dst, self.get_reg(src));
             }
             BasicInst::AnyAny {
-                kind: AnyAnyKind::Add | AnyAnyKind::Or,
+                kind: AnyAnyKind::Add32 | AnyAnyKind::Add64 | AnyAnyKind::Or32 | AnyAnyKind::Or64,
                 dst,
                 src1,
                 src2: RegImm::Imm(0),
@@ -4104,7 +4715,7 @@ impl BlockRegs {
                 self.set_reg(dst, self.get_reg(src1));
             }
             BasicInst::AnyAny {
-                kind: AnyAnyKind::Add | AnyAnyKind::Or,
+                kind: AnyAnyKind::Add32 | AnyAnyKind::Add64 | AnyAnyKind::Or32 | AnyAnyKind::Or64,
                 dst,
                 src1: RegImm::Imm(0),
                 src2,
@@ -4112,7 +4723,7 @@ impl BlockRegs {
                 self.set_reg(dst, self.get_reg(src2));
             }
             BasicInst::AnyAny {
-                kind: AnyAnyKind::Add,
+                kind: AnyAnyKind::Add32 | AnyAnyKind::Add64,
                 dst,
                 src1,
                 src2,
@@ -4125,7 +4736,7 @@ impl BlockRegs {
                 self.set_reg_unknown(dst, unknown_counter, bits_used);
             }
             BasicInst::AnyAny {
-                kind: AnyAnyKind::And,
+                kind: AnyAnyKind::And32 | AnyAnyKind::And64,
                 dst,
                 src1,
                 src2,
@@ -4136,7 +4747,7 @@ impl BlockRegs {
                 self.set_reg_unknown(dst, unknown_counter, bits_used);
             }
             BasicInst::AnyAny {
-                kind: AnyAnyKind::Or,
+                kind: AnyAnyKind::Or32 | AnyAnyKind::Or64,
                 dst,
                 src1,
                 src2,
@@ -4147,7 +4758,7 @@ impl BlockRegs {
                 self.set_reg_unknown(dst, unknown_counter, bits_used);
             }
             BasicInst::AnyAny {
-                kind: AnyAnyKind::ShiftLogicalRight,
+                kind: AnyAnyKind::ShiftLogicalRight32,
                 dst,
                 src1,
                 src2: RegImm::Imm(src2),
@@ -4157,7 +4768,7 @@ impl BlockRegs {
                 self.set_reg_unknown(dst, unknown_counter, bits_used);
             }
             BasicInst::AnyAny {
-                kind: AnyAnyKind::ShiftLogicalLeft,
+                kind: AnyAnyKind::ShiftLogicalLeft32,
                 dst,
                 src1,
                 src2: RegImm::Imm(src2),
@@ -4167,7 +4778,11 @@ impl BlockRegs {
                 self.set_reg_unknown(dst, unknown_counter, bits_used);
             }
             BasicInst::AnyAny {
-                kind: AnyAnyKind::SetLessThanSigned | AnyAnyKind::SetLessThanUnsigned,
+                kind:
+                    AnyAnyKind::SetLessThanSigned32
+                    | AnyAnyKind::SetLessThanSigned64
+                    | AnyAnyKind::SetLessThanUnsigned32
+                    | AnyAnyKind::SetLessThanUnsigned64,
                 dst,
                 ..
             } => {
@@ -4188,6 +4803,14 @@ impl BlockRegs {
                 kind: LoadKind::U16, dst, ..
             } => {
                 self.set_reg_unknown(dst, unknown_counter, u64::from(u16::MAX));
+            }
+            BasicInst::LoadAbsolute {
+                kind: LoadKind::U32, dst, ..
+            }
+            | BasicInst::LoadIndirect {
+                kind: LoadKind::U32, dst, ..
+            } => {
+                self.set_reg_unknown(dst, unknown_counter, u64::from(u32::MAX));
             }
             _ => {
                 for dst in instruction.dst_mask(imports) {
@@ -4233,10 +4856,6 @@ where
             let mut common_value_opt = None;
             for &source in &reachability.reachable_from {
                 let value = output_regs_for_block[source.index()].get_reg(reg);
-                if value == RegValue::InputReg(reg, current) {
-                    continue;
-                }
-
                 if let Some(common_value) = common_value_opt {
                     if common_value == value {
                         continue;
@@ -4268,7 +4887,14 @@ where
             continue;
         }
 
-        while let Some(new_instruction) = regs.simplify_instruction(instruction) {
+        while let Some(new_instruction) = regs.simplify_instruction(elf, instruction) {
+            log::trace!("Simplifying instruction in {}", all_blocks[current.index()].ops[nth_instruction].0);
+            for reg in instruction.src_mask(imports) {
+                log::trace!("  {reg:?} = {:?}", regs.get_reg(reg));
+            }
+            log::trace!("     {instruction:?}");
+            log::trace!("  -> {new_instruction:?}");
+
             if !modified_this_block {
                 references = gather_references(&all_blocks[current.index()]);
                 modified_this_block = true;
@@ -4287,37 +4913,40 @@ where
                         .data()
                         .get(target.offset as usize..target.offset as usize + 8)
                         .map(|xs| u64::from_le_bytes([xs[0], xs[1], xs[2], xs[3], xs[4], xs[5], xs[6], xs[7]]))
-                        .map(|xs| xs as i64),
+                        .map(|x| cast(x).to_signed()),
                     LoadKind::U32 => section
                         .data()
                         .get(target.offset as usize..target.offset as usize + 4)
-                        .map(|xs| u32::from_le_bytes([xs[0], xs[1], xs[2], xs[3]]) as i32)
-                        .map(i32_to_i64),
+                        .map(|xs| u32::from_le_bytes([xs[0], xs[1], xs[2], xs[3]]))
+                        .map(|x| cast(x).to_u64())
+                        .map(|x| cast(x).to_signed()),
                     LoadKind::I32 => section
                         .data()
                         .get(target.offset as usize..target.offset as usize + 4)
                         .map(|xs| i32::from_le_bytes([xs[0], xs[1], xs[2], xs[3]]))
-                        .map(i32_to_i64),
+                        .map(|x| cast(x).to_i64_sign_extend()),
                     LoadKind::U16 => section
                         .data()
                         .get(target.offset as usize..target.offset as usize + 2)
-                        .map(|xs| u32::from(u16::from_le_bytes([xs[0], xs[1]])) as i32)
-                        .map(i32_to_i64),
+                        .map(|xs| u16::from_le_bytes([xs[0], xs[1]]))
+                        .map(|x| cast(x).to_u64())
+                        .map(|x| cast(x).to_signed()),
                     LoadKind::I16 => section
                         .data()
                         .get(target.offset as usize..target.offset as usize + 2)
-                        .map(|xs| i32::from(i16::from_le_bytes([xs[0], xs[1]])))
-                        .map(i32_to_i64),
+                        .map(|xs| i16::from_le_bytes([xs[0], xs[1]]))
+                        .map(|x| cast(x).to_i64_sign_extend()),
                     LoadKind::I8 => section
                         .data()
                         .get(target.offset as usize)
-                        .map(|&x| i32::from(x as i8))
-                        .map(i32_to_i64),
+                        .map(|&x| cast(x).to_signed())
+                        .map(|x| cast(x).to_i64_sign_extend()),
                     LoadKind::U8 => section
                         .data()
                         .get(target.offset as usize)
-                        .map(|&x| u32::from(x) as i32)
-                        .map(i32_to_i64),
+                        .copied()
+                        .map(|x| cast(x).to_u64())
+                        .map(|x| cast(x).to_signed()),
                 };
 
                 if let Some(imm) = value {
@@ -4343,6 +4972,33 @@ where
         regs.set_reg_from_instruction(imports, unknown_counter, instruction);
     }
 
+    if let Some((extra_instruction, new_instruction)) = regs.simplify_control_instruction(elf, all_blocks[current.index()].next.instruction)
+    {
+        log::trace!("Simplifying end of {current:?}");
+        log::trace!("     {:?}", all_blocks[current.index()].next.instruction);
+        if let Some(ref extra_instruction) = extra_instruction {
+            log::trace!("  -> {extra_instruction:?}");
+        }
+        log::trace!("  -> {new_instruction:?}");
+
+        if !modified_this_block {
+            references = gather_references(&all_blocks[current.index()]);
+            modified_this_block = true;
+            modified = true;
+        }
+
+        if let Some(extra_instruction) = extra_instruction {
+            regs.set_reg_from_instruction(imports, unknown_counter, extra_instruction);
+
+            all_blocks[current.index()]
+                .ops
+                .push((all_blocks[current.index()].next.source.clone(), extra_instruction));
+        }
+        all_blocks[current.index()].next.instruction = new_instruction;
+    }
+
+    regs.set_reg_from_control_instruction(imports, unknown_counter, all_blocks[current.index()].next.instruction);
+
     for reg in Reg::ALL {
         if let RegValue::Unknown { bits_used, .. } = regs.get_reg(reg) {
             regs.set_reg(
@@ -4360,22 +5016,6 @@ where
     if output_regs_modified {
         output_regs_for_block[current.index()] = regs.clone();
         modified = true;
-    }
-
-    while let Some(new_instruction) = regs.simplify_control_instruction(all_blocks[current.index()].next.instruction) {
-        log::trace!(
-            "Simplifying end of {current:?}: {:?} -> {:?}",
-            all_blocks[current.index()].next.instruction,
-            new_instruction
-        );
-
-        if !modified_this_block {
-            references = gather_references(&all_blocks[current.index()]);
-            modified_this_block = true;
-            modified = true;
-        }
-
-        all_blocks[current.index()].next.instruction = new_instruction;
     }
 
     if modified_this_block {
@@ -4397,7 +5037,7 @@ where
                     add_to_optimize_queue(all_blocks, reachability_graph, optimize_queue, target_true);
                     add_to_optimize_queue(all_blocks, reachability_graph, optimize_queue, target_false);
                 }
-                ControlInst::Call { .. } | ControlInst::CallIndirect { .. } => unreachable!(),
+                ControlInst::Call { .. } => unreachable!(),
                 _ => {}
             }
         }
@@ -4435,7 +5075,7 @@ fn perform_load_address_and_jump_fusion(all_blocks: &mut [BasicBlock<AnyTarget, 
                 target_return,
                 ra: dst,
             },
-            ControlInst::JumpIndirect { base, offset } => ControlInst::CallIndirect {
+            ControlInst::JumpIndirect { base, offset } if dst != base => ControlInst::CallIndirect {
                 base,
                 offset,
                 target_return,
@@ -4450,6 +5090,7 @@ fn perform_load_address_and_jump_fusion(all_blocks: &mut [BasicBlock<AnyTarget, 
     }
 }
 
+#[deny(clippy::as_conversions)]
 fn optimize_program<H>(
     config: &Config,
     elf: &Elf<H>,
@@ -4489,7 +5130,7 @@ fn optimize_program<H>(
                 target_return,
                 base,
                 offset,
-            } => {
+            } if ra != base => {
                 block.ops.push((
                     block.next.source.clone(),
                     BasicInst::LoadAddress {
@@ -4505,9 +5146,6 @@ fn optimize_program<H>(
         optimize_queue.push(current);
     }
 
-    optimize_queue.vec.sort_by_key(|current| all_blocks[current.index()].ops.len());
-    optimize_queue.vec.reverse();
-
     let mut unknown_counter = 0;
     let mut input_regs_for_block = Vec::with_capacity(all_blocks.len());
     let mut output_regs_for_block = Vec::with_capacity(all_blocks.len());
@@ -4521,93 +5159,110 @@ fn optimize_program<H>(
         registers_needed_for_block.push(RegMask::all())
     }
 
-    let opt_minimum_iteration_count = reachability_graph.reachable_block_count();
-    let mut opt_iteration_count = 0;
-    let mut inline_history = HashSet::new(); // Necessary to prevent infinite loops.
-    while let Some(current) = optimize_queue.pop_non_unique() {
-        if !reachability_graph.is_code_reachable(current) {
-            continue;
-        }
+    let mut count_inline = 0;
+    let mut count_dce = 0;
+    let mut count_cp = 0;
 
+    let mut inline_history: HashSet<(BlockTarget, BlockTarget)> = HashSet::new(); // Necessary to prevent infinite loops.
+    macro_rules! run_optimizations {
+        ($current:expr, $optimize_queue:expr) => {{
+            let mut modified = false;
+            if reachability_graph.is_code_reachable($current) {
+                perform_nop_elimination(all_blocks, $current);
+
+                if perform_inlining(
+                    all_blocks,
+                    reachability_graph,
+                    exports,
+                    $optimize_queue,
+                    &mut inline_history,
+                    config.inline_threshold,
+                    $current,
+                ) {
+                    count_inline += 1;
+                    modified |= true;
+                }
+
+                if perform_dead_code_elimination(
+                    config,
+                    imports,
+                    all_blocks,
+                    &mut registers_needed_for_block,
+                    reachability_graph,
+                    $optimize_queue,
+                    $current,
+                ) {
+                    count_dce += 1;
+                    modified |= true;
+                }
+
+                if perform_constant_propagation(
+                    imports,
+                    elf,
+                    all_blocks,
+                    &mut input_regs_for_block,
+                    &mut output_regs_for_block,
+                    &mut unknown_counter,
+                    reachability_graph,
+                    $optimize_queue,
+                    $current,
+                ) {
+                    count_cp += 1;
+                    modified |= true;
+                }
+            }
+
+            modified
+        }};
+    }
+
+    for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
+        run_optimizations!(current, None);
+    }
+
+    garbage_collect_reachability(all_blocks, reachability_graph);
+
+    let timestamp = std::time::Instant::now();
+    let mut opt_iteration_count = 0;
+    while let Some(current) = optimize_queue.pop_non_unique() {
+        loop {
+            if !run_optimizations!(current, Some(&mut optimize_queue)) {
+                break;
+            }
+        }
         opt_iteration_count += 1;
-        perform_nop_elimination(all_blocks, current);
-        perform_inlining(
-            all_blocks,
-            reachability_graph,
-            exports,
-            Some(&mut optimize_queue),
-            &mut inline_history,
-            config.inline_threshold,
-            current,
-        );
-        perform_dead_code_elimination(
-            config,
-            imports,
-            all_blocks,
-            &mut registers_needed_for_block,
-            reachability_graph,
-            Some(&mut optimize_queue),
-            current,
-        );
-        perform_constant_propagation(
-            imports,
-            elf,
-            all_blocks,
-            &mut input_regs_for_block,
-            &mut output_regs_for_block,
-            &mut unknown_counter,
-            reachability_graph,
-            Some(&mut optimize_queue),
-            current,
-        );
     }
 
     log::debug!(
-        "Optimizing the program took {} iteration(s)",
-        opt_iteration_count - opt_minimum_iteration_count
+        "Optimizing the program took {opt_iteration_count} iteration(s) and {}ms",
+        timestamp.elapsed().as_millis()
     );
+    log::debug!("             Inlinining: {count_inline}");
+    log::debug!("  Dead code elimination: {count_dce}");
+    log::debug!("   Constant propagation: {count_cp}");
     garbage_collect_reachability(all_blocks, reachability_graph);
 
     inline_history.clear();
+    count_inline = 0;
+    count_dce = 0;
+    count_cp = 0;
+
+    let timestamp = std::time::Instant::now();
     let mut opt_brute_force_iterations = 0;
     let mut modified = true;
     while modified {
         opt_brute_force_iterations += 1;
         modified = false;
         for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
-            if !reachability_graph.is_code_reachable(current) {
-                continue;
-            }
+            modified |= run_optimizations!(current, Some(&mut optimize_queue));
+        }
 
-            modified |= perform_inlining(
-                all_blocks,
-                reachability_graph,
-                exports,
-                None,
-                &mut inline_history,
-                config.inline_threshold,
-                current,
-            );
-            modified |= perform_dead_code_elimination(
-                config,
-                imports,
-                all_blocks,
-                &mut registers_needed_for_block,
-                reachability_graph,
-                None,
-                current,
-            );
-            modified |= perform_constant_propagation(
-                imports,
-                elf,
-                all_blocks,
-                &mut input_regs_for_block,
-                &mut output_regs_for_block,
-                &mut unknown_counter,
-                reachability_graph,
-                None,
-                current,
-            );
+        while let Some(current) = optimize_queue.pop_non_unique() {
+            loop {
+                if !run_optimizations!(current, Some(&mut optimize_queue)) {
+                    break;
+                }
+            }
         }
 
         if modified {
@@ -4618,9 +5273,13 @@ fn optimize_program<H>(
     perform_load_address_and_jump_fusion(all_blocks, reachability_graph);
 
     log::debug!(
-        "Optimizing the program took {} brute force iteration(s)",
-        opt_brute_force_iterations - 1
+        "Optimizing the program took {} brute force iteration(s) and {} ms",
+        opt_brute_force_iterations - 1,
+        timestamp.elapsed().as_millis()
     );
+    log::debug!("             Inlinining: {count_inline}");
+    log::debug!("  Dead code elimination: {count_dce}");
+    log::debug!("   Constant propagation: {count_cp}");
 }
 
 #[cfg(test)]
@@ -4737,22 +5396,22 @@ mod test {
                     Instruction::load_imm(dst, imm) => {
                         *out = BasicInst::LoadImmediate {
                             dst: dst.into(),
-                            imm: imm as i32,
+                            imm: cast(imm).to_signed(),
                         }
                         .into();
                     }
-                    Instruction::add_imm(dst, src, imm) => {
+                    Instruction::add_imm_32(dst, src, imm) => {
                         *out = BasicInst::AnyAny {
-                            kind: AnyAnyKind::Add,
+                            kind: AnyAnyKind::Add32,
                             dst: dst.into(),
                             src1: src.into(),
-                            src2: imm.into(),
+                            src2: cast(imm).to_signed().into(),
                         }
                         .into();
                     }
-                    Instruction::add(dst, src1, src2) => {
+                    Instruction::add_32(dst, src1, src2) => {
                         *out = BasicInst::AnyAny {
-                            kind: AnyAnyKind::Add,
+                            kind: AnyAnyKind::Add32,
                             dst: dst.into(),
                             src1: src1.into(),
                             src2: src2.into(),
@@ -4764,12 +5423,12 @@ mod test {
                         let target_false = *program_counter_to_section_target.get(&instruction.next_offset).unwrap();
                         *out = ControlInst::Branch {
                             kind: match instruction.kind {
-                                Instruction::branch_less_unsigned_imm(..) => BranchKind::LessUnsigned,
-                                Instruction::branch_eq_imm(..) => BranchKind::Eq,
+                                Instruction::branch_less_unsigned_imm(..) => BranchKind::LessUnsigned32,
+                                Instruction::branch_eq_imm(..) => BranchKind::Eq32,
                                 _ => unreachable!(),
                             },
                             src1: src1.into(),
-                            src2: src2.into(),
+                            src2: cast(src2).to_signed().into(),
                             target_true,
                             target_false,
                         }
@@ -4801,7 +5460,7 @@ mod test {
                             kind: StoreKind::U32,
                             src: src.into(),
                             base: base.into(),
-                            offset: offset as i32,
+                            offset: cast(offset).to_signed(),
                         }
                         .into();
                     }
@@ -5016,7 +5675,7 @@ mod test {
         assert!(matches!(i.run().unwrap(), polkavm::InterruptKind::Finished));
     }
 
-    fn expect_regs(regs: impl IntoIterator<Item = (Reg, u32)> + Clone) -> impl FnMut(&mut polkavm::RawInstance, &mut polkavm::RawInstance) {
+    fn expect_regs(regs: impl IntoIterator<Item = (Reg, u64)> + Clone) -> impl FnMut(&mut polkavm::RawInstance, &mut polkavm::RawInstance) {
         move |a: &mut polkavm::RawInstance, b: &mut polkavm::RawInstance| {
             for (reg, value) in regs.clone() {
                 assert_eq!(b.reg(reg), value);
@@ -5055,7 +5714,8 @@ mod test {
         ProgramBuilder::test_optimize_oneshot(
             "
             pub @main:
-                a1 = 1
+                a1 = 0
+                a1 = a1 + 1
             @loop:
                 a0 = a0 + a1
                 jump @loop if a0 <u 10
@@ -5066,7 +5726,7 @@ mod test {
                 a1 = 0x1
                 fallthrough
             @1
-                a0 = a0 + 0x1
+                a0 = a0 + a1
                 jump @1 if a0 <u 10
             @2
                 ret
@@ -5183,10 +5843,13 @@ fn merge_consecutive_fallthrough_blocks(
     for nth_block in 0..used_blocks.len() - 1 {
         let current = used_blocks[nth_block];
         let next = used_blocks[nth_block + 1];
+
+        // Find blocks which are empty...
         if !all_blocks[current.index()].ops.is_empty() {
             continue;
         }
 
+        // ...and which immediately jump somewhere else.
         {
             let ControlInst::Jump { target } = all_blocks[current.index()].next.instruction else {
                 continue;
@@ -5201,6 +5864,9 @@ fn merge_consecutive_fallthrough_blocks(
             continue;
         }
 
+        removed.insert(current);
+
+        // Gather all other basic blocks which reference this block.
         let referenced_by_code: BTreeSet<BlockTarget> = current_reachability
             .reachable_from
             .iter()
@@ -5208,37 +5874,7 @@ fn merge_consecutive_fallthrough_blocks(
             .chain(current_reachability.address_taken_in.iter().copied())
             .collect();
 
-        let referenced_by_data: BTreeSet<SectionIndex> = if !current_reachability.referenced_by_data.is_empty() {
-            let section_targets: Vec<SectionTarget> = section_to_block
-                .iter()
-                .filter(|&(_, block_target)| *block_target == current)
-                .map(|(section_target, _)| *section_target)
-                .collect();
-            for section_target in section_targets {
-                section_to_block.insert(section_target, next);
-            }
-
-            let referenced_by_data = core::mem::take(&mut current_reachability.referenced_by_data);
-            for section_index in &referenced_by_data {
-                if let Some(list) = reachability_graph.code_references_in_data_section.get_mut(section_index) {
-                    list.retain(|&target| target != current);
-                }
-            }
-
-            remove_code_if_globally_unreachable(all_blocks, reachability_graph, None, current);
-
-            reachability_graph
-                .for_code
-                .get_mut(&next)
-                .unwrap()
-                .referenced_by_data
-                .extend(referenced_by_data.iter().copied());
-
-            referenced_by_data
-        } else {
-            Default::default()
-        };
-
+        // Replace code references to this block.
         for dep in referenced_by_code {
             let references = gather_references(&all_blocks[dep.index()]);
             for (_, op) in &mut all_blocks[dep.index()].ops {
@@ -5262,16 +5898,57 @@ fn merge_consecutive_fallthrough_blocks(
             update_references(all_blocks, reachability_graph, None, dep, references);
         }
 
-        for section_index in referenced_by_data {
-            remove_if_data_is_globally_unreachable(all_blocks, reachability_graph, None, section_index);
+        // Remove it from the graph if it's globally unreachable now.
+        remove_code_if_globally_unreachable(all_blocks, reachability_graph, None, current);
+
+        let Some(current_reachability) = reachability_graph.for_code.get_mut(&current) else {
+            continue;
+        };
+
+        if !current_reachability.referenced_by_data.is_empty() {
+            // Find all section targets which correspond to this block...
+            let section_targets: Vec<SectionTarget> = section_to_block
+                .iter()
+                .filter(|&(_, block_target)| *block_target == current)
+                .map(|(section_target, _)| *section_target)
+                .collect();
+
+            // ...then make them to point to the new block.
+            for section_target in section_targets {
+                section_to_block.insert(section_target, next);
+            }
+
+            // Grab all of the data sections which reference the current block.
+            let referenced_by_data = core::mem::take(&mut current_reachability.referenced_by_data);
+
+            // Mark the next block as referenced by all of the data sections which reference the current block.
+            reachability_graph
+                .for_code
+                .get_mut(&next)
+                .unwrap()
+                .referenced_by_data
+                .extend(referenced_by_data.iter().copied());
+
+            // Mark the data sections as NOT referencing the current block, and make them reference the next block.
+            for section_index in &referenced_by_data {
+                if let Some(list) = reachability_graph.code_references_in_data_section.get_mut(section_index) {
+                    list.retain(|&target| target != current);
+                    list.push(next);
+                    list.sort_unstable();
+                    list.dedup();
+                }
+            }
         }
 
+        remove_code_if_globally_unreachable(all_blocks, reachability_graph, None, current);
+    }
+
+    for &current in &removed {
         assert!(
             !reachability_graph.is_code_reachable(current),
             "block {current:?} still reachable: {:#?}",
             reachability_graph.for_code.get(&current)
         );
-        removed.insert(current);
     }
 
     used_blocks.retain(|current| !removed.contains(current));
@@ -5543,11 +6220,11 @@ fn spill_fake_registers(
                         let offset = src_slot.index() * reg_size;
                         *regspill_size = core::cmp::max(*regspill_size, offset + reg_size);
                         BasicInst::LoadAbsolute {
-                            kind: if is_rv64 { LoadKind::U64 } else { LoadKind::U32 },
+                            kind: if is_rv64 { LoadKind::U64 } else { LoadKind::I32 },
                             dst: dst_reg,
                             target: SectionTarget {
                                 section_index: section_regspill,
-                                offset: offset as u64,
+                                offset: cast(offset).to_u64(),
                             },
                         }
                     }
@@ -5561,7 +6238,7 @@ fn spill_fake_registers(
                             src: src_reg.into(),
                             target: SectionTarget {
                                 section_index: section_regspill,
-                                offset: offset as u64,
+                                offset: cast(offset).to_u64(),
                             },
                         }
                     }
@@ -5571,6 +6248,7 @@ fn spill_fake_registers(
                         if src_reg == dst_reg {
                             continue;
                         }
+
                         BasicInst::MoveReg {
                             dst: dst_reg,
                             src: src_reg,
@@ -5643,14 +6321,15 @@ fn spill_fake_registers(
     }
 }
 
+#[deny(clippy::as_conversions)]
 fn replace_immediates_with_registers(
     all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>],
     imports: &[Import],
     used_blocks: &[BlockTarget],
 ) {
-    let mut imm_to_reg: HashMap<u32, RegMask> = HashMap::new();
+    let mut imm_to_reg: HashMap<i64, RegMask> = HashMap::new();
     for block_target in used_blocks {
-        let mut reg_to_imm: [Option<u32>; Reg::ALL.len()] = [None; Reg::ALL.len()];
+        let mut reg_to_imm: [Option<i64>; Reg::ALL.len()] = [None; Reg::ALL.len()];
         imm_to_reg.clear();
 
         // If there already exists a register which contains a given immediate value
@@ -5658,8 +6337,9 @@ fn replace_immediates_with_registers(
         macro_rules! replace {
             ($src:ident) => {
                 if let RegImm::Imm(imm) = $src {
-                    if *imm != 0 {
-                        let mask = imm_to_reg.get(imm).copied().unwrap_or(RegMask::empty());
+                    let imm = cast(*imm).to_i64_sign_extend();
+                    if imm != 0 {
+                        let mask = imm_to_reg.get(&imm).copied().unwrap_or(RegMask::empty());
                         if let Some(reg) = mask.into_iter().next() {
                             *$src = RegImm::Reg(reg);
                         }
@@ -5671,8 +6351,22 @@ fn replace_immediates_with_registers(
         for (_, op) in &mut all_blocks[block_target.index()].ops {
             match op {
                 BasicInst::LoadImmediate { dst, imm } => {
-                    imm_to_reg.entry(*imm as u32).or_insert(RegMask::empty()).insert(*dst);
-                    reg_to_imm[*dst as usize] = Some(*imm as u32);
+                    if let Some(old_imm) = reg_to_imm[dst.to_usize()].take() {
+                        imm_to_reg.get_mut(&old_imm).unwrap().remove(*dst);
+                    }
+
+                    let imm = cast(*imm).to_i64_sign_extend();
+                    imm_to_reg.entry(imm).or_insert(RegMask::empty()).insert(*dst);
+                    reg_to_imm[dst.to_usize()] = Some(imm);
+                    continue;
+                }
+                BasicInst::LoadImmediate64 { dst, imm } => {
+                    if let Some(old_imm) = reg_to_imm[dst.to_usize()].take() {
+                        imm_to_reg.get_mut(&old_imm).unwrap().remove(*dst);
+                    }
+
+                    imm_to_reg.entry(*imm).or_insert(RegMask::empty()).insert(*dst);
+                    reg_to_imm[dst.to_usize()] = Some(*imm);
                     continue;
                 }
                 BasicInst::AnyAny {
@@ -5684,7 +6378,18 @@ fn replace_immediates_with_registers(
                     replace!(src1);
                     if !matches!(
                         kind,
-                        AnyAnyKind::ShiftLogicalLeft | AnyAnyKind::ShiftLogicalRight | AnyAnyKind::ShiftArithmeticRight
+                        AnyAnyKind::ShiftLogicalLeft32
+                            | AnyAnyKind::ShiftLogicalRight32
+                            | AnyAnyKind::ShiftArithmeticRight32
+                            | AnyAnyKind::ShiftLogicalLeft64
+                            | AnyAnyKind::ShiftLogicalRight64
+                            | AnyAnyKind::ShiftArithmeticRight64
+                            | AnyAnyKind::ShiftLogicalLeft32AndSignExtend
+                            | AnyAnyKind::ShiftLogicalRight32AndSignExtend
+                            | AnyAnyKind::ShiftArithmeticRight32AndSignExtend
+                            | AnyAnyKind::RotateRight32
+                            | AnyAnyKind::RotateRight32AndSignExtend
+                            | AnyAnyKind::RotateRight64
                     ) {
                         replace!(src2);
                     }
@@ -5702,7 +6407,7 @@ fn replace_immediates_with_registers(
             }
 
             for reg in op.dst_mask(imports) {
-                if let Some(imm) = reg_to_imm[reg as usize].take() {
+                if let Some(imm) = reg_to_imm[reg.to_usize()].take() {
                     imm_to_reg.get_mut(&imm).unwrap().remove(reg);
                 }
             }
@@ -5805,27 +6510,29 @@ where
 }
 
 struct VecSet<T> {
-    vec: Vec<T>,
+    vec: VecDeque<T>,
     set: HashSet<T>,
 }
 
 impl<T> VecSet<T> {
     fn new() -> Self {
         Self {
-            vec: Vec::new(),
+            vec: VecDeque::new(),
             set: HashSet::new(),
         }
     }
 
     fn pop_unique(&mut self) -> Option<T> {
-        self.vec.pop()
+        self.vec.pop_front()
     }
 
     fn pop_non_unique(&mut self) -> Option<T>
     where
         T: core::hash::Hash + Eq,
     {
-        let value = self.vec.pop()?;
+        // Popping from the front instead of the back cuts down on the time
+        // the optimizer takes for the Westend runtime from ~53s down to ~2.6s
+        let value = self.vec.pop_front()?;
         self.set.remove(&value);
         Some(value)
     }
@@ -5835,7 +6542,7 @@ impl<T> VecSet<T> {
         T: core::hash::Hash + Eq + Clone,
     {
         if self.set.insert(value.clone()) {
-            self.vec.push(value);
+            self.vec.push_back(value);
         }
     }
 
@@ -5857,10 +6564,6 @@ struct ReachabilityGraph {
 }
 
 impl ReachabilityGraph {
-    fn reachable_block_count(&self) -> usize {
-        self.for_code.len()
-    }
-
     fn is_code_reachable(&self, block_target: BlockTarget) -> bool {
         if let Some(reachability) = self.for_code.get(&block_target) {
             assert!(
@@ -6351,7 +7054,7 @@ fn emit_code(
             Reg::A3 => PReg::A3,
             Reg::A4 => PReg::A4,
             Reg::A5 => PReg::A5,
-            Reg::E0 | Reg::E1 | Reg::E2 => {
+            Reg::E0 | Reg::E1 | Reg::E2 | Reg::E3 => {
                 unreachable!("internal error: temporary register was not spilled into memory");
             }
         }
@@ -6419,13 +7122,13 @@ fn emit_code(
 
         for (source, op) in &block.ops {
             let op = match *op {
-                BasicInst::LoadImmediate { dst, imm } => Instruction::load_imm(conv_reg(dst), imm as u32),
+                BasicInst::LoadImmediate { dst, imm } => Instruction::load_imm(conv_reg(dst), cast(imm).to_unsigned()),
                 BasicInst::LoadImmediate64 { dst, imm } => {
                     if !is_rv64 {
                         unreachable!("internal error: load_imm64 found when processing 32-bit binary")
+                    } else {
+                        Instruction::load_imm64(conv_reg(dst), cast(imm).to_unsigned())
                     }
-                    // todo: change this to load_imm64
-                    Instruction::load_imm(conv_reg(dst), imm as u32)
                 }
                 BasicInst::LoadAbsolute { kind, dst, target } => {
                     codegen! {
@@ -6459,7 +7162,7 @@ fn emit_code(
                         }
                         RegImm::Imm(value) => {
                             codegen! {
-                                args = (target, value),
+                                args = (target, cast(value).to_unsigned()),
                                 kind = kind,
                                 {
                                     StoreKind::U64 => store_imm_u64,
@@ -6473,7 +7176,7 @@ fn emit_code(
                 }
                 BasicInst::LoadIndirect { kind, dst, base, offset } => {
                     codegen! {
-                        args = (conv_reg(dst), conv_reg(base), offset as u32),
+                        args = (conv_reg(dst), conv_reg(base), cast(offset).to_unsigned()),
                         kind = kind,
                         {
                             LoadKind::I8 => load_indirect_i8,
@@ -6489,7 +7192,7 @@ fn emit_code(
                 BasicInst::StoreIndirect { kind, src, base, offset } => match src {
                     RegImm::Reg(src) => {
                         codegen! {
-                            args = (conv_reg(src), conv_reg(base), offset as u32),
+                            args = (conv_reg(src), conv_reg(base), cast(offset).to_unsigned()),
                             kind = kind,
                             {
                                 StoreKind::U64 => store_indirect_u64,
@@ -6501,7 +7204,7 @@ fn emit_code(
                     }
                     RegImm::Imm(value) => {
                         codegen! {
-                            args = (conv_reg(base), offset as u32, value),
+                            args = (conv_reg(base), cast(offset).to_unsigned(), cast(value).to_unsigned()),
                             kind = kind,
                             {
                                 StoreKind::U64 => store_imm_indirect_u64,
@@ -6539,7 +7242,30 @@ fn emit_code(
                     };
 
                     let value = get_data_address(target)?;
-                    Instruction::load_u32(conv_reg(dst), value)
+                    if is_rv64 {
+                        Instruction::load_u64(conv_reg(dst), value)
+                    } else {
+                        Instruction::load_i32(conv_reg(dst), value)
+                    }
+                }
+                BasicInst::Reg { kind, dst, src } => {
+                    codegen! {
+                        args = (conv_reg(dst), conv_reg(src)),
+                        kind = kind,
+                        {
+                            RegKind::CountLeadingZeroBits32 => count_leading_zero_bits_32,
+                            RegKind::CountLeadingZeroBits64 => count_leading_zero_bits_64,
+                            RegKind::CountSetBits32 => count_set_bits_32,
+                            RegKind::CountSetBits64 => count_set_bits_64,
+                            RegKind::CountTrailingZeroBits32 => count_trailing_zero_bits_32,
+                            RegKind::CountTrailingZeroBits64 => count_trailing_zero_bits_64,
+                            RegKind::OrCombineByte => or_combine_byte,
+                            RegKind::ReverseByte => reverse_byte,
+                            RegKind::SignExtend8 => sign_extend_8,
+                            RegKind::SignExtend16 => sign_extend_16,
+                            RegKind::ZeroExtend16 => zero_extend_16,
+                        }
+                    }
                 }
                 BasicInst::RegReg { kind, dst, src1, src2 } => {
                     use RegRegKind as K;
@@ -6547,16 +7273,34 @@ fn emit_code(
                         args = (conv_reg(dst), conv_reg(src1), conv_reg(src2)),
                         kind = kind,
                         {
-                            K::MulUpperSignedUnsigned => mul_upper_signed_unsigned,
-                            K::MulUpperSignedUnsigned64 => mul_upper_signed_unsigned_64,
-                            K::Div => div_signed,
+                            K::MulUpperSignedSigned32 => mul_upper_signed_signed,
+                            K::MulUpperSignedSigned64 => mul_upper_signed_signed,
+                            K::MulUpperUnsignedUnsigned32 => mul_upper_unsigned_unsigned,
+                            K::MulUpperUnsignedUnsigned64 => mul_upper_unsigned_unsigned,
+                            K::MulUpperSignedUnsigned32 => mul_upper_signed_unsigned,
+                            K::MulUpperSignedUnsigned64 => mul_upper_signed_unsigned,
+                            K::Div32 => div_signed_32,
+                            K::Div32AndSignExtend => div_signed_32,
                             K::Div64 => div_signed_64,
-                            K::DivUnsigned => div_unsigned,
+                            K::DivUnsigned32 => div_unsigned_32,
+                            K::DivUnsigned32AndSignExtend => div_unsigned_32,
                             K::DivUnsigned64 => div_unsigned_64,
-                            K::Rem => rem_signed,
+                            K::Rem32 => rem_signed_32,
+                            K::Rem32AndSignExtend => rem_signed_32,
                             K::Rem64 => rem_signed_64,
-                            K::RemUnsigned => rem_unsigned,
+                            K::RemUnsigned32 => rem_unsigned_32,
+                            K::RemUnsigned32AndSignExtend => rem_unsigned_32,
                             K::RemUnsigned64 => rem_unsigned_64,
+                            K::AndInverted => and_inverted,
+                            K::OrInverted => or_inverted,
+                            K::Xnor => xnor,
+                            K::Maximum => maximum,
+                            K::MaximumUnsigned => maximum_unsigned,
+                            K::Minimum => minimum,
+                            K::MinimumUnsigned => minimum_unsigned,
+                            K::RotateLeft32 => rotate_left_32,
+                            K::RotateLeft32AndSignExtend => rotate_left_32,
+                            K::RotateLeft64 => rotate_left_64,
                         }
                     }
                 }
@@ -6571,96 +7315,108 @@ fn emit_code(
                                 args = (dst, conv_reg(src1), conv_reg(src2)),
                                 kind = kind,
                                 {
-                                    K::Add => add,
+                                    K::Add32 => add_32,
+                                    K::Add32AndSignExtend => add_32,
                                     K::Add64 => add_64,
-                                    K::Sub => sub,
+                                    K::Sub32 => sub_32,
+                                    K::Sub32AndSignExtend => sub_32,
                                     K::Sub64 => sub_64,
-                                    K::ShiftLogicalLeft => shift_logical_left,
+                                    K::ShiftLogicalLeft32 => shift_logical_left_32,
+                                    K::ShiftLogicalLeft32AndSignExtend => shift_logical_left_32,
                                     K::ShiftLogicalLeft64 => shift_logical_left_64,
-                                    K::SetLessThanSigned => set_less_than_signed,
-                                    K::SetLessThanSigned64 => set_less_than_signed_64,
-                                    K::SetLessThanUnsigned => set_less_than_unsigned,
-                                    K::SetLessThanUnsigned64 => set_less_than_unsigned_64,
-                                    K::Xor => xor,
-                                    K::Xor64 => xor_64,
-                                    K::ShiftLogicalRight => shift_logical_right,
+                                    K::SetLessThanSigned32 => set_less_than_signed,
+                                    K::SetLessThanSigned64 => set_less_than_signed,
+                                    K::SetLessThanUnsigned32 => set_less_than_unsigned,
+                                    K::SetLessThanUnsigned64 => set_less_than_unsigned,
+                                    K::Xor32 => xor,
+                                    K::Xor64 => xor,
+                                    K::ShiftLogicalRight32 => shift_logical_right_32,
+                                    K::ShiftLogicalRight32AndSignExtend => shift_logical_right_32,
                                     K::ShiftLogicalRight64 => shift_logical_right_64,
-                                    K::ShiftArithmeticRight => shift_arithmetic_right,
+                                    K::ShiftArithmeticRight32 => shift_arithmetic_right_32,
+                                    K::ShiftArithmeticRight32AndSignExtend => shift_arithmetic_right_32,
                                     K::ShiftArithmeticRight64 => shift_arithmetic_right_64,
-                                    K::Or => or,
-                                    K::Or64 => or_64,
-                                    K::And => and,
-                                    K::And64 => and_64,
-                                    K::Mul => mul,
+                                    K::Or32 => or,
+                                    K::Or64 => or,
+                                    K::And32 => and,
+                                    K::And64 => and,
+                                    K::Mul32 => mul_32,
+                                    K::Mul32AndSignExtend => mul_32,
                                     K::Mul64 => mul_64,
-                                    K::MulUpperSignedSigned => mul_upper_signed_signed,
-                                    K::MulUpperSignedSigned64 => mul_upper_signed_signed_64,
-                                    K::MulUpperUnsignedUnsigned => mul_upper_unsigned_unsigned,
-                                    K::MulUpperUnsignedUnsigned64 => mul_upper_unsigned_unsigned_64,
+                                    K::RotateRight32 => rotate_right_32,
+                                    K::RotateRight32AndSignExtend => rotate_right_32,
+                                    K::RotateRight64 => rotate_right_64,
                                 }
                             }
                         }
                         (RegImm::Reg(src1), RegImm::Imm(src2)) => {
                             let src1 = conv_reg(src1);
+                            let src2 = cast(src2).to_unsigned();
                             match kind {
-                                K::Add => I::add_imm(dst, src1, src2),
-                                K::Add64 => I::add_64_imm(dst, src1, src2),
-                                K::Sub => I::add_imm(dst, src1, (-(src2 as i32)) as u32),
-                                K::Sub64 => I::add_64_imm(dst, src1, (-(src2 as i32)) as u32),
-                                K::ShiftLogicalLeft => I::shift_logical_left_imm(dst, src1, src2),
-                                K::ShiftLogicalLeft64 => I::shift_logical_left_64_imm(dst, src1, src2),
-                                K::SetLessThanSigned => I::set_less_than_signed_imm(dst, src1, src2),
-                                K::SetLessThanSigned64 => I::set_less_than_signed_64_imm(dst, src1, src2),
-                                K::SetLessThanUnsigned => I::set_less_than_unsigned_imm(dst, src1, src2),
-                                K::SetLessThanUnsigned64 => I::set_less_than_unsigned_64_imm(dst, src1, src2),
-                                K::Xor => I::xor_imm(dst, src1, src2),
-                                K::Xor64 => I::xor_64_imm(dst, src1, src2),
-                                K::ShiftLogicalRight => I::shift_logical_right_imm(dst, src1, src2),
-                                K::ShiftLogicalRight64 => I::shift_logical_right_64_imm(dst, src1, src2),
-                                K::ShiftArithmeticRight => I::shift_arithmetic_right_imm(dst, src1, src2),
-                                K::ShiftArithmeticRight64 => I::shift_arithmetic_right_64_imm(dst, src1, src2),
-                                K::Or => I::or_imm(dst, src1, src2),
-                                K::Or64 => I::or_64_imm(dst, src1, src2),
-                                K::And => I::and_imm(dst, src1, src2),
-                                K::And64 => I::and_64_imm(dst, src1, src2),
-                                K::Mul => I::mul_imm(dst, src1, src2),
-                                K::Mul64 => I::mul_imm(dst, src1, src2),
-                                K::MulUpperSignedSigned => I::mul_upper_signed_signed_imm(dst, src1, src2),
-                                K::MulUpperSignedSigned64 => I::mul_upper_signed_signed_imm_64(dst, src1, src2),
-                                K::MulUpperUnsignedUnsigned => I::mul_upper_unsigned_unsigned_imm(dst, src1, src2),
-                                K::MulUpperUnsignedUnsigned64 => I::mul_upper_unsigned_unsigned_imm_64(dst, src1, src2),
+                                K::Add32 => I::add_imm_32(dst, src1, src2),
+                                K::Add32AndSignExtend => I::add_imm_32(dst, src1, src2),
+                                K::Add64 => I::add_imm_64(dst, src1, src2),
+                                K::Sub32 => I::add_imm_32(dst, src1, cast(-cast(src2).to_signed()).to_unsigned()),
+                                K::Sub32AndSignExtend => I::add_imm_32(dst, src1, cast(-cast(src2).to_signed()).to_unsigned()),
+                                K::Sub64 => I::add_imm_64(dst, src1, cast(-cast(src2).to_signed()).to_unsigned()),
+                                K::ShiftLogicalLeft32 => I::shift_logical_left_imm_32(dst, src1, src2),
+                                K::ShiftLogicalLeft32AndSignExtend => I::shift_logical_left_imm_32(dst, src1, src2),
+                                K::ShiftLogicalLeft64 => I::shift_logical_left_imm_64(dst, src1, src2),
+                                K::SetLessThanSigned32 => I::set_less_than_signed_imm(dst, src1, src2),
+                                K::SetLessThanSigned64 => I::set_less_than_signed_imm(dst, src1, src2),
+                                K::SetLessThanUnsigned32 => I::set_less_than_unsigned_imm(dst, src1, src2),
+                                K::SetLessThanUnsigned64 => I::set_less_than_unsigned_imm(dst, src1, src2),
+                                K::Xor32 | K::Xor64 => I::xor_imm(dst, src1, src2),
+                                K::ShiftLogicalRight32 => I::shift_logical_right_imm_32(dst, src1, src2),
+                                K::ShiftLogicalRight32AndSignExtend => I::shift_logical_right_imm_32(dst, src1, src2),
+                                K::ShiftLogicalRight64 => I::shift_logical_right_imm_64(dst, src1, src2),
+                                K::ShiftArithmeticRight32 => I::shift_arithmetic_right_imm_32(dst, src1, src2),
+                                K::ShiftArithmeticRight32AndSignExtend => I::shift_arithmetic_right_imm_32(dst, src1, src2),
+                                K::ShiftArithmeticRight64 => I::shift_arithmetic_right_imm_64(dst, src1, src2),
+                                K::Or32 | K::Or64 => I::or_imm(dst, src1, src2),
+                                K::And32 | K::And64 => I::and_imm(dst, src1, src2),
+                                K::Mul32 => I::mul_imm_32(dst, src1, src2),
+                                K::Mul32AndSignExtend => I::mul_imm_32(dst, src1, src2),
+                                K::Mul64 => I::mul_imm_64(dst, src1, src2),
+                                K::RotateRight32 => I::rotate_right_32_imm(dst, src1, src2),
+                                K::RotateRight32AndSignExtend => I::rotate_right_32_imm(dst, src1, src2),
+                                K::RotateRight64 => I::rotate_right_64_imm(dst, src1, src2),
                             }
                         }
                         (RegImm::Imm(src1), RegImm::Reg(src2)) => {
+                            let src1 = cast(src1).to_unsigned();
                             let src2 = conv_reg(src2);
                             match kind {
-                                K::Add => I::add_imm(dst, src2, src1),
-                                K::Add64 => I::add_64_imm(dst, src2, src1),
-                                K::Xor => I::xor_imm(dst, src2, src1),
-                                K::Xor64 => I::xor_64_imm(dst, src2, src1),
-                                K::Or => I::or_imm(dst, src2, src1),
-                                K::Or64 => I::or_64_imm(dst, src2, src1),
-                                K::And => I::and_imm(dst, src2, src1),
-                                K::And64 => I::and_64_imm(dst, src2, src1),
-                                K::Mul => I::mul_imm(dst, src2, src1),
-                                K::Mul64 => I::mul_imm(dst, src2, src1),
-                                K::MulUpperSignedSigned => I::mul_upper_signed_signed_imm(dst, src2, src1),
-                                K::MulUpperSignedSigned64 => I::mul_upper_signed_signed_imm_64(dst, src2, src1),
-                                K::MulUpperUnsignedUnsigned => I::mul_upper_unsigned_unsigned_imm(dst, src2, src1),
-                                K::MulUpperUnsignedUnsigned64 => I::mul_upper_unsigned_unsigned_imm_64(dst, src2, src1),
+                                K::Add32 => I::add_imm_32(dst, src2, src1),
+                                K::Add32AndSignExtend => I::add_imm_32(dst, src2, src1),
+                                K::Add64 => I::add_imm_64(dst, src2, src1),
+                                K::Xor32 | K::Xor64 => I::xor_imm(dst, src2, src1),
+                                K::Or32 | K::Or64 => I::or_imm(dst, src2, src1),
+                                K::And32 | K::And64 => I::and_imm(dst, src2, src1),
+                                K::Mul32 => I::mul_imm_32(dst, src2, src1),
+                                K::Mul32AndSignExtend => I::mul_imm_32(dst, src2, src1),
+                                K::Mul64 => I::mul_imm_64(dst, src2, src1),
 
-                                K::Sub => I::negate_and_add_imm(dst, src2, src1),
-                                K::Sub64 => I::negate_and_add_imm(dst, src2, src1),
-                                K::ShiftLogicalLeft => I::shift_logical_left_imm_alt(dst, src2, src1),
-                                K::ShiftLogicalLeft64 => I::shift_logical_left_64_imm_alt(dst, src2, src1),
-                                K::SetLessThanSigned => I::set_greater_than_signed_imm(dst, src2, src1),
-                                K::SetLessThanSigned64 => I::set_greater_than_signed_64_imm(dst, src2, src1),
-                                K::SetLessThanUnsigned => I::set_greater_than_unsigned_imm(dst, src2, src1),
-                                K::SetLessThanUnsigned64 => I::set_greater_than_unsigned_64_imm(dst, src2, src1),
-                                K::ShiftLogicalRight => I::shift_logical_right_imm_alt(dst, src2, src1),
-                                K::ShiftLogicalRight64 => I::shift_logical_right_imm_alt(dst, src2, src1),
-                                K::ShiftArithmeticRight => I::shift_arithmetic_right_imm_alt(dst, src2, src1),
-                                K::ShiftArithmeticRight64 => I::shift_arithmetic_right_64_imm_alt(dst, src2, src1),
+                                K::Sub32 => I::negate_and_add_imm_32(dst, src2, src1),
+                                K::Sub32AndSignExtend => I::negate_and_add_imm_32(dst, src2, src1),
+                                K::Sub64 => I::negate_and_add_imm_64(dst, src2, src1),
+                                K::ShiftLogicalLeft32 => I::shift_logical_left_imm_alt_32(dst, src2, src1),
+                                K::ShiftLogicalLeft32AndSignExtend => I::shift_logical_left_imm_alt_32(dst, src2, src1),
+                                K::ShiftLogicalLeft64 => I::shift_logical_left_imm_alt_64(dst, src2, src1),
+                                K::SetLessThanSigned32 => I::set_greater_than_signed_imm(dst, src2, src1),
+                                K::SetLessThanSigned64 => I::set_greater_than_signed_imm(dst, src2, src1),
+                                K::SetLessThanUnsigned32 => I::set_greater_than_unsigned_imm(dst, src2, src1),
+                                K::SetLessThanUnsigned64 => I::set_greater_than_unsigned_imm(dst, src2, src1),
+                                K::ShiftLogicalRight32 => I::shift_logical_right_imm_alt_32(dst, src2, src1),
+                                K::ShiftLogicalRight32AndSignExtend => I::shift_logical_right_imm_alt_32(dst, src2, src1),
+                                K::ShiftLogicalRight64 => I::shift_logical_right_imm_alt_64(dst, src2, src1),
+                                K::ShiftArithmeticRight32 => I::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
+                                K::ShiftArithmeticRight32AndSignExtend => I::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
+                                K::ShiftArithmeticRight64 => I::shift_arithmetic_right_imm_alt_64(dst, src2, src1),
+
+                                K::RotateRight32 => I::rotate_right_32_imm_alt(dst, src2, src1),
+                                K::RotateRight32AndSignExtend => I::rotate_right_32_imm_alt(dst, src2, src1),
+                                K::RotateRight64 => I::rotate_right_64_imm_alt(dst, src2, src1),
                             }
                         }
                         (RegImm::Imm(src1), RegImm::Imm(src2)) => {
@@ -6668,7 +7424,7 @@ fn emit_code(
                                 unreachable!("internal error: instruction with only constant operands: {op:?}")
                             } else {
                                 let imm: u32 = OperationKind::from(kind)
-                                    .apply_const(i32_to_i64(src1 as i32), i32_to_i64(src2 as i32))
+                                    .apply_const(cast(src1).to_i64_sign_extend(), cast(src2).to_i64_sign_extend())
                                     .try_into()
                                     .expect("load immediate overflow");
                                 I::load_imm(dst, imm)
@@ -6689,7 +7445,7 @@ fn emit_code(
                     }
                     RegImm::Imm(imm) => {
                         codegen! {
-                            args = (conv_reg(dst), conv_reg(cond), imm),
+                            args = (conv_reg(dst), conv_reg(cond), cast(imm).to_unsigned()),
                             kind = kind,
                             {
                                 CmovKind::EqZero => cmov_if_zero_imm,
@@ -6741,7 +7497,17 @@ fn emit_code(
                 ));
             }
             ControlInst::JumpIndirect { base, offset } => {
-                code.push((block.next.source.clone(), Instruction::jump_indirect(conv_reg(base), offset as u32)));
+                if offset != 0 {
+                    return Err(ProgramFromElfError::other(
+                        "found an indirect jump with a non-zero offset - this would most likely result in a broken program; aborting",
+                    ));
+                }
+
+                let Ok(offset) = offset.try_into() else {
+                    unreachable!("internal error: indirect jump with an out-of-range offset");
+                };
+
+                code.push((block.next.source.clone(), Instruction::jump_indirect(conv_reg(base), offset)));
             }
             ControlInst::CallIndirect {
                 ra,
@@ -6749,6 +7515,12 @@ fn emit_code(
                 offset,
                 target_return,
             } => {
+                if offset != 0 {
+                    return Err(ProgramFromElfError::other(
+                        "found an indirect call with a non-zero offset - this would most likely result in a broken program; aborting",
+                    ));
+                }
+
                 assert!(can_fallthrough_to_next_block.contains(block_target));
 
                 let target_return = get_jump_target(target_return)?
@@ -6758,9 +7530,13 @@ fn emit_code(
                     return Err(ProgramFromElfError::other("overflow when emitting an indirect call"));
                 };
 
+                let Ok(offset) = offset.try_into() else {
+                    unreachable!("internal error: indirect call with an out-of-range offset");
+                };
+
                 code.push((
                     block.next.source.clone(),
-                    Instruction::load_imm_and_jump_indirect(conv_reg(ra), conv_reg(base), target_return, offset as u32),
+                    Instruction::load_imm_and_jump_indirect(conv_reg(ra), conv_reg(base), target_return, offset),
                 ));
             }
             ControlInst::Branch {
@@ -6781,40 +7557,40 @@ fn emit_code(
                             args = (conv_reg(src1), conv_reg(src2), target_true.static_target),
                             kind = kind,
                             {
-                                BranchKind::Eq => branch_eq,
-                                BranchKind::NotEq => branch_not_eq,
-                                BranchKind::GreaterOrEqualUnsigned => branch_greater_or_equal_unsigned,
-                                BranchKind::GreaterOrEqualSigned => branch_greater_or_equal_signed,
-                                BranchKind::LessSigned => branch_less_signed,
-                                BranchKind::LessUnsigned => branch_less_unsigned,
+                                BranchKind::Eq32 | BranchKind::Eq64 => branch_eq,
+                                BranchKind::NotEq32 | BranchKind::NotEq64 => branch_not_eq,
+                                BranchKind::GreaterOrEqualUnsigned32 | BranchKind::GreaterOrEqualUnsigned64 => branch_greater_or_equal_unsigned,
+                                BranchKind::GreaterOrEqualSigned32 | BranchKind::GreaterOrEqualSigned64 => branch_greater_or_equal_signed,
+                                BranchKind::LessSigned32 | BranchKind::LessSigned64 => branch_less_signed,
+                                BranchKind::LessUnsigned32 | BranchKind::LessUnsigned64 => branch_less_unsigned,
                             }
                         }
                     }
                     (RegImm::Imm(src1), RegImm::Reg(src2)) => {
                         codegen! {
-                            args = (conv_reg(src2), src1, target_true.static_target),
+                            args = (conv_reg(src2), cast(src1).to_unsigned(), target_true.static_target),
                             kind = kind,
                             {
-                                BranchKind::Eq => branch_eq_imm,
-                                BranchKind::NotEq => branch_not_eq_imm,
-                                BranchKind::GreaterOrEqualUnsigned => branch_less_or_equal_unsigned_imm,
-                                BranchKind::GreaterOrEqualSigned => branch_less_or_equal_signed_imm,
-                                BranchKind::LessSigned => branch_greater_signed_imm,
-                                BranchKind::LessUnsigned => branch_greater_unsigned_imm,
+                                BranchKind::Eq32 | BranchKind::Eq64 => branch_eq_imm,
+                                BranchKind::NotEq32 | BranchKind::NotEq64 => branch_not_eq_imm,
+                                BranchKind::GreaterOrEqualUnsigned32 | BranchKind::GreaterOrEqualUnsigned64 => branch_less_or_equal_unsigned_imm,
+                                BranchKind::GreaterOrEqualSigned32 | BranchKind::GreaterOrEqualSigned64 => branch_less_or_equal_signed_imm,
+                                BranchKind::LessSigned32 | BranchKind::LessSigned64 => branch_greater_signed_imm,
+                                BranchKind::LessUnsigned32 | BranchKind::LessUnsigned64 => branch_greater_unsigned_imm,
                             }
                         }
                     }
                     (RegImm::Reg(src1), RegImm::Imm(src2)) => {
                         codegen! {
-                            args = (conv_reg(src1), src2, target_true.static_target),
+                            args = (conv_reg(src1), cast(src2).to_unsigned(), target_true.static_target),
                             kind = kind,
                             {
-                                BranchKind::Eq => branch_eq_imm,
-                                BranchKind::NotEq => branch_not_eq_imm,
-                                BranchKind::LessSigned => branch_less_signed_imm,
-                                BranchKind::LessUnsigned => branch_less_unsigned_imm,
-                                BranchKind::GreaterOrEqualSigned => branch_greater_or_equal_signed_imm,
-                                BranchKind::GreaterOrEqualUnsigned => branch_greater_or_equal_unsigned_imm,
+                                BranchKind::Eq32 | BranchKind::Eq64 => branch_eq_imm,
+                                BranchKind::NotEq32 | BranchKind::NotEq64 => branch_not_eq_imm,
+                                BranchKind::LessSigned32 | BranchKind::LessSigned64 => branch_less_signed_imm,
+                                BranchKind::LessUnsigned32 | BranchKind::LessUnsigned64 => branch_less_unsigned_imm,
+                                BranchKind::GreaterOrEqualSigned32 | BranchKind::GreaterOrEqualSigned64 => branch_greater_or_equal_signed_imm,
+                                BranchKind::GreaterOrEqualUnsigned32 | BranchKind::GreaterOrEqualUnsigned64 => branch_greater_or_equal_unsigned_imm,
                             }
                         }
                     }
@@ -6822,7 +7598,7 @@ fn emit_code(
                         if is_optimized {
                             unreachable!("internal error: branch with only constant operands")
                         } else {
-                            match OperationKind::from(kind).apply_const(i32_to_i64(src1 as i32), i32_to_i64(src2 as i32)) {
+                            match OperationKind::from(kind).apply_const(cast(src1).to_i64_sign_extend(), cast(src2).to_i64_sign_extend()) {
                                 1 => unconditional_jump(target_true),
                                 0 => {
                                     assert!(can_fallthrough_to_next_block.contains(block_target));
@@ -6912,10 +7688,9 @@ pub(crate) enum RelocationKind {
         target_code: SectionTarget,
         target_base: SectionTarget,
     },
-
-    Size {
-        section_index: SectionIndex,
-        range: AddressRange,
+    Offset {
+        origin: SectionTarget,
+        target: SectionTarget,
         size: SizeRelocationSize,
     },
 }
@@ -6924,16 +7699,7 @@ impl RelocationKind {
     fn targets(&self) -> [Option<SectionTarget>; 2] {
         match self {
             RelocationKind::Abs { target, .. } => [Some(*target), None],
-            RelocationKind::Size { section_index, range, .. } => [
-                Some(SectionTarget {
-                    section_index: *section_index,
-                    offset: range.start,
-                }),
-                Some(SectionTarget {
-                    section_index: *section_index,
-                    offset: range.end,
-                }),
-            ],
+            RelocationKind::Offset { origin, target, .. } => [Some(*origin), Some(*target)],
             RelocationKind::JumpTable { target_code, target_base } => [Some(*target_code), Some(*target_base)],
         }
     }
@@ -6966,7 +7732,7 @@ where
         SubUleb128 { target: SectionTarget },
     }
 
-    if elf.relocations(section).next().is_none() {
+    if section.relocations().next().is_none() {
         return Ok(());
     }
 
@@ -6974,7 +7740,7 @@ where
     log::trace!("Harvesting data relocations from section: {}", section_name);
 
     let mut for_address = BTreeMap::new();
-    for (absolute_address, relocation) in elf.relocations(section) {
+    for (absolute_address, relocation) in section.relocations() {
         let Some(relative_address) = absolute_address.checked_sub(section.original_address()) else {
             return Err(ProgramFromElfError::other("invalid relocation offset"));
         };
@@ -7073,13 +7839,34 @@ where
                 continue;
             }
             [(_, Kind::Mut(MutOp::Add, size_1, target_1)), (_, Kind::Mut(MutOp::Sub, size_2, target_2))]
-                if size_1 == size_2 && (target_1.section_index == target_2.section_index && target_1.offset >= target_2.offset) =>
+                if size_1 == size_2
+                    && matches!(*size_1, RelocationSize::U32 | RelocationSize::U64)
+                    && code_sections_set.contains(&target_1.section_index)
+                    && !code_sections_set.contains(&target_2.section_index) =>
             {
+                if *size_1 == RelocationSize::U64 {
+                    // We could support this, but I'm not sure if anything ever emits this,
+                    // so let's return an error for now until somebody complains.
+                    return Err(ProgramFromElfError::other(
+                        "internal error: found 64-bit jump table relocation; please report this",
+                    ));
+                }
+
                 relocations.insert(
                     current_location,
-                    RelocationKind::Size {
-                        section_index: target_1.section_index,
-                        range: (target_2.offset..target_1.offset).into(),
+                    RelocationKind::JumpTable {
+                        target_code: *target_1,
+                        target_base: *target_2,
+                    },
+                );
+                continue;
+            }
+            [(_, Kind::Mut(MutOp::Add, size_1, target_1)), (_, Kind::Mut(MutOp::Sub, size_2, target_2))] if size_1 == size_2 => {
+                relocations.insert(
+                    current_location,
+                    RelocationKind::Offset {
+                        origin: *target_2,
+                        target: *target_1,
                         size: SizeRelocationSize::Generic(*size_1),
                     },
                 );
@@ -7092,55 +7879,36 @@ where
                     size: size_1,
                 }),
             ), (_, Kind::Mut(MutOp::Sub, size_2, target_2))]
-                if size_1 == size_2 && target_1.section_index == target_2.section_index && target_1.offset >= target_2.offset =>
+                if size_1 == size_2 =>
             {
                 relocations.insert(
                     current_location,
-                    RelocationKind::Size {
-                        section_index: target_1.section_index,
-                        range: (target_2.offset..target_1.offset).into(),
+                    RelocationKind::Offset {
+                        origin: *target_2,
+                        target: *target_1,
                         size: SizeRelocationSize::Generic(*size_1),
                     },
                 );
                 continue;
             }
-            [(_, Kind::Set6 { target: target_1 }), (_, Kind::Sub6 { target: target_2 })]
-                if target_1.section_index == target_2.section_index && target_1.offset >= target_2.offset =>
-            {
+            [(_, Kind::Set6 { target: target_1 }), (_, Kind::Sub6 { target: target_2 })] => {
                 relocations.insert(
                     current_location,
-                    RelocationKind::Size {
-                        section_index: target_1.section_index,
-                        range: (target_2.offset..target_1.offset).into(),
+                    RelocationKind::Offset {
+                        origin: *target_2,
+                        target: *target_1,
                         size: SizeRelocationSize::SixBits,
                     },
                 );
                 continue;
             }
-            [(_, Kind::SetUleb128 { target: target_1 }), (_, Kind::SubUleb128 { target: target_2 })]
-                if target_1.section_index == target_2.section_index && target_1.offset >= target_2.offset =>
-            {
+            [(_, Kind::SetUleb128 { target: target_1 }), (_, Kind::SubUleb128 { target: target_2 })] => {
                 relocations.insert(
                     current_location,
-                    RelocationKind::Size {
-                        section_index: target_1.section_index,
-                        range: (target_2.offset..target_1.offset).into(),
+                    RelocationKind::Offset {
+                        origin: *target_2,
+                        target: *target_1,
                         size: SizeRelocationSize::Uleb128,
-                    },
-                );
-                continue;
-            }
-            [(_, Kind::Mut(MutOp::Add, size_1, target_1)), (_, Kind::Mut(MutOp::Sub, size_2, target_2))]
-                if size_1 == size_2
-                    && *size_1 == RelocationSize::U32
-                    && code_sections_set.contains(&target_1.section_index)
-                    && !code_sections_set.contains(&target_2.section_index) =>
-            {
-                relocations.insert(
-                    current_location,
-                    RelocationKind::JumpTable {
-                        target_code: *target_1,
-                        target_base: *target_2,
                     },
                 );
                 continue;
@@ -7286,7 +8054,7 @@ where
         reloc_pcrel_lo12: BTreeMap<u64, (&'static str, u64)>,
     }
 
-    if elf.relocations(section).next().is_none() {
+    if section.relocations().next().is_none() {
         return Ok(());
     }
 
@@ -7296,7 +8064,7 @@ where
     log::trace!("Harvesting code relocations from section: {}", section_name);
 
     let section_data = section.data();
-    for (absolute_address, relocation) in elf.relocations(section) {
+    for (absolute_address, relocation) in section.relocations() {
         let Some(relative_address) = absolute_address.checked_sub(section.original_address()) else {
             return Err(ProgramFromElfError::other("invalid relocation offset"));
         };
@@ -7547,7 +8315,7 @@ where
 
                         let new_instruction = match inst {
                             Inst::RegImm {
-                                kind: RegImmKind::Add,
+                                kind: RegImmKind::Add32,
                                 dst,
                                 src: _,
                                 imm: _,
@@ -7747,7 +8515,7 @@ where
                     (base, InstExt::Basic(BasicInst::LoadAddressIndirect { dst, target }))
                 }
                 Inst::Load {
-                    kind: LoadKind::U32,
+                    kind: LoadKind::I32,
                     base,
                     dst,
                     ..
@@ -7769,7 +8537,7 @@ where
         } else {
             match lo_inst {
                 Inst::RegImm {
-                    kind: RegImmKind::Add,
+                    kind: RegImmKind::Add32,
                     src,
                     dst,
                     ..
@@ -7797,12 +8565,11 @@ where
                     (src, InstExt::Basic(BasicInst::LoadAddress { dst, target }))
                 }
                 Inst::Load { kind, base, dst, .. } => {
-                    let Some(dst) = cast_reg_non_zero(dst)? else {
-                        // The instruction will be translated to a NOP.
-                        continue;
-                    };
-
-                    (base, InstExt::Basic(BasicInst::LoadAbsolute { kind, dst, target }))
+                    if let Some(dst) = cast_reg_non_zero(dst)? {
+                        (base, InstExt::Basic(BasicInst::LoadAbsolute { kind, dst, target }))
+                    } else {
+                        (base, InstExt::nop())
+                    }
                 }
                 Inst::Store { kind, base, src, .. } => (
                     base,
@@ -7972,6 +8739,7 @@ where
         let is_writable = section.is_writable();
         if name == ".rodata"
             || name.starts_with(".rodata.")
+            || name.starts_with(".srodata.")
             || name == ".data.rel.ro"
             || name.starts_with(".data.rel.ro.")
             || name == ".got"
@@ -8067,6 +8835,7 @@ where
 
     let mut instructions = Vec::new();
     let mut imports = Vec::new();
+    let mut metadata_to_nth_import = HashMap::new();
 
     for &section_index in &sections_code {
         let section = elf.section_by_index(section_index);
@@ -8077,6 +8846,7 @@ where
             &decoder_config,
             &relocations,
             &mut imports,
+            &mut metadata_to_nth_import,
             &mut instruction_overrides,
             &mut instructions,
         )?;
@@ -8153,6 +8923,13 @@ where
         let expected_reachability_graph =
             calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations)?;
         if reachability_graph != expected_reachability_graph {
+            if std::env::var("POLKAVM_LINKER_DUMP_REACHABILITY_GRAPH")
+                .map(|value| value == "1")
+                .unwrap_or(false)
+            {
+                let _ = std::fs::write("/tmp/reachability_graph_actual.txt", format!("{reachability_graph:#?}"));
+                let _ = std::fs::write("/tmp/reachability_graph_expected.txt", format!("{expected_reachability_graph:#?}"));
+            }
             panic!("internal error: inconsistent reachability after optimization; this is a bug, please report it!");
         }
     } else {
@@ -8375,21 +9152,36 @@ where
         }
 
         match relocation {
-            RelocationKind::Size {
-                section_index: _,
-                range,
-                size,
-            } => {
-                // These relocations should only be used in debug info sections.
-                if reachability_graph.is_data_section_reachable(section.index()) {
+            RelocationKind::Offset { origin, target, size } => {
+                // These relocations should only be used in debug info sections and RO data sections.
+                if reachability_graph.is_data_section_reachable(section.index()) && !matches!(size, SizeRelocationSize::Generic(..)) {
                     return Err(ProgramFromElfError::other(format!(
                         "relocation was not expected in section '{name}': {relocation:?}",
                         name = section.name(),
                     )));
                 }
 
+                let Some(&origin_section_address) = base_address_for_section.get(&origin.section_index) else {
+                    return Err(ProgramFromElfError::other(format!(
+                        "internal error: relocation in '{name}' ({relocation_target}) refers to an origin section that doesn't have a base address assigned: origin = '{origin_name}' ({origin}), target = '{target_name}' ({target}), size = {size:?}",
+                        name = section.name(),
+                        origin_name = elf.section_by_index(origin.section_index).name(),
+                        target_name = elf.section_by_index(target.section_index).name(),
+                    )));
+                };
+
+                let Some(&target_section_address) = base_address_for_section.get(&target.section_index) else {
+                    return Err(ProgramFromElfError::other(format!(
+                        "internal error: relocation in '{name}' ({relocation_target}) refers to a target section that doesn't have a base address assigned: origin = '{origin_name}' ({origin}), target = '{target_name}' ({target}), size = {size:?}",
+                        name = section.name(),
+                        origin_name = elf.section_by_index(origin.section_index).name(),
+                        target_name = elf.section_by_index(target.section_index).name(),
+                    )));
+                };
+
+                let range = target_section_address.wrapping_add(target.offset)..origin_section_address.wrapping_add(origin.offset);
                 let data = elf.section_data_mut(relocation_target.section_index);
-                let value = range.end - range.start;
+                let mut value = range.end.wrapping_sub(range.start);
                 match size {
                     SizeRelocationSize::Uleb128 => {
                         overwrite_uleb128(data, relocation_target.offset as usize, value)?;
@@ -8404,6 +9196,30 @@ where
                         data[relocation_target.offset as usize] = output as u8;
                     }
                     SizeRelocationSize::Generic(size) => {
+                        if range.end < range.start {
+                            match size {
+                                RelocationSize::U8 => {
+                                    if let Ok(new_value) = cast(value).to_signed().try_into() {
+                                        let new_value: i8 = new_value;
+                                        value = cast(cast(new_value).to_unsigned()).to_u64();
+                                    }
+                                }
+                                RelocationSize::U16 => {
+                                    if let Ok(new_value) = cast(value).to_signed().try_into() {
+                                        let new_value: i16 = new_value;
+                                        value = cast(cast(new_value).to_unsigned()).to_u64();
+                                    }
+                                }
+                                RelocationSize::U32 => {
+                                    if let Ok(new_value) = cast(value).to_signed().try_into() {
+                                        let new_value: i32 = new_value;
+                                        value = cast(cast(new_value).to_unsigned()).to_u64();
+                                    }
+                                }
+                                RelocationSize::U64 => {}
+                            }
+                        }
+
                         write_generic(size, data, relocation_target.offset, value)?;
                     }
                 }

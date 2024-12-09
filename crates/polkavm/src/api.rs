@@ -4,9 +4,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use polkavm_common::abi::{MemoryMap, MemoryMapBuilder, VM_ADDR_RETURN_TO_HOST};
+use polkavm_common::cast::cast;
 use polkavm_common::program::{
-    build_static_dispatch_table, FrameKind, ISA32_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode, ProgramBlob, Reg,
-    ISA32_V1, ISA64_V1,
+    build_static_dispatch_table, FrameKind, ISA32_V1_NoSbrk, ISA64_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode,
+    ProgramBlob, Reg, ISA32_V1, ISA64_V1,
 };
 use polkavm_common::utils::{ArcBytes, AsUninitSliceMut};
 
@@ -22,7 +23,7 @@ use crate::module_cache::{ModuleCache, ModuleKey};
 if_compiler_is_supported! {
     {
         use crate::sandbox::{Sandbox, SandboxInstance};
-        use crate::compiler::{CompiledModule, CompilerCache};
+        use crate::compiler::{CompiledModule, CompilerCache, B32, B64};
 
         #[cfg(target_os = "linux")]
         use crate::sandbox::linux::Sandbox as SandboxLinux;
@@ -63,7 +64,7 @@ impl<T> IntoResult<T> for T {
     }
 }
 
-pub type RegValue = u32;
+pub type RegValue = u64;
 
 #[derive(Copy, Clone)]
 pub struct RuntimeInstructionSet {
@@ -294,7 +295,7 @@ impl Module {
     }
 
     pub(crate) fn code_len(&self) -> u32 {
-        self.state().blob.code().len() as u32
+        cast(self.state().blob.code().len()).assert_always_fits_in_u32()
     }
 
     pub(crate) fn instructions_bounded_at(&self, offset: ProgramCounter) -> Instructions<RuntimeInstructionSet> {
@@ -335,6 +336,10 @@ impl Module {
         value & !self.state().page_size_mask
     }
 
+    pub(crate) fn round_to_page_size_up(&self, value: u32) -> u32 {
+        self.round_to_page_size_down(value) + (u32::from((value & self.state().page_size_mask) != 0) << self.state().page_shift)
+    }
+
     pub(crate) fn address_to_page(&self, address: u32) -> u32 {
         address >> self.state().page_shift
     }
@@ -371,6 +376,7 @@ impl Module {
             .ro_data_size(blob.ro_data_size())
             .rw_data_size(blob.rw_data_size())
             .stack_size(blob.stack_size())
+            .aux_data_size(config.aux_data_size())
             .build()
             .map_err(Error::from_static_str)?;
 
@@ -389,7 +395,7 @@ impl Module {
 
             log::trace!("Checking jump table...");
             for (nth_entry, code_offset) in blob.jump_table().iter().enumerate() {
-                if code_offset.0 as usize >= blob.code().len() {
+                if cast(code_offset.0).to_usize() >= blob.code().len() {
                     log::trace!(
                         "  Invalid jump table entry #{nth_entry}: {code_offset} (should be less than {})",
                         blob.code().len()
@@ -406,7 +412,7 @@ impl Module {
             let mut exports = Vec::with_capacity(1);
             for export in blob.exports() {
                 log::trace!("  Export at {}: {}", export.program_counter(), export.symbol());
-                if config.is_strict && export.program_counter().0 as usize >= blob.code().len() {
+                if config.is_strict && cast(export.program_counter().0).to_usize() >= blob.code().len() {
                     bail!(
                         "out of range export found; export {} points to code offset {}, while the code blob is only {} bytes",
                         export.symbol(),
@@ -437,9 +443,9 @@ impl Module {
 
         #[allow(unused_macros)]
         macro_rules! compile_module {
-            ($sandbox_kind:ident, $visitor_name:ident, $module_kind:ident) => {{
-                type VisitorTy<'a> = crate::compiler::CompilerVisitor<'a, $sandbox_kind>;
-                let (mut visitor, aux) = crate::compiler::CompilerVisitor::<$sandbox_kind>::new(
+            ($sandbox_kind:ident, $bitness_kind:ident, $isa:ident, $isa_no_sbrk:ident, $visitor_name:ident, $module_kind:ident) => {{
+                type VisitorTy<'a> = crate::compiler::CompilerVisitor<'a, $sandbox_kind, $bitness_kind>;
+                let (mut visitor, aux) = crate::compiler::CompilerVisitor::<$sandbox_kind, $bitness_kind>::new(
                     &engine.state.compiler_cache,
                     config,
                     instruction_set,
@@ -448,18 +454,15 @@ impl Module {
                     blob.bitmask(),
                     &exports,
                     config.step_tracing || engine.crosscheck,
-                    blob.code().len() as u32,
+                    cast(blob.code().len()).assert_always_fits_in_u32(),
                     init,
                 )?;
 
                 if config.allow_sbrk {
-                    blob.visit(
-                        build_static_dispatch_table!($visitor_name, ISA32_V1, VisitorTy<'a>),
-                        &mut visitor,
-                    );
+                    blob.visit(build_static_dispatch_table!($visitor_name, $isa, VisitorTy<'a>), &mut visitor);
                 } else {
                     blob.visit(
-                        build_static_dispatch_table!($visitor_name, ISA32_V1_NoSbrk, VisitorTy<'a>),
+                        build_static_dispatch_table!($visitor_name, $isa_no_sbrk, VisitorTy<'a>),
                         &mut visitor,
                     );
                 }
@@ -478,7 +481,11 @@ impl Module {
                             SandboxKind::Linux => {
                                 #[cfg(target_os = "linux")]
                                 {
-                                    compile_module!(SandboxLinux, COMPILER_VISITOR_LINUX, Linux)
+                                    if blob.is_64_bit() {
+                                        compile_module!(SandboxLinux, B64, ISA64_V1, ISA64_V1_NoSbrk, COMPILER_VISITOR_LINUX, Linux)
+                                    } else {
+                                        compile_module!(SandboxLinux, B32, ISA32_V1, ISA32_V1_NoSbrk, COMPILER_VISITOR_LINUX, Linux)
+                                    }
                                 }
 
                                 #[cfg(not(target_os = "linux"))]
@@ -490,7 +497,11 @@ impl Module {
                             SandboxKind::Generic => {
                                 #[cfg(feature = "generic-sandbox")]
                                 {
-                                    compile_module!(SandboxGeneric, COMPILER_VISITOR_GENERIC, Generic)
+                                    if blob.is_64_bit() {
+                                        compile_module!(SandboxGeneric, B64, ISA64_V1, ISA64_V1_NoSbrk, COMPILER_VISITOR_GENERIC, Generic)
+                                    } else {
+                                        compile_module!(SandboxGeneric, B32, ISA32_V1, ISA32_V1_NoSbrk, COMPILER_VISITOR_GENERIC, Generic)
+                                    }
                                 }
 
                                 #[cfg(not(feature = "generic-sandbox"))]
@@ -534,7 +545,7 @@ impl Module {
             memory_map.ro_data_range().end,
             blob.ro_data().len(),
             memory_map.ro_data_range().len(),
-            memory_map.ro_data_range().start as usize + blob.ro_data().len(),
+            cast(memory_map.ro_data_range().start).to_usize() + blob.ro_data().len(),
         );
         log::debug!(
             "  Memory map: RW data: 0x{:08x}..0x{:08x} ({}/{} bytes, non-zero until 0x{:08x})",
@@ -542,7 +553,7 @@ impl Module {
             memory_map.rw_data_range().end,
             blob.rw_data().len(),
             memory_map.rw_data_range().len(),
-            memory_map.rw_data_range().start as usize + blob.rw_data().len(),
+            cast(memory_map.rw_data_range().start).to_usize() + blob.rw_data().len(),
         );
         log::debug!(
             "  Memory map:   Stack: 0x{:08x}..0x{:08x} ({}/{} bytes)",
@@ -588,6 +599,11 @@ impl Module {
         }
 
         Ok(Module(Some(module)))
+    }
+
+    /// Returns whether the module is 64-bit.
+    pub fn is_64_bit(&self) -> bool {
+        self.state().blob.is_64_bit()
     }
 
     /// Fetches a cached module for the given `blob`.
@@ -657,7 +673,7 @@ impl Module {
 
     /// The default stack pointer for the module.
     pub fn default_sp(&self) -> RegValue {
-        self.memory_map().stack_address_high()
+        u64::from(self.memory_map().stack_address_high())
     }
 
     /// Returns the module's exports.
@@ -896,6 +912,11 @@ impl RawInstance {
         &self.module
     }
 
+    /// Returns whether we're running a 64-bit program.
+    pub fn is_64_bit(&self) -> bool {
+        self.module.is_64_bit()
+    }
+
     /// Starts or resumes the execution.
     pub fn run(&mut self) -> Result<InterruptKind, Error> {
         if self.next_program_counter().is_none() {
@@ -923,6 +944,16 @@ impl RawInstance {
                 let expected_interruption = crosscheck.run().expect("crosscheck failed");
                 if interruption != expected_interruption {
                     panic!("run: crosscheck mismatch, interpreter = {expected_interruption:?}, backend = {interruption:?}");
+                }
+
+                if self.module.gas_metering() != Some(GasMeteringKind::Async) {
+                    for reg in Reg::ALL {
+                        let value = access_backend!(self.backend, |backend| backend.reg(reg));
+                        let expected_value = crosscheck.reg(reg);
+                        if value != expected_value {
+                            panic!("run: crosscheck mismatch for {reg}, interpreter = 0x{expected_value:x}, backend = 0x{value:x}");
+                        }
+                    }
                 }
 
                 let crosscheck_gas = crosscheck.gas();
@@ -1007,6 +1038,31 @@ impl RawInstance {
         }
     }
 
+    /// Sets the accessible region of the aux data, rounded up to the nearest page size.
+    pub fn set_accessible_aux_size(&mut self, size: u32) -> Result<(), Error> {
+        if self.module.is_dynamic_paging() {
+            return Err("setting accessible aux size is only possible on modules without dynamic paging".into());
+        }
+
+        if size > self.module.memory_map().aux_data_size() {
+            return Err(format!(
+                "cannot set accessible aux size: the maximum is {}, while tried to set {}",
+                self.module.memory_map().aux_data_size(),
+                size
+            )
+            .into());
+        }
+
+        let size = self.module.round_to_page_size_up(size);
+        if let Some(ref mut crosscheck) = self.crosscheck_instance {
+            crosscheck.set_accessible_aux_size(size);
+        }
+
+        access_backend!(self.backend, |mut backend| backend
+            .set_accessible_aux_size(size)
+            .into_result("failed to set accessible aux size"))
+    }
+
     /// Resets the VM's memory to its initial state.
     pub fn reset_memory(&mut self) -> Result<(), Error> {
         if let Some(ref mut crosscheck) = self.crosscheck_instance {
@@ -1016,6 +1072,56 @@ impl RawInstance {
         access_backend!(self.backend, |mut backend| backend
             .reset_memory()
             .into_result("failed to reset the instance's memory"))
+    }
+
+    /// Returns whether a given chunk of memory is accessible through [`read_memory_into`](Self::read_memory_into)/[`write_memory`](Self::write_memory).
+    ///
+    /// If `size` is zero then this will always return `true`.
+    pub fn is_memory_accessible(&self, address: u32, size: u32, is_writable: bool) -> bool {
+        if size == 0 {
+            return true;
+        }
+
+        if address < 0x10000 {
+            return false;
+        }
+
+        if u64::from(address) + cast(size).to_u64() > 0x100000000 {
+            return false;
+        }
+
+        #[inline]
+        fn is_within(range: core::ops::Range<u32>, address: u32, size: u32) -> bool {
+            let address_end = u64::from(address) + cast(size).to_u64();
+            address >= range.start && address_end <= u64::from(range.end)
+        }
+
+        if !self.module.is_dynamic_paging() {
+            let map = self.module.memory_map();
+            if is_within(map.stack_range(), address, size) {
+                return true;
+            }
+
+            let heap_size = self.heap_size();
+            let heap_top = map.heap_base() + heap_size;
+            let heap_top = self.module.round_to_page_size_up(heap_top);
+            if is_within(map.rw_data_address()..heap_top, address, size) {
+                return true;
+            }
+
+            let aux_size = access_backend!(self.backend, |backend| backend.accessible_aux_size());
+            if is_within(map.aux_data_address()..map.aux_data_address() + aux_size, address, size) {
+                return true;
+            }
+
+            if !is_writable && is_within(map.ro_data_range(), address, size) {
+                return true;
+            }
+
+            false
+        } else {
+            access_backend!(self.backend, |backend| backend.is_memory_accessible(address, size, is_writable))
+        }
     }
 
     /// Reads the VM's memory.
@@ -1034,14 +1140,14 @@ impl RawInstance {
         if address < 0x10000 {
             return Err(MemoryAccessError::OutOfRangeAccess {
                 address,
-                length: slice.len() as u64,
+                length: cast(slice.len()).to_u64(),
             });
         }
 
-        if u64::from(address) + slice.len() as u64 > 0x100000000 {
+        if u64::from(address) + cast(slice.len()).to_u64() > 0x100000000 {
             return Err(MemoryAccessError::OutOfRangeAccess {
                 address,
-                length: slice.len() as u64,
+                length: cast(slice.len()).to_u64(),
             });
         }
 
@@ -1058,7 +1164,7 @@ impl RawInstance {
                 _ => false,
             };
             if !results_match {
-                let address_end = u64::from(address) + length as u64;
+                let address_end = u64::from(address) + cast(length).to_u64();
                 if cfg!(debug_assertions) {
                     if let (Ok(result), Ok(expected_result)) = (result, expected_result) {
                         log::trace!("read_memory result (interpreter): {expected_result:?}");
@@ -1068,6 +1174,21 @@ impl RawInstance {
                 panic!("read_memory: crosscheck mismatch, range = 0x{address:x}..0x{address_end:x}, interpreter = {expected_success}, backend = {success}");
             }
         }
+
+        #[cfg(debug_assertions)]
+        {
+            let is_accessible = self.is_memory_accessible(address, cast(length).assert_always_fits_in_u32(), false);
+            if is_accessible != result.is_ok() {
+                panic!(
+                    "'read_memory_into' doesn't match with 'is_memory_accessible' for 0x{:x}-0x{:x} (read_memory_into = {}, is_memory_accessible = {})",
+                    address,
+                    cast(address).to_usize() + length,
+                    result.is_ok(),
+                    is_accessible,
+                );
+            }
+        }
+
         result
     }
 
@@ -1083,14 +1204,14 @@ impl RawInstance {
         if address < 0x10000 {
             return Err(MemoryAccessError::OutOfRangeAccess {
                 address,
-                length: data.len() as u64,
+                length: cast(data.len()).to_u64(),
             });
         }
 
-        if u64::from(address) + data.len() as u64 > 0x100000000 {
+        if u64::from(address) + cast(data.len()).to_u64() > 0x100000000 {
             return Err(MemoryAccessError::OutOfRangeAccess {
                 address,
-                length: data.len() as u64,
+                length: cast(data.len()).to_u64(),
             });
         }
 
@@ -1100,8 +1221,22 @@ impl RawInstance {
             let expected_success = expected_result.is_ok();
             let success = result.is_ok();
             if success != expected_success {
-                let address_end = u64::from(address) + data.len() as u64;
+                let address_end = u64::from(address) + cast(data.len()).to_u64();
                 panic!("write_memory: crosscheck mismatch, range = 0x{address:x}..0x{address_end:x}, interpreter = {expected_success}, backend = {success}");
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            let is_accessible = self.is_memory_accessible(address, cast(data.len()).assert_always_fits_in_u32(), true);
+            if is_accessible != result.is_ok() {
+                panic!(
+                    "'write_memory' doesn't match with 'is_memory_accessible' for 0x{:x}-0x{:x} (write_memory = {}, is_memory_accessible = {})",
+                    address,
+                    cast(address).to_usize() + data.len(),
+                    result.is_ok(),
+                    is_accessible,
+                );
             }
         }
 
@@ -1111,7 +1246,7 @@ impl RawInstance {
     /// Reads the VM's memory.
     pub fn read_memory(&self, address: u32, length: u32) -> Result<Vec<u8>, MemoryAccessError> {
         let mut buffer = Vec::new();
-        buffer.reserve_exact(length as usize);
+        buffer.reserve_exact(cast(length).to_usize());
 
         let pointer = buffer.as_ptr();
         let slice = self.read_memory_into(address, buffer.spare_capacity_mut())?;
@@ -1119,12 +1254,12 @@ impl RawInstance {
         // Since `read_memory_into_slice` returns a `&mut [u8]` we can be sure it initialized the buffer
         // we've passed to it, as long as it's actually the same buffer we gave it.
         assert_eq!(slice.as_ptr(), pointer);
-        assert_eq!(slice.len(), length as usize);
+        assert_eq!(slice.len(), cast(length).to_usize());
 
         #[allow(unsafe_code)]
         // SAFETY: `read_memory_into_slice` initialized this buffer, and we've verified this with `assert`s.
         unsafe {
-            buffer.set_len(length as usize);
+            buffer.set_len(cast(length).to_usize());
         }
 
         Ok(buffer)
@@ -1277,7 +1412,7 @@ impl RawInstance {
 
         self.clear_regs();
         self.set_reg(Reg::SP, self.module.default_sp());
-        self.set_reg(Reg::RA, VM_ADDR_RETURN_TO_HOST);
+        self.set_reg(Reg::RA, u64::from(VM_ADDR_RETURN_TO_HOST));
         self.set_next_program_counter(pc);
 
         for (reg, &value) in Reg::ARG_REGS.into_iter().zip(args) {
@@ -1296,7 +1431,7 @@ impl RawInstance {
     {
         let mut regs = [0; Reg::ARG_REGS.len()];
         let mut input_count = 0;
-        args._set(|value| {
+        args._set(self.module().blob().is_64_bit(), |value| {
             assert!(input_count <= Reg::ARG_REGS.len(), "too many arguments");
             regs[input_count] = value;
             input_count += 1;
@@ -1313,7 +1448,7 @@ impl RawInstance {
         FnResult: crate::linker::FuncResult,
     {
         let mut output_count = 0;
-        FnResult::_get(|| {
+        FnResult::_get(self.module().blob().is_64_bit(), || {
             let value = access_backend!(self.backend, |backend| backend.reg(Reg::ARG_REGS[output_count]));
             output_count += 1;
             value
