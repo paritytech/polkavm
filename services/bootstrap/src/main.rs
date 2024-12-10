@@ -124,16 +124,16 @@ extern "C" fn accumulate() -> u32 {
     // let solicit_result = unsafe { solicit(omega_7, omega_8) };
     
     unsafe {
-        let ptr1 = 0xFEFF0000 as *mut u32;
+        let ptr1 = 0xFEFDE000 as *mut u32; // 2^32 − 2*ZZ − ZI − P (s) (Writable address)
         *ptr1 = 0;
 
-        let ptr2 = 0xFEFF0004 as *mut u32;
+        let ptr2 = 0xFEFDE004 as *mut u32; // 2^32 − 2*ZZ − ZI − P (s) + 4 (Writable address)
         *ptr2 = result;
     }
     
-    let mut omega_7: u32 = 0xFEFF0000;
+    let mut omega_7: u32 = 0xFEFDE000; // 2^32 − 2*ZZ − ZI − P (s) (Writable address)
     let omega_8: u32 = 4;
-    let omega_9: u32 = 0xFEFF0004;
+    let omega_9: u32 = 0xFEFDE004; // 2^32 − 2*ZZ − ZI − P (s) + 4 (Writable address)
     let omega_10: u32 = 4;
 
     let result = unsafe { write(omega_7, omega_8, omega_9, omega_10) };
