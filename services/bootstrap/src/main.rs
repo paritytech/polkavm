@@ -114,7 +114,7 @@ extern "C" fn accumulate() -> u32 {
     let mut omega_7: u32 = 0xFEFF0000;
     // let omega_8: u32 = 206;
     let omega_8: u32 = unsafe { *(0xFEFF0020 as *const u32) };
-    let omega_9: u32 = 0x2000;
+    let omega_9: u32 = 100;
     let omega_10: u32 = 0x1000;
     let omega_11: u32 = 0x3000;
     let omega_12: u32 = 0x4000;
