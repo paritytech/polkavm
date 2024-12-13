@@ -1,11 +1,11 @@
-\// RO data = 0/0 bytes
+// RO data = 0/0 bytes
 // RW data = 0/0 bytes
 // Stack size = 8192 bytes
 // Jump table entry point size = 0 bytes
 // RO data = []
 // RW data = []
-// Instructions = 34
-// Code size = 134 bytes
+// Instructions = 30
+// Code size = 118 bytes
 
       :                          @0
      0: 28 11 00 00 00           jump @4
@@ -14,7 +14,7 @@
       :                          @2
     10: 28 1c 00 00 00           jump @6
       :                          @3
-    15: 28 73                    jump @7
+    15: 28 63                    jump @7
       :                          @4 [export #0: 'is_authorized']
     17: 33 07                    a0 = 0x0
     19: 32 00                    ret
@@ -27,25 +27,21 @@
     38: 8b 11 f8                 i64 sp = i64 sp - i64 8
     41: 71 10                    u64 [sp] = ra
     43: 14 07 00 00 ff fe 00 00 00 00 a0 = 0xfeff0000
-    53: 76 78 20                 a1 = u32 [a0 + 32]
-    56: 33 09 00 20              a2 = 0x2000
-    60: 33 0a 00 10              a3 = 0x1000
-    64: 33 0b 00 30              a4 = 0x3000
-    68: 33 0c 00 40              a5 = 0x4000
-    72: 0a 09                    ecalli 9 // 'new'
-    74: 14 0b 00 e0 fd fe 00 00 00 00 a4 = 0xfefde000
-    84: 48 0b                    u32 [a4 + 0] = 0
-    86: 70 b7 04                 u32 [a4 + 4] = a0
-    89: 14 09 04 e0 fd fe 00 00 00 00 a2 = 0xfefde004
-    99: 33 08 04                 a1 = 0x4
-   102: 33 0a 04                 a3 = 0x4
-   105: 14 07 00 e0 fd fe 00 00 00 00 a0 = 0xfefde000
-   115: 0a 03                    ecalli 3 // 'write'
-   117: 8d 77 20                 a0 = a0 <<64 32
-   120: 8e 77 20                 a0 = a0 >>64 32
-   123: 78 10                    ra = u64 [sp]
-   125: 8b 11 08                 i64 sp = i64 sp + 0x8
-   128: 32 00                    ret
+    53: 78 78 20                 a1 = u64 [a0 + 32]
+    56: 33 09 64                 a2 = 0x64
+    59: 33 0a 64                 a3 = 0x64
+    62: 0a 09                    ecalli 9 // 'new'
+    64: 14 0b 00 e0 fd fe 00 00 00 00 a4 = 0xfefde000
+    74: 49 0b                    u64 [a4 + 0] = 0
+    76: 71 b7 04                 u64 [a4 + 4] = a0
+    79: 14 09 04 e0 fd fe 00 00 00 00 a2 = 0xfefde004
+    89: 33 08 04                 a1 = 0x4
+    92: 33 0a 04                 a3 = 0x4
+    95: 14 07 00 e0 fd fe 00 00 00 00 a0 = 0xfefde000
+   105: 0a 03                    ecalli 3 // 'write'
+   107: 78 10                    ra = u64 [sp]
+   109: 8b 11 08                 i64 sp = i64 sp + 0x8
+   112: 32 00                    ret
       :                          @7 [export #3: 'on_transfer']
-   130: 33 07                    a0 = 0x0
-   132: 32 00                    ret
+   114: 33 07                    a0 = 0x0
+   116: 32 00                    ret
