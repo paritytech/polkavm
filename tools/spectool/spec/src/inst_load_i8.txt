@@ -6,5 +6,5 @@ pre: gas = 10000
 pub @main:
     a0 = i8 [0x20000]
 
-post: a0 = -127
+post: a0 = 0xffffffffffffff81
 post: gas = 9998
