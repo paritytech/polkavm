@@ -1,0 +1,14 @@
+[package]
+name = "polkavm-test-data"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+polkavm-linker = { workspace = true }
+
+[lints]
+workspace = true

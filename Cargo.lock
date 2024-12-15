@@ -602,6 +602,7 @@ dependencies = [
  "polkavm-common",
  "polkavm-linker",
  "polkavm-linux-raw",
+ "polkavm-test-data",
  "ruzstd",
  "schnellru",
 ]
@@ -690,6 +691,13 @@ name = "polkavm-linux-raw-generate"
 version = "0.1.0"
 dependencies = [
  "bindgen",
+]
+
+[[package]]
+name = "polkavm-test-data"
+version = "0.18.0"
+dependencies = [
+ "polkavm-linker",
 ]
 
 [[package]]
