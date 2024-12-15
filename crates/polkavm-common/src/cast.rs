@@ -56,7 +56,7 @@ impl cast<i32> {
     #[inline(always)]
     pub const fn to_u64(self) -> u64 {
         self.0 as u64
-    } 
+    }
 }
 
 impl cast<i64> {

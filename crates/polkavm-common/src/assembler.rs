@@ -1,6 +1,6 @@
+use crate::cast::cast;
 use crate::program::{Instruction, Reg};
 use crate::utils::{parse_imm, parse_imm64, parse_reg};
-use crate::cast::cast;
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -445,7 +445,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                 if let Some(imm) = parse_imm(rhs) {
                     emit_and_continue!(Instruction::load_imm(dst.into(), imm as u32));
                 }
-                
+
                 if let Some(imm64) = parse_imm64(rhs) {
                     emit_and_continue!(Instruction::load_imm64(dst.into(), imm64 as u64));
                 }
