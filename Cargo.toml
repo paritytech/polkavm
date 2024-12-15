@@ -10,6 +10,7 @@ members = [
     "crates/polkavm-common",
     "crates/polkavm-linux-raw",
     "crates/polkavm",
+    "crates/polkavm-test-data",
 
     "crates/simplealloc",
 
@@ -39,10 +40,12 @@ polkavm-derive-impl       = { version = "0.20.0", path = "crates/polkavm-derive-
 polkavm-derive-impl-macro = { version = "0.20.0", path = "crates/polkavm-derive-impl-macro" }
 polkavm-linker            = { version = "0.20.0", path = "crates/polkavm-linker" }
 polkavm-linux-raw         = { version = "0.20.0", path = "crates/polkavm-linux-raw" }
+polkavm-test-data         = { version = "0.20.0", path = "crates/polkavm-test-data" }
 
 blake3 = { version = "1.5.4", default-features = false }
 clap = "4.4.6"
 diff = "0.1.13"
+dirs = "6.0.0"
 env_logger = { version = "0.10.0", default-features = false }
 gimli = { version = "0.31.1", default-features = false }
 hashbrown = { version = "0.14.1", default-features = false }

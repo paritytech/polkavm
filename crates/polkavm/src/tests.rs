@@ -1489,18 +1489,18 @@ fn decompress_zstd(mut bytes: &[u8]) -> Vec<u8> {
 
 static BLOB_MAP: Mutex<Option<BTreeMap<(bool, bool, &'static [u8]), ProgramBlob>>> = Mutex::new(None);
 
-fn get_blob(elf: &'static [u8]) -> ProgramBlob {
-    get_blob_impl(true, false, elf)
+fn get_blob(elf: &'static [u8], decompress: bool) -> ProgramBlob {
+    get_blob_impl(true, false, decompress, elf)
 }
 
-fn get_blob_impl(optimize: bool, strip: bool, elf: &'static [u8]) -> ProgramBlob {
+fn get_blob_impl(optimize: bool, strip: bool, decompress: bool, elf: &'static [u8]) -> ProgramBlob {
     let mut blob_map = BLOB_MAP.lock();
     let blob_map = blob_map.get_or_insert_with(BTreeMap::new);
     blob_map
         .entry((optimize, strip, elf))
         .or_insert_with(|| {
             // This is slow, so cache it.
-            let elf = decompress_zstd(elf);
+            let elf = if decompress { decompress_zstd(elf) } else { elf.to_vec() };
             let mut config = polkavm_linker::Config::default();
             config.set_optimize(optimize);
             config.set_strip(strip);
@@ -1525,7 +1525,7 @@ fn doom(config: Config, elf: &'static [u8]) {
     const DOOM_WAD: &[u8] = include_bytes!("../../../examples/doom/roms/doom1.wad");
 
     let _ = env_logger::try_init();
-    let blob = get_blob(elf);
+    let blob = get_blob(elf, true /* decompress */);
     let engine = Engine::new(&config).unwrap();
     let mut module_config = ModuleConfig::default();
     module_config.set_page_size(16 * 1024); // TODO: Also test with other page sizes.
@@ -1677,9 +1677,9 @@ fn pinky_impl(config: Config, is_64_bit: bool) {
 
     let _ = env_logger::try_init();
     let blob = if !is_64_bit {
-        get_blob(include_bytes!("../../../test-data/bench-pinky_32.elf.zst"))
+        get_blob(polkavm_test_data::BENCH_PINKY_32, false /* no decompress */)
     } else {
-        get_blob(include_bytes!("../../../test-data/bench-pinky_64.elf.zst"))
+        get_blob(polkavm_test_data::BENCH_PINKY_64, false /* no decompress */)
     };
 
     let engine = Engine::new(&config).unwrap();
@@ -2168,14 +2168,15 @@ struct TestInstance {
     instance: crate::Instance,
 }
 
-const TEST_BLOB_32_ELF_ZST: &[u8] = include_bytes!("../../../test-data/test-blob_32.elf.zst");
-const TEST_BLOB_64_ELF_ZST: &[u8] = include_bytes!("../../../test-data/test-blob_64.elf.zst");
-
 impl TestInstance {
     fn new(config: &Config, optimize: bool, is_64_bit: bool) -> Self {
         let _ = env_logger::try_init();
-        let blob = if is_64_bit { TEST_BLOB_64_ELF_ZST } else { TEST_BLOB_32_ELF_ZST };
-        let blob = get_blob_impl(optimize, is_64_bit, blob);
+        let blob = if is_64_bit {
+            polkavm_test_data::TEST_BLOB_64
+        } else {
+            polkavm_test_data::TEST_BLOB_32
+        };
+        let blob = get_blob_impl(optimize, is_64_bit, false, blob);
 
         let engine = Engine::new(config).unwrap();
         let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
@@ -3046,7 +3047,7 @@ fn memset_with_dynamic_paging(mut config: Config) {
 
 fn test_basic_debug_info(raw_blob: &'static [u8]) {
     let _ = env_logger::try_init();
-    let program = get_blob(raw_blob);
+    let program = get_blob(raw_blob, false /* no decompress */);
     let entry_point = program.exports().find(|export| export == "read_u32").unwrap().program_counter();
     let mut line_program = program.get_debug_line_program_at(entry_point).unwrap().unwrap();
     let info = line_program.run().unwrap().unwrap();
@@ -3070,13 +3071,13 @@ fn test_basic_debug_info(raw_blob: &'static [u8]) {
 #[ignore]
 #[test]
 fn test_basic_debug_info_32() {
-    test_basic_debug_info(TEST_BLOB_32_ELF_ZST);
+    test_basic_debug_info(polkavm_test_data::TEST_BLOB_32);
 }
 
 #[ignore]
 #[test]
 fn test_basic_debug_info_64() {
-    test_basic_debug_info(TEST_BLOB_64_ELF_ZST);
+    test_basic_debug_info(polkavm_test_data::TEST_BLOB_64);
 }
 
 #[test]
@@ -3143,7 +3144,7 @@ fn module_cache(_config: Config) {}
 #[cfg(feature = "module-cache")]
 fn module_cache(mut config: Config) {
     let _ = env_logger::try_init();
-    let blob = get_blob(TEST_BLOB_32_ELF_ZST);
+    let blob = get_blob(polkavm_test_data::TEST_BLOB_32, false /* no decompress */);
 
     config.set_worker_count(0);
 
