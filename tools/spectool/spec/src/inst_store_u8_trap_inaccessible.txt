@@ -1,7 +1,7 @@
+%rw_data_size = 0
+
 pre: a0 = 0x12345678
 pre: gas = 10000
-
-%rw_data_size = 0
 
 pub @main:
 pub @expected_exit:

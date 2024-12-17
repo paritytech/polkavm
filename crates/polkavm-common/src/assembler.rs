@@ -73,6 +73,12 @@ fn parse_load_imm_and_jump_indirect_with_tmp(line: &str) -> Option<(Reg, Reg, i3
 }
 
 #[derive(Copy, Clone)]
+pub enum OpMarker {
+    I32,
+    NONE,
+}
+
+#[derive(Copy, Clone)]
 pub enum LoadKind {
     I8,
     I16,
@@ -378,6 +384,12 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
             let lhs = line[..index].trim();
             let rhs = line[index + 1..].trim();
 
+            let (op_marker, lhs) = if let Some(lhs) = lhs.strip_prefix("i32 ") {
+                (OpMarker::I32, lhs)
+            } else {
+                (OpMarker::NONE, lhs)
+            };
+
             if let Some(dst) = parse_reg(lhs) {
                 if let Some(index) = rhs.find(',') {
                     if let Some(value) = parse_imm(&rhs[..index]) {
@@ -523,77 +535,157 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                             let dst = dst.into();
                             let src1 = src1.into();
                             let src2 = src2.into();
-                            emit_and_continue!(match op {
-                                Op::Add => Instruction::add_32(dst, src1, src2),
-                                Op::Sub => Instruction::sub_32(dst, src1, src2),
-                                Op::And => Instruction::and(dst, src1, src2),
-                                Op::Xor => Instruction::xor(dst, src1, src2),
-                                Op::Or => Instruction::or(dst, src1, src2),
-                                Op::Mul => Instruction::mul_32(dst, src1, src2),
-                                Op::DivUnsigned => Instruction::div_unsigned_32(dst, src1, src2),
-                                Op::DivSigned => Instruction::div_signed_32(dst, src1, src2),
-                                Op::RemUnsigned => Instruction::rem_unsigned_32(dst, src1, src2),
-                                Op::RemSigned => Instruction::rem_signed_32(dst, src1, src2),
-                                Op::LessUnsigned => Instruction::set_less_than_unsigned(dst, src1, src2),
-                                Op::LessSigned => Instruction::set_less_than_signed(dst, src1, src2),
-                                Op::GreaterUnsigned => Instruction::set_less_than_unsigned(dst, src2, src1),
-                                Op::GreaterSigned => Instruction::set_less_than_signed(dst, src2, src1),
-                                Op::ShiftLeft => Instruction::shift_logical_left_32(dst, src1, src2),
-                                Op::ShiftRight => Instruction::shift_logical_right_32(dst, src1, src2),
-                                Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_32(dst, src1, src2),
-                            });
+                            match op_marker {
+                                OpMarker::I32 => {
+                                    emit_and_continue!(match op {
+                                        Op::Add => Instruction::add_32(dst, src1, src2),
+                                        Op::Sub => Instruction::sub_32(dst, src1, src2),
+                                        Op::And => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::Xor => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::Or => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::Mul => Instruction::mul_32(dst, src1, src2),
+                                        Op::DivUnsigned => Instruction::div_unsigned_32(dst, src1, src2),
+                                        Op::DivSigned => Instruction::div_signed_32(dst, src1, src2),
+                                        Op::RemUnsigned => Instruction::rem_unsigned_32(dst, src1, src2),
+                                        Op::RemSigned => Instruction::rem_signed_32(dst, src1, src2),
+                                        Op::LessUnsigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::LessSigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::GreaterUnsigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::GreaterSigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::ShiftLeft => Instruction::shift_logical_left_32(dst, src1, src2),
+                                        Op::ShiftRight => Instruction::shift_logical_right_32(dst, src1, src2),
+                                        Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_32(dst, src1, src2),
+                                    });
+                                }
+                                OpMarker::NONE => {
+                                    emit_and_continue!(match op {
+                                        Op::Add => Instruction::add_64(dst, src1, src2),
+                                        Op::Sub => Instruction::sub_64(dst, src1, src2),
+                                        Op::And => Instruction::and(dst, src1, src2),
+                                        Op::Xor => Instruction::xor(dst, src1, src2),
+                                        Op::Or => Instruction::or(dst, src1, src2),
+                                        Op::Mul => Instruction::mul_64(dst, src1, src2),
+                                        Op::DivUnsigned => Instruction::div_unsigned_64(dst, src1, src2),
+                                        Op::DivSigned => Instruction::div_signed_64(dst, src1, src2),
+                                        Op::RemUnsigned => Instruction::rem_unsigned_64(dst, src1, src2),
+                                        Op::RemSigned => Instruction::rem_signed_64(dst, src1, src2),
+                                        Op::LessUnsigned => Instruction::set_less_than_unsigned(dst, src1, src2),
+                                        Op::LessSigned => Instruction::set_less_than_signed(dst, src1, src2),
+                                        Op::GreaterUnsigned => Instruction::set_less_than_unsigned(dst, src2, src1),
+                                        Op::GreaterSigned => Instruction::set_less_than_signed(dst, src2, src1),
+                                        Op::ShiftLeft => Instruction::shift_logical_left_64(dst, src1, src2),
+                                        Op::ShiftRight => Instruction::shift_logical_right_64(dst, src1, src2),
+                                        Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_64(dst, src1, src2),
+                                    });
+                                }
+                            }
+
                         } else if let Some(src2) = parse_imm(src2) {
                             let dst = dst.into();
                             let src1 = src1.into();
                             let src2 = src2 as u32;
-                            emit_and_continue!(match op {
-                                Op::Add => Instruction::add_imm_32(dst, src1, src2),
-                                Op::Sub => Instruction::add_imm_32(dst, src1, (-(src2 as i32)) as u32),
-                                Op::And => Instruction::and_imm(dst, src1, src2),
-                                Op::Xor => Instruction::xor_imm(dst, src1, src2),
-                                Op::Or => Instruction::or_imm(dst, src1, src2),
-                                Op::Mul => Instruction::mul_imm_32(dst, src1, src2),
-                                Op::DivUnsigned | Op::DivSigned => {
-                                    return Err(format!("cannot parse line {nth_line}: division is not supported for immediates"));
+                            match op_marker {
+                                OpMarker::I32 => {
+                                    emit_and_continue!(match op {
+                                        Op::Add => Instruction::add_imm_32(dst, src1, src2),
+                                        Op::Sub => Instruction::add_imm_32(dst, src1, (-(src2 as i32)) as u32),
+                                        Op::And => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::Xor => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::Or => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::Mul => Instruction::mul_imm_32(dst, src1, src2),
+                                        Op::DivUnsigned | Op::DivSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 and division is not supported for immediates"));
+                                        }
+                                        Op::RemUnsigned | Op::RemSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 and modulo is not supported for immediates"));
+                                        }
+                                        Op::LessUnsigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::LessSigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::GreaterUnsigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::GreaterSigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::ShiftLeft => Instruction::shift_logical_left_imm_32(dst, src1, src2),
+                                        Op::ShiftRight => Instruction::shift_logical_right_imm_32(dst, src1, src2),
+                                        Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_32(dst, src1, src2),
+                                    });
+                                },
+                                OpMarker::NONE => {
+                                    emit_and_continue!(match op {
+                                        Op::Add => Instruction::add_imm_64(dst, src1, src2),
+                                        Op::Sub => Instruction::add_imm_64(dst, src1, (-(src2 as i32)) as u32),
+                                        Op::And => Instruction::and_imm(dst, src1, src2),
+                                        Op::Xor => Instruction::xor_imm(dst, src1, src2),
+                                        Op::Or => Instruction::or_imm(dst, src1, src2),
+                                        Op::Mul => Instruction::mul_imm_64(dst, src1, src2),
+                                        Op::DivUnsigned | Op::DivSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: division is not supported for immediates"));
+                                        }
+                                        Op::RemUnsigned | Op::RemSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: modulo is not supported for immediates"));
+                                        }
+                                        Op::LessUnsigned => Instruction::set_less_than_unsigned_imm(dst, src1, src2),
+                                        Op::LessSigned => Instruction::set_less_than_signed_imm(dst, src1, src2),
+                                        Op::GreaterUnsigned => Instruction::set_greater_than_unsigned_imm(dst, src1, src2),
+                                        Op::GreaterSigned => Instruction::set_greater_than_signed_imm(dst, src1, src2),
+                                        Op::ShiftLeft => Instruction::shift_logical_left_imm_64(dst, src1, src2),
+                                        Op::ShiftRight => Instruction::shift_logical_right_imm_64(dst, src1, src2),
+                                        Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_64(dst, src1, src2),
+                                    });
                                 }
-                                Op::RemUnsigned | Op::RemSigned => {
-                                    return Err(format!("cannot parse line {nth_line}: modulo is not supported for immediates"));
-                                }
-                                Op::LessUnsigned => Instruction::set_less_than_unsigned_imm(dst, src1, src2),
-                                Op::LessSigned => Instruction::set_less_than_signed_imm(dst, src1, src2),
-                                Op::GreaterUnsigned => Instruction::set_greater_than_unsigned_imm(dst, src1, src2),
-                                Op::GreaterSigned => Instruction::set_greater_than_signed_imm(dst, src1, src2),
-                                Op::ShiftLeft => Instruction::shift_logical_left_imm_32(dst, src1, src2),
-                                Op::ShiftRight => Instruction::shift_logical_right_imm_32(dst, src1, src2),
-                                Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_32(dst, src1, src2),
-                            });
+                            }
                         }
                     } else if let Some(src1) = parse_imm(src1) {
                         if let Some(src2) = parse_reg(src2) {
                             let dst = dst.into();
                             let src1 = src1 as u32;
                             let src2 = src2.into();
-                            emit_and_continue!(match op {
-                                Op::Add => Instruction::add_imm_32(dst, src2, src1),
-                                Op::Sub => Instruction::negate_and_add_imm_32(dst, src2, src1),
-                                Op::And => Instruction::and_imm(dst, src2, src1),
-                                Op::Xor => Instruction::xor_imm(dst, src2, src1),
-                                Op::Or => Instruction::or_imm(dst, src2, src1),
-                                Op::Mul => Instruction::mul_imm_32(dst, src2, src1),
-                                Op::DivUnsigned | Op::DivSigned => {
-                                    return Err(format!("cannot parse line {nth_line}: division is not supported for immediates"));
+                            match op_marker {
+                                OpMarker::I32 => {
+                                    emit_and_continue!(match op {
+                                        Op::Add => Instruction::add_imm_32(dst, src2, src1),
+                                        Op::Sub => Instruction::negate_and_add_imm_32(dst, src2, src1),
+                                        Op::And => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::Xor => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::Or => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::Mul => Instruction::mul_imm_32(dst, src2, src1),
+                                        Op::DivUnsigned | Op::DivSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 and division is not supported for immediates"));
+                                        }
+                                        Op::RemUnsigned | Op::RemSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 and modulo is not supported for immediates"));
+                                        }
+                                        Op::LessUnsigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::LessSigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::GreaterUnsigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::GreaterSigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::ShiftLeft => Instruction::shift_logical_left_imm_alt_32(dst, src2, src1),
+                                        Op::ShiftRight => Instruction::shift_logical_right_imm_alt_32(dst, src2, src1),
+                                        Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
+                                    });
+                                },
+                                OpMarker::NONE => {
+                                    emit_and_continue!(match op {
+                                        Op::Add => Instruction::add_imm_64(dst, src2, src1),
+                                        Op::Sub => Instruction::negate_and_add_imm_64(dst, src2, src1),
+                                        Op::And => Instruction::and_imm(dst, src2, src1),
+                                        Op::Xor => Instruction::xor_imm(dst, src2, src1),
+                                        Op::Or => Instruction::or_imm(dst, src2, src1),
+                                        Op::Mul => Instruction::mul_imm_64(dst, src2, src1),
+                                        Op::DivUnsigned | Op::DivSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: division is not supported for immediates"));
+                                        }
+                                        Op::RemUnsigned | Op::RemSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: modulo is not supported for immediates"));
+                                        }
+                                        Op::LessUnsigned => Instruction::set_greater_than_unsigned_imm(dst, src2, src1),
+                                        Op::LessSigned => Instruction::set_greater_than_signed_imm(dst, src2, src1),
+                                        Op::GreaterUnsigned => Instruction::set_less_than_unsigned_imm(dst, src2, src1),
+                                        Op::GreaterSigned => Instruction::set_less_than_signed_imm(dst, src2, src1),
+                                        Op::ShiftLeft => Instruction::shift_logical_left_imm_alt_64(dst, src2, src1),
+                                        Op::ShiftRight => Instruction::shift_logical_right_imm_alt_64(dst, src2, src1),
+                                        Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_alt_64(dst, src2, src1),
+                                    });
                                 }
-                                Op::RemUnsigned | Op::RemSigned => {
-                                    return Err(format!("cannot parse line {nth_line}: modulo is not supported for immediates"));
-                                }
-                                Op::LessUnsigned => Instruction::set_greater_than_unsigned_imm(dst, src2, src1),
-                                Op::LessSigned => Instruction::set_greater_than_signed_imm(dst, src2, src1),
-                                Op::GreaterUnsigned => Instruction::set_less_than_unsigned_imm(dst, src2, src1),
-                                Op::GreaterSigned => Instruction::set_less_than_signed_imm(dst, src2, src1),
-                                Op::ShiftLeft => Instruction::shift_logical_left_imm_alt_32(dst, src2, src1),
-                                Op::ShiftRight => Instruction::shift_logical_right_imm_alt_32(dst, src2, src1),
-                                Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
-                            });
+                            }
                         }
                     }
                 }
