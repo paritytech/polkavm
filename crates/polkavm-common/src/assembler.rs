@@ -540,18 +540,32 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                     emit_and_continue!(match op {
                                         Op::Add => Instruction::add_32(dst, src1, src2),
                                         Op::Sub => Instruction::sub_32(dst, src1, src2),
-                                        Op::And => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::Xor => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::Or => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::And => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Xor => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Or => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
                                         Op::Mul => Instruction::mul_32(dst, src1, src2),
                                         Op::DivUnsigned => Instruction::div_unsigned_32(dst, src1, src2),
                                         Op::DivSigned => Instruction::div_signed_32(dst, src1, src2),
                                         Op::RemUnsigned => Instruction::rem_unsigned_32(dst, src1, src2),
                                         Op::RemSigned => Instruction::rem_signed_32(dst, src1, src2),
-                                        Op::LessUnsigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::LessSigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::GreaterUnsigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::GreaterSigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::LessUnsigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::LessSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::GreaterUnsigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::GreaterSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
                                         Op::ShiftLeft => Instruction::shift_logical_left_32(dst, src1, src2),
                                         Op::ShiftRight => Instruction::shift_logical_right_32(dst, src1, src2),
                                         Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_32(dst, src1, src2),
@@ -579,7 +593,6 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                     });
                                 }
                             }
-
                         } else if let Some(src2) = parse_imm(src2) {
                             let dst = dst.into();
                             let src1 = src1.into();
@@ -589,25 +602,43 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                     emit_and_continue!(match op {
                                         Op::Add => Instruction::add_imm_32(dst, src1, src2),
                                         Op::Sub => Instruction::add_imm_32(dst, src1, (-(src2 as i32)) as u32),
-                                        Op::And => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::Xor => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::Or => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::And => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Xor => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Or => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
                                         Op::Mul => Instruction::mul_imm_32(dst, src1, src2),
                                         Op::DivUnsigned | Op::DivSigned => {
-                                            return Err(format!("cannot parse line {nth_line}: i32 and division is not supported for immediates"));
+                                            return Err(format!(
+                                                "cannot parse line {nth_line}: i32 and division is not supported for immediates"
+                                            ));
                                         }
                                         Op::RemUnsigned | Op::RemSigned => {
-                                            return Err(format!("cannot parse line {nth_line}: i32 and modulo is not supported for immediates"));
+                                            return Err(format!(
+                                                "cannot parse line {nth_line}: i32 and modulo is not supported for immediates"
+                                            ));
                                         }
-                                        Op::LessUnsigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::LessSigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::GreaterUnsigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::GreaterSigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::LessUnsigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::LessSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::GreaterUnsigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::GreaterSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
                                         Op::ShiftLeft => Instruction::shift_logical_left_imm_32(dst, src1, src2),
                                         Op::ShiftRight => Instruction::shift_logical_right_imm_32(dst, src1, src2),
                                         Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_32(dst, src1, src2),
                                     });
-                                },
+                                }
                                 OpMarker::NONE => {
                                     emit_and_continue!(match op {
                                         Op::Add => Instruction::add_imm_64(dst, src1, src2),
@@ -643,25 +674,43 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                     emit_and_continue!(match op {
                                         Op::Add => Instruction::add_imm_32(dst, src2, src1),
                                         Op::Sub => Instruction::negate_and_add_imm_32(dst, src2, src1),
-                                        Op::And => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::Xor => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::Or => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::And => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Xor => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Or => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
                                         Op::Mul => Instruction::mul_imm_32(dst, src2, src1),
                                         Op::DivUnsigned | Op::DivSigned => {
-                                            return Err(format!("cannot parse line {nth_line}: i32 and division is not supported for immediates"));
+                                            return Err(format!(
+                                                "cannot parse line {nth_line}: i32 and division is not supported for immediates"
+                                            ));
                                         }
                                         Op::RemUnsigned | Op::RemSigned => {
-                                            return Err(format!("cannot parse line {nth_line}: i32 and modulo is not supported for immediates"));
+                                            return Err(format!(
+                                                "cannot parse line {nth_line}: i32 and modulo is not supported for immediates"
+                                            ));
                                         }
-                                        Op::LessUnsigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::LessSigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::GreaterUnsigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
-                                        Op::GreaterSigned => {return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));},
+                                        Op::LessUnsigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::LessSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::GreaterUnsigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::GreaterSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
                                         Op::ShiftLeft => Instruction::shift_logical_left_imm_alt_32(dst, src2, src1),
                                         Op::ShiftRight => Instruction::shift_logical_right_imm_alt_32(dst, src2, src1),
                                         Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
                                     });
-                                },
+                                }
                                 OpMarker::NONE => {
                                     emit_and_continue!(match op {
                                         Op::Add => Instruction::add_imm_64(dst, src2, src1),
