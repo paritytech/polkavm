@@ -5763,7 +5763,7 @@ mod test {
             @before_loop:
                 jump @loop
             @loop:
-                a0 = a0 + 0x1
+                i32 a0 = a0 + 0x1
                 jump @before_loop if a0 <u 10
                 ret
             ",
@@ -5785,9 +5785,9 @@ mod test {
             "
             pub @main:
                 a1 = 0
-                a1 = a1 + 1
+                i32 a1 = a1 + 1
             @loop:
-                a0 = a0 + a1
+                i32 a0 = a0 + a1
                 jump @loop if a0 <u 10
                 ret
             ",
@@ -5811,10 +5811,10 @@ mod test {
         ProgramBuilder::test_optimize_oneshot(
             "
             pub @main:
-                a1 = a1 + 100
+                i32 a1 = a1 + 100
                 a1 = 8
-                a2 = a2 + 0
-                a0 = a0 + 1
+                i32 a2 = a2 + 0
+                i32 a0 = a0 + 1
                 jump @main if a0 <u 10
                 ret
             ",
