@@ -6,5 +6,5 @@ pre: gas = 10000
 pub @main:
     a1 = i16 [a0]
 
-post: a1 = -32127
+post: a1 = 0xffffffffffff8281
 post: gas = 9998

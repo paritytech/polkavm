@@ -1,0 +1,11 @@
+%rw_data_size = 8
+%rw_data = 81 82 83 84 85 86 87 88
+
+pre: a0 = 0xdeadbeef
+pre: gas = 10000
+
+pub @main:
+    a0 = u64 [0x20000]
+
+post: a0 = 0x8887868584838281
+post: gas = 9998

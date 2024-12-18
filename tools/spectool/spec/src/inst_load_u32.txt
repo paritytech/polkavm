@@ -1,5 +1,7 @@
 %rw_data_size = 4
 %rw_data = 12 34 56 78
+
+pre: a0 = 0xdeadbeef
 pre: gas = 10000
 
 pub @main:

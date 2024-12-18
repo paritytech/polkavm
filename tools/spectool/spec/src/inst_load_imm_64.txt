@@ -1,0 +1,7 @@
+pre: gas = 10000
+
+pub @main:
+    a0 = 0xdeadbeefdeadbeef
+
+post: a0 = 0xdeadbeefdeadbeef
+post: gas = 9998

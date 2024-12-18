@@ -118,9 +118,16 @@ fn parse_pre_post(line: &str, output: &mut PrePost) {
         output.pc = Some((label.to_owned(), offset));
     } else {
         let lhs = polkavm_common::utils::parse_reg(lhs).expect("invalid 'pre' / 'post' directive: failed to parse lhs");
-        let rhs = polkavm_common::utils::parse_imm(rhs).expect("invalid 'pre' / 'post' directive: failed to parse rhs");
-        let rhs = cast(rhs).to_unsigned();
-        let rhs = cast(rhs).to_u64();
+        let rhs = polkavm_common::utils::parse_imm(rhs)
+            .map(|i| {
+                if i < 0 {
+                    cast(cast(i).to_i64_sign_extend()).to_unsigned()
+                } else {
+                    cast(cast(i).to_unsigned()).to_u64()
+                }
+            })
+            .or_else(|| polkavm_common::utils::parse_imm64(rhs).map(|i| cast(i).to_unsigned()))
+            .expect("invalid 'pre' / 'post' directive: failed to parse rhs");
         output.regs[lhs as usize] = Some(rhs);
     }
 }
@@ -135,8 +142,15 @@ fn main_generate() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("spec");
     let mut found_errors = false;
 
-    for entry in std::fs::read_dir(root.join("src")).unwrap() {
-        let path = entry.unwrap().path();
+    let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(root.join("src"))
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .collect();
+
+    entries.sort_by_key(|entry| entry.path().file_stem().unwrap().to_string_lossy().to_string());
+
+    for entry in entries {
+        let path = entry.path();
         let name = path.file_stem().unwrap().to_string_lossy();
 
         let mut pre = PrePost::default();

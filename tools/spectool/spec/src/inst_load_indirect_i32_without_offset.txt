@@ -1,0 +1,11 @@
+%rw_data_size = 5
+%rw_data = 81 82 83 84 85
+
+pre: a0 = 0x20000
+pre: gas = 10000
+
+pub @main:
+    a1 = i32 [a0]
+
+post: a1 = 0xffffffff84838281
+post: gas = 9998

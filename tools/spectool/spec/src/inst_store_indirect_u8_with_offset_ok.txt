@@ -1,9 +1,8 @@
-pre: gas = 10000
+%rw_data_size = 1
 
 pre: a0 = 0x20000
 pre: a1 = 0x12345678
-
-%rw_data_size = 1
+pre: gas = 10000
 
 pub @main:
     u8 [a0 + 10] = a1
