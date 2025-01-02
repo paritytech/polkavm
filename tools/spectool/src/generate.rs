@@ -5,7 +5,7 @@ use polkavm_common::cast::cast;
 use polkavm_common::program::ProgramParts;
 use std::path::Path;
 
-use crate::{extract_chunks, MemoryChunk, Page, Testcase, TestcaseJson};
+use crate::{extract_chunks, Page, Testcase, TestcaseJson};
 
 #[derive(Default)]
 struct PrePost {

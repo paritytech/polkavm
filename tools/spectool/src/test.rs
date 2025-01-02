@@ -40,7 +40,7 @@ fn run(test: TestcaseJson) -> Result<(), Vec<String>> {
     let mut parts = ProgramParts::default();
     parts.is_64_bit = true;
     parts.code_and_jump_table = test.program.into();
-    setup_memory(&mut parts, &test.initial_page_map, &test.initial_memory);
+    setup_memory(&mut parts, &test.initial_page_map, &test.initial_memory).map_err(|x| vec![x.to_owned()])?;
 
     let blob = ProgramBlob::from_parts(parts.clone()).unwrap();
 
@@ -114,7 +114,7 @@ fn ensure<T: std::fmt::Display + Eq>(errors: &mut Vec<String>, id: &str, actual:
     }
 }
 
-fn setup_memory(parts: &mut ProgramParts, pages: &[Page], chunks: &[MemoryChunk]) {
+fn setup_memory(parts: &mut ProgramParts, pages: &[Page], chunks: &[MemoryChunk]) -> Result<(), &'static str> {
     let mut ro_start = None;
     let mut rw_start = None;
     let mut stack_start = None;
@@ -123,7 +123,7 @@ fn setup_memory(parts: &mut ProgramParts, pages: &[Page], chunks: &[MemoryChunk]
         if page.is_writable {
             if rw_start.is_some() {
                 if stack_start.is_some() {
-                    panic!("Can't set STACK/RW memory twice");
+                    return Err("Can't set STACK/RW memory twice");
                 }
                 parts.stack_size = page.length;
                 stack_start = Some(page.address);
@@ -133,7 +133,7 @@ fn setup_memory(parts: &mut ProgramParts, pages: &[Page], chunks: &[MemoryChunk]
             }
         } else {
             if ro_start.is_some() {
-                panic!("Can't set RO memory twice");
+                return Err("Can't set RO memory twice");
             }
             parts.ro_data_size = page.length;
             ro_start = Some(page.address);
@@ -160,7 +160,7 @@ fn setup_memory(parts: &mut ProgramParts, pages: &[Page], chunks: &[MemoryChunk]
 
     if let Some(ro_start) = ro_start {
         if ro_start != 0x10000 {
-            panic!("Unsupported address of RO data.");
+            return Err("Unsupported address of RO data.");
         }
     }
 
@@ -168,10 +168,12 @@ fn setup_memory(parts: &mut ProgramParts, pages: &[Page], chunks: &[MemoryChunk]
         let is_in_ro = copy_chunk(&chunk, ro_start, parts.ro_data_size, &mut ro_data);
         let is_in_rw = copy_chunk(&chunk, rw_start, parts.rw_data_size, &mut rw_data);
         if !is_in_ro && !is_in_rw {
-            panic!("Invalid chunk!");
+            return Err("Invalid chunk!");
         }
     }
 
     parts.ro_data = ro_data.into();
     parts.rw_data = rw_data.into();
+
+    Ok(())
 }
