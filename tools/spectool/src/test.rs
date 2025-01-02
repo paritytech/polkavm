@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use log::{debug, error, info};
 use polkavm::{Engine, InterruptKind, Module, ModuleConfig, ProgramBlob, ProgramCounter, ProgramParts, Reg};
 
 use crate::{extract_chunks, MemoryChunk, Page, TestcaseJson};
@@ -23,10 +24,10 @@ pub fn main(files: Vec<PathBuf>) -> Result<(), String> {
     let count = files.len();
     if fail_count > 0 {
         let okay = count - fail_count;
-        eprintln!("{okay}/{count}: OK");
+        info!("{okay}/{count}: OK");
         Err("Some of the files produced errors.".into())
     } else {
-        println!("{count}/{count}: OK");
+        info!("{count}/{count}: OK");
         Ok(())
     }
 }
@@ -58,7 +59,10 @@ fn run(test: TestcaseJson) -> Result<(), Vec<String>> {
         instance.set_reg(reg, value);
     }
 
+    let name = test.name;
+    debug!("Running {name}");
     let mut final_pc = test.initial_pc;
+    let mut steps = 0;
     let status = loop {
         match instance.run().unwrap() {
             InterruptKind::Finished => break "halt",
@@ -67,8 +71,14 @@ fn run(test: TestcaseJson) -> Result<(), Vec<String>> {
             InterruptKind::NotEnoughGas => break "out-of-gas",
             InterruptKind::Segfault(..) => break "fault",
             InterruptKind::Step => {
+                steps += 1;
                 final_pc = instance.program_counter().unwrap().0;
-                continue;
+                if steps > 2 * test.initial_gas {
+                    error!("Aborting execution due to potential gas limit.");
+                    break "out-of-gas";
+                } else {
+                    continue;
+                }
             }
         }
     };
