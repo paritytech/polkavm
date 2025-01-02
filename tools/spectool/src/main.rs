@@ -43,7 +43,7 @@ struct Page {
     is_writable: bool,
 }
 
-#[derive(PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(PartialEq, Eq, serde::Serialize, serde::Deserialize, Debug)]
 #[serde(rename_all = "kebab-case")]
 struct MemoryChunk {
     address: u32,

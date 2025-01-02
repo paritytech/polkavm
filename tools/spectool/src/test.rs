@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use log::{debug, error, info};
+use log::debug;
 use polkavm::{Engine, InterruptKind, Module, ModuleConfig, ProgramBlob, ProgramCounter, ProgramParts, Reg};
 
 use crate::{extract_chunks, MemoryChunk, Page, TestcaseJson};
@@ -8,7 +8,7 @@ use crate::{extract_chunks, MemoryChunk, Page, TestcaseJson};
 pub fn main(files: Vec<PathBuf>) -> Result<(), String> {
     let mut fail_count = 0;
     for path in &files {
-        let file = std::fs::File::open(&path).unwrap();
+        let file = std::fs::File::open(path).unwrap();
         let testcase = serde_json::from_reader(file).unwrap();
         if let Err(errors) = run(testcase) {
             fail_count += 1;
@@ -24,10 +24,10 @@ pub fn main(files: Vec<PathBuf>) -> Result<(), String> {
     let count = files.len();
     if fail_count > 0 {
         let okay = count - fail_count;
-        info!("{okay}/{count}: OK");
+        eprintln!("{okay}/{count}: OK");
         Err("Some of the files produced errors.".into())
     } else {
-        info!("{count}/{count}: OK");
+        println!("{count}/{count}: OK");
         Ok(())
     }
 }
@@ -49,7 +49,7 @@ fn run(test: TestcaseJson) -> Result<(), Vec<String>> {
     module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
     module_config.set_step_tracing(true);
 
-    let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
     let mut instance = module.instantiate().unwrap();
 
     instance.set_gas(test.initial_gas);
@@ -74,7 +74,7 @@ fn run(test: TestcaseJson) -> Result<(), Vec<String>> {
                 steps += 1;
                 final_pc = instance.program_counter().unwrap().0;
                 if steps > 2 * test.initial_gas {
-                    error!("Aborting execution due to potential gas limit.");
+                    eprintln!("Aborting execution due to potential gas limit.");
                     break "out-of-gas";
                 } else {
                     continue;
@@ -95,11 +95,23 @@ fn run(test: TestcaseJson) -> Result<(), Vec<String>> {
     }
 
     // Memory
-    let mut expected_memory = Vec::new();
+    let mut actual_memory = Vec::new();
     for page in &test.initial_page_map {
         let memory = instance.read_memory(page.address, page.length).unwrap();
-        expected_memory.extend(extract_chunks(page.address, &memory));
+        actual_memory.extend(extract_chunks(page.address, &memory));
     }
+
+    for (actual, expected) in actual_memory.iter().zip(&test.expected_memory) {
+        let id = format!("Memory @ {:?}", actual.address);
+        ensure(&mut errors, &id, format!("{:?}", actual), format!("{:?}", expected));
+    }
+
+    ensure(
+        &mut errors,
+        "Number of memory chunks",
+        actual_memory.len(),
+        test.expected_memory.len(),
+    );
 
     if !errors.is_empty() {
         Err(errors)
@@ -108,7 +120,7 @@ fn run(test: TestcaseJson) -> Result<(), Vec<String>> {
     }
 }
 
-fn ensure<T: std::fmt::Display + Eq>(errors: &mut Vec<String>, id: &str, actual: T, expected: T) {
+fn ensure<T: core::fmt::Display + Eq>(errors: &mut Vec<String>, id: &str, actual: T, expected: T) {
     if actual != expected {
         errors.push(format!("{id:>12} | expected: {expected:10}, got: {actual:10}"));
     }
@@ -165,8 +177,8 @@ fn setup_memory(parts: &mut ProgramParts, pages: &[Page], chunks: &[MemoryChunk]
     }
 
     for chunk in chunks {
-        let is_in_ro = copy_chunk(&chunk, ro_start, parts.ro_data_size, &mut ro_data);
-        let is_in_rw = copy_chunk(&chunk, rw_start, parts.rw_data_size, &mut rw_data);
+        let is_in_ro = copy_chunk(chunk, ro_start, parts.ro_data_size, &mut ro_data);
+        let is_in_rw = copy_chunk(chunk, rw_start, parts.rw_data_size, &mut rw_data);
         if !is_in_ro && !is_in_rw {
             return Err("Invalid chunk!");
         }
