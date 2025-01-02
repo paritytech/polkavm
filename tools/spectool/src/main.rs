@@ -11,17 +11,22 @@ mod test;
 #[derive(Parser, Debug)]
 #[clap(version)]
 enum Args {
+    /// Generate JSON test cases from spec files in `../spec/src/*`.
     Generate,
-    Test,
+    /// Run JSON test case from given paths.
+    Test {
+        #[arg(value_name = "FILES", required = true)]
+        files: Vec<std::path::PathBuf>,
+    },
 }
 
-fn main() {
+fn main() -> Result<(), String> {
     env_logger::init();
 
     let args = Args::parse();
     match args {
         Args::Generate => generate::main(),
-        Args::Test => test::main(),
+        Args::Test { files } => test::main(files),
     }
 }
 
@@ -60,4 +65,20 @@ struct TestcaseJson {
     expected_pc: u32,
     expected_memory: Vec<MemoryChunk>,
     expected_gas: i64,
+}
+
+fn extract_chunks(base_address: u32, slice: &[u8]) -> Vec<MemoryChunk> {
+    let mut output = Vec::new();
+    let mut position = 0;
+    while let Some(next_position) = slice[position..].iter().position(|&byte| byte != 0).map(|offset| position + offset) {
+        position = next_position;
+        let length = slice[position..].iter().take_while(|&&byte| byte != 0).count();
+        output.push(MemoryChunk {
+            address: base_address + position as u32,
+            contents: slice[position..position + length].into(),
+        });
+        position += length;
+    }
+
+    output
 }

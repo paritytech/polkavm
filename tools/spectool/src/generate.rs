@@ -5,7 +5,7 @@ use polkavm_common::cast::cast;
 use polkavm_common::program::ProgramParts;
 use std::path::Path;
 
-use crate::{MemoryChunk, Page, Testcase, TestcaseJson};
+use crate::{extract_chunks, MemoryChunk, Page, Testcase, TestcaseJson};
 
 #[derive(Default)]
 struct PrePost {
@@ -14,7 +14,7 @@ struct PrePost {
     pc: Option<(String, u32)>,
 }
 
-pub fn main() {
+pub fn main() -> Result<(), String> {
     let mut tests = Vec::new();
 
     let mut config = polkavm::Config::new();
@@ -370,7 +370,9 @@ pub fn main() {
     std::fs::write(root.join("output").join("TESTCASES.md"), index_md).unwrap();
 
     if found_errors {
-        std::process::exit(1);
+        Err("Errors while generating test cases".into())
+    } else {
+        Ok(())
     }
 }
 
@@ -409,20 +411,4 @@ fn parse_pre_post(line: &str, output: &mut PrePost) {
         let rhs = cast(rhs).to_u64();
         output.regs[lhs as usize] = Some(rhs);
     }
-}
-
-fn extract_chunks(base_address: u32, slice: &[u8]) -> Vec<MemoryChunk> {
-    let mut output = Vec::new();
-    let mut position = 0;
-    while let Some(next_position) = slice[position..].iter().position(|&byte| byte != 0).map(|offset| position + offset) {
-        position = next_position;
-        let length = slice[position..].iter().take_while(|&&byte| byte != 0).count();
-        output.push(MemoryChunk {
-            address: base_address + position as u32,
-            contents: slice[position..position + length].into(),
-        });
-        position += length;
-    }
-
-    output
 }
