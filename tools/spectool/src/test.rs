@@ -62,7 +62,6 @@ fn run(test: TestcaseJson) -> Result<(), Vec<String>> {
     let name = test.name;
     debug!("Running {name}");
     let mut final_pc = test.initial_pc;
-    let mut steps = 0;
     let status = loop {
         match instance.run().unwrap() {
             InterruptKind::Finished => break "halt",
@@ -71,14 +70,8 @@ fn run(test: TestcaseJson) -> Result<(), Vec<String>> {
             InterruptKind::NotEnoughGas => break "out-of-gas",
             InterruptKind::Segfault(..) => break "fault",
             InterruptKind::Step => {
-                steps += 1;
                 final_pc = instance.program_counter().unwrap().0;
-                if steps > 2 * test.initial_gas {
-                    eprintln!("Aborting execution due to potential gas limit.");
-                    break "out-of-gas";
-                } else {
-                    continue;
-                }
+                continue;
             }
         }
     };
