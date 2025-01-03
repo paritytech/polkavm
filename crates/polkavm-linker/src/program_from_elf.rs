@@ -1811,6 +1811,73 @@ fn resolve_simple_zero_register_usage(
     false
 }
 
+fn emit_or_combine_byte(
+    location: SectionTarget,
+    dst: Reg,
+    src: Reg,
+    rv64: bool,
+    mut emit: impl FnMut(InstExt<SectionTarget, SectionTarget>),
+) {
+    let op_reg = dst;
+    let cmp_reg = Reg::E1;
+    let tmp_reg = Reg::E2;
+    let mask_reg = if dst != src { src } else { Reg::E3 };
+    let range = if rv64 { 0..64 } else { 0..32 };
+
+    log::warn!("Emulating orc.b at {:?} with an instruction sequence", location);
+
+    if dst != src {
+        emit(InstExt::Basic(BasicInst::MoveReg { dst, src }));
+    }
+
+    // Loop:
+    // mov tmp, op
+    // shl mask, 8
+    // or tmp, mask
+    // test op, mask
+    // cmov.neq op, tmp
+
+    for iter in range.step_by(8) {
+        emit(InstExt::Basic(BasicInst::MoveReg { dst: tmp_reg, src: op_reg }));
+
+        if iter == 0 {
+            emit(InstExt::Basic(BasicInst::LoadImmediate { dst: mask_reg, imm: 0xff }));
+        } else {
+            emit(InstExt::Basic(BasicInst::AnyAny {
+                kind: if rv64 {
+                    AnyAnyKind::ShiftLogicalLeft64
+                } else {
+                    AnyAnyKind::ShiftLogicalLeft32
+                },
+                dst: mask_reg,
+                src1: RegImm::Reg(mask_reg),
+                src2: RegImm::Imm(8),
+            }));
+        }
+
+        emit(InstExt::Basic(BasicInst::AnyAny {
+            kind: if rv64 { AnyAnyKind::Or64 } else { AnyAnyKind::Or32 },
+            dst: tmp_reg,
+            src1: RegImm::Reg(tmp_reg),
+            src2: RegImm::Reg(mask_reg),
+        }));
+
+        emit(InstExt::Basic(BasicInst::AnyAny {
+            kind: if rv64 { AnyAnyKind::And64 } else { AnyAnyKind::And32 },
+            dst: cmp_reg,
+            src1: RegImm::Reg(op_reg),
+            src2: RegImm::Reg(mask_reg),
+        }));
+
+        emit(InstExt::Basic(BasicInst::Cmov {
+            kind: CmovKind::NotEqZero,
+            dst: op_reg,
+            src: RegImm::Reg(tmp_reg),
+            cond: cmp_reg,
+        }));
+    }
+}
+
 fn convert_instruction<H>(
     elf: &Elf<H>,
     section: &Section,
@@ -2005,6 +2072,7 @@ where
             };
 
             use crate::riscv::RegKind as K;
+
             let kind = match kind {
                 K::CountLeadingZeroBits32 => RegKind::CountLeadingZeroBits32,
                 K::CountLeadingZeroBits64 => RegKind::CountLeadingZeroBits64,
@@ -2012,11 +2080,14 @@ where
                 K::CountSetBits64 => RegKind::CountSetBits64,
                 K::CountTrailingZeroBits32 => RegKind::CountTrailingZeroBits32,
                 K::CountTrailingZeroBits64 => RegKind::CountTrailingZeroBits64,
-                K::OrCombineByte => RegKind::OrCombineByte,
                 K::ReverseByte => RegKind::ReverseByte,
                 K::SignExtend8 => RegKind::SignExtend8,
                 K::SignExtend16 => RegKind::SignExtend16,
                 K::ZeroExtend16 => RegKind::ZeroExtend16,
+                K::OrCombineByte => {
+                    emit_or_combine_byte(current_location, dst, src, rv64, &mut emit);
+                    return Ok(());
+                }
             };
 
             emit(InstExt::Basic(BasicInst::Reg { kind, dst, src }));
@@ -3702,7 +3773,6 @@ pub enum RegKind {
     CountSetBits64,
     CountTrailingZeroBits32,
     CountTrailingZeroBits64,
-    OrCombineByte,
     ReverseByte,
     SignExtend8,
     SignExtend16,
@@ -7259,7 +7329,6 @@ fn emit_code(
                             RegKind::CountSetBits64 => count_set_bits_64,
                             RegKind::CountTrailingZeroBits32 => count_trailing_zero_bits_32,
                             RegKind::CountTrailingZeroBits64 => count_trailing_zero_bits_64,
-                            RegKind::OrCombineByte => or_combine_byte,
                             RegKind::ReverseByte => reverse_byte,
                             RegKind::SignExtend8 => sign_extend_8,
                             RegKind::SignExtend16 => sign_extend_16,

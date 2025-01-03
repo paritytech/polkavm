@@ -1602,7 +1602,6 @@ define_opcodes! {
         [I_64, I_32] sign_extend_8                            = 108,
         [I_64, I_32] sign_extend_16                           = 109,
         [I_64, I_32] zero_extend_16                           = 110,
-        [I_64, I_32] or_combine_byte                          = 48,
         [I_64, I_32] reverse_byte                             = 111,
     ]
 
@@ -2413,12 +2412,6 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
         write!(self, "{d} = zext.h {s}")
-    }
-
-    fn or_combine_byte(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        let d = self.format_reg(d);
-        let s = self.format_reg(s);
-        write!(self, "{d} = orc.b {s}")
     }
 
     fn reverse_byte(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
