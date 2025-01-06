@@ -2330,9 +2330,38 @@ fn test_blob_negate_and_add(config: Config, optimize: bool, is_64_bit: bool) {
     }
 }
 
-fn test_blob_return_tuple(config: Config, optimize: bool, is_64_bit: bool) {
+fn test_blob_return_tuple_from_import(config: Config, optimize: bool, is_64_bit: bool) {
     let mut i = TestInstance::new(&config, optimize, is_64_bit);
     i.call::<(), ()>("test_return_tuple", ()).unwrap();
+}
+
+fn test_blob_return_tuple_from_export(config: Config, optimize: bool, is_64_bit: bool) {
+    let mut i = TestInstance::new(&config, optimize, is_64_bit);
+    if is_64_bit {
+        let a0 = 0x123456789abcdefe_u64;
+        let a1 = 0x1122334455667788_u64;
+        i.call::<(), ()>("export_return_tuple_u64", ()).unwrap();
+        assert_eq!(i.instance.reg(Reg::A0), a0);
+        assert_eq!(i.instance.reg(Reg::A1), a1);
+
+        i.instance.set_reg(Reg::A0, 0);
+        i.instance.set_reg(Reg::A1, 0);
+        i.call::<(), ()>("export_return_tuple_usize", ()).unwrap();
+        assert_eq!(i.instance.reg(Reg::A0), a0);
+        assert_eq!(i.instance.reg(Reg::A1), a1);
+    } else {
+        let a0 = 0x12345678_u64;
+        let a1 = 0x9abcdefe_u64;
+        i.call::<(), ()>("export_return_tuple_u32", ()).unwrap();
+        assert_eq!(i.instance.reg(Reg::A0), a0);
+        assert_eq!(i.instance.reg(Reg::A1), a1);
+
+        i.instance.set_reg(Reg::A0, 0);
+        i.instance.set_reg(Reg::A1, 0);
+        i.call::<(), ()>("export_return_tuple_usize", ()).unwrap();
+        assert_eq!(i.instance.reg(Reg::A0), a0);
+        assert_eq!(i.instance.reg(Reg::A1), a1);
+    }
 }
 
 fn basic_gas_metering(config: Config, gas_metering_kind: GasMeteringKind) {
@@ -2859,7 +2888,8 @@ run_test_blob_tests! {
     test_blob_cmov_if_not_zero_with_zero_reg
     test_blob_min_stack_size
     test_blob_negate_and_add
-    test_blob_return_tuple
+    test_blob_return_tuple_from_import
+    test_blob_return_tuple_from_export
 }
 
 macro_rules! assert_impl {
