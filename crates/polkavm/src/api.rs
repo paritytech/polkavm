@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use polkavm_common::abi::{MemoryMap, MemoryMapBuilder, VM_ADDR_RETURN_TO_HOST};
 use polkavm_common::cast::cast;
+#[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
 use polkavm_common::program::{
     build_static_dispatch_table, FrameKind, ISA32_V1_NoSbrk, ISA64_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode,
     ProgramBlob, Reg, ISA32_V1, ISA64_V1,
@@ -226,6 +227,7 @@ impl CompiledModuleKind {
 }
 
 pub(crate) struct ModulePrivate {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     engine_state: Option<Arc<EngineState>>,
     crosscheck: bool,
 
@@ -282,6 +284,7 @@ impl Module {
         self.state().dynamic_paging
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn compiled_module(&self) -> &CompiledModuleKind {
         &self.state().compiled_module
     }
@@ -340,6 +343,7 @@ impl Module {
         self.round_to_page_size_down(value) + (u32::from((value & self.state().page_size_mask) != 0) << self.state().page_shift)
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn address_to_page(&self, address: u32) -> u32 {
         address >> self.state().page_shift
     }
@@ -407,6 +411,7 @@ impl Module {
             }
         };
 
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
         let exports = {
             log::trace!("Parsing exports...");
             let mut exports = Vec::with_capacity(1);

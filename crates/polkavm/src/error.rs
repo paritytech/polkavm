@@ -71,6 +71,7 @@ impl Error {
     }
 
     #[cold]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn context(self, message: impl core::fmt::Display) -> Self {
         let string = match self.0 {
             ErrorKind::Owned(buffer) => format!("{}: {}", message, buffer),

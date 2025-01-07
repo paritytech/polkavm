@@ -151,6 +151,7 @@ where
     B: CompilerBitness,
 {
     #[allow(clippy::too_many_arguments)]
+    #[cfg(target_os = "linux")]
     pub(crate) fn new(
         cache: &CompilerCache,
         config: &'a ModuleConfig,

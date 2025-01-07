@@ -9,6 +9,7 @@ impl<T> Mutex<T> {
     }
 
     #[inline]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn lock(&self) -> std::sync::MutexGuard<T> {
         match self.0.lock() {
             Ok(mutable) => mutable,

@@ -59,6 +59,7 @@ mod config;
 mod gas;
 mod interpreter;
 mod linker;
+#[cfg(any(test, target_os = "linux"))]
 mod page_set;
 #[cfg(feature = "std")]
 mod source_cache;
