@@ -54,7 +54,7 @@ impl cast<i32> {
     }
 
     #[inline(always)]
-    pub const fn to_u64(self) -> u64 {
+    pub const fn to_u64_sign_extend(self) -> u64 {
         self.0 as u64
     }
 }
