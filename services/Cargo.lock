@@ -5628,6 +5628,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "transfer"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
+ "simplealloc 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
+]
+
+[[package]]
 name = "tribonacci"
 version = "0.1.0"
 dependencies = [
