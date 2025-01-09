@@ -3,5 +3,5 @@ pre: gas = 10000
 pub @main:
     a0 = 0xdeadbeef
 
-post: a0 = 0xffffffffdeadbeef
+post: a0 = 0xdeadbeef
 post: gas = 9998

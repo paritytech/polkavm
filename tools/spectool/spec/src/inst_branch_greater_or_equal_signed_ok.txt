@@ -8,5 +8,5 @@ pub @main:
 @target:
     a0 = 0xdeadbeef
 
-post: a0 = 0xffffffffdeadbeef
+post: a0 = 0xdeadbeef
 post: gas = 9995

@@ -7,7 +7,6 @@ use clap::Parser;
 use core::fmt::Write;
 use polkavm::{Engine, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg};
 use polkavm_common::assembler::assemble;
-use polkavm_common::cast::cast;
 use polkavm_common::program::ProgramParts;
 use std::path::{Path, PathBuf};
 
@@ -118,15 +117,8 @@ fn parse_pre_post(line: &str, output: &mut PrePost) {
         output.pc = Some((label.to_owned(), offset));
     } else {
         let lhs = polkavm_common::utils::parse_reg(lhs).expect("invalid 'pre' / 'post' directive: failed to parse lhs");
-        let rhs = polkavm_common::utils::parse_imm(rhs)
-            .map(|i| {
-                if i < 0 {
-                    cast(cast(i).to_i64_sign_extend()).to_unsigned()
-                } else {
-                    cast(cast(i).to_unsigned()).to_u64()
-                }
-            })
-            .or_else(|| polkavm_common::utils::parse_imm64(rhs).map(|i| cast(i).to_unsigned()))
+        let rhs = polkavm_common::utils::parse_immediate(rhs)
+            .map(Into::into)
             .expect("invalid 'pre' / 'post' directive: failed to parse rhs");
         output.regs[lhs as usize] = Some(rhs);
     }
@@ -143,7 +135,9 @@ fn main_generate() {
     let mut found_errors = false;
 
     let mut paths: Vec<PathBuf> = std::fs::read_dir(root.join("src"))
-        .unwrap().map(|entry| entry.unwrap().path()).collect();
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
 
     paths.sort_by_key(|entry| entry.file_stem().unwrap().to_string_lossy().to_string());
 

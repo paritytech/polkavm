@@ -1,6 +1,5 @@
-use crate::cast::cast;
 use crate::program::{Instruction, Reg};
-use crate::utils::{parse_imm, parse_imm64, parse_reg};
+use crate::utils::{parse_imm, parse_immediate, parse_reg, ParsedImmediate};
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -443,23 +442,15 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                     emit_and_continue!(Instruction::move_reg(dst.into(), src.into()));
                 }
 
-                if let Some(index) = rhs.find("i64 ") {
-                    let rhs = rhs[index + 4..].trim();
-                    if let Some(imm) = parse_imm(rhs) {
-                        let imm = cast(imm).to_i64_sign_extend();
-                        emit_and_continue!(Instruction::load_imm64(dst.into(), imm as u64));
+                if let Some(instr) = parse_immediate(rhs) {
+                    match instr {
+                        ParsedImmediate::U32(value) => {
+                            emit_and_continue!(Instruction::load_imm(dst.into(), value));
+                        }
+                        ParsedImmediate::U64(value) => {
+                            emit_and_continue!(Instruction::load_imm64(dst.into(), value));
+                        }
                     }
-                    if let Some(imm64) = parse_imm64(rhs) {
-                        emit_and_continue!(Instruction::load_imm64(dst.into(), imm64 as u64));
-                    }
-                }
-
-                if let Some(imm) = parse_imm(rhs) {
-                    emit_and_continue!(Instruction::load_imm(dst.into(), imm as u32));
-                }
-
-                if let Some(imm64) = parse_imm64(rhs) {
-                    emit_and_continue!(Instruction::load_imm64(dst.into(), imm64 as u64));
                 }
 
                 if let Some(label) = rhs.strip_prefix('@') {

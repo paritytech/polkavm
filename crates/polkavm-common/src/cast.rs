@@ -109,6 +109,11 @@ impl cast<u32> {
     }
 
     #[inline(always)]
+    pub const fn to_u64_sign_extend(self) -> u64 {
+        cast(self.0 as i32).to_u64_sign_extend()
+    }
+
+    #[inline(always)]
     pub const fn to_usize(self) -> usize {
         self.0 as usize
     }
