@@ -6,8 +6,7 @@ use alloc::vec::Vec;
 use polkavm_common::abi::{MemoryMap, MemoryMapBuilder, VM_ADDR_RETURN_TO_HOST};
 use polkavm_common::cast::cast;
 use polkavm_common::program::{
-    FrameKind, ISA32_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode,
-    ProgramBlob, Reg, ISA32_V1, ISA64_V1,
+    FrameKind, ISA32_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode, ProgramBlob, Reg, ISA32_V1, ISA64_V1,
 };
 use polkavm_common::utils::{ArcBytes, AsUninitSliceMut};
 
