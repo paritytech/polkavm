@@ -59,8 +59,6 @@ mod config;
 mod gas;
 mod interpreter;
 mod linker;
-#[cfg(any(test, target_os = "linux"))]
-mod page_set;
 #[cfg(feature = "std")]
 mod source_cache;
 mod utils;
@@ -91,6 +89,7 @@ mod module_cache;
 
 if_compiler_is_supported! {
     mod compiler;
+    mod page_set;
     mod sandbox;
 
     #[cfg(all(target_os = "linux", not(feature = "export-internals-for-testing")))]

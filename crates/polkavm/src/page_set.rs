@@ -269,7 +269,6 @@ impl PageSet {
         }
     }
 
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn clear(&mut self) {
         self.intervals.clear();
     }

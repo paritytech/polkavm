@@ -5,12 +5,17 @@ use alloc::vec::Vec;
 
 use polkavm_common::abi::{MemoryMap, MemoryMapBuilder, VM_ADDR_RETURN_TO_HOST};
 use polkavm_common::cast::cast;
-#[cfg_attr(not(target_os = "linux"), allow(unused_imports))]
 use polkavm_common::program::{
-    build_static_dispatch_table, FrameKind, ISA32_V1_NoSbrk, ISA64_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode,
+    FrameKind, ISA32_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode,
     ProgramBlob, Reg, ISA32_V1, ISA64_V1,
 };
 use polkavm_common::utils::{ArcBytes, AsUninitSliceMut};
+
+if_compiler_is_supported! {
+    use polkavm_common::program::{
+        build_static_dispatch_table, ISA64_V1_NoSbrk,
+    };
+}
 
 use crate::config::{BackendKind, Config, GasMeteringKind, ModuleConfig, SandboxKind};
 use crate::error::{bail, bail_static, Error};
@@ -227,7 +232,7 @@ impl CompiledModuleKind {
 }
 
 pub(crate) struct ModulePrivate {
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[allow(dead_code)]
     engine_state: Option<Arc<EngineState>>,
     crosscheck: bool,
 
@@ -284,9 +289,10 @@ impl Module {
         self.state().dynamic_paging
     }
 
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn compiled_module(&self) -> &CompiledModuleKind {
-        &self.state().compiled_module
+    if_compiler_is_supported! {
+        pub(crate) fn compiled_module(&self) -> &CompiledModuleKind {
+            &self.state().compiled_module
+        }
     }
 
     pub(crate) fn interpreted_module(&self) -> Option<&InterpretedModule> {
@@ -343,9 +349,10 @@ impl Module {
         self.round_to_page_size_down(value) + (u32::from((value & self.state().page_size_mask) != 0) << self.state().page_shift)
     }
 
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn address_to_page(&self, address: u32) -> u32 {
-        address >> self.state().page_shift
+    if_compiler_is_supported! {
+        pub(crate) fn address_to_page(&self, address: u32) -> u32 {
+            address >> self.state().page_shift
+        }
     }
 
     /// Creates a new module by deserializing the program from the given `bytes`.
@@ -411,25 +418,26 @@ impl Module {
             }
         };
 
-        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-        let exports = {
-            log::trace!("Parsing exports...");
-            let mut exports = Vec::with_capacity(1);
-            for export in blob.exports() {
-                log::trace!("  Export at {}: {}", export.program_counter(), export.symbol());
-                if config.is_strict && cast(export.program_counter().0).to_usize() >= blob.code().len() {
-                    bail!(
-                        "out of range export found; export {} points to code offset {}, while the code blob is only {} bytes",
-                        export.symbol(),
-                        export.program_counter(),
-                        blob.code().len(),
-                    );
-                }
+        if_compiler_is_supported! {
+            let exports = {
+                log::trace!("Parsing exports...");
+                let mut exports = Vec::with_capacity(1);
+                for export in blob.exports() {
+                    log::trace!("  Export at {}: {}", export.program_counter(), export.symbol());
+                    if config.is_strict && cast(export.program_counter().0).to_usize() >= blob.code().len() {
+                        bail!(
+                            "out of range export found; export {} points to code offset {}, while the code blob is only {} bytes",
+                            export.symbol(),
+                            export.program_counter(),
+                            blob.code().len(),
+                        );
+                    }
 
-                exports.push(export);
-            }
-            exports
-        };
+                    exports.push(export);
+                }
+                exports
+            };
+        }
 
         let init = GuestInit {
             page_size: config.page_size,
