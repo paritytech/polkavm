@@ -18,46 +18,8 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 #[polkavm_derive::polkavm_import]
 extern "C" {
-
-    #[polkavm_import(index = 1)]
-    pub fn lookup(service: u32, hash_ptr: *const u8, out: *mut u8, out_len: u32) -> u32;
-    #[polkavm_import(index = 2)]
-    pub fn read(service: u32, key_ptr: *const u8, key_len: u32, out: *mut u8, out_len: u32) -> u32;
-
-    #[polkavm_import(index = 3)]
-    pub fn write(ko: u64, kz: u64, bo: u64, bz: u64) -> u64;
-
-    #[polkavm_import(index = 4)]
-    pub fn info(service: u64, out: u64) -> u64;
-    
-    #[polkavm_import(index = 9)]
-    pub fn new(service: u32, hash_ptr: *const u8, out: *mut u8, out_len: u32) -> u32;
-    #[polkavm_import(index = 10)]
-    pub fn upgrade(out: *const u8, g: u64, m: u64) -> u32;
     #[polkavm_import(index = 11)]
     pub fn transfer(d: u64, a: u64, g: u64, out: u64) -> u64;
-    #[polkavm_import(index = 12)]
-    pub fn quit(d: u32, a: u64, g: u64, out: *mut u8) -> u32;
-    #[polkavm_import(index = 13)]
-    pub fn solicit(hash_ptr: *const u8, z: u32) -> u32;
-    #[polkavm_import(index = 14)]
-    pub fn forget(hash_ptr: *const u8, z: u32) -> u32;
-    #[polkavm_import(index = 15)]
-    pub fn historical_lookup(service: u32, hash_ptr: *const u8, out: *mut u8, out_len: u32) -> u32;
-    #[polkavm_import(index = 16)]
-    pub fn import(import_index: u32, out: *mut u8, out_len: u32) -> u32;
-    #[polkavm_import(index = 17)]
-    pub fn export(out: *const u8, out_len: u32) -> u32;
-    #[polkavm_import(index = 18)]
-    pub fn machine(out: *const u8, out_len: u32) -> u32;
-    #[polkavm_import(index = 19)]
-    pub fn peek(out: *const u8, out_len: u32, i: u32) -> u32;
-    #[polkavm_import(index = 20)]
-    pub fn poke(n: u32, a: u32, b: u32, l: u32) -> u32;
-    #[polkavm_import(index = 21)]
-    pub fn invoke(n: u32, out: *mut u8) -> u32;
-    #[polkavm_import(index = 22)]
-    pub fn expunge(n: u32) -> u32;
 }
 
 #[polkavm_derive::polkavm_export]
