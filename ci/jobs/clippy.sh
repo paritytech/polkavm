@@ -8,10 +8,14 @@ cd ../..
 echo ">> cargo clippy"
 RUSTFLAGS="-D warnings" cargo clippy --all
 
-echo ">> cargo clippy (zygote)"
-cd crates/polkavm-zygote
-RUSTFLAGS="-D warnings" cargo clippy --all
-cd ../..
+case "$OSTYPE" in
+  linux*)
+    echo ">> cargo clippy (zygote)"
+    cd crates/polkavm-zygote
+    RUSTFLAGS="-D warnings" cargo clippy --all
+    cd ../..
+  ;;
+esac
 
 echo ">> cargo clippy (guests)"
 
