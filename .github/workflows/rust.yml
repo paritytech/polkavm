@@ -42,10 +42,8 @@ jobs:
     - uses: actions/checkout@v4
     - name: Install clippy (base toolchain)
       run: rustup component add clippy
-    - name: Install clippy (zygote toolchain)
-      run: cd crates/polkavm-zygote && rustup component add clippy
     - name: Run clippy
-      run: ./ci/jobs/clippy.sh
+      run: ./ci/jobs/clippy-macos.sh
   build-and-test-windows:
     runs-on: windows-latest
     steps:
