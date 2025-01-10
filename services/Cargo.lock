@@ -3574,16 +3574,6 @@ dependencies = [
 [[package]]
 name = "polkavm-derive-impl"
 version = "0.18.0"
-dependencies = [
- "polkavm-common 0.18.0",
- "proc-macro2",
- "quote",
- "syn 2.0.90",
-]
-
-[[package]]
-name = "polkavm-derive-impl"
-version = "0.18.0"
 source = "git+https://github.com/koute/polkavm?branch=master#8b9a836a244726dfba940aa0077b9208a2cc0c77"
 dependencies = [
  "polkavm-common 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
@@ -3593,10 +3583,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "polkavm-derive-impl"
+version = "0.18.1"
+dependencies = [
+ "polkavm-common 0.18.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.90",
+]
+
+[[package]]
 name = "polkavm-derive-impl-macro"
 version = "0.18.0"
 dependencies = [
- "polkavm-derive-impl 0.18.0",
+ "polkavm-derive-impl 0.18.1",
  "syn 2.0.90",
 ]
 
@@ -3605,7 +3605,7 @@ name = "polkavm-derive-impl-macro"
 version = "0.18.0"
 source = "git+https://github.com/koute/polkavm?branch=master#8b9a836a244726dfba940aa0077b9208a2cc0c77"
 dependencies = [
- "polkavm-derive-impl 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
+ "polkavm-derive-impl 0.18.0",
  "syn 2.0.90",
 ]
 
