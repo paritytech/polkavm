@@ -386,3 +386,28 @@ extern "C" fn test_return_tuple() {
         assert_eq!(unsafe { return_tuple_usize() }, (0x123456789abcdefe, 0x1122334455667788));
     }
 }
+
+#[cfg(target_pointer_width = "32")]
+#[polkavm_derive::polkavm_export]
+extern "C" fn export_return_tuple_u32() -> (u32, u32) {
+    (0x12345678, 0x9abcdefe)
+}
+
+#[cfg(target_pointer_width = "64")]
+#[polkavm_derive::polkavm_export]
+extern "C" fn export_return_tuple_u64() -> (u64, u64) {
+    (0x123456789abcdefe, 0x1122334455667788)
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn export_return_tuple_usize() -> (usize, usize) {
+    #[cfg(target_pointer_width = "32")]
+    {
+        (0x12345678, 0x9abcdefe)
+    }
+
+    #[cfg(target_pointer_width = "64")]
+    {
+        (0x123456789abcdefe, 0x1122334455667788)
+    }
+}

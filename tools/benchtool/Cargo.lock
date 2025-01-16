@@ -1768,7 +1768,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "polkavm"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "libc",
  "log",
@@ -1779,14 +1779,14 @@ dependencies = [
 
 [[package]]
 name = "polkavm-assembler"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "polkavm-common"
-version = "0.18.0"
+version = "0.19.0"
 dependencies = [
  "log",
  "polkavm-assembler",
@@ -1794,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-linux-raw"
-version = "0.18.0"
+version = "0.19.0"
 
 [[package]]
 name = "postcard"

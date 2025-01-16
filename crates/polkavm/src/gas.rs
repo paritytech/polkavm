@@ -400,11 +400,6 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
-    fn or_combine_byte(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
-        self.cost += 1;
-    }
-
-    #[inline(always)]
     fn reverse_byte(&mut self, _d: RawReg, _s: RawReg) -> Self::ReturnTy {
         self.cost += 1;
     }

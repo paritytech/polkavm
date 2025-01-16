@@ -2330,9 +2330,38 @@ fn test_blob_negate_and_add(config: Config, optimize: bool, is_64_bit: bool) {
     }
 }
 
-fn test_blob_return_tuple(config: Config, optimize: bool, is_64_bit: bool) {
+fn test_blob_return_tuple_from_import(config: Config, optimize: bool, is_64_bit: bool) {
     let mut i = TestInstance::new(&config, optimize, is_64_bit);
     i.call::<(), ()>("test_return_tuple", ()).unwrap();
+}
+
+fn test_blob_return_tuple_from_export(config: Config, optimize: bool, is_64_bit: bool) {
+    let mut i = TestInstance::new(&config, optimize, is_64_bit);
+    if is_64_bit {
+        let a0 = 0x123456789abcdefe_u64;
+        let a1 = 0x1122334455667788_u64;
+        i.call::<(), ()>("export_return_tuple_u64", ()).unwrap();
+        assert_eq!(i.instance.reg(Reg::A0), a0);
+        assert_eq!(i.instance.reg(Reg::A1), a1);
+
+        i.instance.set_reg(Reg::A0, 0);
+        i.instance.set_reg(Reg::A1, 0);
+        i.call::<(), ()>("export_return_tuple_usize", ()).unwrap();
+        assert_eq!(i.instance.reg(Reg::A0), a0);
+        assert_eq!(i.instance.reg(Reg::A1), a1);
+    } else {
+        let a0 = 0x12345678_u64;
+        let a1 = 0x9abcdefe_u64;
+        i.call::<(), ()>("export_return_tuple_u32", ()).unwrap();
+        assert_eq!(i.instance.reg(Reg::A0), a0);
+        assert_eq!(i.instance.reg(Reg::A1), a1);
+
+        i.instance.set_reg(Reg::A0, 0);
+        i.instance.set_reg(Reg::A1, 0);
+        i.call::<(), ()>("export_return_tuple_usize", ()).unwrap();
+        assert_eq!(i.instance.reg(Reg::A0), a0);
+        assert_eq!(i.instance.reg(Reg::A1), a1);
+    }
 }
 
 fn basic_gas_metering(config: Config, gas_metering_kind: GasMeteringKind) {
@@ -2589,6 +2618,48 @@ fn gas_metering_with_implicit_trap(config: Config) {
     assert_eq!(instance.gas(), 8);
 }
 
+fn trapping_preserves_all_registers_normal_trap(config: Config) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::default(), blob).unwrap();
+    let mut instance = module.instantiate().unwrap();
+    instance.set_next_program_counter(ProgramCounter(0));
+    for (index, reg) in Reg::ALL.into_iter().enumerate() {
+        instance.set_reg(reg, index as u64 + 0x100);
+    }
+    assert_eq!(instance.run().unwrap(), InterruptKind::Trap);
+    for (index, reg) in Reg::ALL.into_iter().enumerate() {
+        assert_eq!(instance.reg(reg), index as u64 + 0x100);
+    }
+}
+
+fn trapping_preserves_all_registers_segfault(config: Config) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::store_imm_u32(0, 0x12345678), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::default(), blob).unwrap();
+    let mut instance = module.instantiate().unwrap();
+    instance.set_next_program_counter(ProgramCounter(0));
+    for (index, reg) in Reg::ALL.into_iter().enumerate() {
+        instance.set_reg(reg, index as u64 + 0x100);
+    }
+    assert_eq!(instance.run().unwrap(), InterruptKind::Trap);
+    for (index, reg) in Reg::ALL.into_iter().enumerate() {
+        assert_eq!(instance.reg(reg), index as u64 + 0x100, "mismatch for register {reg}");
+    }
+}
+
 fn test_basic_debug_info(raw_blob: &'static [u8]) {
     let _ = env_logger::try_init();
     let program = get_blob(raw_blob);
@@ -2833,6 +2904,9 @@ run_tests! {
     gas_metering_with_more_than_one_basic_block
     gas_metering_with_implicit_trap
 
+    trapping_preserves_all_registers_normal_trap
+    trapping_preserves_all_registers_segfault
+
     spawn_stress_test
     module_cache
 }
@@ -2859,7 +2933,8 @@ run_test_blob_tests! {
     test_blob_cmov_if_not_zero_with_zero_reg
     test_blob_min_stack_size
     test_blob_negate_and_add
-    test_blob_return_tuple
+    test_blob_return_tuple_from_import
+    test_blob_return_tuple_from_export
 }
 
 macro_rules! assert_impl {

@@ -112,7 +112,6 @@ where
     step_label: Label,
     trap_label: Label,
     invalid_jump_label: Label,
-    or_combine_label: Label,
     instruction_set: RuntimeInstructionSet,
 
     _phantom: PhantomData<(S, B)>,
@@ -219,7 +218,6 @@ where
         let step_label = asm.forward_declare_label();
         let jump_table_label = asm.forward_declare_label();
         let sbrk_label = asm.forward_declare_label();
-        let or_combine_label = asm.forward_declare_label();
 
         polkavm_common::static_assert!(polkavm_common::zygote::VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE < u32::MAX);
 
@@ -246,7 +244,6 @@ where
             step_label,
             jump_table_label,
             sbrk_label,
-            or_combine_label,
             gas_metering: config.gas_metering,
             step_tracing,
             program_counter_to_machine_code_offset_list,
@@ -261,7 +258,6 @@ where
         ArchVisitor(&mut visitor).emit_trap_trampoline();
         ArchVisitor(&mut visitor).emit_ecall_trampoline();
         ArchVisitor(&mut visitor).emit_sbrk_trampoline();
-        ArchVisitor(&mut visitor).emit_or_combine_trampoline();
 
         if step_tracing {
             ArchVisitor(&mut visitor).emit_step_trampoline();
@@ -1142,13 +1138,6 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor.zero_extend_16(d, s);
         ArchVisitor(self).zero_extend_16(d, s);
-        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
-    }
-
-    fn or_combine_byte(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        self.before_instruction(code_offset);
-        self.gas_visitor.or_combine_byte(d, s);
-        ArchVisitor(self).or_combine_byte(d, s);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 

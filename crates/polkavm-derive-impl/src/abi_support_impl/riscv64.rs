@@ -65,6 +65,28 @@ impl IntoHost for isize {
 }
 
 #[cfg(target_pointer_width = "64")]
+impl IntoHost for (usize, usize) {
+    type Regs = (u64, u64);
+    type Destructor = ();
+
+    #[inline(always)]
+    fn into_host((a, b): Self) -> (Self::Regs, ()) {
+        ((a as u64, b as u64), ())
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+impl IntoHost for (u64, u64) {
+    type Regs = (u64, u64);
+    type Destructor = ();
+
+    #[inline(always)]
+    fn into_host(value: Self) -> (Self::Regs, ()) {
+        (value, ())
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
 impl FromHost for u32 {
     type Regs = (u64,);
 

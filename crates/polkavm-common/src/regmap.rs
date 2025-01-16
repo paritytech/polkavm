@@ -23,6 +23,12 @@ pub const fn to_native_reg(reg: Reg) -> NativeReg {
     }
 }
 
+/// A temporary register which can be freely used.
+pub const TMP_REG: NativeReg = rcx;
+
+/// A temporary register which must be saved/restored.
+pub const AUX_TMP_REG: NativeReg = r15;
+
 #[inline]
 pub const fn to_guest_reg(reg: NativeReg) -> Option<Reg> {
     let mut index = 0;

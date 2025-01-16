@@ -115,7 +115,7 @@ mod sandbox;
 mod shm_allocator;
 
 pub use polkavm_common::{
-    abi::MemoryMap,
+    abi::{MemoryMap, MemoryMapBuilder},
     program::{ProgramBlob, ProgramCounter, ProgramParts, Reg},
     utils::{ArcBytes, AsUninitSliceMut},
 };
