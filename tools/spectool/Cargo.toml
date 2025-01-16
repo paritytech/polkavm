@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
 env_logger = { workspace = true }
+log = { workspace = true }
 polkavm = { workspace = true }
 polkavm-common = { workspace = true }
 polkavm-disassembler = { workspace = true }

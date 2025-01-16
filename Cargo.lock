@@ -999,6 +999,7 @@ version = "0.0.0"
 dependencies = [
  "clap",
  "env_logger",
+ "log",
  "polkavm",
  "polkavm-common",
  "polkavm-disassembler",
