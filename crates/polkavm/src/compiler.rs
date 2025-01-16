@@ -112,7 +112,6 @@ where
     step_label: Label,
     trap_label: Label,
     invalid_jump_label: Label,
-    or_combine_label: Label,
     instruction_set: RuntimeInstructionSet,
 
     _phantom: PhantomData<(S, B)>,
@@ -411,27 +410,94 @@ if_compiler_is_supported! {
             Ok(module)
         }
 
-        #[inline(always)]
-        fn force_start_new_basic_block(&mut self, program_counter: u32, is_valid_jump_target: bool) {
-            log::trace!("Starting new basic block at: {program_counter}");
-            if is_valid_jump_target {
-                if let Some(label) = self.program_counter_to_label.get(program_counter) {
-                    log::trace!("Label: {label} -> {program_counter} -> {:08x}", self.asm.current_address());
-                    self.asm.define_label(label);
-                } else {
-                    let label = self.asm.create_label();
-                    log::trace!("Label: {label} -> {program_counter} -> {:08x}", self.asm.current_address());
-                    self.program_counter_to_label.insert(program_counter, label);
-                }
-            }
+        let ecall_label = asm.forward_declare_label();
+        let trap_label = asm.forward_declare_label();
+        let invalid_jump_label = asm.forward_declare_label();
+        let step_label = asm.forward_declare_label();
+        let jump_table_label = asm.forward_declare_label();
+        let sbrk_label = asm.forward_declare_label();
 
             if self.step_tracing {
                 self.step(program_counter);
             }
 
-            if let Some(gas_metering) = self.gas_metering {
-                self.gas_metering_stub_offsets.push(self.asm.len());
-                ArchVisitor(self).emit_gas_metering_stub(gas_metering);
+        if config.gas_metering.is_some() {
+            gas_metering_stub_offsets.reserve(code_length as usize);
+            gas_cost_for_basic_block.reserve(code_length as usize);
+        }
+
+        asm.set_origin(native_code_origin);
+
+        let mut visitor = CompilerVisitor {
+            gas_visitor: GasVisitor::default(),
+            asm,
+            exports,
+            program_counter_to_label,
+            init,
+            jump_table,
+            code,
+            bitmask,
+            export_to_label,
+            ecall_label,
+            trap_label,
+            invalid_jump_label,
+            step_label,
+            jump_table_label,
+            sbrk_label,
+            gas_metering: config.gas_metering,
+            step_tracing,
+            program_counter_to_machine_code_offset_list,
+            program_counter_to_machine_code_offset_map,
+            gas_metering_stub_offsets,
+            gas_cost_for_basic_block,
+            code_length,
+            instruction_set,
+            _phantom: PhantomData,
+        };
+
+        ArchVisitor(&mut visitor).emit_trap_trampoline();
+        ArchVisitor(&mut visitor).emit_ecall_trampoline();
+        ArchVisitor(&mut visitor).emit_sbrk_trampoline();
+
+        if step_tracing {
+            ArchVisitor(&mut visitor).emit_step_trampoline();
+        }
+
+        log::trace!("Emitting code...");
+        visitor
+            .program_counter_to_machine_code_offset_list
+            .push((ProgramCounter(0), visitor.asm.len() as u32));
+
+        visitor.force_start_new_basic_block(0, visitor.is_jump_target_valid(0));
+        Ok((visitor, address_space))
+    }
+
+    fn is_jump_target_valid(&self, offset: u32) -> bool {
+        is_jump_target_valid(self.instruction_set, self.code, self.bitmask, offset)
+    }
+
+    pub(crate) fn finish_compilation(
+        mut self,
+        global: &S::GlobalState,
+        cache: &CompilerCache,
+        address_space: S::AddressSpace,
+    ) -> Result<CompiledModule<S>, Error>
+    where
+        S: Sandbox,
+    {
+        log::trace!("Finishing compilation...");
+        let invalid_code_offset_address = self.asm.origin() + self.asm.len() as u64;
+        self.emit_trap_epilogue();
+        self.program_counter_to_machine_code_offset_list.shrink_to_fit();
+
+        let mut gas_metering_stub_offsets = core::mem::take(&mut self.gas_metering_stub_offsets);
+        let mut gas_cost_for_basic_block = core::mem::take(&mut self.gas_cost_for_basic_block);
+        if self.gas_metering.is_some() {
+            log::trace!("Finalizing block costs...");
+            assert_eq!(gas_metering_stub_offsets.len(), gas_cost_for_basic_block.len());
+            for (&native_code_offset, &cost) in gas_metering_stub_offsets.iter().zip(gas_cost_for_basic_block.iter()) {
+                log::trace!("  0x{:08x}: {}", self.asm.origin() + native_code_offset as u64, cost);
+                ArchVisitor(&mut self).emit_weight(native_code_offset, cost);
             }
         }
 
@@ -1144,13 +1210,6 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor.zero_extend_16(d, s);
         ArchVisitor(self).zero_extend_16(d, s);
-        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
-    }
-
-    fn or_combine_byte(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        self.before_instruction(code_offset);
-        self.gas_visitor.or_combine_byte(d, s);
-        ArchVisitor(self).or_combine_byte(d, s);
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 

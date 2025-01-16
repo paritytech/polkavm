@@ -15,12 +15,6 @@ use crate::config::GasMeteringKind;
 use crate::sandbox::Sandbox;
 use crate::utils::RegImm;
 
-/// A temporary register which can be freely used.
-const TMP_REG: NativeReg = rcx;
-
-/// A temporary register which must be saved/restored.
-const AUX_TMP_REG: NativeReg = r15;
-
 /// The register used for the embedded sandbox to hold the base address of the guest's linear memory.
 const GENERIC_SANDBOX_MEMORY_REG: NativeReg = AUX_TMP_REG;
 
@@ -28,6 +22,7 @@ const GENERIC_SANDBOX_MEMORY_REG: NativeReg = AUX_TMP_REG;
 const LINUX_SANDBOX_VMCTX_REG: NativeReg = AUX_TMP_REG;
 
 use polkavm_common::regmap::to_native_reg as conv_reg_const;
+use polkavm_common::regmap::{AUX_TMP_REG, TMP_REG};
 
 polkavm_common::static_assert!(polkavm_common::regmap::to_guest_reg(TMP_REG).is_none());
 polkavm_common::static_assert!(polkavm_common::regmap::to_guest_reg(AUX_TMP_REG).is_none());
@@ -696,39 +691,6 @@ where
         self.push(pop(rdi));
         self.push(call(TMP_REG));
         self.push(push(rax));
-        self.restore_registers_from_vmctx();
-        self.push(pop(TMP_REG));
-        self.push(ret());
-    }
-
-    pub(crate) fn emit_or_combine_trampoline(&mut self) {
-        log::trace!("Emitting trampoline: or_combine");
-        let label = self.or_combine_label;
-        let (reg_size, range) = if B::BITNESS == Bitness::B32 {
-            (RegSize::R32, (8..32))
-        } else {
-            (RegSize::R64, (8..64))
-        };
-
-        self.define_label(label);
-        self.push(push(TMP_REG));
-        self.save_registers_to_vmctx();
-
-        self.push(pop(rdi));
-        self.push(mov_imm(rax, imm32(0xff)));
-        self.push(or((reg_size, rdi, rax)));
-        self.push(test((reg_size, TMP_REG, rax)));
-        self.push(cmov(Condition::NotEqual, reg_size, TMP_REG, rdi));
-
-        for _ in range.step_by(8) {
-            self.push(mov(reg_size, rdi, TMP_REG));
-            self.push(shl_imm(RegSize::R64, rax, 8));
-            self.push(or((reg_size, rdi, rax)));
-            self.push(test((reg_size, TMP_REG, rax)));
-            self.push(cmov(Condition::NotEqual, reg_size, TMP_REG, rdi));
-        }
-
-        self.push(push(TMP_REG));
         self.restore_registers_from_vmctx();
         self.push(pop(TMP_REG));
         self.push(ret());
@@ -1771,20 +1733,6 @@ where
     #[inline(always)]
     pub fn zero_extend_16(&mut self, d: RawReg, s: RawReg) {
         self.push(movzx_16_to_64(self.reg_size(), conv_reg(d), conv_reg(s)))
-    }
-
-    #[inline(always)]
-    pub fn or_combine_byte(&mut self, d: RawReg, s: RawReg) {
-        let reg_size = self.reg_size();
-        let d = conv_reg(d);
-        let s = conv_reg(s);
-        let or_combine_label = self.or_combine_label;
-
-        let asm = self.asm.reserve::<U3>();
-        let asm = asm.push(mov(reg_size, TMP_REG, s));
-        let asm = asm.push(call_label32(or_combine_label));
-        let asm = asm.push(mov(reg_size, d, TMP_REG));
-        asm.assert_reserved_exactly_as_needed();
     }
 
     #[inline(always)]

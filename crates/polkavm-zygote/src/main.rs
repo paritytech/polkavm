@@ -323,27 +323,33 @@ unsafe extern "C" fn signal_handler(signal: u32, _info: &linux_raw::siginfo_t, c
         abort_with_message("segmentation fault")
     }
 
-    use polkavm_common::regmap::NativeReg::*;
-    for reg in polkavm_common::program::Reg::ALL {
-        #[deny(unreachable_patterns)]
-        let value = match polkavm_common::regmap::to_native_reg(reg) {
-            rax => context.uc_mcontext.rax,
-            rcx => context.uc_mcontext.rcx,
-            rdx => context.uc_mcontext.rdx,
-            rbx => context.uc_mcontext.rbx,
-            rbp => context.uc_mcontext.rbp,
-            rsi => context.uc_mcontext.rsi,
-            rdi => context.uc_mcontext.rdi,
-            r8 => context.uc_mcontext.r8,
-            r9 => context.uc_mcontext.r9,
-            r10 => context.uc_mcontext.r10,
-            r11 => context.uc_mcontext.r11,
-            r12 => context.uc_mcontext.r12,
-            r13 => context.uc_mcontext.r13,
-            r14 => context.uc_mcontext.r14,
-            r15 => context.uc_mcontext.r15,
-        };
+    use polkavm_common::regmap::NativeReg;
 
+    #[inline]
+    fn get_reg(reg: NativeReg, ctx: &linux_raw::sigcontext) -> u64 {
+        use polkavm_common::regmap::NativeReg::*;
+
+        match reg {
+            rax => ctx.rax,
+            rcx => ctx.rcx,
+            rdx => ctx.rdx,
+            rbx => ctx.rbx,
+            rbp => ctx.rbp,
+            rsi => ctx.rsi,
+            rdi => ctx.rdi,
+            r8 => ctx.r8,
+            r9 => ctx.r9,
+            r10 => ctx.r10,
+            r11 => ctx.r11,
+            r12 => ctx.r12,
+            r13 => ctx.r13,
+            r14 => ctx.r14,
+            r15 => ctx.r15,
+        }
+    }
+
+    for reg in polkavm_common::program::Reg::ALL {
+        let value = get_reg(polkavm_common::regmap::to_native_reg(reg), &context.uc_mcontext);
         VMCTX.regs[reg as usize].store(value, Ordering::Relaxed);
     }
 

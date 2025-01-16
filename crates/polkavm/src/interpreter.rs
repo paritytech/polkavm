@@ -2641,42 +2641,6 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn or_combine_byte_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::or_combine_byte(d, s));
-        }
-
-        let word = visitor.get32(s);
-
-        let mut result = 0;
-        for i in (0..32).step_by(8) {
-            if (word & (0xffu32 << i)) != 0 {
-                result |= 0xffu32 << i;
-            }
-        }
-
-        visitor.set32::<DEBUG>(d, result);
-        visitor.go_to_next_instruction()
-    }
-
-    fn or_combine_byte_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::or_combine_byte(d, s));
-        }
-
-        let word = visitor.get64(s);
-
-        let mut result = 0;
-        for i in (0..64).step_by(8) {
-            if (word & (0xffu64 << i)) != 0 {
-                result |= 0xffu64 << i;
-            }
-        }
-
-        visitor.set64::<DEBUG>(d, result);
-        visitor.go_to_next_instruction()
-    }
-
     fn reverse_byte_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::reverse_byte(d, s));
@@ -3959,14 +3923,6 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
             emit!(self, zero_extend_16_64(d, s));
         } else {
             emit!(self, zero_extend_16_32(d, s));
-        }
-    }
-
-    fn or_combine_byte(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        if self.module.blob().is_64_bit() {
-            emit!(self, or_combine_byte_64(d, s));
-        } else {
-            emit!(self, or_combine_byte_32(d, s));
         }
     }
 
