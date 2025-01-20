@@ -36,6 +36,14 @@ jobs:
       run: ./ci/jobs/build-and-test.sh
     - name: Build and test (macOS-only)
       run: ./ci/jobs/build-and-test-macos.sh
+  clippy-macos:
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install clippy (base toolchain)
+      run: rustup component add clippy
+    - name: Run clippy
+      run: ./ci/jobs/clippy.sh
   build-and-test-windows:
     runs-on: windows-latest
     steps:

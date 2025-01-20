@@ -9,6 +9,7 @@ impl<T> Mutex<T> {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn lock(&self) -> std::sync::MutexGuard<T> {
         match self.0.lock() {
             Ok(mutable) => mutable,

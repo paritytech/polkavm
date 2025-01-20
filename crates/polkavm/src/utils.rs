@@ -60,6 +60,7 @@ where
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn new_reusing_memory(mut memory: Self, capacity: u32) -> Self {
         memory.inner.clear();
         memory.inner.resize_with(capacity as usize, || None);
@@ -72,6 +73,7 @@ where
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn len(&self) -> u32 {
         self.inner.len() as u32
     }
@@ -82,6 +84,7 @@ where
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.inner.clear();
     }
