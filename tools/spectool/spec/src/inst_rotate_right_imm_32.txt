@@ -1,0 +1,8 @@
+pre: a0 = 0x800000009
+pre: gas = 10000
+
+pub @main:
+    i32 a2 = a0 >>r 3
+
+post: a2 = 0x20000001
+post: gas = 9998

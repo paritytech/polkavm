@@ -1,0 +1,8 @@
+pre: a0 = 0x1000000030000000
+pre: gas = 10000
+
+pub @main:
+    a2 = ctz a0
+
+post: a2 = 28
+post: gas = 9998
