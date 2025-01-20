@@ -1,5 +1,5 @@
 use crate::program::{Instruction, Reg};
-use crate::utils::{parse_imm, parse_reg};
+use crate::utils::{parse_imm, parse_immediate, parse_reg, ParsedImmediate};
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -72,12 +72,20 @@ fn parse_load_imm_and_jump_indirect_with_tmp(line: &str) -> Option<(Reg, Reg, i3
 }
 
 #[derive(Copy, Clone)]
+pub enum OpMarker {
+    I32,
+    NONE,
+}
+
+#[derive(Copy, Clone)]
 pub enum LoadKind {
     I8,
     I16,
-    U32,
+    I32,
     U8,
     U16,
+    U32,
+    U64,
 }
 
 #[derive(Copy, Clone)]
@@ -85,6 +93,7 @@ pub enum StoreKind {
     U8,
     U16,
     U32,
+    U64,
 }
 
 #[derive(Copy, Clone)]
@@ -161,7 +170,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
         Branch(String, ConditionKind, Reg, Reg),
         BranchImm(String, ConditionKind, Reg, i32),
         LoadLabelAddress(Reg, String),
-        LoadImmAndJump(Reg, i32, String),
+        LoadImmAndJump(Reg, u32, String),
     }
 
     impl MaybeInstruction {
@@ -374,16 +383,21 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
             let lhs = line[..index].trim();
             let rhs = line[index + 1..].trim();
 
+            let (op_marker, lhs) = if let Some(lhs) = lhs.strip_prefix("i32 ") {
+                (OpMarker::I32, lhs)
+            } else {
+                (OpMarker::NONE, lhs)
+            };
+
             if let Some(dst) = parse_reg(lhs) {
                 if let Some(index) = rhs.find(',') {
-                    if let Some(value) = parse_imm(&rhs[..index]) {
+                    if let Some(value) = parse_immediate(&rhs[..index]).and_then(|value| value.try_into().ok()) {
                         if let Some(line) = rhs[index + 1..].trim().strip_prefix("jump") {
                             if let Some(label) = line.trim().strip_prefix('@') {
                                 emit_and_continue!(MaybeInstruction::LoadImmAndJump(dst, value, label.to_owned()));
                             }
                             if let Some((base, offset)) = parse_indirect_memory_access(line) {
-                                let instruction =
-                                    Instruction::load_imm_and_jump_indirect(dst.into(), base.into(), value as u32, offset as u32);
+                                let instruction = Instruction::load_imm_and_jump_indirect(dst.into(), base.into(), value, offset as u32);
 
                                 if dst == base {
                                     return Err(format!("cannot parse line {nth_line}, expected: \"{instruction}\""));
@@ -427,8 +441,15 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                     emit_and_continue!(Instruction::move_reg(dst.into(), src.into()));
                 }
 
-                if let Some(imm) = parse_imm(rhs) {
-                    emit_and_continue!(Instruction::load_imm(dst.into(), imm as u32));
+                if let Some(instr) = parse_immediate(rhs) {
+                    match instr {
+                        ParsedImmediate::U32(value) => {
+                            emit_and_continue!(Instruction::load_imm(dst.into(), value));
+                        }
+                        ParsedImmediate::U64(value) => {
+                            emit_and_continue!(Instruction::load_imm64(dst.into(), value));
+                        }
+                    }
                 }
 
                 if let Some(label) = rhs.strip_prefix('@') {
@@ -504,77 +525,204 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                             let dst = dst.into();
                             let src1 = src1.into();
                             let src2 = src2.into();
-                            emit_and_continue!(match op {
-                                Op::Add => Instruction::add_32(dst, src1, src2),
-                                Op::Sub => Instruction::sub_32(dst, src1, src2),
-                                Op::And => Instruction::and(dst, src1, src2),
-                                Op::Xor => Instruction::xor(dst, src1, src2),
-                                Op::Or => Instruction::or(dst, src1, src2),
-                                Op::Mul => Instruction::mul_32(dst, src1, src2),
-                                Op::DivUnsigned => Instruction::div_unsigned_32(dst, src1, src2),
-                                Op::DivSigned => Instruction::div_signed_32(dst, src1, src2),
-                                Op::RemUnsigned => Instruction::rem_unsigned_32(dst, src1, src2),
-                                Op::RemSigned => Instruction::rem_signed_32(dst, src1, src2),
-                                Op::LessUnsigned => Instruction::set_less_than_unsigned(dst, src1, src2),
-                                Op::LessSigned => Instruction::set_less_than_signed(dst, src1, src2),
-                                Op::GreaterUnsigned => Instruction::set_less_than_unsigned(dst, src2, src1),
-                                Op::GreaterSigned => Instruction::set_less_than_signed(dst, src2, src1),
-                                Op::ShiftLeft => Instruction::shift_logical_left_32(dst, src1, src2),
-                                Op::ShiftRight => Instruction::shift_logical_right_32(dst, src1, src2),
-                                Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_32(dst, src1, src2),
-                            });
-                        } else if let Some(src2) = parse_imm(src2) {
+                            match op_marker {
+                                OpMarker::I32 => {
+                                    emit_and_continue!(match op {
+                                        Op::Add => Instruction::add_32(dst, src1, src2),
+                                        Op::Sub => Instruction::sub_32(dst, src1, src2),
+                                        Op::And => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Xor => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Or => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Mul => Instruction::mul_32(dst, src1, src2),
+                                        Op::DivUnsigned => Instruction::div_unsigned_32(dst, src1, src2),
+                                        Op::DivSigned => Instruction::div_signed_32(dst, src1, src2),
+                                        Op::RemUnsigned => Instruction::rem_unsigned_32(dst, src1, src2),
+                                        Op::RemSigned => Instruction::rem_signed_32(dst, src1, src2),
+                                        Op::LessUnsigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::LessSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::GreaterUnsigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::GreaterSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::ShiftLeft => Instruction::shift_logical_left_32(dst, src1, src2),
+                                        Op::ShiftRight => Instruction::shift_logical_right_32(dst, src1, src2),
+                                        Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_32(dst, src1, src2),
+                                    });
+                                }
+                                OpMarker::NONE => {
+                                    emit_and_continue!(match op {
+                                        Op::Add => Instruction::add_64(dst, src1, src2),
+                                        Op::Sub => Instruction::sub_64(dst, src1, src2),
+                                        Op::And => Instruction::and(dst, src1, src2),
+                                        Op::Xor => Instruction::xor(dst, src1, src2),
+                                        Op::Or => Instruction::or(dst, src1, src2),
+                                        Op::Mul => Instruction::mul_64(dst, src1, src2),
+                                        Op::DivUnsigned => Instruction::div_unsigned_64(dst, src1, src2),
+                                        Op::DivSigned => Instruction::div_signed_64(dst, src1, src2),
+                                        Op::RemUnsigned => Instruction::rem_unsigned_64(dst, src1, src2),
+                                        Op::RemSigned => Instruction::rem_signed_64(dst, src1, src2),
+                                        Op::LessUnsigned => Instruction::set_less_than_unsigned(dst, src1, src2),
+                                        Op::LessSigned => Instruction::set_less_than_signed(dst, src1, src2),
+                                        Op::GreaterUnsigned => Instruction::set_less_than_unsigned(dst, src2, src1),
+                                        Op::GreaterSigned => Instruction::set_less_than_signed(dst, src2, src1),
+                                        Op::ShiftLeft => Instruction::shift_logical_left_64(dst, src1, src2),
+                                        Op::ShiftRight => Instruction::shift_logical_right_64(dst, src1, src2),
+                                        Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_64(dst, src1, src2),
+                                    });
+                                }
+                            }
+                        } else if let Some(src2) = parse_immediate(src2).and_then(|value| value.try_into().ok()) {
                             let dst = dst.into();
                             let src1 = src1.into();
-                            let src2 = src2 as u32;
-                            emit_and_continue!(match op {
-                                Op::Add => Instruction::add_imm_32(dst, src1, src2),
-                                Op::Sub => Instruction::add_imm_32(dst, src1, (-(src2 as i32)) as u32),
-                                Op::And => Instruction::and_imm(dst, src1, src2),
-                                Op::Xor => Instruction::xor_imm(dst, src1, src2),
-                                Op::Or => Instruction::or_imm(dst, src1, src2),
-                                Op::Mul => Instruction::mul_imm_32(dst, src1, src2),
-                                Op::DivUnsigned | Op::DivSigned => {
-                                    return Err(format!("cannot parse line {nth_line}: division is not supported for immediates"));
+                            match op_marker {
+                                OpMarker::I32 => {
+                                    emit_and_continue!(match op {
+                                        Op::Add => Instruction::add_imm_32(dst, src1, src2),
+                                        Op::Sub => Instruction::add_imm_32(dst, src1, (-(src2 as i32)) as u32),
+                                        Op::And => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Xor => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Or => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Mul => Instruction::mul_imm_32(dst, src1, src2),
+                                        Op::DivUnsigned | Op::DivSigned => {
+                                            return Err(format!(
+                                                "cannot parse line {nth_line}: i32 and division is not supported for immediates"
+                                            ));
+                                        }
+                                        Op::RemUnsigned | Op::RemSigned => {
+                                            return Err(format!(
+                                                "cannot parse line {nth_line}: i32 and modulo is not supported for immediates"
+                                            ));
+                                        }
+                                        Op::LessUnsigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::LessSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::GreaterUnsigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::GreaterSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::ShiftLeft => Instruction::shift_logical_left_imm_32(dst, src1, src2),
+                                        Op::ShiftRight => Instruction::shift_logical_right_imm_32(dst, src1, src2),
+                                        Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_32(dst, src1, src2),
+                                    });
                                 }
-                                Op::RemUnsigned | Op::RemSigned => {
-                                    return Err(format!("cannot parse line {nth_line}: modulo is not supported for immediates"));
+                                OpMarker::NONE => {
+                                    emit_and_continue!(match op {
+                                        Op::Add => Instruction::add_imm_64(dst, src1, src2),
+                                        Op::Sub => Instruction::add_imm_64(dst, src1, (-(src2 as i32)) as u32),
+                                        Op::And => Instruction::and_imm(dst, src1, src2),
+                                        Op::Xor => Instruction::xor_imm(dst, src1, src2),
+                                        Op::Or => Instruction::or_imm(dst, src1, src2),
+                                        Op::Mul => Instruction::mul_imm_64(dst, src1, src2),
+                                        Op::DivUnsigned | Op::DivSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: division is not supported for immediates"));
+                                        }
+                                        Op::RemUnsigned | Op::RemSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: modulo is not supported for immediates"));
+                                        }
+                                        Op::LessUnsigned => Instruction::set_less_than_unsigned_imm(dst, src1, src2),
+                                        Op::LessSigned => Instruction::set_less_than_signed_imm(dst, src1, src2),
+                                        Op::GreaterUnsigned => Instruction::set_greater_than_unsigned_imm(dst, src1, src2),
+                                        Op::GreaterSigned => Instruction::set_greater_than_signed_imm(dst, src1, src2),
+                                        Op::ShiftLeft => Instruction::shift_logical_left_imm_64(dst, src1, src2),
+                                        Op::ShiftRight => Instruction::shift_logical_right_imm_64(dst, src1, src2),
+                                        Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_64(dst, src1, src2),
+                                    });
                                 }
-                                Op::LessUnsigned => Instruction::set_less_than_unsigned_imm(dst, src1, src2),
-                                Op::LessSigned => Instruction::set_less_than_signed_imm(dst, src1, src2),
-                                Op::GreaterUnsigned => Instruction::set_greater_than_unsigned_imm(dst, src1, src2),
-                                Op::GreaterSigned => Instruction::set_greater_than_signed_imm(dst, src1, src2),
-                                Op::ShiftLeft => Instruction::shift_logical_left_imm_32(dst, src1, src2),
-                                Op::ShiftRight => Instruction::shift_logical_right_imm_32(dst, src1, src2),
-                                Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_32(dst, src1, src2),
-                            });
+                            }
                         }
-                    } else if let Some(src1) = parse_imm(src1) {
+                    } else if let Some(src1) = parse_immediate(src1).and_then(|value| value.try_into().ok()) {
                         if let Some(src2) = parse_reg(src2) {
                             let dst = dst.into();
-                            let src1 = src1 as u32;
                             let src2 = src2.into();
-                            emit_and_continue!(match op {
-                                Op::Add => Instruction::add_imm_32(dst, src2, src1),
-                                Op::Sub => Instruction::negate_and_add_imm_32(dst, src2, src1),
-                                Op::And => Instruction::and_imm(dst, src2, src1),
-                                Op::Xor => Instruction::xor_imm(dst, src2, src1),
-                                Op::Or => Instruction::or_imm(dst, src2, src1),
-                                Op::Mul => Instruction::mul_imm_32(dst, src2, src1),
-                                Op::DivUnsigned | Op::DivSigned => {
-                                    return Err(format!("cannot parse line {nth_line}: division is not supported for immediates"));
+                            match op_marker {
+                                OpMarker::I32 => {
+                                    emit_and_continue!(match op {
+                                        Op::Add => Instruction::add_imm_32(dst, src2, src1),
+                                        Op::Sub => Instruction::negate_and_add_imm_32(dst, src2, src1),
+                                        Op::And => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Xor => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Or => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::Mul => Instruction::mul_imm_32(dst, src2, src1),
+                                        Op::DivUnsigned | Op::DivSigned => {
+                                            return Err(format!(
+                                                "cannot parse line {nth_line}: i32 and division is not supported for immediates"
+                                            ));
+                                        }
+                                        Op::RemUnsigned | Op::RemSigned => {
+                                            return Err(format!(
+                                                "cannot parse line {nth_line}: i32 and modulo is not supported for immediates"
+                                            ));
+                                        }
+                                        Op::LessUnsigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::LessSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::GreaterUnsigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::GreaterSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+                                        Op::ShiftLeft => Instruction::shift_logical_left_imm_alt_32(dst, src2, src1),
+                                        Op::ShiftRight => Instruction::shift_logical_right_imm_alt_32(dst, src2, src1),
+                                        Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
+                                    });
                                 }
-                                Op::RemUnsigned | Op::RemSigned => {
-                                    return Err(format!("cannot parse line {nth_line}: modulo is not supported for immediates"));
+                                OpMarker::NONE => {
+                                    emit_and_continue!(match op {
+                                        Op::Add => Instruction::add_imm_64(dst, src2, src1),
+                                        Op::Sub => Instruction::negate_and_add_imm_64(dst, src2, src1),
+                                        Op::And => Instruction::and_imm(dst, src2, src1),
+                                        Op::Xor => Instruction::xor_imm(dst, src2, src1),
+                                        Op::Or => Instruction::or_imm(dst, src2, src1),
+                                        Op::Mul => Instruction::mul_imm_64(dst, src2, src1),
+                                        Op::DivUnsigned | Op::DivSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: division is not supported for immediates"));
+                                        }
+                                        Op::RemUnsigned | Op::RemSigned => {
+                                            return Err(format!("cannot parse line {nth_line}: modulo is not supported for immediates"));
+                                        }
+                                        Op::LessUnsigned => Instruction::set_greater_than_unsigned_imm(dst, src2, src1),
+                                        Op::LessSigned => Instruction::set_greater_than_signed_imm(dst, src2, src1),
+                                        Op::GreaterUnsigned => Instruction::set_less_than_unsigned_imm(dst, src2, src1),
+                                        Op::GreaterSigned => Instruction::set_less_than_signed_imm(dst, src2, src1),
+                                        Op::ShiftLeft => Instruction::shift_logical_left_imm_alt_64(dst, src2, src1),
+                                        Op::ShiftRight => Instruction::shift_logical_right_imm_alt_64(dst, src2, src1),
+                                        Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_alt_64(dst, src2, src1),
+                                    });
                                 }
-                                Op::LessUnsigned => Instruction::set_greater_than_unsigned_imm(dst, src2, src1),
-                                Op::LessSigned => Instruction::set_greater_than_signed_imm(dst, src2, src1),
-                                Op::GreaterUnsigned => Instruction::set_less_than_unsigned_imm(dst, src2, src1),
-                                Op::GreaterSigned => Instruction::set_less_than_signed_imm(dst, src2, src1),
-                                Op::ShiftLeft => Instruction::shift_logical_left_imm_alt_32(dst, src2, src1),
-                                Op::ShiftRight => Instruction::shift_logical_right_imm_alt_32(dst, src2, src1),
-                                Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
-                            });
+                            }
                         }
                     }
                 }
@@ -586,10 +734,14 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                     Some((LoadKind::U16, rhs))
                 } else if let Some(rhs) = rhs.strip_prefix("u32") {
                     Some((LoadKind::U32, rhs))
+                } else if let Some(rhs) = rhs.strip_prefix("u64") {
+                    Some((LoadKind::U64, rhs))
                 } else if let Some(rhs) = rhs.strip_prefix("i8") {
                     Some((LoadKind::I8, rhs))
                 } else if let Some(rhs) = rhs.strip_prefix("i16") {
                     Some((LoadKind::I16, rhs))
+                } else if let Some(rhs) = rhs.strip_prefix("i32") {
+                    Some((LoadKind::I32, rhs))
                 } else {
                     None
                 };
@@ -602,9 +754,11 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                         emit_and_continue!(match kind {
                             LoadKind::I8 => Instruction::load_indirect_i8(dst, base, offset),
                             LoadKind::I16 => Instruction::load_indirect_i16(dst, base, offset),
-                            LoadKind::U32 => Instruction::load_indirect_i32(dst, base, offset),
+                            LoadKind::I32 => Instruction::load_indirect_i32(dst, base, offset),
                             LoadKind::U8 => Instruction::load_indirect_u8(dst, base, offset),
                             LoadKind::U16 => Instruction::load_indirect_u16(dst, base, offset),
+                            LoadKind::U32 => Instruction::load_indirect_u32(dst, base, offset),
+                            LoadKind::U64 => Instruction::load_indirect_u64(dst, base, offset),
                         });
                     } else if let Some(offset) = parse_absolute_memory_access(rhs) {
                         let dst = dst.into();
@@ -612,9 +766,11 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                         emit_and_continue!(match kind {
                             LoadKind::I8 => Instruction::load_i8(dst, offset),
                             LoadKind::I16 => Instruction::load_i16(dst, offset),
-                            LoadKind::U32 => Instruction::load_i32(dst, offset),
+                            LoadKind::I32 => Instruction::load_i32(dst, offset),
                             LoadKind::U8 => Instruction::load_u8(dst, offset),
                             LoadKind::U16 => Instruction::load_u16(dst, offset),
+                            LoadKind::U32 => Instruction::load_u32(dst, offset),
+                            LoadKind::U64 => Instruction::load_u64(dst, offset),
                         });
                     }
                 }
@@ -627,6 +783,8 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                 Some((StoreKind::U16, lhs))
             } else if let Some(lhs) = lhs.strip_prefix("u32") {
                 Some((StoreKind::U32, lhs))
+            } else if let Some(lhs) = lhs.strip_prefix("u64") {
+                Some((StoreKind::U64, lhs))
             } else {
                 None
             };
@@ -640,9 +798,9 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                             StoreKind::U8 => Instruction::store_u8(rhs, offset),
                             StoreKind::U16 => Instruction::store_u16(rhs, offset),
                             StoreKind::U32 => Instruction::store_u32(rhs, offset),
+                            StoreKind::U64 => Instruction::store_u64(rhs, offset),
                         });
-                    } else if let Some(rhs) = parse_imm(rhs) {
-                        let rhs = rhs as u32;
+                    } else if let Some(rhs) = parse_immediate(rhs).and_then(|value| value.try_into().ok()) {
                         emit_and_continue!(match kind {
                             StoreKind::U8 => match u8::try_from(rhs) {
                                 Ok(_) => Instruction::store_imm_u8(offset, rhs),
@@ -653,6 +811,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                 Err(_) => return Err(format!("cannot parse line {nth_line}: immediate larger than u16")),
                             },
                             StoreKind::U32 => Instruction::store_imm_u32(offset, rhs),
+                            StoreKind::U64 => Instruction::store_imm_u64(offset, rhs),
                         });
                     }
                 } else if let Some((base, offset)) = parse_indirect_memory_access(lhs) {
@@ -664,9 +823,9 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                             StoreKind::U8 => Instruction::store_indirect_u8(rhs, base, offset),
                             StoreKind::U16 => Instruction::store_indirect_u16(rhs, base, offset),
                             StoreKind::U32 => Instruction::store_indirect_u32(rhs, base, offset),
+                            StoreKind::U64 => Instruction::store_indirect_u64(rhs, base, offset),
                         });
-                    } else if let Some(rhs) = parse_imm(rhs) {
-                        let rhs = rhs as u32;
+                    } else if let Some(rhs) = parse_immediate(rhs).and_then(|value| value.try_into().ok()) {
                         emit_and_continue!(match kind {
                             StoreKind::U8 => match u8::try_from(rhs) {
                                 Ok(_) => Instruction::store_imm_indirect_u8(base, offset, rhs),
@@ -677,6 +836,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                 Err(_) => return Err(format!("cannot parse line {nth_line}: immediate larger than u16")),
                             },
                             StoreKind::U32 => Instruction::store_imm_indirect_u32(base, offset, rhs),
+                            StoreKind::U64 => Instruction::store_imm_indirect_u64(base, offset, rhs),
                         });
                     }
                 }
@@ -709,7 +869,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                     return Err(format!("label is not defined: \"{label}\""));
                 };
 
-                code.push(Instruction::load_imm_and_jump(dst.into(), value as u32, target_index));
+                code.push(Instruction::load_imm_and_jump(dst.into(), value, target_index));
             }
             MaybeInstruction::Jump(label) => {
                 let Some(&target_index) = label_to_index.get(&*label) else {
@@ -763,7 +923,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
         };
     }
 
-    let mut builder = crate::writer::ProgramBlobBuilder::new();
+    let mut builder = crate::writer::ProgramBlobBuilder::new_64bit();
     builder.set_ro_data(ro_data);
     builder.set_ro_data_size(ro_data_size);
     builder.set_rw_data(rw_data);
@@ -786,17 +946,12 @@ fn assert_assembler(input: &str, expected_output: &str) {
     let expected_output_clean: Vec<_> = expected_output.trim().split('\n').map(|line| line.trim()).collect();
     let expected_output_clean = expected_output_clean.join("\n");
 
-    let format = InstructionFormat {
-        is_64_bit: false,
-        ..InstructionFormat::default()
-    };
-
     let blob = assemble(input).expect("failed to assemble");
     let program = crate::program::ProgramBlob::parse(blob.into()).unwrap();
     let output: Vec<_> = program
-        .instructions(crate::program::DefaultInstructionSet::default())
+        .instructions(crate::program::ISA64_V1)
         .take_while(|inst| (inst.offset.0 as usize) < program.code().len())
-        .map(|inst| inst.kind.display(&format).to_string())
+        .map(|inst| inst.kind.display(&InstructionFormat::default()).to_string())
         .collect();
     let output = output.join("\n");
     assert_eq!(output, expected_output_clean);

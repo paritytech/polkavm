@@ -1,0 +1,9 @@
+%rw_data_size = 8
+
+pre: a0 = 0x20FF8
+pre: gas = 10000
+
+pub @main:
+    u64 [a0] = 0x778899aa
+
+post: gas = 9998

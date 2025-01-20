@@ -1,10 +1,11 @@
-%rw_data_size = 4
-%rw_data = 12 34 56 78
+%rw_data_size = 5
+%rw_data = 11 22 33 44 55
+
 pre: a0 = 0x20000
 pre: gas = 10000
 
 pub @main:
     a1 = u32 [a0]
 
-post: a1 = 0x78563412
+post: a1 = 0x44332211
 post: gas = 9998

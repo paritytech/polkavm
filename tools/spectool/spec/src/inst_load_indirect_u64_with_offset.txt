@@ -1,0 +1,11 @@
+%rw_data_size = 9
+%rw_data = 81 82 83 84 85 86 87 88 89
+
+pre: a0 = 0x20000
+pre: gas = 10000
+
+pub @main:
+    a1 = u64 [a0 + 1]
+
+post: a1 = 0x8988878685848382
+post: gas = 9998
