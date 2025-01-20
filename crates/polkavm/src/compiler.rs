@@ -144,270 +144,72 @@ where
     }
 }
 
-if_compiler_is_supported! {
-    impl<'a, S, B> CompilerVisitor<'a, S, B>
+impl<'a, S, B> CompilerVisitor<'a, S, B>
+where
+    S: Sandbox,
+    B: CompilerBitness,
+{
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        cache: &CompilerCache,
+        config: &'a ModuleConfig,
+        instruction_set: RuntimeInstructionSet,
+        jump_table: JumpTable<'a>,
+        code: &'a [u8],
+        bitmask: &'a [u8],
+        exports: &'a [ProgramExport<&'a [u8]>],
+        step_tracing: bool,
+        code_length: u32,
+        init: GuestInit<'a>,
+    ) -> Result<(Self, S::AddressSpace), Error>
     where
         S: Sandbox,
-        B: CompilerBitness,
     {
-        #[allow(clippy::too_many_arguments)]
-        pub(crate) fn new(
-            cache: &CompilerCache,
-            config: &'a ModuleConfig,
-            instruction_set: RuntimeInstructionSet,
-            jump_table: JumpTable<'a>,
-            code: &'a [u8],
-            bitmask: &'a [u8],
-            exports: &'a [ProgramExport<&'a [u8]>],
-            step_tracing: bool,
-            code_length: u32,
-            init: GuestInit<'a>,
-        ) -> Result<(Self, S::AddressSpace), Error>
-        where
-            S: Sandbox,
-        {
-            let native_page_size = crate::sandbox::get_native_page_size();
-            if native_page_size > config.page_size as usize || config.page_size as usize % native_page_size != 0 {
-                return Err(format!(
-                    "configured page size of {} is incompatible with the native page size of {}",
-                    config.page_size, native_page_size
-                )
-                .into());
-            }
-
-            let address_space = S::reserve_address_space().map_err(Error::from_display)?;
-            let native_code_origin = crate::sandbox::SandboxAddressSpace::native_code_origin(&address_space);
-
-            let (per_compilation_cache, per_module_cache) = {
-                let mut cache = cache.0.lock();
-                (cache.per_compilation.pop(), cache.per_module.pop())
-            };
-
-            let mut asm;
-            let mut gas_metering_stub_offsets: Vec<usize>;
-            let mut gas_cost_for_basic_block: Vec<u32>;
-            let program_counter_to_label;
-            let export_to_label;
-
-            if let Some(per_compilation_cache) = per_compilation_cache {
-                asm = per_compilation_cache.assembler;
-                program_counter_to_label = FlatMap::new_reusing_memory(per_compilation_cache.program_counter_to_label, code_length + 2);
-                gas_metering_stub_offsets = per_compilation_cache.gas_metering_stub_offsets;
-                gas_cost_for_basic_block = per_compilation_cache.gas_cost_for_basic_block;
-                export_to_label = per_compilation_cache.export_to_label;
-            } else {
-                asm = Assembler::new();
-                program_counter_to_label = FlatMap::new(code_length + 2);
-                gas_metering_stub_offsets = Vec::new();
-                gas_cost_for_basic_block = Vec::new();
-                export_to_label = HashMap::new();
-            }
-
-            let program_counter_to_machine_code_offset_list: Vec<(ProgramCounter, u32)>;
-            let program_counter_to_machine_code_offset_map: HashMap<ProgramCounter, u32>;
-            if let Some(per_module_cache) = per_module_cache {
-                program_counter_to_machine_code_offset_list = per_module_cache.program_counter_to_machine_code_offset_list;
-                program_counter_to_machine_code_offset_map = per_module_cache.program_counter_to_machine_code_offset_map;
-            } else {
-                program_counter_to_machine_code_offset_list = Vec::with_capacity(code_length as usize);
-                program_counter_to_machine_code_offset_map = HashMap::with_capacity(exports.len());
-            }
-
-            let ecall_label = asm.forward_declare_label();
-            let trap_label = asm.forward_declare_label();
-            let invalid_jump_label = asm.forward_declare_label();
-            let step_label = asm.forward_declare_label();
-            let jump_table_label = asm.forward_declare_label();
-            let sbrk_label = asm.forward_declare_label();
-            let or_combine_label = asm.forward_declare_label();
-
-            polkavm_common::static_assert!(polkavm_common::zygote::VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE < u32::MAX);
-
-            if config.gas_metering.is_some() {
-                gas_metering_stub_offsets.reserve(code_length as usize);
-                gas_cost_for_basic_block.reserve(code_length as usize);
-            }
-
-            asm.set_origin(native_code_origin);
-
-            let mut visitor = CompilerVisitor {
-                gas_visitor: GasVisitor::default(),
-                asm,
-                exports,
-                program_counter_to_label,
-                init,
-                jump_table,
-                code,
-                bitmask,
-                export_to_label,
-                ecall_label,
-                trap_label,
-                invalid_jump_label,
-                step_label,
-                jump_table_label,
-                sbrk_label,
-                or_combine_label,
-                gas_metering: config.gas_metering,
-                step_tracing,
-                program_counter_to_machine_code_offset_list,
-                program_counter_to_machine_code_offset_map,
-                gas_metering_stub_offsets,
-                gas_cost_for_basic_block,
-                code_length,
-                instruction_set,
-                _phantom: PhantomData,
-            };
-
-            ArchVisitor(&mut visitor).emit_trap_trampoline();
-            ArchVisitor(&mut visitor).emit_ecall_trampoline();
-            ArchVisitor(&mut visitor).emit_sbrk_trampoline();
-            ArchVisitor(&mut visitor).emit_or_combine_trampoline();
-
-            if step_tracing {
-                ArchVisitor(&mut visitor).emit_step_trampoline();
-            }
-
-            log::trace!("Emitting code...");
-            visitor
-                .program_counter_to_machine_code_offset_list
-                .push((ProgramCounter(0), visitor.asm.len() as u32));
-
-            visitor.force_start_new_basic_block(0, visitor.is_jump_target_valid(0));
-            Ok((visitor, address_space))
+        let native_page_size = crate::sandbox::get_native_page_size();
+        if native_page_size > config.page_size as usize || config.page_size as usize % native_page_size != 0 {
+            return Err(format!(
+                "configured page size of {} is incompatible with the native page size of {}",
+                config.page_size, native_page_size
+            )
+            .into());
         }
 
-        fn is_jump_target_valid(&self, offset: u32) -> bool {
-            is_jump_target_valid(self.instruction_set, self.code, self.bitmask, offset)
+        let address_space = S::reserve_address_space().map_err(Error::from_display)?;
+        let native_code_origin = crate::sandbox::SandboxAddressSpace::native_code_origin(&address_space);
+
+        let (per_compilation_cache, per_module_cache) = {
+            let mut cache = cache.0.lock();
+            (cache.per_compilation.pop(), cache.per_module.pop())
+        };
+
+        let mut asm;
+        let mut gas_metering_stub_offsets: Vec<usize>;
+        let mut gas_cost_for_basic_block: Vec<u32>;
+        let program_counter_to_label;
+        let export_to_label;
+
+        if let Some(per_compilation_cache) = per_compilation_cache {
+            asm = per_compilation_cache.assembler;
+            program_counter_to_label = FlatMap::new_reusing_memory(per_compilation_cache.program_counter_to_label, code_length + 2);
+            gas_metering_stub_offsets = per_compilation_cache.gas_metering_stub_offsets;
+            gas_cost_for_basic_block = per_compilation_cache.gas_cost_for_basic_block;
+            export_to_label = per_compilation_cache.export_to_label;
+        } else {
+            asm = Assembler::new();
+            program_counter_to_label = FlatMap::new(code_length + 2);
+            gas_metering_stub_offsets = Vec::new();
+            gas_cost_for_basic_block = Vec::new();
+            export_to_label = HashMap::new();
         }
 
-        pub(crate) fn finish_compilation(
-            mut self,
-            global: &S::GlobalState,
-            cache: &CompilerCache,
-            address_space: S::AddressSpace,
-        ) -> Result<CompiledModule<S>, Error>
-        where
-            S: Sandbox,
-        {
-            log::trace!("Finishing compilation...");
-            let invalid_code_offset_address = self.asm.origin() + self.asm.len() as u64;
-            self.emit_trap_epilogue();
-            self.program_counter_to_machine_code_offset_list.shrink_to_fit();
-
-            let mut gas_metering_stub_offsets = core::mem::take(&mut self.gas_metering_stub_offsets);
-            let mut gas_cost_for_basic_block = core::mem::take(&mut self.gas_cost_for_basic_block);
-            if self.gas_metering.is_some() {
-                log::trace!("Finalizing block costs...");
-                assert_eq!(gas_metering_stub_offsets.len(), gas_cost_for_basic_block.len());
-                for (&native_code_offset, &cost) in gas_metering_stub_offsets.iter().zip(gas_cost_for_basic_block.iter()) {
-                    log::trace!("  0x{:08x}: {}", self.asm.origin() + native_code_offset as u64, cost);
-                    ArchVisitor(&mut self).emit_weight(native_code_offset, cost);
-                }
-            }
-
-            let label_sysenter = ArchVisitor(&mut self).emit_sysenter();
-            let label_sysreturn = ArchVisitor(&mut self).emit_sysreturn();
-            let native_code_origin = self.asm.origin();
-
-            let jump_table_length = (self.jump_table.len() as usize + 1) * VM_CODE_ADDRESS_ALIGNMENT as usize;
-            let mut native_jump_table = S::allocate_jump_table(global, jump_table_length).map_err(Error::from_display)?;
-            {
-                let native_jump_table = native_jump_table.as_mut();
-                native_jump_table[..VM_CODE_ADDRESS_ALIGNMENT as usize].fill(JUMP_TABLE_INVALID_ADDRESS); // First entry is always invalid.
-                native_jump_table[jump_table_length..].fill(JUMP_TABLE_INVALID_ADDRESS); // Fill in the padding, since the size is page-aligned.
-
-                for (jump_table_index, code_offset) in self.jump_table.iter().enumerate() {
-                    let mut address = JUMP_TABLE_INVALID_ADDRESS;
-                    if let Some(label) = self.program_counter_to_label.get(code_offset.0) {
-                        if let Some(native_code_offset) = self.asm.get_label_origin_offset(label) {
-                            address = native_code_origin.checked_add_signed(native_code_offset as i64).expect("overflow") as usize;
-                        }
-                    }
-
-                    native_jump_table[(jump_table_index + 1) * VM_CODE_ADDRESS_ALIGNMENT as usize] = address;
-                }
-            }
-
-            assert!(self.program_counter_to_machine_code_offset_map.is_empty());
-            for export in self.exports {
-                let native_offset = if let Ok(index) = self
-                    .program_counter_to_machine_code_offset_list
-                    .binary_search_by_key(&export.program_counter(), |&(code_offset, _)| code_offset)
-                {
-                    self.program_counter_to_machine_code_offset_list[index].1
-                } else {
-                    self.program_counter_to_machine_code_offset_list.last().unwrap().1
-                };
-
-                log::trace!(
-                    "Export at {}: {} => 0x{:08x}",
-                    export.program_counter(),
-                    export.symbol(),
-                    native_code_origin + u64::from(native_offset)
-                );
-                self.program_counter_to_machine_code_offset_map
-                    .insert(export.program_counter(), native_offset);
-            }
-
-            let sysenter_address = native_code_origin
-                .checked_add_signed(self.asm.get_label_origin_offset_or_panic(label_sysenter) as i64)
-                .expect("overflow");
-
-            let sysreturn_address = native_code_origin
-                .checked_add_signed(self.asm.get_label_origin_offset_or_panic(label_sysreturn) as i64)
-                .expect("overflow");
-
-            match S::KIND {
-                SandboxKind::Linux => {}
-                SandboxKind::Generic => {
-                    let native_page_size = crate::sandbox::get_native_page_size();
-                    let padded_length = polkavm_common::utils::align_to_next_page_usize(native_page_size, self.asm.len()).unwrap();
-                    self.asm.resize(padded_length, ArchVisitor::<S, B>::PADDING_BYTE);
-                    self.asm.define_label(self.jump_table_label);
-                }
-            }
-
-            let module = {
-                let init = SandboxInit {
-                    guest_init: self.init,
-                    code: &self.asm.finalize(),
-                    jump_table: native_jump_table,
-                    sysenter_address,
-                    sysreturn_address,
-                };
-
-                let sandbox_program = S::prepare_program(global, init, address_space).map_err(Error::from_display)?;
-                CompiledModule {
-                    sandbox_program,
-                    native_code_origin,
-                    program_counter_to_machine_code_offset_list: self.program_counter_to_machine_code_offset_list,
-                    program_counter_to_machine_code_offset_map: self.program_counter_to_machine_code_offset_map,
-                    cache: cache.clone(),
-                    invalid_code_offset_address,
-                    bitness: B::BITNESS,
-                }
-            };
-
-            {
-                let mut cache = cache.0.lock();
-                if cache.per_compilation.is_empty() {
-                    self.asm.clear();
-                    self.program_counter_to_label.clear();
-                    self.export_to_label.clear();
-                    gas_metering_stub_offsets.clear();
-                    gas_cost_for_basic_block.clear();
-
-                    cache.per_compilation.push(CachePerCompilation {
-                        assembler: self.asm,
-                        program_counter_to_label: self.program_counter_to_label,
-                        export_to_label: self.export_to_label,
-                        gas_metering_stub_offsets,
-                        gas_cost_for_basic_block,
-                    });
-                }
-            }
-
-            Ok(module)
+        let program_counter_to_machine_code_offset_list: Vec<(ProgramCounter, u32)>;
+        let program_counter_to_machine_code_offset_map: HashMap<ProgramCounter, u32>;
+        if let Some(per_module_cache) = per_module_cache {
+            program_counter_to_machine_code_offset_list = per_module_cache.program_counter_to_machine_code_offset_list;
+            program_counter_to_machine_code_offset_map = per_module_cache.program_counter_to_machine_code_offset_map;
+        } else {
+            program_counter_to_machine_code_offset_list = Vec::with_capacity(code_length as usize);
+            program_counter_to_machine_code_offset_map = HashMap::with_capacity(exports.len());
         }
 
         let ecall_label = asm.forward_declare_label();
@@ -417,9 +219,7 @@ if_compiler_is_supported! {
         let jump_table_label = asm.forward_declare_label();
         let sbrk_label = asm.forward_declare_label();
 
-            if self.step_tracing {
-                self.step(program_counter);
-            }
+        polkavm_common::static_assert!(polkavm_common::zygote::VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE < u32::MAX);
 
         if config.gas_metering.is_some() {
             gas_metering_stub_offsets.reserve(code_length as usize);
@@ -501,110 +301,238 @@ if_compiler_is_supported! {
             }
         }
 
-        fn before_instruction(&self, program_counter: u32) {
-            if log::log_enabled!(log::Level::Trace) {
-                self.trace_compiled_instruction(program_counter);
-            }
-        }
+        let label_sysenter = ArchVisitor(&mut self).emit_sysenter();
+        let label_sysreturn = ArchVisitor(&mut self).emit_sysreturn();
+        let native_code_origin = self.asm.origin();
 
-        fn after_instruction<const KIND: usize>(&mut self, program_counter: u32, args_length: u32) {
-            assert!(KIND == CONTINUE_BASIC_BLOCK || KIND == END_BASIC_BLOCK || KIND == END_BASIC_BLOCK_INVALID);
+        let jump_table_length = (self.jump_table.len() as usize + 1) * VM_CODE_ADDRESS_ALIGNMENT as usize;
+        let mut native_jump_table = S::allocate_jump_table(global, jump_table_length).map_err(Error::from_display)?;
+        {
+            let native_jump_table = native_jump_table.as_mut();
+            native_jump_table[..VM_CODE_ADDRESS_ALIGNMENT as usize].fill(JUMP_TABLE_INVALID_ADDRESS); // First entry is always invalid.
+            native_jump_table[jump_table_length..].fill(JUMP_TABLE_INVALID_ADDRESS); // Fill in the padding, since the size is page-aligned.
 
-            if cfg!(debug_assertions) && !self.step_tracing {
-                let offset = self.program_counter_to_machine_code_offset_list.last().unwrap().1 as usize;
-                let instruction_length = self.asm.len() - offset;
-                if instruction_length > VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH as usize {
-                    self.panic_on_too_long_instruction(program_counter, instruction_length)
-                }
-            }
-
-            let next_program_counter = program_counter + args_length + 1;
-            self.program_counter_to_machine_code_offset_list
-                .push((ProgramCounter(next_program_counter), self.asm.len() as u32));
-
-            if KIND == END_BASIC_BLOCK || KIND == END_BASIC_BLOCK_INVALID {
-                if self.gas_metering.is_some() {
-                    let cost = self.gas_visitor.take_block_cost().unwrap();
-                    self.gas_cost_for_basic_block.push(cost);
-                }
-
-                let can_jump_into_new_basic_block = KIND != END_BASIC_BLOCK_INVALID && (next_program_counter as usize) < self.code.len();
-                debug_assert_eq!(self.is_jump_target_valid(next_program_counter), can_jump_into_new_basic_block);
-                self.force_start_new_basic_block(next_program_counter, can_jump_into_new_basic_block);
-            } else if self.step_tracing {
-                self.step(next_program_counter);
-            }
-        }
-
-        #[inline(never)]
-        #[cold]
-        fn step(&mut self, program_counter: u32) {
-            ArchVisitor(self).trace_execution(program_counter);
-        }
-
-        #[cold]
-        fn current_instruction(&self, program_counter: u32) -> impl core::fmt::Display {
-            struct MaybeInstruction(Option<ParsedInstruction>);
-            impl core::fmt::Display for MaybeInstruction {
-                fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
-                    if let Some(instruction) = self.0 {
-                        instruction.fmt(fmt)
-                    } else {
-                        write!(fmt, "<NONE>")
+            for (jump_table_index, code_offset) in self.jump_table.iter().enumerate() {
+                let mut address = JUMP_TABLE_INVALID_ADDRESS;
+                if let Some(label) = self.program_counter_to_label.get(code_offset.0) {
+                    if let Some(native_code_offset) = self.asm.get_label_origin_offset(label) {
+                        address = native_code_origin.checked_add_signed(native_code_offset as i64).expect("overflow") as usize;
                     }
                 }
-            }
 
-            MaybeInstruction(Instructions::new_bounded(self.instruction_set, self.code, self.bitmask, program_counter).next())
+                native_jump_table[(jump_table_index + 1) * VM_CODE_ADDRESS_ALIGNMENT as usize] = address;
+            }
         }
 
-        #[cold]
-        fn panic_on_too_long_instruction(&self, program_counter: u32, instruction_length: usize) -> ! {
-            panic!(
-                "maximum instruction length of {} exceeded with {} bytes for instruction: {}",
-                VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH,
-                instruction_length,
-                self.current_instruction(program_counter),
+        assert!(self.program_counter_to_machine_code_offset_map.is_empty());
+        for export in self.exports {
+            let native_offset = if let Ok(index) = self
+                .program_counter_to_machine_code_offset_list
+                .binary_search_by_key(&export.program_counter(), |&(code_offset, _)| code_offset)
+            {
+                self.program_counter_to_machine_code_offset_list[index].1
+            } else {
+                self.program_counter_to_machine_code_offset_list.last().unwrap().1
+            };
+
+            log::trace!(
+                "Export at {}: {} => 0x{:08x}",
+                export.program_counter(),
+                export.symbol(),
+                native_code_origin + u64::from(native_offset)
             );
+            self.program_counter_to_machine_code_offset_map
+                .insert(export.program_counter(), native_offset);
         }
 
-        #[inline(never)]
-        #[cold]
-        fn trace_compiled_instruction(&self, program_counter: u32) {
-            log::trace!("Compiling {}", self.current_instruction(program_counter));
-        }
+        let sysenter_address = native_code_origin
+            .checked_add_signed(self.asm.get_label_origin_offset_or_panic(label_sysenter) as i64)
+            .expect("overflow");
 
-        fn get_or_forward_declare_label(&mut self, program_counter: u32) -> Option<Label> {
-            match self.program_counter_to_label.get(program_counter) {
-                Some(label) => Some(label),
-                None => {
-                    if program_counter > self.program_counter_to_label.len() {
-                        return None;
-                    }
+        let sysreturn_address = native_code_origin
+            .checked_add_signed(self.asm.get_label_origin_offset_or_panic(label_sysreturn) as i64)
+            .expect("overflow");
 
-                    let label = self.asm.forward_declare_label();
-                    log::trace!("Label: {label} -> {program_counter} (forward declare)");
-
-                    self.program_counter_to_label.insert(program_counter, label);
-                    Some(label)
-                }
+        match S::KIND {
+            SandboxKind::Linux => {}
+            SandboxKind::Generic => {
+                let native_page_size = crate::sandbox::get_native_page_size();
+                let padded_length = polkavm_common::utils::align_to_next_page_usize(native_page_size, self.asm.len()).unwrap();
+                self.asm.resize(padded_length, ArchVisitor::<S, B>::PADDING_BYTE);
+                self.asm.define_label(self.jump_table_label);
             }
         }
 
-        fn define_label(&mut self, label: Label) {
-            log::trace!("Label: {} -> {:08x}", label, self.asm.current_address());
-            self.asm.define_label(label);
+        let module = {
+            let init = SandboxInit {
+                guest_init: self.init,
+                code: &self.asm.finalize(),
+                jump_table: native_jump_table,
+                sysenter_address,
+                sysreturn_address,
+            };
+
+            let sandbox_program = S::prepare_program(global, init, address_space).map_err(Error::from_display)?;
+            CompiledModule {
+                sandbox_program,
+                native_code_origin,
+                program_counter_to_machine_code_offset_list: self.program_counter_to_machine_code_offset_list,
+                program_counter_to_machine_code_offset_map: self.program_counter_to_machine_code_offset_map,
+                cache: cache.clone(),
+                invalid_code_offset_address,
+                bitness: B::BITNESS,
+            }
+        };
+
+        {
+            let mut cache = cache.0.lock();
+            if cache.per_compilation.is_empty() {
+                self.asm.clear();
+                self.program_counter_to_label.clear();
+                self.export_to_label.clear();
+                gas_metering_stub_offsets.clear();
+                gas_cost_for_basic_block.clear();
+
+                cache.per_compilation.push(CachePerCompilation {
+                    assembler: self.asm,
+                    program_counter_to_label: self.program_counter_to_label,
+                    export_to_label: self.export_to_label,
+                    gas_metering_stub_offsets,
+                    gas_cost_for_basic_block,
+                });
+            }
         }
 
-        fn emit_trap_epilogue(&mut self) {
-            self.before_instruction(self.code_length);
-            self.gas_visitor.trap();
-            ArchVisitor(self).trap_without_modifying_program_counter();
+        Ok(module)
+    }
 
+    #[inline(always)]
+    fn force_start_new_basic_block(&mut self, program_counter: u32, is_valid_jump_target: bool) {
+        log::trace!("Starting new basic block at: {program_counter}");
+        if is_valid_jump_target {
+            if let Some(label) = self.program_counter_to_label.get(program_counter) {
+                log::trace!("Label: {label} -> {program_counter} -> {:08x}", self.asm.current_address());
+                self.asm.define_label(label);
+            } else {
+                let label = self.asm.create_label();
+                log::trace!("Label: {label} -> {program_counter} -> {:08x}", self.asm.current_address());
+                self.program_counter_to_label.insert(program_counter, label);
+            }
+        }
+
+        if self.step_tracing {
+            self.step(program_counter);
+        }
+
+        if let Some(gas_metering) = self.gas_metering {
+            self.gas_metering_stub_offsets.push(self.asm.len());
+            ArchVisitor(self).emit_gas_metering_stub(gas_metering);
+        }
+    }
+
+    fn before_instruction(&self, program_counter: u32) {
+        if log::log_enabled!(log::Level::Trace) {
+            self.trace_compiled_instruction(program_counter);
+        }
+    }
+
+    fn after_instruction<const KIND: usize>(&mut self, program_counter: u32, args_length: u32) {
+        assert!(KIND == CONTINUE_BASIC_BLOCK || KIND == END_BASIC_BLOCK || KIND == END_BASIC_BLOCK_INVALID);
+
+        if cfg!(debug_assertions) && !self.step_tracing {
+            let offset = self.program_counter_to_machine_code_offset_list.last().unwrap().1 as usize;
+            let instruction_length = self.asm.len() - offset;
+            if instruction_length > VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH as usize {
+                self.panic_on_too_long_instruction(program_counter, instruction_length)
+            }
+        }
+
+        let next_program_counter = program_counter + args_length + 1;
+        self.program_counter_to_machine_code_offset_list
+            .push((ProgramCounter(next_program_counter), self.asm.len() as u32));
+
+        if KIND == END_BASIC_BLOCK || KIND == END_BASIC_BLOCK_INVALID {
             if self.gas_metering.is_some() {
                 let cost = self.gas_visitor.take_block_cost().unwrap();
                 self.gas_cost_for_basic_block.push(cost);
             }
+
+            let can_jump_into_new_basic_block = KIND != END_BASIC_BLOCK_INVALID && (next_program_counter as usize) < self.code.len();
+            debug_assert_eq!(self.is_jump_target_valid(next_program_counter), can_jump_into_new_basic_block);
+            self.force_start_new_basic_block(next_program_counter, can_jump_into_new_basic_block);
+        } else if self.step_tracing {
+            self.step(next_program_counter);
+        }
+    }
+
+    #[inline(never)]
+    #[cold]
+    fn step(&mut self, program_counter: u32) {
+        ArchVisitor(self).trace_execution(program_counter);
+    }
+
+    #[cold]
+    fn current_instruction(&self, program_counter: u32) -> impl core::fmt::Display {
+        struct MaybeInstruction(Option<ParsedInstruction>);
+        impl core::fmt::Display for MaybeInstruction {
+            fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+                if let Some(instruction) = self.0 {
+                    instruction.fmt(fmt)
+                } else {
+                    write!(fmt, "<NONE>")
+                }
+            }
+        }
+
+        MaybeInstruction(Instructions::new_bounded(self.instruction_set, self.code, self.bitmask, program_counter).next())
+    }
+
+    #[cold]
+    fn panic_on_too_long_instruction(&self, program_counter: u32, instruction_length: usize) -> ! {
+        panic!(
+            "maximum instruction length of {} exceeded with {} bytes for instruction: {}",
+            VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH,
+            instruction_length,
+            self.current_instruction(program_counter),
+        );
+    }
+
+    #[inline(never)]
+    #[cold]
+    fn trace_compiled_instruction(&self, program_counter: u32) {
+        log::trace!("Compiling {}", self.current_instruction(program_counter));
+    }
+
+    fn get_or_forward_declare_label(&mut self, program_counter: u32) -> Option<Label> {
+        match self.program_counter_to_label.get(program_counter) {
+            Some(label) => Some(label),
+            None => {
+                if program_counter > self.program_counter_to_label.len() {
+                    return None;
+                }
+
+                let label = self.asm.forward_declare_label();
+                log::trace!("Label: {label} -> {program_counter} (forward declare)");
+
+                self.program_counter_to_label.insert(program_counter, label);
+                Some(label)
+            }
+        }
+    }
+
+    fn define_label(&mut self, label: Label) {
+        log::trace!("Label: {} -> {:08x}", label, self.asm.current_address());
+        self.asm.define_label(label);
+    }
+
+    fn emit_trap_epilogue(&mut self) {
+        self.before_instruction(self.code_length);
+        self.gas_visitor.trap();
+        ArchVisitor(self).trap_without_modifying_program_counter();
+
+        if self.gas_metering.is_some() {
+            let cost = self.gas_visitor.take_block_cost().unwrap();
+            self.gas_cost_for_basic_block.push(cost);
         }
     }
 }
