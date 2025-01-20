@@ -437,6 +437,19 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                     }
                 }
 
+                if let Some(index) = rhs.find("cpop ") {
+                    if let Some(src) = parse_reg(rhs[index + 5..].trim()) {
+                        match op_marker {
+                            OpMarker::I32 => {
+                                emit_and_continue!(Instruction::count_set_bits_32(dst.into(), src.into()));
+                            },
+                            OpMarker::NONE => {
+                                emit_and_continue!(Instruction::count_set_bits_64(dst.into(), src.into()));
+                            },
+                        }
+                    }
+                }
+
                 if let Some(src) = parse_reg(rhs) {
                     emit_and_continue!(Instruction::move_reg(dst.into(), src.into()));
                 }
