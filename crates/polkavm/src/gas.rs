@@ -46,6 +46,11 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
+    fn memset(&mut self) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
     fn ecalli(&mut self, _imm: u32) -> Self::ReturnTy {
         self.cost += 1;
     }

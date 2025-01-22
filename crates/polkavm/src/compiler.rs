@@ -111,8 +111,11 @@ where
     sbrk_label: Label,
     step_label: Label,
     trap_label: Label,
+    memset_label: Label,
     invalid_jump_label: Label,
     instruction_set: RuntimeInstructionSet,
+    memset_trampoline_start: usize,
+    memset_trampoline_end: usize,
 
     _phantom: PhantomData<(S, B)>,
 }
@@ -218,6 +221,7 @@ where
         let step_label = asm.forward_declare_label();
         let jump_table_label = asm.forward_declare_label();
         let sbrk_label = asm.forward_declare_label();
+        let memset_label = asm.forward_declare_label();
 
         polkavm_common::static_assert!(polkavm_common::zygote::VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE < u32::MAX);
 
@@ -244,6 +248,7 @@ where
             step_label,
             jump_table_label,
             sbrk_label,
+            memset_label,
             gas_metering: config.gas_metering,
             step_tracing,
             program_counter_to_machine_code_offset_list,
@@ -252,12 +257,20 @@ where
             gas_cost_for_basic_block,
             code_length,
             instruction_set,
+            memset_trampoline_start: 0,
+            memset_trampoline_end: 0,
             _phantom: PhantomData,
         };
 
         ArchVisitor(&mut visitor).emit_trap_trampoline();
         ArchVisitor(&mut visitor).emit_ecall_trampoline();
         ArchVisitor(&mut visitor).emit_sbrk_trampoline();
+
+        if config.gas_metering.is_some() {
+            visitor.memset_trampoline_start = visitor.asm.len();
+            ArchVisitor(&mut visitor).emit_memset_trampoline();
+            visitor.memset_trampoline_end = visitor.asm.len();
+        }
 
         if step_tracing {
             ArchVisitor(&mut visitor).emit_step_trampoline();
@@ -381,6 +394,8 @@ where
                 cache: cache.clone(),
                 invalid_code_offset_address,
                 bitness: B::BITNESS,
+                memset_trampoline_start: polkavm_common::cast::cast(self.memset_trampoline_start).to_u64(),
+                memset_trampoline_end: polkavm_common::cast::cast(self.memset_trampoline_end).to_u64(),
             }
         };
 
@@ -650,6 +665,14 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor.sbrk(d, s);
         ArchVisitor(self).sbrk(d, s);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
+    fn memset(&mut self, code_offset: u32, args_length: u32) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.memset();
+        ArchVisitor(self).memset();
         self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
     }
 
@@ -1700,6 +1723,9 @@ where
     cache: CompilerCache,
     pub(crate) invalid_code_offset_address: u64,
     pub(crate) bitness: Bitness,
+
+    pub(crate) memset_trampoline_start: u64,
+    pub(crate) memset_trampoline_end: u64,
 }
 
 impl<S> CompiledModule<S>
@@ -1728,8 +1754,7 @@ where
             .map(|native_offset| self.native_code_origin + u64::from(native_offset))
     }
 
-    pub fn program_counter_by_native_code_address(&self, address: u64, strict: bool) -> Option<ProgramCounter> {
-        let offset = address - self.native_code_origin;
+    pub fn program_counter_by_native_code_offset(&self, offset: u64, strict: bool) -> Option<ProgramCounter> {
         let index = match self
             .program_counter_to_machine_code_offset_list
             .binary_search_by_key(&offset, |&(_, native_offset)| u64::from(native_offset))

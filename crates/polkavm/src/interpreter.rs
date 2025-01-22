@@ -1907,6 +1907,49 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
+    fn memset<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: memset", visitor.inner.compiled_offset);
+        }
+
+        let gas_metering_enabled = visitor.inner.module.gas_metering().is_some();
+
+        // TODO: This is very inefficient.
+        let next_instruction = visitor.go_to_next_instruction();
+        let mut result = next_instruction;
+
+        let value = visitor.get32(Reg::A1);
+        let mut dst = visitor.get32(Reg::A0);
+        let mut count = visitor.get64(Reg::A2);
+        while count > 0 {
+            if gas_metering_enabled && visitor.inner.gas == 0 {
+                result = not_enough_gas_impl::<DEBUG>(visitor, program_counter, 0);
+                break;
+            }
+
+            if visitor.inner.module.is_dynamic_paging() {
+                result = visitor.store::<u8, DEBUG, true>(program_counter, value, None, dst);
+            } else {
+                result = visitor.store::<u8, DEBUG, false>(program_counter, value, None, dst);
+            }
+            if result != next_instruction {
+                break;
+            }
+
+            if gas_metering_enabled {
+                visitor.inner.gas -= 1;
+            }
+
+            dst += 1;
+            count -= 1;
+        }
+
+        visitor.set64::<DEBUG>(Reg::A0, u64::from(dst));
+        visitor.set64::<DEBUG>(Reg::A2, count);
+
+        result
+    }
+
     fn ecalli<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, hostcall_number: u32) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: ecalli {hostcall_number}", visitor.inner.compiled_offset);
@@ -3555,6 +3598,10 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
 
     fn sbrk(&mut self, dst: RawReg, size: RawReg) -> Self::ReturnTy {
         emit!(self, sbrk(dst, size));
+    }
+
+    fn memset(&mut self) -> Self::ReturnTy {
+        emit!(self, memset(self.program_counter));
     }
 
     fn ecalli(&mut self, imm: u32) -> Self::ReturnTy {

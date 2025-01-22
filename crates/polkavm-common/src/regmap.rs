@@ -8,8 +8,8 @@ pub const fn to_native_reg(reg: Reg) -> NativeReg {
     // We try to assign registers which result in more compact code to the more common RISC-V registers.
     match reg {
         Reg::A0 => rdi,
-        Reg::A1 => rsi,
-        Reg::SP => rax,
+        Reg::A1 => rax,
+        Reg::SP => rsi,
         Reg::RA => rbx,
         Reg::A2 => rdx,
         Reg::A3 => rbp,

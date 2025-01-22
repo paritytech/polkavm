@@ -1,3 +1,5 @@
+use core::sync::atomic::Ordering;
+
 use polkavm_assembler::amd64::addr::*;
 use polkavm_assembler::amd64::inst::*;
 use polkavm_assembler::amd64::Reg::rsp;
@@ -7,8 +9,8 @@ use polkavm_assembler::amd64::{Condition, LoadKind, MemOp, RegSize, Size};
 use polkavm_assembler::{Label, NonZero, ReservedAssembler, U1, U2, U3, U4};
 
 use polkavm_common::cast::cast;
-use polkavm_common::program::{RawReg, Reg};
-use polkavm_common::zygote::VM_ADDR_VMCTX;
+use polkavm_common::program::{ProgramCounter, RawReg, Reg};
+use polkavm_common::zygote::{VmCtx, VM_ADDR_VMCTX};
 
 use crate::compiler::{ArchVisitor, Bitness, CompilerBitness, SandboxKind};
 use crate::config::GasMeteringKind;
@@ -197,6 +199,86 @@ where
     } else {
         asm.push(jmp_label32(label))
     }
+}
+
+const GAS_METERING_TRAP_OFFSET: u64 = 9;
+const GAS_COST_OFFSET: usize = 3;
+const REP_STOSB_MACHINE_CODE: &[u8] = &[0xf3, 0xaa];
+
+#[derive(Copy, Clone)]
+enum MemsetKind {
+    Inline,
+    Trampoline,
+}
+
+fn are_we_executing_memset<S>(compiled_module: &crate::compiler::CompiledModule<S>, machine_code_offset: u64) -> Option<MemsetKind>
+where
+    S: Sandbox,
+{
+    if machine_code_offset >= compiled_module.memset_trampoline_start && machine_code_offset < compiled_module.memset_trampoline_end {
+        Some(MemsetKind::Trampoline)
+    } else if compiled_module
+        .machine_code()
+        .get(machine_code_offset as usize..)
+        .map_or(false, |slice| slice.starts_with(REP_STOSB_MACHINE_CODE))
+    {
+        Some(MemsetKind::Inline)
+    } else {
+        None
+    }
+}
+
+fn set_program_counter_after_interruption<S>(
+    compiled_module: &crate::compiler::CompiledModule<S>,
+    machine_code_offset: u64,
+    vmctx: &VmCtx,
+) -> Result<ProgramCounter, &'static str>
+where
+    S: Sandbox,
+{
+    let Some(program_counter) = compiled_module.program_counter_by_native_code_offset(machine_code_offset, false) else {
+        return Err("internal error: failed to find the program counter based on the native program counter when handling a page fault");
+    };
+
+    vmctx.program_counter.store(program_counter.0, Ordering::Relaxed);
+    vmctx.next_program_counter.store(program_counter.0, Ordering::Relaxed);
+
+    Ok(program_counter)
+}
+
+fn handle_interruption_during_memset<S>(
+    memset_kind: MemsetKind,
+    compiled_module: &crate::compiler::CompiledModule<S>,
+    is_gas_metering_enabled: bool,
+    machine_code_offset: u64,
+    vmctx: &VmCtx,
+) -> Result<(), &'static str>
+where
+    S: Sandbox,
+{
+    let bytes_remaining = vmctx.tmp_reg.load(Ordering::Relaxed);
+
+    // Move the count into the non-temporary register.
+    match memset_kind {
+        MemsetKind::Inline => vmctx.regs[Reg::A2 as usize].store(bytes_remaining, Ordering::Relaxed),
+        MemsetKind::Trampoline => {
+            vmctx.regs[Reg::A2 as usize].fetch_add(bytes_remaining, Ordering::Relaxed);
+        }
+    }
+
+    if is_gas_metering_enabled {
+        // Give back the gas that we've pre-charged.
+        vmctx.gas.fetch_add(cast(bytes_remaining).to_signed(), Ordering::Relaxed);
+    }
+
+    let original_offset = match memset_kind {
+        MemsetKind::Inline => machine_code_offset,
+        MemsetKind::Trampoline => vmctx.next_native_program_counter.load(Ordering::Relaxed) - compiled_module.native_code_origin,
+    };
+
+    set_program_counter_after_interruption(compiled_module, original_offset, vmctx)?;
+
+    Ok(())
 }
 
 impl<'r, 'a, S, B> ArchVisitor<'r, 'a, S, B>
@@ -696,6 +778,45 @@ where
         self.push(ret());
     }
 
+    // This is a slower memset implementation when we're running with gas metering enabled
+    // and we don't have enough gas to finish running the whole memset.
+    pub(crate) fn emit_memset_trampoline(&mut self) {
+        log::trace!("Emitting trampoline: memset");
+        let label = self.memset_label;
+        self.define_label(label);
+
+        let count = conv_reg(Reg::A2.into());
+
+        // // Store the address to restart the memset in case we trigger a page fault.
+        // self.push(store(
+        //     RegSize::R64,
+        //     Self::vmctx_field(S::offset_table().next_native_program_counter),
+        //     rcx,
+        // ));
+
+        // Grab the amount of gas we have (this will always be negative), and zero the gas counter.
+        // (We assume the memset will consume all of the gas.)
+        self.push(xor((RegSize::R32, rcx, rcx)));
+        self.push(xchg_mem(RegSize::R64, rcx, Self::vmctx_field(S::offset_table().gas)));
+
+        // Calculate the number of bytes we can memset given our gas budget.
+        self.push(add((RegSize::R64, rcx, count)));
+
+        // Set the final counter to how much bytes will be remaining when we run out of gas.
+        self.push(sub((RegSize::R64, count, rcx)));
+
+        // Stash the counter, in case we page fault in the middle of the memset.
+        self.push(store(RegSize::R64, Self::vmctx_field(S::offset_table().arg), rcx));
+
+        // Execute the memset.
+        self.asm.push_raw(REP_STOSB_MACHINE_CODE);
+
+        // We've successfully finished memset without page faulting, so we can run out of gas.
+        self.save_registers_to_vmctx();
+        self.push(mov_imm64(TMP_REG, S::address_table().syscall_not_enough_gas));
+        self.push(jmp(TMP_REG));
+    }
+
     pub(crate) fn trace_execution(&mut self, code_offset: u32) {
         let step_label = self.step_label;
         let asm = self.asm.reserve::<U3>();
@@ -708,14 +829,11 @@ where
         asm.assert_reserved_exactly_as_needed();
     }
 
-    pub const GAS_METERING_TRAP_OFFSET: u64 = 9;
-    pub const GAS_COST_OFFSET: usize = 3;
-
     pub(crate) fn emit_gas_metering_stub(&mut self, kind: GasMeteringKind) {
         let origin = self.asm.len();
 
         self.push(sub((Self::vmctx_field(S::offset_table().gas), imm64(i32::MAX))));
-        debug_assert_eq!(Self::GAS_COST_OFFSET, self.asm.len() - origin - 4); // Offset to bring us from the start of the stub to the gas cost.
+        debug_assert_eq!(GAS_COST_OFFSET, self.asm.len() - origin - 4); // Offset to bring us from the start of the stub to the gas cost.
 
         if matches!(kind, GasMeteringKind::Sync) {
             // 49833F00             cmp qword [r15],0
@@ -729,7 +847,7 @@ where
             assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r15 + 0)); // Sanity check.
             debug_assert!(self.asm.code_mut().ends_with(&[0x49, 0x83, 0x3F, 0x00]));
             // Offset to bring us from where the trap will trigger to the beginning of the stub.
-            debug_assert_eq!(Self::GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 2) as u64);
+            debug_assert_eq!(GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 2) as u64);
             self.asm.push_raw(&[0x78, 0xfc]);
         }
     }
@@ -1026,6 +1144,145 @@ where
         self.push(store(RegSize::R64, reg_indirect(RegSize::R64, heap_info_base), dst));
 
         self.define_label(label_continue);
+    }
+
+    #[inline(always)]
+    pub fn memset(&mut self) {
+        let reg_size = self.reg_size();
+
+        const _: () = {
+            assert!(TMP_REG as u32 == rcx as u32);
+            assert!(conv_reg_const(Reg::A0) as u32 == rdi as u32);
+            assert!(conv_reg_const(Reg::A1) as u32 == rax as u32);
+        };
+
+        let label_repeat = self.asm.create_label();
+        self.asm.push(lea_rip_label(rcx, label_repeat));
+
+        // Store the address to restart the memset in case we trigger a page fault.
+        self.push(store(
+            RegSize::R64,
+            Self::vmctx_field(S::offset_table().next_native_program_counter),
+            rcx,
+        ));
+
+        let count = conv_reg(Reg::A2.into());
+        self.asm.push(mov(RegSize::R32, count, count));
+
+        match self.gas_metering {
+            None => {
+                self.asm.push(mov(reg_size, rcx, count));
+                // rep stosb, rdi is destination pointer, rcx is count, rax is the value
+                self.asm.push_raw(REP_STOSB_MACHINE_CODE);
+                self.asm.push(mov(reg_size, count, rcx));
+            }
+            Some(GasMeteringKind::Sync) => {
+                // Pre charge the gas cost of the memset.
+                self.asm.push(sub((RegSize::R64, Self::vmctx_field(S::offset_table().gas), count)));
+                // Will we have enough gas to finish the operation?
+                self.asm.push(cmp((Self::vmctx_field(S::offset_table().gas), imm64(0))));
+                // If no - jump to a slower version of the routine.
+                let label_slow = self.memset_label;
+                branch_to_label(self.asm.reserve::<U1>(), Condition::Less, label_slow);
+                // If yes - do it the fast way.
+                self.asm.push(mov(reg_size, rcx, count));
+                self.asm.push_raw(REP_STOSB_MACHINE_CODE);
+                self.asm.push(mov(reg_size, count, rcx));
+            }
+            Some(GasMeteringKind::Async) => {
+                self.asm.push(sub((RegSize::R64, Self::vmctx_field(S::offset_table().gas), count)));
+                self.asm.push(mov(reg_size, rcx, count));
+                self.asm.push_raw(REP_STOSB_MACHINE_CODE);
+                self.asm.push(mov(reg_size, count, rcx));
+            }
+        }
+    }
+
+    pub fn on_signal_trap(
+        compiled_module: &crate::compiler::CompiledModule<S>,
+        is_gas_metering_enabled: bool,
+        machine_code_offset: u64,
+        vmctx: &VmCtx,
+    ) -> Result<bool, &'static str> {
+        enum TrapKind {
+            Memset { kind: MemsetKind },
+            NotEnoughGas,
+            Trap,
+        }
+
+        let trap_kind = if let Some(kind) = are_we_executing_memset(compiled_module, machine_code_offset) {
+            TrapKind::Memset { kind }
+        } else if is_gas_metering_enabled && vmctx.gas.load(Ordering::Relaxed) < 0 {
+            TrapKind::NotEnoughGas
+        } else {
+            TrapKind::Trap
+        };
+
+        match trap_kind {
+            TrapKind::NotEnoughGas => {
+                let Some(offset) = machine_code_offset.checked_sub(GAS_METERING_TRAP_OFFSET) else {
+                    return Err("internal error: address underflow after a trap");
+                };
+
+                // If we restart we want to check the gas again, so set the address to point there.
+                vmctx
+                    .next_native_program_counter
+                    .store(compiled_module.native_code_origin + offset, Ordering::Relaxed);
+
+                // Also set the logical program counter, in case the user wants to stash the location
+                // somewhere and continue some other time.
+                let program_counter = set_program_counter_after_interruption(compiled_module, machine_code_offset, vmctx)?;
+
+                // The gas counter is now negative; refund the amount of gas consumed so that it's positive again.
+                let offset = offset as usize + GAS_COST_OFFSET;
+                let Some(gas_cost) = &compiled_module.machine_code().get(offset..offset + 4) else {
+                    return Err("internal error: failed to read back the gas cost from the machine code");
+                };
+
+                let gas_cost = u32::from_le_bytes([gas_cost[0], gas_cost[1], gas_cost[2], gas_cost[3]]);
+                let gas = vmctx.gas.fetch_add(i64::from(gas_cost), Ordering::Relaxed);
+                log::trace!(
+                    "Out of gas; program counter = {program_counter}, reverting gas: {gas} -> {new_gas} (gas cost: {gas_cost})",
+                    new_gas = gas + i64::from(gas_cost)
+                );
+
+                Ok(true)
+            }
+            TrapKind::Trap => {
+                set_program_counter_after_interruption(compiled_module, machine_code_offset, vmctx)?;
+
+                // Traps are unrecoverable.
+                vmctx.next_native_program_counter.store(0, Ordering::Relaxed);
+
+                Ok(false)
+            }
+            // Did we prematurely trigger a page fault during a memset?
+            TrapKind::Memset { kind } => {
+                handle_interruption_during_memset(kind, compiled_module, is_gas_metering_enabled, machine_code_offset, vmctx)?;
+
+                // We can only be here if dynamic page faulting is disabled, so this situation is unrecoverable.
+                vmctx.next_native_program_counter.store(0, Ordering::Relaxed);
+
+                Ok(false)
+            }
+        }
+    }
+
+    pub fn on_page_fault(
+        compiled_module: &crate::compiler::CompiledModule<S>,
+        is_gas_metering_enabled: bool,
+        machine_code_address: u64,
+        machine_code_offset: u64,
+        vmctx: &VmCtx,
+    ) -> Result<(), &'static str> {
+        if let Some(kind) = are_we_executing_memset(compiled_module, machine_code_offset) {
+            handle_interruption_during_memset(kind, compiled_module, is_gas_metering_enabled, machine_code_offset, vmctx)?;
+        } else {
+            set_program_counter_after_interruption(compiled_module, machine_code_offset, vmctx)?;
+            vmctx.next_native_program_counter.store(machine_code_address, Ordering::Relaxed);
+        }
+
+        Ok(())
     }
 
     #[inline(always)]

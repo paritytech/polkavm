@@ -1,0 +1,24 @@
+[package]
+name = "bench-memset"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "bench_memset"
+path = "src/main.rs"
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "bench-memset"
+path = "src/main.rs"
+
+[dependencies]
+simplealloc = { path = "../../crates/simplealloc" }
+compiler_builtins_crate = { package = "compiler_builtins", version = "=0.1.139", default-features = false }
+
+[target.'cfg(target_env = "polkavm")'.dependencies]
+polkavm-derive = { path = "../../crates/polkavm-derive" }
+
+[lints]
+workspace = true

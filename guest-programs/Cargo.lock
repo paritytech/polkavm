@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "bench-memset"
+version = "0.1.0"
+dependencies = [
+ "compiler_builtins",
+ "polkavm-derive",
+ "simplealloc",
+]
+
+[[package]]
 name = "bench-minimal"
 version = "0.1.0"
 dependencies = [
@@ -34,6 +43,12 @@ name = "bitflags"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "327762f6e5a765692301e5bb513e0d9fef63be86bbc14528052b1cd3e6f03e07"
+
+[[package]]
+name = "compiler_builtins"
+version = "0.1.139"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7925a77545f37a18e152a4aeaeb9a220309022067cafcfa2ecebe9ec55d36ccb"
 
 [[package]]
 name = "emumisc"

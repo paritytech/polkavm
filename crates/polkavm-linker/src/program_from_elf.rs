@@ -623,6 +623,7 @@ enum BasicInst<T> {
         dst: Reg,
         size: Reg,
     },
+    Memset,
     Nop,
 }
 
@@ -659,6 +660,7 @@ impl<T> BasicInst<T> {
             BasicInst::Cmov { dst, src, cond, .. } => RegMask::from(dst) | RegMask::from(src) | RegMask::from(cond),
             BasicInst::Ecalli { nth_import } => imports[nth_import].src_mask(),
             BasicInst::Sbrk { size, .. } => RegMask::from(size),
+            BasicInst::Memset => RegMask::from(Reg::A0) | RegMask::from(Reg::A1) | RegMask::from(Reg::A2),
         }
     }
 
@@ -678,12 +680,17 @@ impl<T> BasicInst<T> {
             | BasicInst::AnyAny { dst, .. } => RegMask::from(dst),
             BasicInst::Ecalli { nth_import } => imports[nth_import].dst_mask(),
             BasicInst::Sbrk { dst, .. } => RegMask::from(dst),
+            BasicInst::Memset { .. } => RegMask::from(Reg::A0) | RegMask::from(Reg::A2),
         }
     }
 
     fn has_side_effects(&self, config: &Config) -> bool {
         match *self {
-            BasicInst::Sbrk { .. } | BasicInst::Ecalli { .. } | BasicInst::StoreAbsolute { .. } | BasicInst::StoreIndirect { .. } => true,
+            BasicInst::Sbrk { .. }
+            | BasicInst::Ecalli { .. }
+            | BasicInst::StoreAbsolute { .. }
+            | BasicInst::StoreIndirect { .. }
+            | BasicInst::Memset { .. } => true,
             BasicInst::LoadAbsolute { .. } | BasicInst::LoadIndirect { .. } => !config.elide_unnecessary_loads,
             BasicInst::Nop
             | BasicInst::MoveReg { .. }
@@ -771,6 +778,12 @@ impl<T> BasicInst<T> {
                 size: map(size, OpKind::Read),
                 dst: map(dst, OpKind::Write),
             }),
+            BasicInst::Memset => {
+                assert_eq!(map(Reg::A1, OpKind::Read), Reg::A1);
+                assert_eq!(map(Reg::A0, OpKind::ReadWrite), Reg::A0);
+                assert_eq!(map(Reg::A2, OpKind::ReadWrite), Reg::A2);
+                Some(BasicInst::Memset)
+            }
             BasicInst::Nop => Some(BasicInst::Nop),
         }
     }
@@ -839,6 +852,7 @@ impl<T> BasicInst<T> {
             BasicInst::Cmov { kind, dst, src, cond } => BasicInst::Cmov { kind, dst, src, cond },
             BasicInst::Ecalli { nth_import } => BasicInst::Ecalli { nth_import },
             BasicInst::Sbrk { dst, size } => BasicInst::Sbrk { dst, size },
+            BasicInst::Memset => BasicInst::Memset,
             BasicInst::Nop => BasicInst::Nop,
         })
     }
@@ -861,6 +875,7 @@ impl<T> BasicInst<T> {
             | BasicInst::AnyAny { .. }
             | BasicInst::Cmov { .. }
             | BasicInst::Sbrk { .. }
+            | BasicInst::Memset { .. }
             | BasicInst::Ecalli { .. } => (None, None),
         }
     }
@@ -2618,6 +2633,7 @@ where
 
         const FUNC3_ECALLI: u32 = 0b000;
         const FUNC3_SBRK: u32 = 0b001;
+        const FUNC3_MEMSET: u32 = 0b010;
 
         if crate::riscv::R(raw_inst).unpack() == (crate::riscv::OPCODE_CUSTOM_0, FUNC3_ECALLI, 0, RReg::Zero, RReg::Zero, RReg::Zero) {
             let initial_offset = relative_offset as u64;
@@ -2719,6 +2735,19 @@ where
                     offset_range: (relative_offset as u64..relative_offset as u64 + inst_size).into(),
                 },
                 InstExt::Basic(BasicInst::Sbrk { dst, size }),
+            ));
+
+            relative_offset += inst_size as usize;
+            continue;
+        }
+
+        if let (crate::riscv::OPCODE_CUSTOM_0, FUNC3_MEMSET, 0, RReg::Zero, RReg::Zero, RReg::Zero) = crate::riscv::R(raw_inst).unpack() {
+            output.push((
+                Source {
+                    section_index,
+                    offset_range: (relative_offset as u64..relative_offset as u64 + inst_size).into(),
+                },
+                InstExt::Basic(BasicInst::Memset),
             ));
 
             relative_offset += inst_size as usize;
@@ -7529,6 +7558,7 @@ fn emit_code(
                     Instruction::ecalli(import.metadata.index.expect("internal error: no index was assigned to an ecall"))
                 }
                 BasicInst::Sbrk { dst, size } => Instruction::sbrk(conv_reg(dst), conv_reg(size)),
+                BasicInst::Memset => Instruction::memset,
                 BasicInst::Nop => unreachable!("internal error: a nop instruction was not removed"),
             };
 

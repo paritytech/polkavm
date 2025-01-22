@@ -9,7 +9,8 @@ use polkavm_common::{
     utils::{align_to_next_page_usize, slice_assume_init_mut},
     zygote::{
         AddressTable, AddressTablePacked, ExtTable, ExtTablePacked, VmCtx, VmFd, VmMap, VMCTX_FUTEX_BUSY, VMCTX_FUTEX_GUEST_ECALLI,
-        VMCTX_FUTEX_GUEST_SIGNAL, VMCTX_FUTEX_GUEST_STEP, VMCTX_FUTEX_GUEST_TRAP, VMCTX_FUTEX_IDLE, VM_ADDR_NATIVE_CODE,
+        VMCTX_FUTEX_GUEST_NOT_ENOUGH_GAS, VMCTX_FUTEX_GUEST_SIGNAL, VMCTX_FUTEX_GUEST_STEP, VMCTX_FUTEX_GUEST_TRAP, VMCTX_FUTEX_IDLE,
+        VM_ADDR_NATIVE_CODE,
     },
 };
 
@@ -991,6 +992,7 @@ pub struct Sandbox {
     state: SandboxState,
     is_program_counter_valid: bool,
     next_program_counter: Option<ProgramCounter>,
+    next_program_counter_changed: bool,
     pending_pagefault: Option<Pagefault>,
     page_set: PageSet,
     dynamic_paging_enabled: bool,
@@ -1596,6 +1598,7 @@ impl super::Sandbox for Sandbox {
             state: SandboxState::Idle,
             is_program_counter_valid: false,
             next_program_counter: None,
+            next_program_counter_changed: true,
             pending_pagefault: None,
             page_set: PageSet::new(),
             dynamic_paging_enabled: false,
@@ -1759,10 +1762,16 @@ impl super::Sandbox for Sandbox {
             return Err(Error::from_str("no module loaded into the sandbox"));
         };
 
-        if let Some(pc) = self.next_program_counter.take() {
-            if self.pending_pagefault.take().is_some() {
-                self.cancel_pagefault()?;
-            }
+        if self.pending_pagefault.take().is_some() {
+            self.cancel_pagefault()?;
+        }
+
+        if self.next_program_counter_changed {
+            let Some(pc) = self.next_program_counter.take() else {
+                panic!("failed to run: next program counter is not set");
+            };
+
+            self.next_program_counter_changed = false;
 
             let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
             let Some(address) = compiled_module.lookup_native_code_address(pc) else {
@@ -1894,6 +1903,7 @@ impl super::Sandbox for Sandbox {
     fn set_next_program_counter(&mut self, pc: ProgramCounter) {
         self.is_program_counter_valid = false;
         self.next_program_counter = Some(pc);
+        self.next_program_counter_changed = true;
     }
 
     fn next_native_program_counter(&self) -> Option<usize> {
@@ -2250,61 +2260,31 @@ impl Sandbox {
                     }
                 }
 
-                let address = self.vmctx().next_native_program_counter.load(Ordering::Relaxed);
-                let gas = self.vmctx().gas.load(Ordering::Relaxed);
-                if gas < 0 {
-                    // Read the gas cost from the machine code.
-                    let gas_metering_trap_offset = match compiled_module.bitness {
-                        Bitness::B32 => crate::compiler::ArchVisitor::<Self, B32>::GAS_METERING_TRAP_OFFSET,
-                        Bitness::B64 => crate::compiler::ArchVisitor::<Self, B64>::GAS_METERING_TRAP_OFFSET,
-                    };
+                let machine_code_address = self.vmctx().rip.load(Ordering::Relaxed);
+                let Some(machine_code_offset) = machine_code_address.checked_sub(compiled_module.native_code_origin) else {
+                    return Err(Error::from_str("internal error: address underflow after a trap"));
+                };
 
-                    let Some(offset) = address.checked_sub(compiled_module.native_code_origin + gas_metering_trap_offset) else {
-                        return Err(Error::from_str("internal error: address underflow after a trap"));
-                    };
+                let is_out_of_gas = match compiled_module.bitness {
+                    Bitness::B32 => crate::compiler::ArchVisitor::<Self, B32>::on_signal_trap(
+                        compiled_module,
+                        self.gas_metering.is_some(),
+                        machine_code_offset,
+                        self.vmctx(),
+                    ),
+                    Bitness::B64 => crate::compiler::ArchVisitor::<Self, B64>::on_signal_trap(
+                        compiled_module,
+                        self.gas_metering.is_some(),
+                        machine_code_offset,
+                        self.vmctx(),
+                    ),
+                }
+                .map_err(Error::from_str)?;
 
-                    self.vmctx()
-                        .next_native_program_counter
-                        .store(compiled_module.native_code_origin + offset, Ordering::Relaxed);
-
-                    let Some(program_counter) = compiled_module.program_counter_by_native_code_address(address, false) else {
-                        return Err(Error::from_str("internal error: failed to find the program counter based on the native program counter when running out of gas"));
-                    };
-
-                    let gas_cost_offset = match compiled_module.bitness {
-                        Bitness::B32 => crate::compiler::ArchVisitor::<Self, B32>::GAS_COST_OFFSET,
-                        Bitness::B64 => crate::compiler::ArchVisitor::<Self, B64>::GAS_COST_OFFSET,
-                    };
-
-                    let offset = offset as usize + gas_cost_offset;
-                    let Some(gas_cost) = &compiled_module.machine_code().get(offset..offset + 4) else {
-                        return Err(Error::from_str(
-                            "internal error: failed to read back the gas cost from the machine code",
-                        ));
-                    };
-
-                    let gas_cost = u32::from_le_bytes([gas_cost[0], gas_cost[1], gas_cost[2], gas_cost[3]]);
-                    let gas = self.vmctx().gas.fetch_add(i64::from(gas_cost), Ordering::Relaxed);
-                    log::trace!(
-                        "Out of gas; program counter = {program_counter}, reverting gas: {gas} -> {new_gas} (gas cost: {gas_cost})",
-                        new_gas = gas + i64::from(gas_cost)
-                    );
-
-                    self.is_program_counter_valid = true;
-                    self.vmctx().program_counter.store(program_counter.0, Ordering::Relaxed);
-                    self.vmctx().next_program_counter.store(program_counter.0, Ordering::Relaxed);
-
+                self.is_program_counter_valid = true;
+                if is_out_of_gas {
                     return Ok(Interrupt::NotEnoughGas);
                 } else {
-                    let Some(program_counter) = compiled_module.program_counter_by_native_code_address(address, false) else {
-                        log::error!("Failed to find the program counter based on the native program counter: {address:x}");
-                        return Err(Error::from_str("internal error: failed to find the program counter based on the native program counter after receiving a signal"));
-                    };
-
-                    self.is_program_counter_valid = true;
-                    self.vmctx().program_counter.store(program_counter.0, Ordering::Relaxed);
-                    self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
-
                     return Ok(Interrupt::Trap);
                 }
             }
@@ -2318,6 +2298,11 @@ impl Sandbox {
             if state == VMCTX_FUTEX_GUEST_TRAP {
                 core::sync::atomic::fence(Ordering::Acquire);
                 return Ok(Interrupt::Trap);
+            }
+
+            if state == VMCTX_FUTEX_GUEST_NOT_ENOUGH_GAS {
+                core::sync::atomic::fence(Ordering::Acquire);
+                return Ok(Interrupt::NotEnoughGas);
             }
 
             if state == VMCTX_FUTEX_GUEST_STEP {
@@ -2409,8 +2394,33 @@ impl Sandbox {
                                 return Err(Error::from_str("internal error: unexpected child status"));
                             }
 
-                            self.download_registers()?;
+                            let machine_code_address = self.download_registers()?;
+                            log::trace!("Child #{}: pagefault: rip=0x{machine_code_address:x}", self.child.pid);
 
+                            let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
+                            let Some(machine_code_offset) = machine_code_address.checked_sub(compiled_module.native_code_origin) else {
+                                return Err(Error::from_str("internal error: address underflow after a segfault"));
+                            };
+
+                            match compiled_module.bitness {
+                                Bitness::B32 => crate::compiler::ArchVisitor::<Self, B32>::on_page_fault(
+                                    compiled_module,
+                                    self.gas_metering.is_some(),
+                                    machine_code_address,
+                                    machine_code_offset,
+                                    self.vmctx(),
+                                ),
+                                Bitness::B64 => crate::compiler::ArchVisitor::<Self, B64>::on_page_fault(
+                                    compiled_module,
+                                    self.gas_metering.is_some(),
+                                    machine_code_address,
+                                    machine_code_offset,
+                                    self.vmctx(),
+                                ),
+                            }
+                            .map_err(Error::from_str)?;
+
+                            self.is_program_counter_valid = true;
                             return Ok(Interrupt::Segfault(Segfault {
                                 page_address: address as u32,
                                 page_size: get_native_page_size() as u32,
@@ -2477,44 +2487,36 @@ impl Sandbox {
         }
     }
 
-    fn download_registers(&mut self) -> Result<(), Error> {
+    #[inline]
+    fn get_register(reg: polkavm_common::regmap::NativeReg, regs: &mut linux_raw::user_regs_struct) -> &mut u64 {
+        use polkavm_common::regmap::NativeReg::*;
+
+        match reg {
+            rax => &mut regs.rax,
+            rcx => &mut regs.rcx,
+            rdx => &mut regs.rdx,
+            rbx => &mut regs.rbx,
+            rbp => &mut regs.rbp,
+            rsi => &mut regs.rsi,
+            rdi => &mut regs.rdi,
+            r8 => &mut regs.r8,
+            r9 => &mut regs.r9,
+            r10 => &mut regs.r10,
+            r11 => &mut regs.r11,
+            r12 => &mut regs.r12,
+            r13 => &mut regs.r13,
+            r14 => &mut regs.r14,
+            r15 => &mut regs.r15,
+        }
+    }
+
+    fn download_registers(&mut self) -> Result<u64, Error> {
         use crate::sandbox::Sandbox;
 
+        let mut regs = linux_raw::sys_ptrace_getregs(self.child.pid)?;
         let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
-        let regs = linux_raw::sys_ptrace_getregs(self.child.pid)?;
-        let Some(program_counter) = compiled_module.program_counter_by_native_code_address(regs.rip, false) else {
-            return Err(Error::from_str(
-                "internal error: failed to find the program counter based on the native code address",
-            ));
-        };
-
-        self.is_program_counter_valid = true;
-        self.vmctx().program_counter.store(program_counter.0, Ordering::Relaxed);
-        self.vmctx().next_program_counter.store(program_counter.0, Ordering::Relaxed);
-        self.vmctx().next_native_program_counter.store(regs.rip, Ordering::Relaxed);
-
         for reg in Reg::ALL {
-            use polkavm_common::regmap::NativeReg::*;
-
-            #[deny(unreachable_patterns)]
-            let mut value = match polkavm_common::regmap::to_native_reg(reg) {
-                rax => regs.rax,
-                rcx => regs.rcx,
-                rdx => regs.rdx,
-                rbx => regs.rbx,
-                rbp => regs.rbp,
-                rsi => regs.rsi,
-                rdi => regs.rdi,
-                r8 => regs.r8,
-                r9 => regs.r9,
-                r10 => regs.r10,
-                r11 => regs.r11,
-                r12 => regs.r12,
-                r13 => regs.r13,
-                r14 => regs.r14,
-                r15 => regs.r15,
-            };
-
+            let mut value = *Self::get_register(polkavm_common::regmap::to_native_reg(reg), &mut regs);
             if compiled_module.bitness == Bitness::B32 {
                 value &= 0xffffffff;
             }
@@ -2522,35 +2524,22 @@ impl Sandbox {
             self.vmctx().regs[reg as usize].store(value, Ordering::Relaxed);
         }
 
-        Ok(())
+        self.vmctx()
+            .tmp_reg
+            .store(*Self::get_register(polkavm_common::regmap::TMP_REG, &mut regs), Ordering::Relaxed);
+
+        Ok(regs.rip)
     }
 
     fn upload_registers(&mut self) -> Result<(), Error> {
         let mut regs = linux_raw::sys_ptrace_getregs(self.child.pid)?;
         for reg in Reg::ALL {
-            use polkavm_common::regmap::NativeReg::*;
-
-            #[deny(unreachable_patterns)]
-            let value = match polkavm_common::regmap::to_native_reg(reg) {
-                rax => &mut regs.rax,
-                rcx => &mut regs.rcx,
-                rdx => &mut regs.rdx,
-                rbx => &mut regs.rbx,
-                rbp => &mut regs.rbp,
-                rsi => &mut regs.rsi,
-                rdi => &mut regs.rdi,
-                r8 => &mut regs.r8,
-                r9 => &mut regs.r9,
-                r10 => &mut regs.r10,
-                r11 => &mut regs.r11,
-                r12 => &mut regs.r12,
-                r13 => &mut regs.r13,
-                r14 => &mut regs.r14,
-                r15 => &mut regs.r15,
-            };
-
-            *value = self.vmctx().regs[reg as usize].load(Ordering::Relaxed);
+            *Self::get_register(polkavm_common::regmap::to_native_reg(reg), &mut regs) =
+                self.vmctx().regs[reg as usize].load(Ordering::Relaxed);
         }
+
+        regs.rip = self.vmctx().next_native_program_counter.load(Ordering::Relaxed);
+        *Self::get_register(polkavm_common::regmap::TMP_REG, &mut regs) = self.vmctx().tmp_reg.load(Ordering::Relaxed);
 
         linux_raw::sys_ptrace_setregs(self.child.pid, &regs)?;
 

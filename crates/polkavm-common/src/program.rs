@@ -1424,6 +1424,7 @@ define_opcodes! {
     [
         [I_64, I_32] trap                                     = 0,
         [I_64, I_32] fallthrough                              = 1,
+        [I_64, I_32] memset                                   = 2,
     ]
 
     // Instructions with args: reg, imm
@@ -1851,6 +1852,10 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
         write!(self, "{d} = sbrk {s}")
+    }
+
+    fn memset(&mut self) -> Self::ReturnTy {
+        write!(self, "[a0..a0 + a2] = u8 a1")
     }
 
     fn ecalli(&mut self, nth_import: u32) -> Self::ReturnTy {

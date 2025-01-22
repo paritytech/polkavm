@@ -61,6 +61,7 @@ define_address_table! {
     syscall_return: unsafe extern "C" fn() -> !,
     syscall_step: unsafe extern "C" fn() -> !,
     syscall_sbrk: unsafe extern "C" fn(u64) -> u32,
+    syscall_not_enough_gas: unsafe extern "C" fn() -> !,
 }
 
 define_address_table! {
@@ -265,6 +266,9 @@ pub struct VmCtx {
     pub arg2: AtomicU32,
     pub arg3: AtomicU32,
 
+    pub tmp_reg: AtomicU64,
+    pub rip: AtomicU64,
+
     /// Offset in shared memory to this sandbox's memory map.
     pub shm_memory_map_offset: AtomicU64,
     /// Number of maps to map.
@@ -329,6 +333,9 @@ pub const VMCTX_FUTEX_GUEST_SIGNAL: u32 = VMCTX_FUTEX_IDLE | (3 << 1);
 /// The VM has went through a single instruction is idle.
 pub const VMCTX_FUTEX_GUEST_STEP: u32 = VMCTX_FUTEX_IDLE | (4 << 1);
 
+/// The VM gas ran out of gas.
+pub const VMCTX_FUTEX_GUEST_NOT_ENOUGH_GAS: u32 = VMCTX_FUTEX_IDLE | (5 << 1);
+
 #[allow(clippy::declare_interior_mutable_const)]
 const ATOMIC_U64_ZERO: AtomicU64 = AtomicU64::new(0);
 
@@ -346,6 +353,8 @@ impl VmCtx {
             arg: AtomicU32::new(0),
             arg2: AtomicU32::new(0),
             arg3: AtomicU32::new(0),
+            tmp_reg: AtomicU64::new(0),
+            rip: AtomicU64::new(0),
             regs: [ATOMIC_U64_ZERO; REG_COUNT],
             jump_into: AtomicU64::new(0),
             next_native_program_counter: AtomicU64::new(0),

@@ -2660,6 +2660,220 @@ fn trapping_preserves_all_registers_segfault(config: Config) {
     }
 }
 
+fn memset_basic(config: Config) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new();
+    builder.set_ro_data_size(1);
+    builder.set_rw_data_size(1);
+    builder.set_ro_data(vec![0x00]);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::memset(), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let mut module_config = ModuleConfig::default();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let offsets: Vec<_> = module
+        .blob()
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.offset)
+        .collect();
+
+    let memory_map = module.memory_map();
+    let linker: Linker = Linker::new();
+    let instance_pre = linker.instantiate_pre(&module).unwrap();
+    let mut instance = instance_pre.instantiate().unwrap();
+
+    instance.set_gas(100);
+
+    // Write near the start of RW data.
+    instance
+        .call_typed(&mut (), "main", (memory_map.rw_data_address() + 1, 0x1234567a, 3))
+        .unwrap();
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_address(), 5).unwrap(),
+        vec![0, 0x7a, 0x7a, 0x7a, 0]
+    );
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_address() + 4)); // Pointer is incremented.
+    assert_eq!(instance.reg(Reg::A1), 0x1234567a); // Value is unchanged.
+    assert_eq!(instance.reg(Reg::A2), 0); // Count is zeroed.
+
+    // Write at the end of RW data.
+    instance
+        .call_typed(&mut (), "main", (memory_map.rw_data_range().end - 3, 0x1234567b, 3))
+        .unwrap();
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_range().end - 4, 4).unwrap(),
+        vec![0, 0x7b, 0x7b, 0x7b]
+    );
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_range().end)); // Pointer is at the end.
+    assert_eq!(instance.reg(Reg::A1), 0x1234567b); // Value is unchanged.
+    assert_eq!(instance.reg(Reg::A2), 0); // Count is zeroed.
+
+    // Write going out of bounds (partial write).
+    instance.set_gas(100);
+    assert!(matches!(
+        instance
+            .call_typed(&mut (), "main", (memory_map.rw_data_range().end - 3, 0x1234567c, 10))
+            .unwrap_err(),
+        CallError::Trap
+    ));
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_range().end)); // Pointer is at the end.
+    assert_eq!(instance.reg(Reg::A1), 0x1234567c); // Value is unchanged.
+    assert_eq!(instance.reg(Reg::A2), 7); // Count is partially decremented.
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_range().end - 4, 4).unwrap(),
+        vec![0, 0x7c, 0x7c, 0x7c]
+    );
+    assert_eq!(instance.gas(), 95);
+
+    // Write out of bounds (empty write).
+    assert!(matches!(
+        instance
+            .call_typed(&mut (), "main", (memory_map.rw_data_range().end + 2, 0x1234567d, 10))
+            .unwrap_err(),
+        CallError::Trap
+    ));
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_range().end + 2)); // Pointer is unchanged.
+    assert_eq!(instance.reg(Reg::A1), 0x1234567d); // Value is unchanged.
+    assert_eq!(instance.reg(Reg::A2), 10); // Count is unchanged.
+
+    // Gas-limited write.
+    instance.zero_memory(memory_map.rw_data_address(), 10).unwrap();
+    instance.set_gas(5);
+    assert!(matches!(
+        instance
+            .call_typed(&mut (), "main", (memory_map.rw_data_address(), 0x1234567e, 100))
+            .unwrap_err(),
+        CallError::NotEnoughGas
+    ));
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_address()) + 3); // Pointer is at the end.
+    assert_eq!(instance.reg(Reg::A1), 0x1234567e); // Value is unchanged.
+    assert_eq!(instance.reg(Reg::A2), 97); // Count is partially decremented.
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_address(), 5).unwrap(),
+        vec![0x7e, 0x7e, 0x7e, 0, 0]
+    );
+    assert_eq!(instance.program_counter(), Some(offsets[0]));
+    assert_eq!(instance.next_program_counter(), Some(offsets[0]));
+
+    // Continue gas-limited write.
+    instance.set_gas(1);
+    instance.set_reg(Reg::A1, 0x1234567f);
+    assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_address()) + 4); // Pointer is at the end.
+    assert_eq!(instance.reg(Reg::A1), 0x1234567f); // Value is unchanged.
+    assert_eq!(instance.reg(Reg::A2), 96); // Count is partially decremented.
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_address(), 5).unwrap(),
+        vec![0x7e, 0x7e, 0x7e, 0x7f, 0]
+    );
+    assert_eq!(instance.program_counter(), Some(offsets[0]));
+    assert_eq!(instance.next_program_counter(), Some(offsets[0]));
+
+    // Write out of bounds during a gas-limited write.
+    instance.set_gas(50);
+    assert!(matches!(
+        instance
+            .call_typed(&mut (), "main", (memory_map.rw_data_range().end - 3, 0x12345680, 100))
+            .unwrap_err(),
+        CallError::Trap
+    ));
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_range().end)); // Pointer is at the end.
+    assert_eq!(instance.reg(Reg::A1), 0x12345680); // Value is unchanged.
+    assert_eq!(instance.reg(Reg::A2), 97); // Count is partially decremented.
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_range().end - 4, 4).unwrap(),
+        vec![0, 0x80, 0x80, 0x80]
+    );
+    assert_eq!(instance.gas(), 45);
+}
+
+fn memset_with_dynamic_paging(mut config: Config) {
+    let _ = env_logger::try_init();
+
+    config.set_allow_dynamic_paging(true);
+
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::memset(), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let page_size = get_native_page_size() as u32;
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_dynamic_paging(true);
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let offsets: Vec<_> = module
+        .blob()
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.offset)
+        .collect();
+
+    let memory_map = module.memory_map();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_gas(100);
+    instance.prepare_call_typed(offsets[0], (memory_map.rw_data_range().start, 0x1234567a, 3));
+    let segfault = expect_segfault(instance.run().unwrap());
+    assert_eq!(segfault.page_address, memory_map.rw_data_range().start);
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_range().start)); // Pointer is unchanged.
+    assert_eq!(instance.reg(Reg::A1), 0x1234567a); // Value is unchanged.
+    assert_eq!(instance.reg(Reg::A2), 3); // Count is unchanged.
+    assert_eq!(instance.program_counter(), Some(offsets[0]));
+    assert_eq!(instance.next_program_counter(), Some(offsets[0]));
+    assert_eq!(instance.gas(), 98);
+    instance.zero_memory(segfault.page_address, segfault.page_size).unwrap();
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_range().start + 3)); // Pointer is at the end.
+    assert_eq!(instance.reg(Reg::A1), 0x1234567a); // Value is unchanged.
+    assert_eq!(instance.reg(Reg::A2), 0); // Count is decremented.
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_range().start, 5).unwrap(),
+        vec![0x7a, 0x7a, 0x7a, 0, 0]
+    );
+    assert_eq!(instance.gas(), 95);
+
+    let mut instance = module.instantiate().unwrap();
+    instance.zero_memory(memory_map.rw_data_range().start, page_size).unwrap();
+    instance.set_gas(100);
+    instance.prepare_call_typed(offsets[0], (memory_map.rw_data_range().start + page_size - 1, 0x1234567a, 4));
+    let segfault = expect_segfault(instance.run().unwrap());
+    assert_eq!(segfault.page_address, memory_map.rw_data_range().start + page_size);
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_range().start + page_size)); // Pointer is incremented.
+    assert_eq!(instance.reg(Reg::A1), 0x1234567a); // Value is unchanged.
+    assert_eq!(instance.reg(Reg::A2), 3); // Count is decremented.
+    assert_eq!(instance.program_counter(), Some(offsets[0]));
+    assert_eq!(instance.next_program_counter(), Some(offsets[0]));
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_range().start + page_size - 2, 2).unwrap(),
+        vec![0, 0x7a]
+    );
+    assert_eq!(instance.gas(), 97);
+    // Change everything mid-flight.
+    instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_range().start + page_size + 1));
+    instance.set_reg(Reg::A1, 0x1234567b);
+    instance.set_reg(Reg::A2, 2);
+    instance
+        .zero_memory(memory_map.rw_data_range().start + page_size, page_size)
+        .unwrap();
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_range().start + page_size + 3)); // Pointer is incremented.
+    assert_eq!(instance.reg(Reg::A1), 0x1234567b); // Value is unchanged.
+    assert_eq!(instance.reg(Reg::A2), 0); // Count is decremented.
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_range().start + page_size - 2, 6).unwrap(),
+        vec![0, 0x7a, 0, 0x7b, 0x7b, 0]
+    );
+    assert_eq!(instance.gas(), 95);
+}
+
 fn test_basic_debug_info(raw_blob: &'static [u8]) {
     let _ = env_logger::try_init();
     let program = get_blob(raw_blob);
@@ -2906,6 +3120,9 @@ run_tests! {
 
     trapping_preserves_all_registers_normal_trap
     trapping_preserves_all_registers_segfault
+
+    memset_basic
+    memset_with_dynamic_paging
 
     spawn_stress_test
     module_cache
