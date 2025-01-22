@@ -960,7 +960,10 @@ impl RawInstance {
                 let crosscheck_program_counter = crosscheck.program_counter();
                 let crosscheck_next_program_counter = crosscheck.next_program_counter();
                 if self.module.gas_metering() != Some(GasMeteringKind::Async) {
-                    assert_eq!(self.gas(), crosscheck_gas);
+                    let gas = self.gas();
+                    if gas != crosscheck_gas {
+                        panic!("run: crosscheck mismatch for gas, interpreter = {crosscheck_gas}, backend = {gas}");
+                    }
                 }
 
                 assert_eq!(self.program_counter(), crosscheck_program_counter);
