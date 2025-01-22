@@ -667,6 +667,7 @@ impl InterpretedInstance {
 
             self.program_counter = program_counter;
             self.compiled_offset = self.resolve_arbitrary_jump::<DEBUG>(program_counter).unwrap_or(TARGET_OUT_OF_RANGE);
+            self.next_program_counter_changed = false;
 
             if DEBUG {
                 log::debug!("Starting execution at: {} [{}]", program_counter, self.compiled_offset);
