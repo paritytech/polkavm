@@ -484,6 +484,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "balances"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "simplealloc",
+]
+
+[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -646,8 +654,8 @@ dependencies = [
 name = "bootstrap"
 version = "0.1.0"
 dependencies = [
- "polkavm-derive 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
- "simplealloc 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
+ "polkavm-derive",
+ "simplealloc",
 ]
 
 [[package]]
@@ -1672,8 +1680,8 @@ dependencies = [
 name = "fib"
 version = "0.1.0"
 dependencies = [
- "polkavm-derive 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
- "simplealloc 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
+ "polkavm-derive",
+ "simplealloc",
 ]
 
 [[package]]
@@ -2722,8 +2730,8 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 name = "megatron"
 version = "0.1.0"
 dependencies = [
- "polkavm-derive 0.18.0",
- "simplealloc 0.18.0",
+ "polkavm-derive",
+ "simplealloc",
 ]
 
 [[package]]
@@ -3549,44 +3557,20 @@ checksum = "953ec861398dccce10c670dfeaf3ec4911ca479e9c02154b3a215178c5f566f2"
 
 [[package]]
 name = "polkavm-common"
-version = "0.18.0"
-
-[[package]]
-name = "polkavm-common"
-version = "0.18.0"
-source = "git+https://github.com/koute/polkavm?branch=master#8b9a836a244726dfba940aa0077b9208a2cc0c77"
+version = "0.20.0"
 
 [[package]]
 name = "polkavm-derive"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
- "polkavm-derive-impl-macro 0.18.0",
-]
-
-[[package]]
-name = "polkavm-derive"
-version = "0.18.0"
-source = "git+https://github.com/koute/polkavm?branch=master#8b9a836a244726dfba940aa0077b9208a2cc0c77"
-dependencies = [
- "polkavm-derive-impl-macro 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
+ "polkavm-derive-impl-macro",
 ]
 
 [[package]]
 name = "polkavm-derive-impl"
-version = "0.18.0"
-source = "git+https://github.com/koute/polkavm?branch=master#8b9a836a244726dfba940aa0077b9208a2cc0c77"
+version = "0.20.0"
 dependencies = [
- "polkavm-common 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
- "proc-macro2",
- "quote",
- "syn 2.0.90",
-]
-
-[[package]]
-name = "polkavm-derive-impl"
-version = "0.18.1"
-dependencies = [
- "polkavm-common 0.18.0",
+ "polkavm-common",
  "proc-macro2",
  "quote",
  "syn 2.0.90",
@@ -3594,18 +3578,9 @@ dependencies = [
 
 [[package]]
 name = "polkavm-derive-impl-macro"
-version = "0.18.0"
+version = "0.20.0"
 dependencies = [
- "polkavm-derive-impl 0.18.1",
- "syn 2.0.90",
-]
-
-[[package]]
-name = "polkavm-derive-impl-macro"
-version = "0.18.0"
-source = "git+https://github.com/koute/polkavm?branch=master#8b9a836a244726dfba940aa0077b9208a2cc0c77"
-dependencies = [
- "polkavm-derive-impl 0.18.0",
+ "polkavm-derive-impl",
  "syn 2.0.90",
 ]
 
@@ -4629,12 +4604,7 @@ dependencies = [
 
 [[package]]
 name = "simplealloc"
-version = "0.18.0"
-
-[[package]]
-name = "simplealloc"
-version = "0.18.0"
-source = "git+https://github.com/koute/polkavm?branch=master#8b9a836a244726dfba940aa0077b9208a2cc0c77"
+version = "0.20.0"
 
 [[package]]
 name = "size"
@@ -4682,8 +4652,8 @@ name = "sp1"
 version = "0.1.0"
 dependencies = [
  "bincode",
- "polkavm-derive 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
- "simplealloc 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
+ "polkavm-derive",
+ "simplealloc",
  "sp1-sdk",
 ]
 
@@ -5631,16 +5601,16 @@ dependencies = [
 name = "transfer"
 version = "0.1.0"
 dependencies = [
- "polkavm-derive 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
- "simplealloc 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
+ "polkavm-derive",
+ "simplealloc",
 ]
 
 [[package]]
 name = "tribonacci"
 version = "0.1.0"
 dependencies = [
- "polkavm-derive 0.18.0",
- "simplealloc 0.18.0",
+ "polkavm-derive",
+ "simplealloc",
 ]
 
 [[package]]
