@@ -1462,9 +1462,9 @@ where
                 self.push(push(rax));
                 self.push(push(rdx));
                 match (s1 == rax, s2 == rax) {
-                    (true, true) => self.push(imul_dx_ax(RegSize::R64, rax)),
-                    (false, true) => self.push(imul_dx_ax(RegSize::R64, s1)),
-                    (true, false) => self.push(imul_dx_ax(RegSize::R64, s2)),
+                    (true, true) => self.push(mul_dx_ax(RegSize::R64, rax)),
+                    (false, true) => self.push(mul_dx_ax(RegSize::R64, s1)),
+                    (true, false) => self.push(mul_dx_ax(RegSize::R64, s2)),
                     (false, false) => {
                         self.push(mov(RegSize::R64, rax, s1));
                         self.push(mul(RegSize::R64, s2));
