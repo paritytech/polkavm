@@ -670,8 +670,8 @@ dependencies = [
 name = "bootstrap"
 version = "0.1.0"
 dependencies = [
- "polkavm-derive 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
- "simplealloc 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
+ "polkavm-derive",
+ "simplealloc",
 ]
 
 [[package]]
@@ -1518,8 +1518,8 @@ dependencies = [
 name = "fib"
 version = "0.1.0"
 dependencies = [
- "polkavm-derive 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
- "simplealloc 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
+ "polkavm-derive",
+ "simplealloc",
 ]
 
 [[package]]
@@ -3457,7 +3457,7 @@ dependencies = [
  "env_logger",
  "iced-x86",
  "polkavm",
- "polkavm-common 0.18.0",
+ "polkavm-common",
  "polkavm-disassembler",
  "polkavm-linker",
  "tikv-jemallocator",
@@ -3473,7 +3473,7 @@ dependencies = [
  "log",
  "paste",
  "polkavm-assembler",
- "polkavm-common 0.18.0",
+ "polkavm-common",
  "polkavm-linker",
  "polkavm-linux-raw",
  "ruzstd",
@@ -3499,23 +3499,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "polkavm-common"
-version = "0.18.0"
-source = "git+https://github.com/koute/polkavm?branch=master#8b9a836a244726dfba940aa0077b9208a2cc0c77"
-
-[[package]]
 name = "polkavm-derive"
 version = "0.23.0"
 dependencies = [
- "polkavm-derive-impl-macro 0.18.0",
-]
-
-[[package]]
-name = "polkavm-derive"
-version = "0.18.0"
-source = "git+https://github.com/koute/polkavm?branch=master#8b9a836a244726dfba940aa0077b9208a2cc0c77"
-dependencies = [
- "polkavm-derive-impl-macro 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
+ "polkavm-derive-impl-macro",
 ]
 
 [[package]]
@@ -3553,7 +3540,7 @@ dependencies = [
  "clap",
  "iced-x86",
  "polkavm",
- "polkavm-common 0.18.0",
+ "polkavm-common",
  "polkavm-linker",
  "ruzstd",
 ]
@@ -3570,7 +3557,7 @@ dependencies = [
  "log",
  "object 0.36.1",
  "polkavm",
- "polkavm-common 0.18.0",
+ "polkavm-common",
  "polkavm-disassembler",
  "proptest",
  "regalloc2",
@@ -4596,11 +4583,6 @@ name = "simplealloc"
 version = "0.23.0"
 
 [[package]]
-name = "simplealloc"
-version = "0.18.0"
-source = "git+https://github.com/koute/polkavm?branch=master#8b9a836a244726dfba940aa0077b9208a2cc0c77"
-
-[[package]]
 name = "size"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4652,8 +4634,8 @@ name = "sp1"
 version = "0.1.0"
 dependencies = [
  "bincode",
- "polkavm-derive 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
- "simplealloc 0.18.0 (git+https://github.com/koute/polkavm?branch=master)",
+ "polkavm-derive",
+ "simplealloc",
  "sp1-sdk",
 ]
 
@@ -5053,7 +5035,7 @@ dependencies = [
  "clap",
  "env_logger",
  "polkavm",
- "polkavm-common 0.18.0",
+ "polkavm-common",
  "polkavm-disassembler",
  "polkavm-linker",
  "serde",

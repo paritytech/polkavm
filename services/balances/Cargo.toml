@@ -1,13 +1,13 @@
 cargo-features = ["edition2024"]
 
 [package]
-name = "bootstrap"
+name = "balances"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [lib]
-name = "bootstrap"
+name = "balances"
 path = "src/main.rs"
 crate-type = ["staticlib", "rlib"]
 
