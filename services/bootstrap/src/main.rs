@@ -3,7 +3,6 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
 use simplealloc::SimpleAlloc;
 
 #[global_allocator]
@@ -23,6 +22,9 @@ extern "C" {
 
     #[polkavm_import(index = 9)]
     pub fn new(o: u64, l: u64, g: u64, m: u64) -> u64;
+
+    #[polkavm_import(index = 11)]
+    pub fn transfer(d: u64, a: u64, g: u64, out: u64) -> u64;
 }
 
 #[polkavm_derive::polkavm_export]
@@ -61,9 +63,16 @@ extern "C" fn accumulate() -> u64 {
     let omega_9: u64 = 0xFEFDE004; // 2^32 − 2*ZZ − ZI − P (s) + 4 (Writable address), new service index u32
     let omega_10: u64 = 4;
     // write: create service host call
-    let result = unsafe { write(omega_7, omega_8, omega_9, omega_10) };
-    omega_7 = result;
-    result
+    unsafe { write(omega_7, omega_8, omega_9, omega_10) };
+
+    // transfer some token to the new service
+
+    let mut omega_7 = result;
+    let omega_8: u64 = 9999999;
+    let omega_9: u64 = 100;  // g -  the minimum gas
+    let omega_10: u64 = 0xFEFDE000; // memo start address
+    unsafe { transfer(omega_7, omega_8, omega_9, omega_10) };
+    0
 }
 
 #[polkavm_derive::polkavm_export]

@@ -12,7 +12,7 @@ path = "src/main.rs"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-polkavm-derive = { git = "https://github.com/koute/polkavm", package = "polkavm-derive", branch = "master" }
-simplealloc = { git = "https://github.com/koute/polkavm", package = "simplealloc", branch = "master" }
+polkavm-derive = { path = "../../crates/polkavm-derive" }
+simplealloc = { path = "../../crates/simplealloc" }
 sp1-sdk = "3.0"
 bincode = "1.3"
