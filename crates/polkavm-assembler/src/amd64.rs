@@ -1013,6 +1013,13 @@ pub mod addr {
         }
     }
 
+    impl From<(RegSize, MemOp, RegIndex)> for Operands {
+        #[inline]
+        fn from((reg_size, dst, src): (RegSize, MemOp, RegIndex)) -> Self {
+            Self::RegMem_Reg(reg_size.into(), RegMem::Mem(dst), src.into())
+        }
+    }
+
     impl From<(RegSize, Reg, MemOp)> for Operands {
         #[inline]
         fn from((reg_size, dst, src): (RegSize, Reg, MemOp)) -> Self {
