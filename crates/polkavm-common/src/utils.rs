@@ -334,7 +334,7 @@ pub fn parse_immediate(text: &str) -> Option<ParsedImmediate> {
         return Some(ParsedImmediate::U64(value));
     }
 
-    if value <= 0xffffffff || cast(cast(value).truncate_to_u32()).to_u64_sign_extend() == value {
+    if value <= u32::max_value().into() || cast(cast(value).truncate_to_u32()).to_u64_sign_extend() == value {
         Some(ParsedImmediate::U32(cast(value).truncate_to_u32()))
     } else {
         Some(ParsedImmediate::U64(value))
