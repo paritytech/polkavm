@@ -334,7 +334,7 @@ pub fn parse_immediate(text: &str) -> Option<ParsedImmediate> {
         return Some(ParsedImmediate::U64(value));
     }
 
-    if value < 0x7fffffff || cast(cast(value).truncate_to_u32()).to_u64_sign_extend() == value {
+    if value <= 0xffffffff || cast(cast(value).truncate_to_u32()).to_u64_sign_extend() == value {
         Some(ParsedImmediate::U32(cast(value).truncate_to_u32()))
     } else {
         Some(ParsedImmediate::U64(value))
@@ -344,9 +344,10 @@ pub fn parse_immediate(text: &str) -> Option<ParsedImmediate> {
 #[test]
 fn test_parse_immediate() {
     // "special cases"
-    assert_eq!(parse_immediate("0xffffffff"), Some(ParsedImmediate::U64(0xffffffff)));
+    assert_eq!(parse_immediate("0xffffffff"), Some(ParsedImmediate::U32(0xffffffff)));
     assert_eq!(parse_immediate("0xffffffff87654321"), Some(ParsedImmediate::U32(0x87654321)));
-    assert_eq!(parse_immediate("0x80000075"), Some(ParsedImmediate::U64(0x80000075)));
+    assert_eq!(parse_immediate("0x80000075"), Some(ParsedImmediate::U32(0x80000075)));
+
     // "normal cases"
     assert_eq!(parse_immediate("0x1234"), Some(ParsedImmediate::U32(0x1234)));
     assert_eq!(parse_immediate("0x12345678"), Some(ParsedImmediate::U32(0x12345678)));
@@ -354,13 +355,13 @@ fn test_parse_immediate() {
     assert_eq!(parse_immediate("-1"), Some(ParsedImmediate::U32(0xffffffff)));
     assert_eq!(parse_immediate("-2"), Some(ParsedImmediate::U32(0xfffffffe)));
     assert_eq!(parse_immediate("i64 0xffffffff"), Some(ParsedImmediate::U64(0xffffffff)));
-    assert_eq!(parse_immediate("0xdeadbeef"), Some(ParsedImmediate::U64(0xdeadbeef)));
+    assert_eq!(parse_immediate("0xdeadbeef"), Some(ParsedImmediate::U32(0xdeadbeef)));
     assert_eq!(
         parse_immediate("0xffffffff00000000"),
         Some(ParsedImmediate::U64(0xffffffff00000000))
     );
-    assert_eq!(parse_immediate("0xf000000e").map(Into::into), Some(0xf000000eu64));
-    assert_eq!(parse_immediate("0x80000075").and_then(|imm| imm.try_into().ok()), None::<u32>);
+    assert_eq!(parse_immediate("0xf000000e").map(Into::into), Some(0xfffffffff000000e_u64));
+    assert_eq!(parse_immediate("0x80000075").and_then(|imm| imm.try_into().ok()), Some(0x80000075_u32));
 }
 
 pub fn parse_reg(text: &str) -> Option<Reg> {
