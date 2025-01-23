@@ -450,6 +450,56 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                     }
                 }
 
+                if let Some(index) = rhs.find("clz ") {
+                    if let Some(src) = parse_reg(rhs[index + 4..].trim()) {
+                        match op_marker {
+                            OpMarker::I32 => {
+                                emit_and_continue!(Instruction::count_leading_zero_bits_32(dst.into(), src.into()));
+                            }
+                            OpMarker::NONE => {
+                                emit_and_continue!(Instruction::count_leading_zero_bits_64(dst.into(), src.into()));
+                            }
+                        }
+                    }
+                }
+
+                if let Some(index) = rhs.find("ctz ") {
+                    if let Some(src) = parse_reg(rhs[index + 4..].trim()) {
+                        match op_marker {
+                            OpMarker::I32 => {
+                                emit_and_continue!(Instruction::count_trailing_zero_bits_32(dst.into(), src.into()));
+                            }
+                            OpMarker::NONE => {
+                                emit_and_continue!(Instruction::count_trailing_zero_bits_64(dst.into(), src.into()));
+                            }
+                        }
+                    }
+                }
+
+                if let Some(index) = rhs.find("sext.b ") {
+                    if let Some(src) = parse_reg(rhs[index + 7..].trim()) {
+                        emit_and_continue!(Instruction::sign_extend_8(dst.into(), src.into()));
+                    }
+                }
+
+                if let Some(index) = rhs.find("sext.h ") {
+                    if let Some(src) = parse_reg(rhs[index + 7..].trim()) {
+                        emit_and_continue!(Instruction::sign_extend_16(dst.into(), src.into()));
+                    }
+                }
+
+                if let Some(index) = rhs.find("zext.h ") {
+                    if let Some(src) = parse_reg(rhs[index + 7..].trim()) {
+                        emit_and_continue!(Instruction::zero_extend_16(dst.into(), src.into()));
+                    }
+                }
+
+                if let Some(index) = rhs.find("reverse ") {
+                    if let Some(src) = parse_reg(rhs[index + 8..].trim()) {
+                        emit_and_continue!(Instruction::reverse_byte(dst.into(), src.into()));
+                    }
+                }
+
                 if let Some(src) = parse_reg(rhs) {
                     emit_and_continue!(Instruction::move_reg(dst.into(), src.into()));
                 }
