@@ -361,7 +361,10 @@ fn test_parse_immediate() {
         Some(ParsedImmediate::U64(0xffffffff00000000))
     );
     assert_eq!(parse_immediate("0xf000000e").map(Into::into), Some(0xfffffffff000000e_u64));
-    assert_eq!(parse_immediate("0x80000075").and_then(|imm| imm.try_into().ok()), Some(0x80000075_u32));
+    assert_eq!(
+        parse_immediate("0x80000075").and_then(|imm| imm.try_into().ok()),
+        Some(0x80000075_u32)
+    );
 }
 
 pub fn parse_reg(text: &str) -> Option<Reg> {
