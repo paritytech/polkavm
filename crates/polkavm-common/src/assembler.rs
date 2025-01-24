@@ -658,11 +658,10 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                         Op::RotateRight => Instruction::rotate_right_32(dst, src1, src2),
                                         Op::AndInverted => {
                                             return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
-                                        },
+                                        }
                                         Op::OrInverted => {
                                             return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
                                         }
-
                                     });
                                 }
                                 OpMarker::NONE => {
@@ -736,13 +735,17 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                         Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_32(dst, src1, src2),
                                         Op::RotateLeft => {
                                             return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
-                                        },
+                                        }
                                         Op::RotateRight => Instruction::rotate_right_imm_32(dst, src1, src2),
                                         Op::AndInverted => {
-                                            return Err(format!("cannot parse line {nth_line}: i32 and and_inverted not supported for immediates"));
-                                        },
+                                            return Err(format!(
+                                                "cannot parse line {nth_line}: i32 and and_inverted not supported for immediates"
+                                            ));
+                                        }
                                         Op::OrInverted => {
-                                            return Err(format!("cannot parse line {nth_line}: i32 and or_inverted not supported for immediates"));
+                                            return Err(format!(
+                                                "cannot parse line {nth_line}: i32 and or_inverted not supported for immediates"
+                                            ));
                                         }
                                     });
                                 }
@@ -769,11 +772,11 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                         Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_64(dst, src1, src2),
                                         Op::RotateLeft => {
                                             return Err(format!("cannot parse line {nth_line}: rotate_left not supported for immediates"));
-                                        },
+                                        }
                                         Op::RotateRight => Instruction::rotate_right_imm_64(dst, src1, src2),
                                         Op::AndInverted => {
                                             return Err(format!("cannot parse line {nth_line}: and_inverted not supported for immediates"));
-                                        },
+                                        }
                                         Op::OrInverted => {
                                             return Err(format!("cannot parse line {nth_line}: or_inverted not supported for immediates"));
                                         }
@@ -826,14 +829,20 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                         Op::ShiftRight => Instruction::shift_logical_right_imm_alt_32(dst, src2, src1),
                                         Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
                                         Op::RotateLeft => {
-                                            return Err(format!("cannot parse line {nth_line}: i32 and rotate_left is not supported for immediates"));
-                                        },
+                                            return Err(format!(
+                                                "cannot parse line {nth_line}: i32 and rotate_left is not supported for immediates"
+                                            ));
+                                        }
                                         Op::RotateRight => Instruction::rotate_right_imm_alt_32(dst, src2, src1),
                                         Op::AndInverted => {
-                                            return Err(format!("cannot parse line {nth_line}: i32 and and_inverted not supported for operation"));
-                                        },
+                                            return Err(format!(
+                                                "cannot parse line {nth_line}: i32 and and_inverted not supported for operation"
+                                            ));
+                                        }
                                         Op::OrInverted => {
-                                            return Err(format!("cannot parse line {nth_line}: i32 and or_inverted not supported for operation"));
+                                            return Err(format!(
+                                                "cannot parse line {nth_line}: i32 and or_inverted not supported for operation"
+                                            ));
                                         }
                                     });
                                 }
@@ -860,11 +869,11 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                         Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_alt_64(dst, src2, src1),
                                         Op::RotateLeft => {
                                             return Err(format!("cannot parse line {nth_line}: i64 not supported for operation"));
-                                        },
+                                        }
                                         Op::RotateRight => Instruction::rotate_right_imm_alt_64(dst, src2, src1),
                                         Op::AndInverted => {
                                             return Err(format!("cannot parse line {nth_line}: and_inverted not supported for immediates"));
-                                        },
+                                        }
                                         Op::OrInverted => {
                                             return Err(format!("cannot parse line {nth_line}: or_inverted not supported for immediates"));
                                         }
