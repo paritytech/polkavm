@@ -2041,12 +2041,12 @@ where
     }
 
     #[inline(always)]
-    pub fn rotate_right_32_imm(&mut self, d: RawReg, s: RawReg, c: u32) {
+    pub fn rotate_right_imm_32(&mut self, d: RawReg, s: RawReg, c: u32) {
         self.rotate_right_imm_generic(RegSize::R32, d, s, c);
     }
 
     #[inline(always)]
-    pub fn rotate_right_64_imm(&mut self, d: RawReg, s: RawReg, c: u32) {
+    pub fn rotate_right_imm_64(&mut self, d: RawReg, s: RawReg, c: u32) {
         assert_eq!(B::BITNESS, Bitness::B64);
         self.rotate_right_imm_generic(RegSize::R64, d, s, c);
     }
@@ -2071,12 +2071,12 @@ where
     }
 
     #[inline(always)]
-    pub fn rotate_right_32_imm_alt(&mut self, d: RawReg, s: RawReg, c: u32) {
+    pub fn rotate_right_imm_alt_32(&mut self, d: RawReg, s: RawReg, c: u32) {
         self.rotate_right_imm_alt_generic(RegSize::R32, d, s, c);
     }
 
     #[inline(always)]
-    pub fn rotate_right_64_imm_alt(&mut self, d: RawReg, s: RawReg, c: u32) {
+    pub fn rotate_right_imm_alt_64(&mut self, d: RawReg, s: RawReg, c: u32) {
         assert_eq!(B::BITNESS, Bitness::B64);
         self.rotate_right_imm_alt_generic(RegSize::R64, d, s, c);
     }

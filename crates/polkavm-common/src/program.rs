@@ -1509,10 +1509,10 @@ define_opcodes! {
         [I_64, I_32] cmov_if_zero_imm                         = 147,
         [I_64, I_32] cmov_if_not_zero_imm                     = 148,
 
-        [I_64, I_32] rotate_right_32_imm                      = 160,
-        [I_64, I_32] rotate_right_32_imm_alt                  = 161,
-        [I_64]       rotate_right_64_imm                      = 158,
-        [I_64]       rotate_right_64_imm_alt                  = 159,
+        [I_64, I_32] rotate_right_imm_32                      = 160,
+        [I_64, I_32] rotate_right_imm_alt_32                  = 161,
+        [I_64]       rotate_right_imm_64                      = 158,
+        [I_64]       rotate_right_imm_alt_64                  = 159,
     ]
 
     // Instructions with args: reg, reg, offset
@@ -2503,7 +2503,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "{d} = {s} if {c} != 0")
     }
 
-    fn rotate_right_32_imm(&mut self, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
+    fn rotate_right_imm_32(&mut self, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
         let c = self.format_imm(c);
@@ -2514,7 +2514,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn rotate_right_32_imm_alt(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
+    fn rotate_right_imm_alt_32(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let c = self.format_reg(c);
         let s = self.format_imm(s);
@@ -2525,14 +2525,14 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn rotate_right_64_imm(&mut self, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
+    fn rotate_right_imm_64(&mut self, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
         let c = self.format_imm(c);
         write!(self, "{d} = {s} >>r {c}")
     }
 
-    fn rotate_right_64_imm_alt(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
+    fn rotate_right_imm_alt_64(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let c = self.format_reg(c);
         let s = self.format_imm(s);

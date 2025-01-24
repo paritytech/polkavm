@@ -7476,9 +7476,9 @@ fn emit_code(
                                 K::Mul32 => I::mul_imm_32(dst, src1, src2),
                                 K::Mul32AndSignExtend => I::mul_imm_32(dst, src1, src2),
                                 K::Mul64 => I::mul_imm_64(dst, src1, src2),
-                                K::RotateRight32 => I::rotate_right_32_imm(dst, src1, src2),
-                                K::RotateRight32AndSignExtend => I::rotate_right_32_imm(dst, src1, src2),
-                                K::RotateRight64 => I::rotate_right_64_imm(dst, src1, src2),
+                                K::RotateRight32 => I::rotate_right_imm_32(dst, src1, src2),
+                                K::RotateRight32AndSignExtend => I::rotate_right_imm_32(dst, src1, src2),
+                                K::RotateRight64 => I::rotate_right_imm_64(dst, src1, src2),
                             }
                         }
                         (RegImm::Imm(src1), RegImm::Reg(src2)) => {
@@ -7512,9 +7512,9 @@ fn emit_code(
                                 K::ShiftArithmeticRight32AndSignExtend => I::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
                                 K::ShiftArithmeticRight64 => I::shift_arithmetic_right_imm_alt_64(dst, src2, src1),
 
-                                K::RotateRight32 => I::rotate_right_32_imm_alt(dst, src2, src1),
-                                K::RotateRight32AndSignExtend => I::rotate_right_32_imm_alt(dst, src2, src1),
-                                K::RotateRight64 => I::rotate_right_64_imm_alt(dst, src2, src1),
+                                K::RotateRight32 => I::rotate_right_imm_alt_32(dst, src2, src1),
+                                K::RotateRight32AndSignExtend => I::rotate_right_imm_alt_32(dst, src2, src1),
+                                K::RotateRight64 => I::rotate_right_imm_alt_64(dst, src2, src1),
                             }
                         }
                         (RegImm::Imm(src1), RegImm::Imm(src2)) => {
