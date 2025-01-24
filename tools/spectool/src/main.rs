@@ -7,7 +7,7 @@ use clap::Parser;
 use core::fmt::Write;
 use polkavm::{Engine, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg};
 use polkavm_common::assembler::assemble;
-use polkavm_common::program::ProgramParts;
+use polkavm_common::program::{ProgramParts, ISA64_V1};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
@@ -261,9 +261,7 @@ fn main_generate() {
                 panic!("label specified in 'post: pc = ...' is missing: @{label}");
             };
 
-            let instructions: Vec<_> = blob
-                .instructions(polkavm_common::program::DefaultInstructionSet::default())
-                .collect();
+            let instructions: Vec<_> = blob.instructions(ISA64_V1).collect();
             let index = instructions
                 .iter()
                 .position(|inst| inst.offset == export.program_counter())
