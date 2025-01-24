@@ -5599,12 +5599,12 @@ mod test {
             let mut all_blocks = resolve_basic_block_references(&data_sections_set, &section_to_block, &all_blocks).unwrap();
             let mut reachability_graph =
                 calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations).unwrap();
-            if config.optimize {
+            if matches!(config.opt_level, OptLevel::O2) {
                 optimize_program(&config, &elf, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
             }
             let mut used_blocks = collect_used_blocks(&all_blocks, &reachability_graph);
 
-            if config.optimize {
+            if matches!(config.opt_level, OptLevel::O2) {
                 used_blocks = add_missing_fallthrough_blocks(&mut all_blocks, &mut reachability_graph, used_blocks);
                 merge_consecutive_fallthrough_blocks(&mut all_blocks, &mut reachability_graph, &mut section_to_block, &mut used_blocks);
                 replace_immediates_with_registers(&mut all_blocks, &imports, &used_blocks);
@@ -5688,11 +5688,11 @@ mod test {
             expected_disassembly: &str,
         ) {
             let mut unopt = self.build(Config {
-                optimize: false,
+                opt_level: OptLevel::O0,
                 ..Config::default()
             });
             let mut opt = self.build(Config {
-                optimize: true,
+                opt_level: OptLevel::O2,
                 ..Config::default()
             });
 
@@ -8752,9 +8752,16 @@ where
     Ok(functions)
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum OptLevel {
+    O0,
+    O1,
+    O2,
+}
+
 pub struct Config {
     strip: bool,
-    optimize: bool,
+    opt_level: OptLevel,
     inline_threshold: usize,
     elide_unnecessary_loads: bool,
     dispatch_table: Vec<Vec<u8>>,
@@ -8764,7 +8771,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             strip: false,
-            optimize: true,
+            opt_level: OptLevel::O2,
             inline_threshold: 2,
             elide_unnecessary_loads: true,
             dispatch_table: Vec::new(),
@@ -8779,7 +8786,12 @@ impl Config {
     }
 
     pub fn set_optimize(&mut self, value: bool) -> &mut Self {
-        self.optimize = value;
+        self.opt_level = if value { OptLevel::O2 } else { OptLevel::O0 };
+        self
+    }
+
+    pub fn set_opt_level(&mut self, value: OptLevel) -> &mut Self {
+        self.opt_level = value;
         self
     }
 
@@ -9002,9 +9014,15 @@ where
     let mut used_blocks;
 
     let mut regspill_size = 0;
-    if config.optimize {
+    if matches!(config.opt_level, OptLevel::O1 | OptLevel::O2) {
         reachability_graph = calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations)?;
-        optimize_program(&config, &elf, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
+        if matches!(config.opt_level, OptLevel::O2) {
+            optimize_program(&config, &elf, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
+        } else {
+            for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
+                perform_nop_elimination(&mut all_blocks, current);
+            }
+        }
         used_blocks = collect_used_blocks(&all_blocks, &reachability_graph);
         spill_fake_registers(
             section_regspill,
@@ -9017,7 +9035,9 @@ where
         );
         used_blocks = add_missing_fallthrough_blocks(&mut all_blocks, &mut reachability_graph, used_blocks);
         merge_consecutive_fallthrough_blocks(&mut all_blocks, &mut reachability_graph, &mut section_to_block, &mut used_blocks);
-        replace_immediates_with_registers(&mut all_blocks, &imports, &used_blocks);
+        if matches!(config.opt_level, OptLevel::O2) {
+            replace_immediates_with_registers(&mut all_blocks, &imports, &used_blocks);
+        }
 
         let expected_reachability_graph =
             calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations)?;
@@ -9188,7 +9208,7 @@ where
         &used_blocks,
         &used_imports,
         &jump_target_for_block,
-        config.optimize,
+        matches!(config.opt_level, OptLevel::O2),
         is_rv64,
     )?;
 

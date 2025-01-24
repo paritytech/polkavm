@@ -11,7 +11,7 @@ mod reader_wrapper;
 mod riscv;
 mod utils;
 
-pub use crate::program_from_elf::{program_from_elf, Config, ProgramFromElfError};
+pub use crate::program_from_elf::{program_from_elf, Config, OptLevel, ProgramFromElfError};
 pub use polkavm_common::program::{ProgramBlob, ProgramParseError, ProgramParts};
 
 pub static TARGET_JSON_32_BIT: &str = include_str!("../riscv32emac-unknown-none-polkavm.json");
