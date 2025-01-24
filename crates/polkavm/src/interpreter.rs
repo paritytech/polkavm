@@ -214,15 +214,41 @@ impl BasicMemory {
     }
 }
 
-fn empty_page(page_size: u32) -> Box<[u8]> {
-    let mut page = Vec::new();
-    page.reserve_exact(cast(page_size).to_usize());
-    page.resize(cast(page_size).to_usize(), 0);
-    page.into()
+struct Page {
+    data: Box<[u8]>,
+    is_read_only: bool,
+}
+
+impl Page {
+    fn empty(page_size: u32) -> Self {
+        let mut page = Vec::new();
+        page.reserve_exact(cast(page_size).to_usize());
+        page.resize(cast(page_size).to_usize(), 0);
+        Page {
+            data: page.into(),
+            is_read_only: false,
+        }
+    }
+}
+
+impl core::ops::Deref for Page {
+    type Target = [u8];
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl core::ops::DerefMut for Page {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
+    }
 }
 
 pub(crate) struct DynamicMemory {
-    pages: BTreeMap<u32, Box<[u8]>>,
+    pages: BTreeMap<u32, Page>,
 }
 
 impl DynamicMemory {
@@ -559,7 +585,7 @@ impl InterpretedInstance {
                 address,
                 cast(data.len()).assert_always_fits_in_u32(),
                 move |page_address, page_offset, buffer_offset, length| {
-                    let page = dynamic_memory.pages.entry(page_address).or_insert_with(|| empty_page(page_size));
+                    let page = dynamic_memory.pages.entry(page_address).or_insert_with(|| Page::empty(page_size));
                     page[page_offset..page_offset + length].copy_from_slice(&data[buffer_offset..buffer_offset + length]);
                     Ok(())
                 },
@@ -594,13 +620,36 @@ impl InterpretedInstance {
                         Ok(())
                     }
                     Entry::Vacant(entry) => {
-                        entry.insert(empty_page(page_size));
+                        entry.insert(Page::empty(page_size));
                         Ok(())
                     }
                 },
             )
             .unwrap();
         }
+
+        Ok(())
+    }
+
+    pub fn protect_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
+        assert!(self.module.is_dynamic_paging());
+
+        each_page(
+            &self.module,
+            address,
+            length,
+            |page_address, page_offset, _buffer_offset, length| {
+                if let Some(page) = self.dynamic_memory.pages.get_mut(&page_address) {
+                    page.is_read_only = true;
+                    Ok(())
+                } else {
+                    Err(MemoryAccessError::OutOfRangeAccess {
+                        address: page_address + cast(page_offset).assert_always_fits_in_u32(),
+                        length: cast(length).to_u64(),
+                    })
+                }
+            },
+        )?;
 
         Ok(())
     }
@@ -1149,6 +1198,17 @@ impl<'a> Visitor<'a> {
             let page_address_hi = self.inner.module.round_to_page_size_down(address_end - 1);
             if page_address_lo == page_address_hi {
                 if let Some(page) = self.inner.dynamic_memory.pages.get_mut(&page_address_lo) {
+                    if page.is_read_only {
+                        if DEBUG {
+                            log::debug!(
+                                "Store of {length} bytes to 0x{address:x} failed! (pc = {program_counter}, cycle = {cycle})",
+                                cycle = self.inner.cycle_counter
+                            );
+                        }
+
+                        return trap_impl::<DEBUG>(self, program_counter);
+                    }
+
                     let offset = cast(address).to_usize() - cast(page_address_lo).to_usize();
                     let value = value.as_ref();
                     page[offset..offset + value.len()].copy_from_slice(value);
@@ -1162,6 +1222,17 @@ impl<'a> Visitor<'a> {
 
                 match (lo, hi) {
                     (Some((_, lo)), Some((_, hi))) => {
+                        if lo.is_read_only || hi.is_read_only {
+                            if DEBUG {
+                                log::debug!(
+                                    "Store of {length} bytes to 0x{address:x} failed! (pc = {program_counter}, cycle = {cycle})",
+                                    cycle = self.inner.cycle_counter
+                                );
+                            }
+
+                            return trap_impl::<DEBUG>(self, program_counter);
+                        }
+
                         let value = value.as_ref();
                         let page_size = cast(self.inner.module.memory_map().page_size()).to_usize();
                         let lo_len = cast(page_address_hi).to_usize() - cast(address).to_usize();

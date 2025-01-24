@@ -2122,6 +2122,28 @@ impl super::Sandbox for Sandbox {
         Ok(())
     }
 
+    fn protect_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
+        assert!(self.dynamic_paging_enabled);
+
+        log::trace!(
+            "Protecting memory: 0x{:x}-0x{:x} ({} bytes)",
+            address,
+            address as usize + length as usize,
+            length
+        );
+
+        let mut arg: linux_raw::uffdio_writeprotect = Default::default();
+        arg.range.start = u64::from(address);
+        arg.range.len = u64::from(length);
+        arg.mode = linux_raw::UFFDIO_WRITEPROTECT_MODE_WP;
+
+        if let Err(error) = linux_raw::sys_uffdio_writeprotect(self.userfaultfd.borrow(), &mut arg) {
+            return Err(MemoryAccessError::Error(error.into()));
+        }
+
+        Ok(())
+    }
+
     fn free_pages(&mut self, address: u32, length: u32) -> Result<(), Self::Error> {
         if !self.dynamic_paging_enabled {
             todo!();
@@ -2421,6 +2443,11 @@ impl Sandbox {
                             .map_err(Error::from_str)?;
 
                             self.is_program_counter_valid = true;
+                            if is_write && is_wp {
+                                self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
+                                return Ok(Interrupt::Trap);
+                            }
+
                             return Ok(Interrupt::Segfault(Segfault {
                                 page_address: address as u32,
                                 page_size: get_native_page_size() as u32,

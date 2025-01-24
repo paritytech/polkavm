@@ -1359,6 +1359,37 @@ impl RawInstance {
         result
     }
 
+    /// Read-only protects a given memory region.
+    ///
+    /// Is only supported when dynamic paging is enabled.
+    pub fn protect_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
+        if !self.module.is_dynamic_paging() {
+            return Err(MemoryAccessError::Error(
+                "protecting memory is only possible on modules with dynamic paging".into(),
+            ));
+        }
+
+        if length == 0 {
+            return Ok(());
+        }
+
+        if address < 0x10000 {
+            return Err(MemoryAccessError::OutOfRangeAccess {
+                address,
+                length: u64::from(length),
+            });
+        }
+
+        if u64::from(address) + u64::from(length) > 0x100000000 {
+            return Err(MemoryAccessError::OutOfRangeAccess {
+                address,
+                length: u64::from(length),
+            });
+        }
+
+        access_backend!(self.backend, |mut backend| backend.protect_memory(address, length))
+    }
+
     /// Frees the given page(s).
     ///
     /// `address` must be a multiple of the page size. The value of `length` will be rounded up to the nearest multiple of the page size.

@@ -777,6 +777,48 @@ fn dynamic_paging_freeing_pages(mut engine_config: Config) {
     expect_segfault(instance.run().unwrap());
 }
 
+fn dynamic_paging_protect_memory(mut engine_config: Config) {
+    engine_config.set_allow_dynamic_paging(true);
+
+    if engine_config.crosscheck() {
+        // TODO: This is currently broken due to a different stepping behavior when page faults are involved.
+        return;
+    }
+
+    let _ = env_logger::try_init();
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[asm::load_i32(Reg::A0, 0x10000), asm::store_imm_u32(0x10000, 0x12345678), asm::ret()],
+        &[],
+    );
+
+    let blob = ProgramBlob::parse(builder.into_vec().into()).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_dynamic_paging(true);
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let offsets: Vec<_> = module
+        .blob()
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.offset)
+        .collect();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(offsets[0]);
+    let segfault = expect_segfault(instance.run().unwrap());
+    assert_eq!(instance.program_counter(), Some(offsets[0]));
+    instance.zero_memory(segfault.page_address, page_size).unwrap();
+    instance.protect_memory(segfault.page_address, page_size).unwrap();
+    assert_eq!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.program_counter(), Some(offsets[1]));
+    assert_eq!(instance.next_program_counter(), None);
+}
+
 #[cfg(not(feature = "std"))]
 fn dynamic_paging_stress_test(_engine_config: Config) {}
 
@@ -3080,6 +3122,7 @@ run_tests! {
     jump_after_invalid_instruction_from_within
     dynamic_paging_basic
     dynamic_paging_freeing_pages
+    dynamic_paging_protect_memory
     dynamic_paging_stress_test
     dynamic_paging_initialize_multiple_pages
     dynamic_paging_preinitialize_pages
