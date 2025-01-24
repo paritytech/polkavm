@@ -1198,6 +1198,7 @@ fn extract_memory_config<H>(
     sections_bss: &[SectionIndex],
     sections_min_stack_size: &[SectionIndex],
     base_address_for_section: &mut HashMap<SectionIndex, u64>,
+    mut min_stack_size: u32,
 ) -> Result<MemoryConfig, ProgramFromElfError>
 where
     H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
@@ -1223,7 +1224,6 @@ where
         sections_rw_data.iter().copied().chain(sections_bss.iter().copied()),
     );
 
-    let mut min_stack_size = VM_MIN_PAGE_SIZE * 2;
     for &section_index in sections_min_stack_size {
         let section = elf.section_by_index(section_index);
         let data = section.data();
@@ -8765,6 +8765,7 @@ pub struct Config {
     inline_threshold: usize,
     elide_unnecessary_loads: bool,
     dispatch_table: Vec<Vec<u8>>,
+    min_stack_size: u32,
 }
 
 impl Default for Config {
@@ -8775,6 +8776,7 @@ impl Default for Config {
             inline_threshold: 2,
             elide_unnecessary_loads: true,
             dispatch_table: Vec::new(),
+            min_stack_size: VM_MIN_PAGE_SIZE * 2,
         }
     }
 }
@@ -8807,6 +8809,11 @@ impl Config {
 
     pub fn set_dispatch_table(&mut self, dispatch_table: Vec<Vec<u8>>) -> &mut Self {
         self.dispatch_table = dispatch_table;
+        self
+    }
+
+    pub fn set_min_stack_size(&mut self, value: u32) -> &mut Self {
+        self.min_stack_size = value;
         self
     }
 }
@@ -9194,6 +9201,7 @@ where
         &sections_bss,
         &sections_min_stack_size,
         &mut base_address_for_section,
+        config.min_stack_size,
     )?;
 
     log::trace!("Memory configuration: {:#?}", memory_config);
