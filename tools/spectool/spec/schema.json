@@ -37,7 +37,7 @@
     },
     "expected-status": {
       "type": "string",
-      "enum": ["trap", "halt"]
+      "enum": ["panic", "halt"]
     },
     "expected-regs": {
       "type": "array",

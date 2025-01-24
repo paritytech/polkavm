@@ -260,7 +260,7 @@ fn main_generate() {
         let expected_status = loop {
             match instance.run().unwrap() {
                 InterruptKind::Finished => break "halt",
-                InterruptKind::Trap => break "trap",
+                InterruptKind::Trap => break "panic",
                 InterruptKind::Ecalli(..) => todo!(),
                 InterruptKind::NotEnoughGas => break "out-of-gas",
                 InterruptKind::Segfault(..) => todo!(),

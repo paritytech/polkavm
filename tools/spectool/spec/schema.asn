@@ -51,8 +51,8 @@ Testcase ::= SEQUENCE {
     -- the status code of the execution, i.e. the way the program is supposed to end
     expected-status ENUMERATED {
         -- (called "panic" in the Graypaper)
-        -- the execution ended with a trap (the `trap` instruction was executed, the execution went "out of bounds", an invalid jump was made, or an invalid instruction was executed)
-        trap,
+        -- the execution ended with a panic (the `trap` instruction was executed, the execution went "out of bounds", an invalid jump was made, or an invalid instruction was executed)
+        panic,
 
         -- the execution finished gracefully (a dynamic jump to address `0xffff0000` was made)
         halt
