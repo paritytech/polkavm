@@ -16,10 +16,6 @@ _finish:
 
 .global _start
 
-.pushsection .polkavm_min_stack_size,"",@progbits
-    .word 4096
-.popsection
-
 .pushsection .metadata,"",@progbits
 _entry_point_name:
     .asciz "main"

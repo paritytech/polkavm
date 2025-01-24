@@ -135,3 +135,4 @@ function build_benchmark() {
 build_benchmark "bench-minimal"
 build_benchmark "bench-pinky"
 build_benchmark "bench-prime-sieve"
+build_benchmark "bench-memset"

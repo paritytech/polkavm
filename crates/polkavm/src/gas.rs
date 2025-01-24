@@ -46,6 +46,11 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
+    fn memset(&mut self) -> Self::ReturnTy {
+        self.cost += 1;
+    }
+
+    #[inline(always)]
     fn ecalli(&mut self, _imm: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
@@ -425,22 +430,22 @@ impl InstructionVisitor for GasVisitor {
     }
 
     #[inline(always)]
-    fn rotate_right_32_imm(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
+    fn rotate_right_imm_32(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn rotate_right_32_imm_alt(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
+    fn rotate_right_imm_alt_32(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn rotate_right_64_imm(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
+    fn rotate_right_imm_64(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 
     #[inline(always)]
-    fn rotate_right_64_imm_alt(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
+    fn rotate_right_imm_alt_64(&mut self, _d: RawReg, _s: RawReg, _c: u32) -> Self::ReturnTy {
         self.cost += 1;
     }
 

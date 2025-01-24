@@ -623,6 +623,7 @@ enum BasicInst<T> {
         dst: Reg,
         size: Reg,
     },
+    Memset,
     Nop,
 }
 
@@ -659,6 +660,7 @@ impl<T> BasicInst<T> {
             BasicInst::Cmov { dst, src, cond, .. } => RegMask::from(dst) | RegMask::from(src) | RegMask::from(cond),
             BasicInst::Ecalli { nth_import } => imports[nth_import].src_mask(),
             BasicInst::Sbrk { size, .. } => RegMask::from(size),
+            BasicInst::Memset => RegMask::from(Reg::A0) | RegMask::from(Reg::A1) | RegMask::from(Reg::A2),
         }
     }
 
@@ -678,12 +680,17 @@ impl<T> BasicInst<T> {
             | BasicInst::AnyAny { dst, .. } => RegMask::from(dst),
             BasicInst::Ecalli { nth_import } => imports[nth_import].dst_mask(),
             BasicInst::Sbrk { dst, .. } => RegMask::from(dst),
+            BasicInst::Memset { .. } => RegMask::from(Reg::A0) | RegMask::from(Reg::A2),
         }
     }
 
     fn has_side_effects(&self, config: &Config) -> bool {
         match *self {
-            BasicInst::Sbrk { .. } | BasicInst::Ecalli { .. } | BasicInst::StoreAbsolute { .. } | BasicInst::StoreIndirect { .. } => true,
+            BasicInst::Sbrk { .. }
+            | BasicInst::Ecalli { .. }
+            | BasicInst::StoreAbsolute { .. }
+            | BasicInst::StoreIndirect { .. }
+            | BasicInst::Memset { .. } => true,
             BasicInst::LoadAbsolute { .. } | BasicInst::LoadIndirect { .. } => !config.elide_unnecessary_loads,
             BasicInst::Nop
             | BasicInst::MoveReg { .. }
@@ -771,6 +778,12 @@ impl<T> BasicInst<T> {
                 size: map(size, OpKind::Read),
                 dst: map(dst, OpKind::Write),
             }),
+            BasicInst::Memset => {
+                assert_eq!(map(Reg::A1, OpKind::Read), Reg::A1);
+                assert_eq!(map(Reg::A0, OpKind::ReadWrite), Reg::A0);
+                assert_eq!(map(Reg::A2, OpKind::ReadWrite), Reg::A2);
+                Some(BasicInst::Memset)
+            }
             BasicInst::Nop => Some(BasicInst::Nop),
         }
     }
@@ -839,6 +852,7 @@ impl<T> BasicInst<T> {
             BasicInst::Cmov { kind, dst, src, cond } => BasicInst::Cmov { kind, dst, src, cond },
             BasicInst::Ecalli { nth_import } => BasicInst::Ecalli { nth_import },
             BasicInst::Sbrk { dst, size } => BasicInst::Sbrk { dst, size },
+            BasicInst::Memset => BasicInst::Memset,
             BasicInst::Nop => BasicInst::Nop,
         })
     }
@@ -861,6 +875,7 @@ impl<T> BasicInst<T> {
             | BasicInst::AnyAny { .. }
             | BasicInst::Cmov { .. }
             | BasicInst::Sbrk { .. }
+            | BasicInst::Memset { .. }
             | BasicInst::Ecalli { .. } => (None, None),
         }
     }
@@ -1183,6 +1198,7 @@ fn extract_memory_config<H>(
     sections_bss: &[SectionIndex],
     sections_min_stack_size: &[SectionIndex],
     base_address_for_section: &mut HashMap<SectionIndex, u64>,
+    mut min_stack_size: u32,
 ) -> Result<MemoryConfig, ProgramFromElfError>
 where
     H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
@@ -1208,7 +1224,6 @@ where
         sections_rw_data.iter().copied().chain(sections_bss.iter().copied()),
     );
 
-    let mut min_stack_size = VM_MIN_PAGE_SIZE * 2;
     for &section_index in sections_min_stack_size {
         let section = elf.section_by_index(section_index);
         let data = section.data();
@@ -2618,6 +2633,7 @@ where
 
         const FUNC3_ECALLI: u32 = 0b000;
         const FUNC3_SBRK: u32 = 0b001;
+        const FUNC3_MEMSET: u32 = 0b010;
 
         if crate::riscv::R(raw_inst).unpack() == (crate::riscv::OPCODE_CUSTOM_0, FUNC3_ECALLI, 0, RReg::Zero, RReg::Zero, RReg::Zero) {
             let initial_offset = relative_offset as u64;
@@ -2719,6 +2735,19 @@ where
                     offset_range: (relative_offset as u64..relative_offset as u64 + inst_size).into(),
                 },
                 InstExt::Basic(BasicInst::Sbrk { dst, size }),
+            ));
+
+            relative_offset += inst_size as usize;
+            continue;
+        }
+
+        if let (crate::riscv::OPCODE_CUSTOM_0, FUNC3_MEMSET, 0, RReg::Zero, RReg::Zero, RReg::Zero) = crate::riscv::R(raw_inst).unpack() {
+            output.push((
+                Source {
+                    section_index,
+                    offset_range: (relative_offset as u64..relative_offset as u64 + inst_size).into(),
+                },
+                InstExt::Basic(BasicInst::Memset),
             ));
 
             relative_offset += inst_size as usize;
@@ -5570,12 +5599,12 @@ mod test {
             let mut all_blocks = resolve_basic_block_references(&data_sections_set, &section_to_block, &all_blocks).unwrap();
             let mut reachability_graph =
                 calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations).unwrap();
-            if config.optimize {
+            if matches!(config.opt_level, OptLevel::O2) {
                 optimize_program(&config, &elf, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
             }
             let mut used_blocks = collect_used_blocks(&all_blocks, &reachability_graph);
 
-            if config.optimize {
+            if matches!(config.opt_level, OptLevel::O2) {
                 used_blocks = add_missing_fallthrough_blocks(&mut all_blocks, &mut reachability_graph, used_blocks);
                 merge_consecutive_fallthrough_blocks(&mut all_blocks, &mut reachability_graph, &mut section_to_block, &mut used_blocks);
                 replace_immediates_with_registers(&mut all_blocks, &imports, &used_blocks);
@@ -5659,11 +5688,11 @@ mod test {
             expected_disassembly: &str,
         ) {
             let mut unopt = self.build(Config {
-                optimize: false,
+                opt_level: OptLevel::O0,
                 ..Config::default()
             });
             let mut opt = self.build(Config {
-                optimize: true,
+                opt_level: OptLevel::O2,
                 ..Config::default()
             });
 
@@ -7447,9 +7476,9 @@ fn emit_code(
                                 K::Mul32 => I::mul_imm_32(dst, src1, src2),
                                 K::Mul32AndSignExtend => I::mul_imm_32(dst, src1, src2),
                                 K::Mul64 => I::mul_imm_64(dst, src1, src2),
-                                K::RotateRight32 => I::rotate_right_32_imm(dst, src1, src2),
-                                K::RotateRight32AndSignExtend => I::rotate_right_32_imm(dst, src1, src2),
-                                K::RotateRight64 => I::rotate_right_64_imm(dst, src1, src2),
+                                K::RotateRight32 => I::rotate_right_imm_32(dst, src1, src2),
+                                K::RotateRight32AndSignExtend => I::rotate_right_imm_32(dst, src1, src2),
+                                K::RotateRight64 => I::rotate_right_imm_64(dst, src1, src2),
                             }
                         }
                         (RegImm::Imm(src1), RegImm::Reg(src2)) => {
@@ -7483,9 +7512,9 @@ fn emit_code(
                                 K::ShiftArithmeticRight32AndSignExtend => I::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
                                 K::ShiftArithmeticRight64 => I::shift_arithmetic_right_imm_alt_64(dst, src2, src1),
 
-                                K::RotateRight32 => I::rotate_right_32_imm_alt(dst, src2, src1),
-                                K::RotateRight32AndSignExtend => I::rotate_right_32_imm_alt(dst, src2, src1),
-                                K::RotateRight64 => I::rotate_right_64_imm_alt(dst, src2, src1),
+                                K::RotateRight32 => I::rotate_right_imm_alt_32(dst, src2, src1),
+                                K::RotateRight32AndSignExtend => I::rotate_right_imm_alt_32(dst, src2, src1),
+                                K::RotateRight64 => I::rotate_right_imm_alt_64(dst, src2, src1),
                             }
                         }
                         (RegImm::Imm(src1), RegImm::Imm(src2)) => {
@@ -7529,6 +7558,7 @@ fn emit_code(
                     Instruction::ecalli(import.metadata.index.expect("internal error: no index was assigned to an ecall"))
                 }
                 BasicInst::Sbrk { dst, size } => Instruction::sbrk(conv_reg(dst), conv_reg(size)),
+                BasicInst::Memset => Instruction::memset,
                 BasicInst::Nop => unreachable!("internal error: a nop instruction was not removed"),
             };
 
@@ -8722,22 +8752,31 @@ where
     Ok(functions)
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum OptLevel {
+    O0,
+    O1,
+    O2,
+}
+
 pub struct Config {
     strip: bool,
-    optimize: bool,
+    opt_level: OptLevel,
     inline_threshold: usize,
     elide_unnecessary_loads: bool,
     dispatch_table: Vec<Vec<u8>>,
+    min_stack_size: u32,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             strip: false,
-            optimize: true,
+            opt_level: OptLevel::O2,
             inline_threshold: 2,
             elide_unnecessary_loads: true,
             dispatch_table: Vec::new(),
+            min_stack_size: VM_MIN_PAGE_SIZE * 2,
         }
     }
 }
@@ -8749,7 +8788,12 @@ impl Config {
     }
 
     pub fn set_optimize(&mut self, value: bool) -> &mut Self {
-        self.optimize = value;
+        self.opt_level = if value { OptLevel::O2 } else { OptLevel::O0 };
+        self
+    }
+
+    pub fn set_opt_level(&mut self, value: OptLevel) -> &mut Self {
+        self.opt_level = value;
         self
     }
 
@@ -8765,6 +8809,11 @@ impl Config {
 
     pub fn set_dispatch_table(&mut self, dispatch_table: Vec<Vec<u8>>) -> &mut Self {
         self.dispatch_table = dispatch_table;
+        self
+    }
+
+    pub fn set_min_stack_size(&mut self, value: u32) -> &mut Self {
+        self.min_stack_size = value;
         self
     }
 }
@@ -8972,9 +9021,15 @@ where
     let mut used_blocks;
 
     let mut regspill_size = 0;
-    if config.optimize {
+    if matches!(config.opt_level, OptLevel::O1 | OptLevel::O2) {
         reachability_graph = calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations)?;
-        optimize_program(&config, &elf, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
+        if matches!(config.opt_level, OptLevel::O2) {
+            optimize_program(&config, &elf, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
+        } else {
+            for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
+                perform_nop_elimination(&mut all_blocks, current);
+            }
+        }
         used_blocks = collect_used_blocks(&all_blocks, &reachability_graph);
         spill_fake_registers(
             section_regspill,
@@ -8987,7 +9042,9 @@ where
         );
         used_blocks = add_missing_fallthrough_blocks(&mut all_blocks, &mut reachability_graph, used_blocks);
         merge_consecutive_fallthrough_blocks(&mut all_blocks, &mut reachability_graph, &mut section_to_block, &mut used_blocks);
-        replace_immediates_with_registers(&mut all_blocks, &imports, &used_blocks);
+        if matches!(config.opt_level, OptLevel::O2) {
+            replace_immediates_with_registers(&mut all_blocks, &imports, &used_blocks);
+        }
 
         let expected_reachability_graph =
             calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations)?;
@@ -9144,6 +9201,7 @@ where
         &sections_bss,
         &sections_min_stack_size,
         &mut base_address_for_section,
+        config.min_stack_size,
     )?;
 
     log::trace!("Memory configuration: {:#?}", memory_config);
@@ -9158,7 +9216,7 @@ where
         &used_blocks,
         &used_imports,
         &jump_target_for_block,
-        config.optimize,
+        matches!(config.opt_level, OptLevel::O2),
         is_rv64,
     )?;
 

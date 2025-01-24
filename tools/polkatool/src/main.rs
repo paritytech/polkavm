@@ -40,6 +40,10 @@ enum Args {
         #[clap(long)]
         run_only_if_newer: bool,
 
+        /// Sets the minimum stack size.
+        #[clap(long)]
+        min_stack_size: Option<u32>,
+
         /// The input file.
         input: PathBuf,
     },
@@ -103,7 +107,8 @@ fn main() {
             strip,
             disable_optimizations,
             run_only_if_newer,
-        } => main_link(input, output, strip, disable_optimizations, run_only_if_newer),
+            min_stack_size,
+        } => main_link(input, output, strip, disable_optimizations, run_only_if_newer, min_stack_size),
         Args::Disassemble {
             output,
             format,
@@ -129,7 +134,14 @@ fn main() {
     }
 }
 
-fn main_link(input: PathBuf, output: PathBuf, strip: bool, disable_optimizations: bool, run_only_if_newer: bool) -> Result<(), String> {
+fn main_link(
+    input: PathBuf,
+    output: PathBuf,
+    strip: bool,
+    disable_optimizations: bool,
+    run_only_if_newer: bool,
+    min_stack_size: Option<u32>,
+) -> Result<(), String> {
     if run_only_if_newer {
         if let Ok(output_mtime) = std::fs::metadata(&output).and_then(|m| m.modified()) {
             if let Ok(input_mtime) = std::fs::metadata(&input).and_then(|m| m.modified()) {
@@ -143,6 +155,9 @@ fn main_link(input: PathBuf, output: PathBuf, strip: bool, disable_optimizations
     let mut config = polkavm_linker::Config::default();
     config.set_strip(strip);
     config.set_optimize(!disable_optimizations);
+    if let Some(min_stack_size) = min_stack_size {
+        config.set_min_stack_size(min_stack_size);
+    }
 
     let data = match std::fs::read(&input) {
         Ok(data) => data,

@@ -545,7 +545,7 @@ mod tests {
             "// Code size = 18 bytes",
             "",
             "      : @0 [export #0: 'main'] (gas: 5)",
-            "     0: u32 [0x20000] = 305419896",
+            "     0: u32 [0x20000] = 0x12345678",
             "     9: s0 = a0 + a1",
             "    12: ecalli 0 // 'hostcall'",
             "    13: a0 = a0 + s0",

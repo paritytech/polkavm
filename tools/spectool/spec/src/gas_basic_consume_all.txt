@@ -1,0 +1,4 @@
+pre: gas = 2
+
+pub @main:
+    nop

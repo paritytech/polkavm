@@ -30,6 +30,29 @@ pub fn sbrk(size: usize) -> *mut u8 {
     }
 }
 
+/// A hardware accelerated memset.
+#[inline]
+#[allow(unused_assignments)]
+#[allow(unused_mut)]
+#[allow(clippy::missing_safety_doc)]
+#[allow(clippy::undocumented_unsafe_blocks)]
+pub unsafe fn memset(mut dst: *mut u8, value: usize, mut count: usize) {
+    #[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+    unsafe {
+        core::arch::asm!(
+            ".insn r 0xb, 2, 0, zero, zero, zero",
+            inout("a0") dst,
+            in("a1") value,
+            inout("a2") count,
+        );
+    }
+
+    #[cfg(not(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e")))]
+    unsafe {
+        core::ptr::write_bytes(dst, value as u8, count);
+    }
+}
+
 /// A basic memory allocator which doesn't support deallocation.
 pub struct LeakingAllocator;
 
