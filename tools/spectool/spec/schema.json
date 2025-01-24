@@ -7,7 +7,7 @@
     },
     "initial-regs": {
       "type": "array",
-      "items": { "$ref": "#/$defs/u32" },
+      "items": { "$ref": "#/$defs/u64" },
       "minItems": 13,
       "maxItems": 13
     },
@@ -41,7 +41,7 @@
     },
     "expected-regs": {
       "type": "array",
-      "items": { "$ref": "#/$defs/u32" },
+      "items": { "$ref": "#/$defs/u64" },
       "minItems": 13,
       "maxItems": 13
     },
@@ -65,6 +65,11 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 4294967295
+    },
+    "u64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
     },
     "i64": {
       "type": "integer",
