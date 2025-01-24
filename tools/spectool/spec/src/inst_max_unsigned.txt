@@ -1,0 +1,9 @@
+pre: a0 = 1
+pre: a1 = -2
+pre: gas = 10000
+
+pub @main:
+    a2 = maxu(a0, a1)
+
+post: a2 = -2
+post: gas = 9998

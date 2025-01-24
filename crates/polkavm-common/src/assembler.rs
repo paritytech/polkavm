@@ -519,6 +519,26 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                     emit_and_continue!(MaybeInstruction::LoadLabelAddress(dst, label.to_owned()));
                 }
 
+                if let Some(index) = rhs.find("~(") {
+                    let rhs = rhs[index + 2..].trim();
+                    if let Some(index) = rhs.find(')') {
+                        let rhs = rhs[..index].trim();
+                        if let Some(index) = rhs.find('^') {
+                            let src1 = rhs[..index].trim();
+                            let src2 = rhs[index + 1..].trim();
+
+                            if let Some(src1) = parse_reg(src1) {
+                                if let Some(src2) = parse_reg(src2) {
+                                    let dst = dst.into();
+                                    let src1 = src1.into();
+                                    let src2 = src2.into();
+                                    emit_and_continue!(Instruction::xnor(dst, src1, src2));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 enum Op {
                     Add,
                     Sub,
@@ -537,13 +557,21 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                     ShiftLeft,
                     ShiftRight,
                     ShiftArithmeticRight,
+                    RotateLeft,
+                    RotateRight,
+                    AndInverted,
+                    OrInverted,
                 }
 
                 #[allow(clippy::manual_map)]
                 let operation = if let Some(index) = rhs.find('+') {
                     Some((index, 1, Op::Add))
+                } else if let Some(index) = rhs.find("& ~") {
+                    Some((index, 3, Op::AndInverted))
                 } else if let Some(index) = rhs.find('&') {
                     Some((index, 1, Op::And))
+                } else if let Some(index) = rhs.find("| ~") {
+                    Some((index, 3, Op::OrInverted))
                 } else if let Some(index) = rhs.find('|') {
                     Some((index, 1, Op::Or))
                 } else if let Some(index) = rhs.find('^') {
@@ -560,6 +588,10 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                     Some((index, 2, Op::RemSigned))
                 } else if let Some(index) = rhs.find(">>a") {
                     Some((index, 3, Op::ShiftArithmeticRight))
+                } else if let Some(index) = rhs.find(">>r") {
+                    Some((index, 3, Op::RotateRight))
+                } else if let Some(index) = rhs.find("<<r") {
+                    Some((index, 3, Op::RotateLeft))
                 } else if let Some(index) = rhs.find("<<") {
                     Some((index, 2, Op::ShiftLeft))
                 } else if let Some(index) = rhs.find(">>") {
@@ -622,6 +654,15 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                         Op::ShiftLeft => Instruction::shift_logical_left_32(dst, src1, src2),
                                         Op::ShiftRight => Instruction::shift_logical_right_32(dst, src1, src2),
                                         Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_32(dst, src1, src2),
+                                        Op::RotateLeft => Instruction::rotate_left_32(dst, src1, src2),
+                                        Op::RotateRight => Instruction::rotate_right_32(dst, src1, src2),
+                                        Op::AndInverted => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        },
+                                        Op::OrInverted => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        }
+
                                     });
                                 }
                                 OpMarker::NONE => {
@@ -643,6 +684,10 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                         Op::ShiftLeft => Instruction::shift_logical_left_64(dst, src1, src2),
                                         Op::ShiftRight => Instruction::shift_logical_right_64(dst, src1, src2),
                                         Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_64(dst, src1, src2),
+                                        Op::RotateLeft => Instruction::rotate_left_64(dst, src1, src2),
+                                        Op::RotateRight => Instruction::rotate_right_64(dst, src1, src2),
+                                        Op::AndInverted => Instruction::and_inverted(dst, src1, src2),
+                                        Op::OrInverted => Instruction::or_inverted(dst, src1, src2),
                                     });
                                 }
                             }
@@ -689,6 +734,16 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                         Op::ShiftLeft => Instruction::shift_logical_left_imm_32(dst, src1, src2),
                                         Op::ShiftRight => Instruction::shift_logical_right_imm_32(dst, src1, src2),
                                         Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_32(dst, src1, src2),
+                                        Op::RotateLeft => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
+                                        },
+                                        Op::RotateRight => Instruction::rotate_right_imm_32(dst, src1, src2),
+                                        Op::AndInverted => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 and and_inverted not supported for immediates"));
+                                        },
+                                        Op::OrInverted => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 and or_inverted not supported for immediates"));
+                                        }
                                     });
                                 }
                                 OpMarker::NONE => {
@@ -712,6 +767,16 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                         Op::ShiftLeft => Instruction::shift_logical_left_imm_64(dst, src1, src2),
                                         Op::ShiftRight => Instruction::shift_logical_right_imm_64(dst, src1, src2),
                                         Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_64(dst, src1, src2),
+                                        Op::RotateLeft => {
+                                            return Err(format!("cannot parse line {nth_line}: rotate_left not supported for immediates"));
+                                        },
+                                        Op::RotateRight => Instruction::rotate_right_imm_64(dst, src1, src2),
+                                        Op::AndInverted => {
+                                            return Err(format!("cannot parse line {nth_line}: and_inverted not supported for immediates"));
+                                        },
+                                        Op::OrInverted => {
+                                            return Err(format!("cannot parse line {nth_line}: or_inverted not supported for immediates"));
+                                        }
                                     });
                                 }
                             }
@@ -760,6 +825,16 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                         Op::ShiftLeft => Instruction::shift_logical_left_imm_alt_32(dst, src2, src1),
                                         Op::ShiftRight => Instruction::shift_logical_right_imm_alt_32(dst, src2, src1),
                                         Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_alt_32(dst, src2, src1),
+                                        Op::RotateLeft => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 and rotate_left is not supported for immediates"));
+                                        },
+                                        Op::RotateRight => Instruction::rotate_right_imm_alt_32(dst, src2, src1),
+                                        Op::AndInverted => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 and and_inverted not supported for operation"));
+                                        },
+                                        Op::OrInverted => {
+                                            return Err(format!("cannot parse line {nth_line}: i32 and or_inverted not supported for operation"));
+                                        }
                                     });
                                 }
                                 OpMarker::NONE => {
@@ -783,6 +858,61 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                                         Op::ShiftLeft => Instruction::shift_logical_left_imm_alt_64(dst, src2, src1),
                                         Op::ShiftRight => Instruction::shift_logical_right_imm_alt_64(dst, src2, src1),
                                         Op::ShiftArithmeticRight => Instruction::shift_arithmetic_right_imm_alt_64(dst, src2, src1),
+                                        Op::RotateLeft => {
+                                            return Err(format!("cannot parse line {nth_line}: i64 not supported for operation"));
+                                        },
+                                        Op::RotateRight => Instruction::rotate_right_imm_alt_64(dst, src2, src1),
+                                        Op::AndInverted => {
+                                            return Err(format!("cannot parse line {nth_line}: and_inverted not supported for immediates"));
+                                        },
+                                        Op::OrInverted => {
+                                            return Err(format!("cannot parse line {nth_line}: or_inverted not supported for immediates"));
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                enum MaxMinOp {
+                    Max,
+                    MaxUnsigned,
+                    Min,
+                    MinUnsigned,
+                }
+
+                #[allow(clippy::manual_map)]
+                let min_max_op = if let Some(index) = rhs.find("maxs(") {
+                    Some((index, 5, MaxMinOp::Max))
+                } else if let Some(index) = rhs.find("maxu(") {
+                    Some((index, 5, MaxMinOp::MaxUnsigned))
+                } else if let Some(index) = rhs.find("mins(") {
+                    Some((index, 5, MaxMinOp::Min))
+                } else if let Some(index) = rhs.find("minu(") {
+                    Some((index, 5, MaxMinOp::MinUnsigned))
+                } else {
+                    None
+                };
+
+                if let Some((index, op_len, op)) = min_max_op {
+                    let rhs = rhs[index + op_len..].trim();
+                    if let Some(index) = rhs.find(')') {
+                        let rhs = rhs[..index].trim();
+                        if let Some(index) = rhs.find(',') {
+                            let src1 = rhs[..index].trim();
+                            let src2 = rhs[index + 1..].trim();
+
+                            if let Some(src1) = parse_reg(src1) {
+                                if let Some(src2) = parse_reg(src2) {
+                                    let dst = dst.into();
+                                    let src1 = src1.into();
+                                    let src2 = src2.into();
+                                    emit_and_continue!(match op {
+                                        MaxMinOp::Max => Instruction::maximum(dst, src1, src2),
+                                        MaxMinOp::MaxUnsigned => Instruction::maximum_unsigned(dst, src1, src2),
+                                        MaxMinOp::Min => Instruction::minimum(dst, src1, src2),
+                                        MaxMinOp::MinUnsigned => Instruction::minimum_unsigned(dst, src1, src2),
                                     });
                                 }
                             }
