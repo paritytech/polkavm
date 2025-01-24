@@ -62,6 +62,8 @@ struct TestcaseJson {
     expected_pc: u32,
     expected_memory: Vec<MemoryChunk>,
     expected_gas: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_page_fault_address: Option<u32>,
 }
 
 fn extract_chunks(base_address: u32, slice: &[u8]) -> Vec<MemoryChunk> {
@@ -137,6 +139,7 @@ fn main_generate() {
 
     let mut config = polkavm::Config::new();
     config.set_backend(Some(polkavm::BackendKind::Interpreter));
+    config.set_allow_dynamic_paging(true);
 
     let engine = Engine::new(&config).unwrap();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("spec");
@@ -268,6 +271,7 @@ fn main_generate() {
         module_config.set_strict(true);
         module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
         module_config.set_step_tracing(true);
+        module_config.set_dynamic_paging(true);
 
         let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
         let mut instance = module.instantiate().unwrap();
@@ -338,14 +342,27 @@ fn main_generate() {
             instance.set_reg(reg, value);
         }
 
+        if module_config.dynamic_paging() {
+            for page in &initial_page_map {
+                instance.zero_memory(page.address, page.length).unwrap();
+                if !page.is_writable {
+                    instance.protect_memory(page.address, page.length).unwrap();
+                }
+            }
+
+            for chunk in &initial_memory {
+                instance.write_memory(chunk.address, &chunk.contents).unwrap();
+            }
+        }
+
         let mut final_pc = initial_pc;
-        let final_status = loop {
+        let (final_status, page_fault_address) = loop {
             match instance.run().unwrap() {
-                InterruptKind::Finished => break "halt",
-                InterruptKind::Trap => break "panic",
+                InterruptKind::Finished => break ("halt", None),
+                InterruptKind::Trap => break ("panic", None),
                 InterruptKind::Ecalli(..) => todo!(),
-                InterruptKind::NotEnoughGas => break "out-of-gas",
-                InterruptKind::Segfault(..) => todo!(),
+                InterruptKind::NotEnoughGas => break ("out-of-gas", None),
+                InterruptKind::Segfault(segfault) => break ("page-fault", Some(segfault.page_address)),
                 InterruptKind::Step => {
                     final_pc = instance.program_counter().unwrap();
                     continue;
@@ -435,6 +452,7 @@ fn main_generate() {
                 expected_pc: expected_final_pc,
                 expected_memory,
                 expected_gas,
+                expected_page_fault_address: page_fault_address,
             },
         });
     }
@@ -562,7 +580,17 @@ fn main_generate() {
             writeln!(&mut index_md).unwrap();
         }
 
-        writeln!(&mut index_md, "Program should end with: {}\n", test.json.expected_status).unwrap();
+        assert_eq!(
+            test.json.expected_status == "page-fault",
+            test.json.expected_page_fault_address.is_some()
+        );
+        write!(&mut index_md, "Program should end with: {}", test.json.expected_status).unwrap();
+
+        if let Some(address) = test.json.expected_page_fault_address {
+            write!(&mut index_md, " (page address = 0x{:x})", address).unwrap();
+        }
+
+        writeln!(&mut index_md, "\n").unwrap();
         writeln!(&mut index_md, "Final value of the program counter: {}\n", test.json.expected_pc).unwrap();
         writeln!(
             &mut index_md,

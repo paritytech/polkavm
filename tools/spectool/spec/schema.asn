@@ -58,7 +58,10 @@ Testcase ::= SEQUENCE {
         panic,
 
         -- the execution finished gracefully (a dynamic jump to address `0xffff0000` was made)
-        halt
+        halt,
+
+        -- the execution finished with a page fault
+        page-fault
     },
 
     -- (the "ω′" from the paper)
@@ -75,7 +78,10 @@ Testcase ::= SEQUENCE {
 
     -- (the "ξ′" from the paper)
     -- the final amount of gas remaining after the execution finishes
-    expected-gas I64
+    expected-gas I64,
+
+    -- the address of a page fault (only if the program finishes with a page fault)
+    expected-page-fault-address U32 OPTIONAL
 }
 
 END

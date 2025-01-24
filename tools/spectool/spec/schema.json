@@ -37,7 +37,7 @@
     },
     "expected-status": {
       "type": "string",
-      "enum": ["panic", "halt"]
+      "enum": ["panic", "halt", "page-fault"]
     },
     "expected-regs": {
       "type": "array",
@@ -51,6 +51,9 @@
     },
     "expected-gas": {
       "$ref": "#/$defs/i64"
+    },
+    "expected-page-fault-address": {
+      "$ref": "#/$defs/u32"
     }
   },
   "required": ["name", "initial-regs", "initial-pc", "initial-page-map", "initial-memory", "initial-gas", "program", "expected-status", "expected-regs", "expected-pc", "expected-memory", "expected-gas"],
