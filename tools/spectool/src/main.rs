@@ -141,6 +141,15 @@ fn main_generate() {
 
     paths.sort_by_key(|entry| entry.file_stem().unwrap().to_string_lossy().to_string());
 
+    struct RawTestcase {
+        name: String,
+        internal_name: String,
+        blob: Vec<u8>,
+        pre: PrePost,
+        post: PrePost,
+    }
+
+    let mut testcases = Vec::new();
     for path in paths {
         let name = path.file_stem().unwrap().to_string_lossy();
 
@@ -165,10 +174,6 @@ fn main_generate() {
             input_lines.push(line);
         }
 
-        let initial_gas = pre.gas.unwrap_or(10000);
-        let initial_regs = pre.regs.map(|value| value.unwrap_or(0));
-        assert!(pre.pc.is_none(), "'pre: pc = ...' is currently unsupported");
-
         let input = input_lines.join("\n");
         let blob = match assemble(&input) {
             Ok(blob) => blob,
@@ -178,6 +183,28 @@ fn main_generate() {
                 continue;
             }
         };
+
+        testcases.push(RawTestcase {
+            name: name.into_owned(),
+            internal_name: format!("{path:?}"),
+            blob,
+            pre,
+            post,
+        });
+    }
+
+    for testcase in testcases {
+        let RawTestcase {
+            name,
+            internal_name,
+            blob,
+            pre,
+            post,
+        } = testcase;
+
+        let initial_gas = pre.gas.unwrap_or(10000);
+        let initial_regs = pre.regs.map(|value| value.unwrap_or(0));
+        assert!(pre.pc.is_none(), "'pre: pc = ...' is currently unsupported");
 
         let parts = ProgramParts::from_bytes(blob.into()).unwrap();
         let blob = ProgramBlob::from_parts(parts.clone()).unwrap();
@@ -276,7 +303,7 @@ fn main_generate() {
         }
 
         if final_pc.0 != expected_final_pc {
-            eprintln!("Unexpected final program counter for {path:?}: expected {expected_final_pc}, is {final_pc}");
+            eprintln!("Unexpected final program counter for {internal_name}: expected {expected_final_pc}, is {final_pc}");
             found_errors = true;
             continue;
         }
@@ -300,7 +327,7 @@ fn main_generate() {
         for ((final_value, reg), required_value) in expected_regs.iter().zip(Reg::ALL).zip(post.regs.iter()) {
             if let Some(required_value) = required_value {
                 if final_value != required_value {
-                    eprintln!("{path:?}: unexpected {reg}: 0x{final_value:x} (expected: 0x{required_value:x})");
+                    eprintln!("{internal_name}: unexpected {reg}: 0x{final_value:x} (expected: 0x{required_value:x})");
                     found_post_check_errors = true;
                 }
             }
@@ -308,7 +335,7 @@ fn main_generate() {
 
         if let Some(post_gas) = post.gas {
             if expected_gas != post_gas {
-                eprintln!("{path:?}: unexpected gas: {expected_gas} (expected: {post_gas})");
+                eprintln!("{internal_name}: unexpected gas: {expected_gas} (expected: {post_gas})");
                 found_post_check_errors = true;
             }
         }
@@ -333,7 +360,7 @@ fn main_generate() {
         tests.push(Testcase {
             disassembly,
             json: TestcaseJson {
-                name: name.into(),
+                name,
                 initial_regs,
                 initial_pc: initial_pc.0,
                 initial_page_map,
