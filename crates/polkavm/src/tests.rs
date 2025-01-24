@@ -3026,6 +3026,7 @@ fn run_riscv_test(engine_config: Config, elf: &[u8], testnum_reg: Reg, optimize:
     let mut linker_config = polkavm_linker::Config::default();
     linker_config.set_optimize(optimize);
     linker_config.set_strip(true);
+    linker_config.set_min_stack_size(0);
     let raw_blob = polkavm_linker::program_from_elf(linker_config, elf).unwrap();
 
     let _ = env_logger::try_init();
