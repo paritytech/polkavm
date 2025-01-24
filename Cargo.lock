@@ -1002,6 +1002,7 @@ dependencies = [
  "polkavm",
  "polkavm-common",
  "polkavm-disassembler",
+ "polkavm-linker",
  "serde",
  "serde_json",
 ]

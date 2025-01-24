@@ -7,7 +7,7 @@ use clap::Parser;
 use core::fmt::Write;
 use polkavm::{Engine, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg};
 use polkavm_common::assembler::assemble;
-use polkavm_common::program::{ProgramParts, ISA64_V1};
+use polkavm_common::program::{asm, ProgramCounter, ProgramParts, ISA64_V1};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
@@ -80,11 +80,16 @@ fn extract_chunks(base_address: u32, slice: &[u8]) -> Vec<MemoryChunk> {
     output
 }
 
+enum ProgramCounterRef {
+    ByLabel { label: String, instruction_offset: u32 },
+    Preset(ProgramCounter),
+}
+
 #[derive(Default)]
 struct PrePost {
     gas: Option<i64>,
     regs: [Option<u64>; 13],
-    pc: Option<(String, u32)>,
+    pc: Option<ProgramCounterRef>,
 }
 
 fn parse_pre_post(line: &str, output: &mut PrePost) {
@@ -114,7 +119,10 @@ fn parse_pre_post(line: &str, output: &mut PrePost) {
             panic!("invalid 'pre' / 'post' directive: failed to parse 'pc': junk after ']'");
         }
 
-        output.pc = Some((label.to_owned(), offset));
+        output.pc = Some(ProgramCounterRef::ByLabel {
+            label: label.to_owned(),
+            instruction_offset: offset,
+        });
     } else {
         let lhs = polkavm_common::utils::parse_reg(lhs).expect("invalid 'pre' / 'post' directive: failed to parse lhs");
         let rhs = polkavm_common::utils::parse_immediate(rhs)
@@ -147,6 +155,7 @@ fn main_generate() {
         blob: Vec<u8>,
         pre: PrePost,
         post: PrePost,
+        expected_status: Option<&'static str>,
     }
 
     let mut testcases = Vec::new();
@@ -190,6 +199,51 @@ fn main_generate() {
             blob,
             pre,
             post,
+            expected_status: None,
+        });
+    }
+
+    // This is kind of a hack, but whatever.
+    for line in include_str!("../../../crates/polkavm/src/tests_riscv.rs").lines() {
+        let prefix = "riscv_test!(riscv_unoptimized_rv64";
+        if !line.starts_with(prefix) {
+            continue;
+        }
+
+        let line = &line[prefix.len()..];
+        let mut xs = line.split(',');
+        let name = xs.next().unwrap();
+        let path = xs.next().unwrap().trim();
+        let path = &path[1..path.len() - 1];
+
+        let path = root.join("../../../crates/polkavm/src").join(path);
+        let path = path.canonicalize().unwrap();
+        let elf = std::fs::read(&path).unwrap();
+
+        let mut linker_config = polkavm_linker::Config::default();
+        linker_config.set_opt_level(polkavm_linker::OptLevel::O1);
+        linker_config.set_strip(true);
+        linker_config.set_min_stack_size(0);
+        let blob = polkavm_linker::program_from_elf(linker_config, &elf).unwrap();
+
+        let mut post = PrePost::default();
+
+        let program_blob = ProgramBlob::parse(blob.clone().into()).unwrap();
+        post.pc = Some(ProgramCounterRef::Preset(
+            program_blob
+                .instructions(ISA64_V1)
+                .find(|inst| inst.kind == asm::ret())
+                .unwrap()
+                .offset,
+        ));
+
+        testcases.push(RawTestcase {
+            name: format!("riscv_rv64{name}"),
+            internal_name: format!("{path:?}"),
+            blob,
+            pre: PrePost::default(),
+            post,
+            expected_status: Some("halt"),
         });
     }
 
@@ -200,6 +254,7 @@ fn main_generate() {
             blob,
             pre,
             post,
+            expected_status,
         } = testcase;
 
         let initial_gas = pre.gas.unwrap_or(10000);
@@ -256,7 +311,7 @@ fn main_generate() {
                 "'@expected_exit' label and 'post: pc = ...' should not be used together"
             );
             export.program_counter().0
-        } else if let Some((label, nth_instruction)) = post.pc {
+        } else if let Some(ProgramCounterRef::ByLabel { label, instruction_offset }) = post.pc {
             let Some(export) = blob.exports().find(|export| export.symbol().as_bytes() == label.as_bytes()) else {
                 panic!("label specified in 'post: pc = ...' is missing: @{label}");
             };
@@ -267,9 +322,11 @@ fn main_generate() {
                 .position(|inst| inst.offset == export.program_counter())
                 .expect("failed to find label specified in 'post: pc = ...'");
             let instruction = instructions
-                .get(index + nth_instruction as usize)
+                .get(index + instruction_offset as usize)
                 .expect("invalid 'post: pc = ...': offset goes out of bounds of the basic block");
             instruction.offset.0
+        } else if let Some(ProgramCounterRef::Preset(pc)) = post.pc {
+            pc.0
         } else {
             blob.code().len() as u32
         };
@@ -282,7 +339,7 @@ fn main_generate() {
         }
 
         let mut final_pc = initial_pc;
-        let expected_status = loop {
+        let final_status = loop {
             match instance.run().unwrap() {
                 InterruptKind::Finished => break "halt",
                 InterruptKind::Trap => break "panic",
@@ -296,8 +353,16 @@ fn main_generate() {
             }
         };
 
-        if expected_status != "halt" {
+        if final_status != "halt" {
             final_pc = instance.program_counter().unwrap();
+        }
+
+        if let Some(expected_status) = expected_status {
+            if final_status != expected_status {
+                eprintln!("Unexpected final status for {internal_name}: expected {expected_status}, is {final_status}");
+                found_errors = true;
+                continue;
+            }
         }
 
         if final_pc.0 != expected_final_pc {
@@ -365,7 +430,7 @@ fn main_generate() {
                 initial_memory,
                 initial_gas,
                 program: parts.code_and_jump_table.to_vec(),
-                expected_status: expected_status.to_owned(),
+                expected_status: final_status.to_owned(),
                 expected_regs,
                 expected_pc: expected_final_pc,
                 expected_memory,
