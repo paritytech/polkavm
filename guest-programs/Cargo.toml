@@ -22,6 +22,7 @@ members = [
     "bench-prime-sieve",
 
     # Tests
+    "program-for-bug",
     "test-blob",
 ]
 

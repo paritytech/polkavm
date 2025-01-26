@@ -1,0 +1,13 @@
+[package]
+name = "program-for-bug"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+polkavm-derive = { path = "../../crates/polkavm-derive" }
+spin = "0.9.8"
+talc = "4.4.2"
+
+[lints]
+workspace = true

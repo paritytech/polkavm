@@ -19,3 +19,4 @@ function build_test_data() {
 
 build_test_data "bench-pinky" "release"
 build_test_data "test-blob" "no-lto"
+build_test_data "program-for-bug" "no-lto"
