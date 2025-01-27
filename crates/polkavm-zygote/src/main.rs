@@ -26,6 +26,7 @@ use polkavm_common::{
         VMCTX_FUTEX_GUEST_ECALLI,
         VMCTX_FUTEX_GUEST_STEP,
         VMCTX_FUTEX_GUEST_TRAP,
+        VMCTX_FUTEX_GUEST_NOT_ENOUGH_GAS,
         VMCTX_FUTEX_GUEST_SIGNAL,
         VMCTX_FUTEX_IDLE,
     },
@@ -353,7 +354,11 @@ unsafe extern "C" fn signal_handler(signal: u32, _info: &linux_raw::siginfo_t, c
         VMCTX.regs[reg as usize].store(value, Ordering::Relaxed);
     }
 
-    VMCTX.next_native_program_counter.store(rip, Ordering::Relaxed);
+    VMCTX
+        .tmp_reg
+        .store(get_reg(polkavm_common::regmap::TMP_REG, &context.uc_mcontext), Ordering::Relaxed);
+
+    VMCTX.rip.store(rip, Ordering::Relaxed);
 
     signal_host_and_longjmp(VMCTX_FUTEX_GUEST_SIGNAL);
 }
@@ -843,6 +848,13 @@ pub unsafe extern "C" fn syscall_trap() -> ! {
 
 #[inline(never)]
 #[no_mangle]
+pub unsafe extern "C" fn syscall_not_enough_gas() -> ! {
+    trace!("syscall: not enough gas triggered");
+    signal_host_and_longjmp(VMCTX_FUTEX_GUEST_NOT_ENOUGH_GAS);
+}
+
+#[inline(never)]
+#[no_mangle]
 pub unsafe extern "C" fn syscall_return() -> ! {
     trace!("syscall: return triggered");
     signal_host_and_longjmp(VMCTX_FUTEX_IDLE);
@@ -915,6 +927,7 @@ pub static ADDRESS_TABLE: AddressTableRaw = AddressTableRaw {
     syscall_return,
     syscall_step,
     syscall_sbrk,
+    syscall_not_enough_gas,
 };
 
 // A table for functions which can be called from *outside* the VM (by the host).

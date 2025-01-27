@@ -11,7 +11,7 @@ mod reader_wrapper;
 mod riscv;
 mod utils;
 
-pub use crate::program_from_elf::{program_from_elf, Config, ProgramFromElfError};
+pub use crate::program_from_elf::{program_from_elf, Config, OptLevel, ProgramFromElfError};
 pub use polkavm_common::program::{ProgramBlob, ProgramParseError, ProgramParts};
 
 pub static TARGET_JSON_32_BIT: &str = include_str!("../riscv32emac-unknown-none-polkavm.json");
@@ -24,6 +24,7 @@ fn target_json_path_impl(json_name: &str, json_contents: &str) -> Result<PathBuf
         .unwrap_or_else(|| PathBuf::from("./"))
         .join(".polkavm-linker")
         .join(version);
+
     if let Err(error) = std::fs::create_dir_all(&cache_path) {
         return Err(format!(
             "failed to fetch path to the PolkaVM target JSON: failed to create {cache_path:?}: {error}"

@@ -9,6 +9,7 @@ env_logger = { workspace = true }
 polkavm = { workspace = true }
 polkavm-common = { workspace = true }
 polkavm-disassembler = { workspace = true }
+polkavm-linker = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

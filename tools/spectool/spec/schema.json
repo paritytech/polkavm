@@ -7,7 +7,7 @@
     },
     "initial-regs": {
       "type": "array",
-      "items": { "$ref": "#/$defs/u32" },
+      "items": { "$ref": "#/$defs/u64" },
       "minItems": 13,
       "maxItems": 13
     },
@@ -37,11 +37,11 @@
     },
     "expected-status": {
       "type": "string",
-      "enum": ["trap", "halt"]
+      "enum": ["panic", "halt", "page-fault"]
     },
     "expected-regs": {
       "type": "array",
-      "items": { "$ref": "#/$defs/u32" },
+      "items": { "$ref": "#/$defs/u64" },
       "minItems": 13,
       "maxItems": 13
     },
@@ -51,6 +51,9 @@
     },
     "expected-gas": {
       "$ref": "#/$defs/i64"
+    },
+    "expected-page-fault-address": {
+      "$ref": "#/$defs/u32"
     }
   },
   "required": ["name", "initial-regs", "initial-pc", "initial-page-map", "initial-memory", "initial-gas", "program", "expected-status", "expected-regs", "expected-pc", "expected-memory", "expected-gas"],
@@ -65,6 +68,11 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 4294967295
+    },
+    "u64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
     },
     "i64": {
       "type": "integer",

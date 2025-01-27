@@ -7,7 +7,7 @@ use clap::Parser;
 use core::fmt::Write;
 use polkavm::{Engine, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg};
 use polkavm_common::assembler::assemble;
-use polkavm_common::program::ProgramParts;
+use polkavm_common::program::{asm, ProgramCounter, ProgramParts, ISA64_V1};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
@@ -62,6 +62,8 @@ struct TestcaseJson {
     expected_pc: u32,
     expected_memory: Vec<MemoryChunk>,
     expected_gas: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_page_fault_address: Option<u32>,
 }
 
 fn extract_chunks(base_address: u32, slice: &[u8]) -> Vec<MemoryChunk> {
@@ -80,11 +82,16 @@ fn extract_chunks(base_address: u32, slice: &[u8]) -> Vec<MemoryChunk> {
     output
 }
 
+enum ProgramCounterRef {
+    ByLabel { label: String, instruction_offset: u32 },
+    Preset(ProgramCounter),
+}
+
 #[derive(Default)]
 struct PrePost {
     gas: Option<i64>,
     regs: [Option<u64>; 13],
-    pc: Option<(String, u32)>,
+    pc: Option<ProgramCounterRef>,
 }
 
 fn parse_pre_post(line: &str, output: &mut PrePost) {
@@ -114,7 +121,10 @@ fn parse_pre_post(line: &str, output: &mut PrePost) {
             panic!("invalid 'pre' / 'post' directive: failed to parse 'pc': junk after ']'");
         }
 
-        output.pc = Some((label.to_owned(), offset));
+        output.pc = Some(ProgramCounterRef::ByLabel {
+            label: label.to_owned(),
+            instruction_offset: offset,
+        });
     } else {
         let lhs = polkavm_common::utils::parse_reg(lhs).expect("invalid 'pre' / 'post' directive: failed to parse lhs");
         let rhs = polkavm_common::utils::parse_immediate(rhs)
@@ -129,6 +139,7 @@ fn main_generate() {
 
     let mut config = polkavm::Config::new();
     config.set_backend(Some(polkavm::BackendKind::Interpreter));
+    config.set_allow_dynamic_paging(true);
 
     let engine = Engine::new(&config).unwrap();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("spec");
@@ -141,6 +152,16 @@ fn main_generate() {
 
     paths.sort_by_key(|entry| entry.file_stem().unwrap().to_string_lossy().to_string());
 
+    struct RawTestcase {
+        name: String,
+        internal_name: String,
+        blob: Vec<u8>,
+        pre: PrePost,
+        post: PrePost,
+        expected_status: Option<&'static str>,
+    }
+
+    let mut testcases = Vec::new();
     for path in paths {
         let name = path.file_stem().unwrap().to_string_lossy();
 
@@ -165,10 +186,6 @@ fn main_generate() {
             input_lines.push(line);
         }
 
-        let initial_gas = pre.gas.unwrap_or(10000);
-        let initial_regs = pre.regs.map(|value| value.unwrap_or(0));
-        assert!(pre.pc.is_none(), "'pre: pc = ...' is currently unsupported");
-
         let input = input_lines.join("\n");
         let blob = match assemble(&input) {
             Ok(blob) => blob,
@@ -179,6 +196,74 @@ fn main_generate() {
             }
         };
 
+        testcases.push(RawTestcase {
+            name: name.into_owned(),
+            internal_name: format!("{path:?}"),
+            blob,
+            pre,
+            post,
+            expected_status: None,
+        });
+    }
+
+    // This is kind of a hack, but whatever.
+    for line in include_str!("../../../crates/polkavm/src/tests_riscv.rs").lines() {
+        let prefix = "riscv_test!(riscv_unoptimized_rv64";
+        if !line.starts_with(prefix) {
+            continue;
+        }
+
+        let line = &line[prefix.len()..];
+        let mut xs = line.split(',');
+        let name = xs.next().unwrap();
+        let path = xs.next().unwrap().trim();
+        let path = &path[1..path.len() - 1];
+
+        let path = root.join("../../../crates/polkavm/src").join(path);
+        let path = path.canonicalize().unwrap();
+        let elf = std::fs::read(&path).unwrap();
+
+        let mut linker_config = polkavm_linker::Config::default();
+        linker_config.set_opt_level(polkavm_linker::OptLevel::O1);
+        linker_config.set_strip(true);
+        linker_config.set_min_stack_size(0);
+        let blob = polkavm_linker::program_from_elf(linker_config, &elf).unwrap();
+
+        let mut post = PrePost::default();
+
+        let program_blob = ProgramBlob::parse(blob.clone().into()).unwrap();
+        post.pc = Some(ProgramCounterRef::Preset(
+            program_blob
+                .instructions(ISA64_V1)
+                .find(|inst| inst.kind == asm::ret())
+                .unwrap()
+                .offset,
+        ));
+
+        testcases.push(RawTestcase {
+            name: format!("riscv_rv64{name}"),
+            internal_name: format!("{path:?}"),
+            blob,
+            pre: PrePost::default(),
+            post,
+            expected_status: Some("halt"),
+        });
+    }
+
+    for testcase in testcases {
+        let RawTestcase {
+            name,
+            internal_name,
+            blob,
+            pre,
+            post,
+            expected_status,
+        } = testcase;
+
+        let initial_gas = pre.gas.unwrap_or(10000);
+        let initial_regs = pre.regs.map(|value| value.unwrap_or(0));
+        assert!(pre.pc.is_none(), "'pre: pc = ...' is currently unsupported");
+
         let parts = ProgramParts::from_bytes(blob.into()).unwrap();
         let blob = ProgramBlob::from_parts(parts.clone()).unwrap();
 
@@ -186,6 +271,7 @@ fn main_generate() {
         module_config.set_strict(true);
         module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
         module_config.set_step_tracing(true);
+        module_config.set_dynamic_paging(true);
 
         let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
         let mut instance = module.instantiate().unwrap();
@@ -229,22 +315,22 @@ fn main_generate() {
                 "'@expected_exit' label and 'post: pc = ...' should not be used together"
             );
             export.program_counter().0
-        } else if let Some((label, nth_instruction)) = post.pc {
+        } else if let Some(ProgramCounterRef::ByLabel { label, instruction_offset }) = post.pc {
             let Some(export) = blob.exports().find(|export| export.symbol().as_bytes() == label.as_bytes()) else {
                 panic!("label specified in 'post: pc = ...' is missing: @{label}");
             };
 
-            let instructions: Vec<_> = blob
-                .instructions(polkavm_common::program::DefaultInstructionSet::default())
-                .collect();
+            let instructions: Vec<_> = blob.instructions(ISA64_V1).collect();
             let index = instructions
                 .iter()
                 .position(|inst| inst.offset == export.program_counter())
                 .expect("failed to find label specified in 'post: pc = ...'");
             let instruction = instructions
-                .get(index + nth_instruction as usize)
+                .get(index + instruction_offset as usize)
                 .expect("invalid 'post: pc = ...': offset goes out of bounds of the basic block");
             instruction.offset.0
+        } else if let Some(ProgramCounterRef::Preset(pc)) = post.pc {
+            pc.0
         } else {
             blob.code().len() as u32
         };
@@ -256,14 +342,27 @@ fn main_generate() {
             instance.set_reg(reg, value);
         }
 
+        if module_config.dynamic_paging() {
+            for page in &initial_page_map {
+                instance.zero_memory(page.address, page.length).unwrap();
+                if !page.is_writable {
+                    instance.protect_memory(page.address, page.length).unwrap();
+                }
+            }
+
+            for chunk in &initial_memory {
+                instance.write_memory(chunk.address, &chunk.contents).unwrap();
+            }
+        }
+
         let mut final_pc = initial_pc;
-        let expected_status = loop {
+        let (final_status, page_fault_address) = loop {
             match instance.run().unwrap() {
-                InterruptKind::Finished => break "halt",
-                InterruptKind::Trap => break "trap",
+                InterruptKind::Finished => break ("halt", None),
+                InterruptKind::Trap => break ("panic", None),
                 InterruptKind::Ecalli(..) => todo!(),
-                InterruptKind::NotEnoughGas => break "out-of-gas",
-                InterruptKind::Segfault(..) => todo!(),
+                InterruptKind::NotEnoughGas => break ("out-of-gas", None),
+                InterruptKind::Segfault(segfault) => break ("page-fault", Some(segfault.page_address)),
                 InterruptKind::Step => {
                     final_pc = instance.program_counter().unwrap();
                     continue;
@@ -271,12 +370,20 @@ fn main_generate() {
             }
         };
 
-        if expected_status != "halt" {
+        if final_status != "halt" {
             final_pc = instance.program_counter().unwrap();
         }
 
+        if let Some(expected_status) = expected_status {
+            if final_status != expected_status {
+                eprintln!("Unexpected final status for {internal_name}: expected {expected_status}, is {final_status}");
+                found_errors = true;
+                continue;
+            }
+        }
+
         if final_pc.0 != expected_final_pc {
-            eprintln!("Unexpected final program counter for {path:?}: expected {expected_final_pc}, is {final_pc}");
+            eprintln!("Unexpected final program counter for {internal_name}: expected {expected_final_pc}, is {final_pc}");
             found_errors = true;
             continue;
         }
@@ -300,7 +407,7 @@ fn main_generate() {
         for ((final_value, reg), required_value) in expected_regs.iter().zip(Reg::ALL).zip(post.regs.iter()) {
             if let Some(required_value) = required_value {
                 if final_value != required_value {
-                    eprintln!("{path:?}: unexpected {reg}: 0x{final_value:x} (expected: 0x{required_value:x})");
+                    eprintln!("{internal_name}: unexpected {reg}: 0x{final_value:x} (expected: 0x{required_value:x})");
                     found_post_check_errors = true;
                 }
             }
@@ -308,7 +415,7 @@ fn main_generate() {
 
         if let Some(post_gas) = post.gas {
             if expected_gas != post_gas {
-                eprintln!("{path:?}: unexpected gas: {expected_gas} (expected: {post_gas})");
+                eprintln!("{internal_name}: unexpected gas: {expected_gas} (expected: {post_gas})");
                 found_post_check_errors = true;
             }
         }
@@ -333,18 +440,19 @@ fn main_generate() {
         tests.push(Testcase {
             disassembly,
             json: TestcaseJson {
-                name: name.into(),
+                name,
                 initial_regs,
                 initial_pc: initial_pc.0,
                 initial_page_map,
                 initial_memory,
                 initial_gas,
                 program: parts.code_and_jump_table.to_vec(),
-                expected_status: expected_status.to_owned(),
+                expected_status: final_status.to_owned(),
                 expected_regs,
                 expected_pc: expected_final_pc,
                 expected_memory,
                 expected_gas,
+                expected_page_fault_address: page_fault_address,
             },
         });
     }
@@ -472,7 +580,17 @@ fn main_generate() {
             writeln!(&mut index_md).unwrap();
         }
 
-        writeln!(&mut index_md, "Program should end with: {}\n", test.json.expected_status).unwrap();
+        assert_eq!(
+            test.json.expected_status == "page-fault",
+            test.json.expected_page_fault_address.is_some()
+        );
+        write!(&mut index_md, "Program should end with: {}", test.json.expected_status).unwrap();
+
+        if let Some(address) = test.json.expected_page_fault_address {
+            write!(&mut index_md, " (page address = 0x{:x})", address).unwrap();
+        }
+
+        writeln!(&mut index_md, "\n").unwrap();
         writeln!(&mut index_md, "Final value of the program counter: {}\n", test.json.expected_pc).unwrap();
         writeln!(
             &mut index_md,
