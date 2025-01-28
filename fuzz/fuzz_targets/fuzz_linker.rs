@@ -8,21 +8,22 @@ use libfuzzer_sys::fuzz_target;
 #[derive(Arbitrary, Debug)]
 pub enum Reg {
     Zero = 0,
-    RA,
-    SP,
-    GP,
-    TP,
-    T0,
-    T1,
-    T2,
-    S0,
-    S1,
-    A0,
-    A1,
-    A2,
-    A3,
-    A4,
-    A5,
+    RA = 1,
+    SP = 2,
+    // These registers are not supported
+    // GP = 3,
+    // TP = 4,
+    T0 = 5,
+    T1 = 6,
+    T2 = 7,
+    S0 = 8,
+    S1 = 9,
+    A0 = 10,
+    A1 = 11,
+    A2 = 12,
+    A3 = 13,
+    A4 = 14,
+    A5 = 15,
 }
 
 #[derive(Arbitrary, Debug)]

@@ -2082,11 +2082,21 @@ where
                 return Ok(());
             };
 
-            let Some(src) = cast_reg_non_zero(src)? else {
-                return Err(ProgramFromElfError::other("found an invalid instruction"));
-            };
-
             use crate::riscv::RegKind as K;
+
+            let Some(src) = cast_reg_non_zero(src)? else {
+                let imm = match kind {
+                    K::CountLeadingZeroBits32 | K::CountTrailingZeroBits32 => 32,
+                    K::CountLeadingZeroBits64 | K::CountTrailingZeroBits64 => 64,
+                    K::CountSetBits32 | K::CountSetBits64 => 0,
+                    K::ReverseByte => 0,
+                    K::OrCombineByte => 0,
+                    K::SignExtend8 | K::SignExtend16 | K::ZeroExtend16 => 0,
+                };
+
+                emit(InstExt::Basic(BasicInst::LoadImmediate { dst, imm }));
+                return Ok(());
+            };
 
             let kind = match kind {
                 K::CountLeadingZeroBits32 => RegKind::CountLeadingZeroBits32,
@@ -4315,11 +4325,19 @@ impl OperationKind {
             (O::ShiftArithmeticRight32, lhs, C(0)) => lhs,
             (O::ShiftArithmeticRight64, lhs, C(0)) => lhs,
             // x % 0 = x
-            (O::Rem32,                  lhs, C(0)) => lhs,
-            (O::Rem64,                  lhs, C(0)) => lhs,
-            // x % 0 = x
-            (O::RemUnsigned32,          lhs, C(0)) => lhs,
-            (O::RemUnsigned64,          lhs, C(0)) => lhs,
+            (O::Rem32,                          lhs, C(0)) => lhs,
+            (O::Rem64,                          lhs, C(0)) => lhs,
+            (O::RemUnsigned32,                  lhs, C(0)) => lhs,
+            (O::RemUnsigned64,                  lhs, C(0)) => lhs,
+            (O::Rem32AndSignExtend,             lhs, C(0)) => lhs,
+            (O::RemUnsigned32AndSignExtend,     lhs, C(0)) => lhs,
+            // 0 % x = 0
+            (O::Rem32,                          C(0), _) => C(0),
+            (O::Rem64,                          C(0), _) => C(0),
+            (O::RemUnsigned32,                  C(0), _) => C(0),
+            (O::RemUnsigned64,                  C(0), _) => C(0),
+            (O::Rem32AndSignExtend,             C(0), _) => C(0),
+            (O::RemUnsigned32AndSignExtend,     C(0), _) => C(0),
 
             // x & 0 = 0
             (O::And32,                    _, C(0)) => C(0),
@@ -4347,10 +4365,20 @@ impl OperationKind {
             (O::MulUpperUnsignedUnsigned64, C(0), _) => C(0),
 
             // x / 0 = -1
-            (O::Div32,                    _, C(0)) => C(-1),
-            (O::Div64,                    _, C(0)) => C(-1),
-            (O::DivUnsigned32,            _, C(0)) => C(-1),
-            (O::DivUnsigned64,            _, C(0)) => C(-1),
+            (O::Div32,                          _, C(0)) => C(-1),
+            (O::Div64,                          _, C(0)) => C(-1),
+            (O::DivUnsigned32,                  _, C(0)) => C(-1),
+            (O::DivUnsigned64,                  _, C(0)) => C(-1),
+            (O::Div32AndSignExtend,             _, C(0)) => C(-1),
+            (O::DivUnsigned32AndSignExtend,     _, C(0)) => C(-1),
+
+            // 0 / x = 0
+            (O::Div32,                          C(0), _) => C(0),
+            (O::Div64,                          C(0), _) => C(0),
+            (O::DivUnsigned32,                  C(0), _) => C(0),
+            (O::DivUnsigned64,                  C(0), _) => C(0),
+            (O::Div32AndSignExtend,             C(0), _) => C(0),
+            (O::DivUnsigned32AndSignExtend,     C(0), _) => C(0),
 
             // (x & ~0) = x
             (O::AndInverted,              lhs, C(0)) => lhs,
