@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
     - uses: actions/checkout@v4
+    - name: uname -a
+      run: uname -a
     - name: Enable unprivileged userfaultfd
       run: echo "1" | sudo tee /proc/sys/vm/unprivileged_userfaultfd
     - name: Install LLD
