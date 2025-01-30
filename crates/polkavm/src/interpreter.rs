@@ -1043,6 +1043,10 @@ impl<'a> Visitor<'a> {
     }
 
     fn segfault_impl(&mut self, program_counter: ProgramCounter, page_address: u32) -> Option<Target> {
+        if page_address < 1024 * 16 {
+            return trap_impl::<false>(self, program_counter);
+        }
+
         self.inner.program_counter = program_counter;
         self.inner.program_counter_valid = true;
         self.inner.next_program_counter = Some(program_counter);
@@ -1052,6 +1056,16 @@ impl<'a> Visitor<'a> {
         });
 
         None
+    }
+
+    #[cold]
+    fn segfault_or_trap_at_top_of_address_space<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<Target> {
+        let page_address = self.inner.module.round_to_page_size_down(0xffffffff);
+        if self.inner.dynamic_memory.pages.contains_key(&page_address) {
+            trap_impl::<DEBUG>(self, program_counter)
+        } else {
+            self.segfault_impl(program_counter, page_address)
+        }
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
@@ -1084,7 +1098,7 @@ impl<'a> Visitor<'a> {
             T::from_slice(slice)
         } else {
             let Some(address_end) = address.checked_add(length) else {
-                return trap_impl::<DEBUG>(self, program_counter);
+                return self.segfault_or_trap_at_top_of_address_space::<DEBUG>(program_counter);
             };
 
             let page_address_lo = self.inner.module.round_to_page_size_down(address);
@@ -1191,7 +1205,7 @@ impl<'a> Visitor<'a> {
             slice.copy_from_slice(value.as_ref());
         } else {
             let Some(address_end) = address.checked_add(length) else {
-                return trap_impl::<DEBUG>(self, program_counter);
+                return self.segfault_or_trap_at_top_of_address_space::<DEBUG>(program_counter);
             };
 
             let page_address_lo = self.inner.module.round_to_page_size_down(address);
