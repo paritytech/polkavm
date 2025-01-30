@@ -91,20 +91,9 @@ impl IoUring {
         })
     }
 
-    #[allow(clippy::field_reassign_with_default)]
-    pub fn queue_read(&mut self, user_data: u64, fd: linux_raw::FdRef, buffer: *mut u8, length: u32) -> Result<(), linux_raw::Error> {
-        if self.queue_length() >= self.queue_capacity() {
-            return Err(linux_raw::Error::from("no remaining capacity in the io_uring submission queue"));
-        }
-
+    fn append_sqe(&mut self, sqe: linux_raw::io_uring_sqe) {
         let index = self.submit_tail & self.submit_ring_mask;
-        let mut sqe = linux_raw::io_uring_sqe::default();
-        sqe.opcode = linux_raw::io_uring_op_IORING_OP_READ as u8;
-        sqe.fd = fd.raw();
-        sqe.__bindgen_anon_2.addr = buffer as u64;
-        sqe.len = length;
-        sqe.__bindgen_anon_1.off = u64::MAX;
-        sqe.user_data = user_data;
+
         unsafe {
             self.sqes_map
                 .as_mut_ptr()
@@ -113,6 +102,22 @@ impl IoUring {
                 .write(sqe)
         };
         self.submit_tail = self.submit_tail.wrapping_add(1);
+    }
+
+    #[allow(clippy::field_reassign_with_default)]
+    pub fn queue_read(&mut self, user_data: u64, fd: linux_raw::FdRef, buffer: *mut u8, length: u32) -> Result<(), linux_raw::Error> {
+        if self.queue_length() >= self.queue_capacity() {
+            return Err(linux_raw::Error::from("no remaining capacity in the io_uring submission queue"));
+        }
+
+        let mut sqe = linux_raw::io_uring_sqe::default();
+        sqe.opcode = linux_raw::io_uring_op_IORING_OP_READ as u8;
+        sqe.fd = fd.raw();
+        sqe.__bindgen_anon_2.addr = buffer as u64;
+        sqe.len = length;
+        sqe.__bindgen_anon_1.off = u64::MAX;
+        sqe.user_data = user_data;
+        self.append_sqe(sqe);
 
         Ok(())
     }
@@ -123,7 +128,6 @@ impl IoUring {
             return Err(linux_raw::Error::from("no remaining capacity in the io_uring submission queue"));
         }
 
-        let index = self.submit_tail & self.submit_ring_mask;
         let mut sqe = linux_raw::io_uring_sqe::default();
         sqe.opcode = linux_raw::io_uring_op_IORING_OP_TIMEOUT as u8;
         sqe.fd = -1;
@@ -135,14 +139,7 @@ impl IoUring {
         sqe.len = event_count;
         sqe.__bindgen_anon_1.off = 0;
         sqe.user_data = user_data;
-        unsafe {
-            self.sqes_map
-                .as_mut_ptr()
-                .cast::<linux_raw::io_uring_sqe>()
-                .add(index as usize)
-                .write(sqe)
-        };
-        self.submit_tail = self.submit_tail.wrapping_add(1);
+        self.append_sqe(sqe);
 
         Ok(())
     }
@@ -154,7 +151,6 @@ impl IoUring {
             return Err(linux_raw::Error::from("no remaining capacity in the io_uring submission queue"));
         }
 
-        let index = self.submit_tail & self.submit_ring_mask;
         let mut sqe = linux_raw::io_uring_sqe::default();
         sqe.opcode = linux_raw::io_uring_op_IORING_OP_FUTEX_WAIT as u8;
         sqe.__bindgen_anon_2.addr = futex as usize as u64;
@@ -162,14 +158,7 @@ impl IoUring {
         unsafe { sqe.__bindgen_anon_6.__bindgen_anon_1.as_mut().addr3 = u64::from(linux_raw::FUTEX_BITSET_MATCH_ANY) };
         sqe.user_data = user_data;
         sqe.fd = linux_raw::FUTEX2_SIZE_U32 as i32;
-        unsafe {
-            self.sqes_map
-                .as_mut_ptr()
-                .cast::<linux_raw::io_uring_sqe>()
-                .add(index as usize)
-                .write(sqe)
-        };
-        self.submit_tail = self.submit_tail.wrapping_add(1);
+        self.append_sqe(sqe);
 
         Ok(())
     }
@@ -181,7 +170,6 @@ impl IoUring {
             return Err(linux_raw::Error::from("no remaining capacity in the io_uring submission queue"));
         }
 
-        let index = self.submit_tail & self.submit_ring_mask;
         let mut sqe = linux_raw::io_uring_sqe::default();
         sqe.opcode = linux_raw::io_uring_op_IORING_OP_FUTEX_WAKE as u8;
         sqe.__bindgen_anon_2.addr = futex as usize as u64;
@@ -189,14 +177,7 @@ impl IoUring {
         unsafe { sqe.__bindgen_anon_6.__bindgen_anon_1.as_mut().addr3 = u64::from(linux_raw::FUTEX_BITSET_MATCH_ANY) };
         sqe.user_data = user_data;
         sqe.fd = linux_raw::FUTEX2_SIZE_U32 as i32;
-        unsafe {
-            self.sqes_map
-                .as_mut_ptr()
-                .cast::<linux_raw::io_uring_sqe>()
-                .add(index as usize)
-                .write(sqe)
-        };
-        self.submit_tail = self.submit_tail.wrapping_add(1);
+        self.append_sqe(sqe);
 
         Ok(())
     }
