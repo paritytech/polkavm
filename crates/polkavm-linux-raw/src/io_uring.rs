@@ -253,6 +253,25 @@ impl IoUring {
         self.completion_head = self.completion_head.wrapping_add(1);
         Some(event)
     }
+
+    pub fn cancel_all_sync(&mut self) -> Result<(), linux_raw::Error> {
+        let reg = linux_raw::io_uring_sync_cancel_reg {
+            addr: 0,
+            fd: 0,
+            flags: linux_raw::IORING_ASYNC_CANCEL_ANY,
+            timeout: linux_raw::arch_bindings::__kernel_timespec { tv_sec: !0, tv_nsec: !0 },
+            opcode: 0,
+            pad: Default::default(),
+            pad2: Default::default(),
+        };
+
+        linux_raw::sys_io_uring_register(
+            self.fd.borrow(),
+            linux_raw::IORING_REGISTER_SYNC_CANCEL,
+            core::ptr::addr_of!(reg).cast(),
+            1,
+        )
+    }
 }
 
 impl linux_raw::io_uring_cqe {
