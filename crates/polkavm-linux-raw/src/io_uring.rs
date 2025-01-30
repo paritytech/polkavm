@@ -182,6 +182,32 @@ impl IoUring {
         Ok(())
     }
 
+    // Requires Linux 6.5+.
+    #[allow(clippy::field_reassign_with_default)]
+    pub fn queue_waitid(
+        &mut self,
+        user_data: u64,
+        id_type: u32,
+        id: u32,
+        info: *mut crate::siginfo_t,
+        options: u32,
+    ) -> Result<(), linux_raw::Error> {
+        if self.queue_length() >= self.queue_capacity() {
+            return Err(linux_raw::Error::from("no remaining capacity in the io_uring submission queue"));
+        }
+
+        let mut sqe = linux_raw::io_uring_sqe::default();
+        sqe.user_data = user_data;
+        sqe.opcode = linux_raw::io_uring_op_IORING_OP_WAITID as u8;
+        sqe.fd = id as i32;
+        sqe.len = id_type;
+        sqe.__bindgen_anon_5.file_index = options;
+        sqe.__bindgen_anon_1.addr2 = info as u64;
+        self.append_sqe(sqe);
+
+        Ok(())
+    }
+
     pub fn queue_length(&self) -> usize {
         self.submit_tail.wrapping_sub(self.submit_head) as usize
     }
