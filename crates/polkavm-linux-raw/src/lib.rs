@@ -1839,6 +1839,21 @@ pub fn sys_ptrace_detach(pid: pid_t) -> Result<(), Error> {
     Ok(())
 }
 
+pub fn sys_ptrace_get_siginfo(pid: pid_t) -> Result<siginfo_t, Error> {
+    let mut siginfo: siginfo_t = unsafe { core::mem::zeroed() };
+    let result = unsafe {
+        syscall!(
+            SYS_ptrace,
+            crate::arch_bindings::PTRACE_GETSIGINFO,
+            pid,
+            0,
+            core::ptr::addr_of_mut!(siginfo)
+        )
+    };
+    Error::from_syscall("ptrace (PTRACE_GETSIGINFO)", result)?;
+    Ok(siginfo)
+}
+
 #[cfg(target_arch = "x86_64")]
 #[repr(C)]
 #[derive(Default, Debug)]
