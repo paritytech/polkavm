@@ -1004,6 +1004,12 @@ pub struct Sandbox {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
+        if let Some(mut iouring) = self.iouring.take() {
+            if let Err(error) = iouring.cancel_all_sync() {
+                log::error!("Failed to cancel io_uring requests: {error}");
+            }
+        }
+
         let vmctx = self.vmctx();
         let child_futex_wait = unsafe { *vmctx.counters.syscall_futex_wait.get() };
         let child_loop_start = unsafe { *vmctx.counters.syscall_wait_loop_start.get() };
