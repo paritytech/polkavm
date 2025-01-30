@@ -1729,7 +1729,7 @@ impl super::Sandbox for Sandbox {
                 &mut linux_raw::uffdio_register {
                     range: linux_raw::uffdio_range {
                         start: 0x10000,
-                        len: u64::from(u32::MAX) + 1 - 0x20000,
+                        len: u64::from(u32::MAX) + 1 - 0x10000,
                     },
                     mode: linux_raw::UFFDIO_REGISTER_MODE_MISSING | linux_raw::UFFDIO_REGISTER_MODE_WP,
                     ..linux_raw::uffdio_register::default()
