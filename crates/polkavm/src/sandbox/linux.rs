@@ -999,6 +999,7 @@ pub struct Sandbox {
     idle_regs: linux_raw::user_regs_struct,
     aux_data_address: u32,
     aux_data_length: u32,
+    is_borked: bool,
 }
 
 impl Drop for Sandbox {
@@ -1605,6 +1606,7 @@ impl super::Sandbox for Sandbox {
             idle_regs,
             aux_data_address: 0,
             aux_data_length: 0,
+            is_borked: false,
         })
     }
 
@@ -1740,6 +1742,10 @@ impl super::Sandbox for Sandbox {
     }
 
     fn recycle(&mut self, _global: &Self::GlobalState) -> Result<(), Self::Error> {
+        if self.is_borked {
+            return Err(Error::from_str("broken sandbox"));
+        }
+
         log::trace!("Recycling sandbox #{}", self.child.pid);
         if self.dynamic_paging_enabled {
             self.free_pages(0x10000, 0xffff0000)?;
@@ -2504,6 +2510,8 @@ impl Sandbox {
         if status.is_running() {
             return Ok(());
         }
+
+        self.is_borked = true;
 
         log::trace!("Child #{} is not running anymore: {status}", self.child.pid);
         let message = get_message(self.vmctx());
