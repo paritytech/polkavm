@@ -2227,7 +2227,6 @@ where
     #[inline(always)]
     pub fn load_indirect_u32(&mut self, dst: RawReg, base: RawReg, offset: u32) {
         assert_eq!(B::BITNESS, Bitness::B64);
-        // NOTE: For 32-bit the 'LoadKind::U32' is deliberate.
         self.load(dst, Some(base), offset, LoadKind::U32);
     }
 
