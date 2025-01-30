@@ -287,17 +287,8 @@ impl ChildProcess {
         }
     }
 
-    fn check_status(&mut self, non_blocking: bool) -> Result<ChildStatus, Error> {
-        // The __WALL here is needed since we're not specifying an exit signal
-        // when cloning the child process, so we'd get an ECHILD error without this flag.
-        //
-        // (And we're not using __WCLONE since that doesn't work for children which ran execve.)
-        let mut flags = linux_raw::WEXITED | linux_raw::__WALL;
-        if non_blocking {
-            flags |= linux_raw::WNOHANG;
-        }
-
-        match self.waitid(flags) {
+    fn extract_status(result: Result<linux_raw::siginfo_t, Error>) -> Result<ChildStatus, Error> {
+        match result {
             Ok(ok) => unsafe {
                 if ok.si_signo() == 0 && ok.si_pid() == 0 {
                     Ok(ChildStatus::Running)
@@ -327,6 +318,19 @@ impl ChildProcess {
                 }
             }
         }
+    }
+
+    fn check_status(&mut self, non_blocking: bool) -> Result<ChildStatus, Error> {
+        // The __WALL here is needed since we're not specifying an exit signal
+        // when cloning the child process, so we'd get an ECHILD error without this flag.
+        //
+        // (And we're not using __WCLONE since that doesn't work for children which ran execve.)
+        let mut flags = linux_raw::WEXITED | linux_raw::__WALL;
+        if non_blocking {
+            flags |= linux_raw::WNOHANG;
+        }
+
+        Self::extract_status(self.waitid(flags))
     }
 
     fn send_signal(&mut self, signal: c_uint) -> Result<(), Error> {
@@ -959,6 +963,17 @@ struct UffdBuffer(Arc<UnsafeCell<linux_raw::uffd_msg>>);
 unsafe impl Send for UffdBuffer {}
 unsafe impl Sync for UffdBuffer {}
 
+struct SiginfoBuffer(Box<UnsafeCell<linux_raw::siginfo_t>>);
+
+unsafe impl Sync for SiginfoBuffer {}
+unsafe impl Send for SiginfoBuffer {}
+
+impl Default for SiginfoBuffer {
+    fn default() -> Self {
+        Self(Box::new(UnsafeCell::new(unsafe { core::mem::zeroed() })))
+    }
+}
+
 struct Pagefault {
     address: u64,
     registers_modified: bool,
@@ -978,7 +993,8 @@ pub struct Sandbox {
     iouring: Option<linux_raw::IoUring>,
     iouring_futex_wait_queued: bool,
     iouring_uffd_read_queued: bool,
-    iouring_timeout_queued: bool,
+    iouring_waitid_queued: bool,
+    iouring_siginfo: SiginfoBuffer,
     userfaultfd: Fd,
     uffd_msg: UffdBuffer,
     child: ChildProcess,
@@ -1590,7 +1606,8 @@ impl super::Sandbox for Sandbox {
             iouring,
             iouring_futex_wait_queued: false,
             iouring_uffd_read_queued: false,
-            iouring_timeout_queued: false,
+            iouring_waitid_queued: false,
+            iouring_siginfo: Default::default(),
             userfaultfd,
             #[allow(clippy::arc_with_non_send_sync)]
             uffd_msg: UffdBuffer(Arc::new(UnsafeCell::new(linux_raw::uffd_msg::default()))),
@@ -1761,7 +1778,7 @@ impl super::Sandbox for Sandbox {
         self.page_set.clear();
 
         if self.pending_pagefault.take().is_some() {
-            self.cancel_pagefault()?;
+            self.resume_child()?;
             Ok(())
         } else {
             self.vmctx().jump_into.store(ZYGOTE_TABLES.1.ext_recycle, Ordering::Relaxed);
@@ -1775,7 +1792,7 @@ impl super::Sandbox for Sandbox {
         };
 
         if self.pending_pagefault.take().is_some() {
-            self.cancel_pagefault()?;
+            self.resume_child()?;
         }
 
         if self.next_program_counter_changed {
@@ -2270,12 +2287,43 @@ impl Sandbox {
         self.wait()?.expect_idle()
     }
 
+    fn handle_guest_signal(&mut self, machine_code_address: u64) -> Result<Interrupt, Error> {
+        use crate::sandbox::Sandbox;
+
+        let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
+        let Some(machine_code_offset) = machine_code_address.checked_sub(compiled_module.native_code_origin) else {
+            return Err(Error::from_str("internal error: address underflow after a trap"));
+        };
+
+        let is_out_of_gas = match compiled_module.bitness {
+            Bitness::B32 => crate::compiler::ArchVisitor::<Self, B32>::on_signal_trap(
+                compiled_module,
+                self.gas_metering.is_some(),
+                machine_code_offset,
+                self.vmctx(),
+            ),
+            Bitness::B64 => crate::compiler::ArchVisitor::<Self, B64>::on_signal_trap(
+                compiled_module,
+                self.gas_metering.is_some(),
+                machine_code_offset,
+                self.vmctx(),
+            ),
+        }
+        .map_err(Error::from_str)?;
+
+        self.is_program_counter_valid = true;
+        if is_out_of_gas {
+            Ok(Interrupt::NotEnoughGas)
+        } else {
+            Ok(Interrupt::Trap)
+        }
+    }
+
     #[inline(never)]
     #[cold]
     fn wait(&mut self) -> Result<Interrupt, Error> {
         use crate::sandbox::Sandbox;
 
-        let mut erestartsys_count = 0;
         'outer: loop {
             self.count_wait_loop_start += 1;
 
@@ -2296,32 +2344,7 @@ impl Sandbox {
                 }
 
                 let machine_code_address = self.vmctx().rip.load(Ordering::Relaxed);
-                let Some(machine_code_offset) = machine_code_address.checked_sub(compiled_module.native_code_origin) else {
-                    return Err(Error::from_str("internal error: address underflow after a trap"));
-                };
-
-                let is_out_of_gas = match compiled_module.bitness {
-                    Bitness::B32 => crate::compiler::ArchVisitor::<Self, B32>::on_signal_trap(
-                        compiled_module,
-                        self.gas_metering.is_some(),
-                        machine_code_offset,
-                        self.vmctx(),
-                    ),
-                    Bitness::B64 => crate::compiler::ArchVisitor::<Self, B64>::on_signal_trap(
-                        compiled_module,
-                        self.gas_metering.is_some(),
-                        machine_code_offset,
-                        self.vmctx(),
-                    ),
-                }
-                .map_err(Error::from_str)?;
-
-                self.is_program_counter_valid = true;
-                if is_out_of_gas {
-                    return Ok(Interrupt::NotEnoughGas);
-                } else {
-                    return Ok(Interrupt::Trap);
-                }
+                return self.handle_guest_signal(machine_code_address);
             }
 
             if state == VMCTX_FUTEX_GUEST_ECALLI {
@@ -2355,7 +2378,7 @@ impl Sandbox {
 
                 const IO_URING_JOB_FUTEX_WAIT: u64 = 1;
                 const IO_URING_JOB_USERFAULTFD_READ: u64 = 2;
-                const IO_URING_JOB_TIMEOUT: u64 = 3;
+                const IO_URING_JOB_WAITID: u64 = 3;
 
                 if !self.iouring_futex_wait_queued {
                     self.count_futex_wait += 1;
@@ -2378,11 +2401,17 @@ impl Sandbox {
                     self.iouring_uffd_read_queued = true;
                 }
 
-                if !self.iouring_timeout_queued {
+                if !self.iouring_waitid_queued {
                     iouring
-                        .queue_timeout(IO_URING_JOB_TIMEOUT, 1, Duration::from_millis(100))
+                        .queue_waitid(
+                            IO_URING_JOB_WAITID,
+                            linux_raw::P_PIDFD,
+                            self.child.pidfd.as_ref().expect("internal error: no pidfd handle").raw() as u32,
+                            self.iouring_siginfo.0.get(),
+                            linux_raw::WEXITED | linux_raw::__WALL,
+                        )
                         .expect("internal error: io_uring queue overflow");
-                    self.iouring_timeout_queued = true;
+                    self.iouring_waitid_queued = true;
                 }
 
                 unsafe {
@@ -2396,13 +2425,8 @@ impl Sandbox {
                     } else if job.user_data == IO_URING_JOB_USERFAULTFD_READ {
                         self.iouring_uffd_read_queued = false;
                         if job.res == -(linux_raw::ERESTARTSYS as i32) {
-                            erestartsys_count += 1;
-                            if (erestartsys_count % 16) == 0 {
-                                self.check_child_status()?;
-                            }
-
                             log::trace!("Child #{}: ERESTARTSYS", self.child.pid);
-                            continue 'outer;
+                            continue;
                         }
                         job.to_result()?;
 
@@ -2428,7 +2452,34 @@ impl Sandbox {
                             debug_assert!(address <= u64::from(u32::MAX));
 
                             linux_raw::sys_ptrace_interrupt(self.child.pid)?;
-                            let status = self.child.check_status(false)?;
+                            let status = if !self.iouring_waitid_queued {
+                                self.child.check_status(false)?
+                            } else {
+                                'wait_loop: loop {
+                                    unsafe {
+                                        self.iouring
+                                            .as_mut()
+                                            .unwrap()
+                                            .submit_and_wait(1)
+                                            .expect("internal error: io_uring failed");
+                                    }
+
+                                    while let Some(job) = self.iouring.as_mut().unwrap().pop_finished() {
+                                        if job.user_data == IO_URING_JOB_FUTEX_WAIT {
+                                            self.iouring_futex_wait_queued = false;
+                                        } else if job.user_data == IO_URING_JOB_WAITID {
+                                            self.iouring_waitid_queued = false;
+                                            let result = job
+                                                .to_result()
+                                                .map(|_| unsafe { core::ptr::read_volatile(self.iouring_siginfo.0.get()) });
+                                            break 'wait_loop ChildProcess::extract_status(result)?;
+                                        } else {
+                                            unreachable!("internal error: unknown io_uring job");
+                                        }
+                                    }
+                                }
+                            };
+
                             if !status.is_trapped() {
                                 log::error!("Child #{}: expected child to trap, found: {status}", self.child.pid);
                                 return Err(Error::from_str("internal error: unexpected child status"));
@@ -2471,11 +2522,17 @@ impl Sandbox {
                                 page_size: get_native_page_size() as u32,
                             }));
                         }
-                    } else if job.user_data == IO_URING_JOB_TIMEOUT {
-                        self.iouring_timeout_queued = false;
+                    } else if job.user_data == IO_URING_JOB_WAITID {
+                        self.iouring_waitid_queued = false;
 
-                        log::trace!("Timeout expired while waiting for child #{}...", self.child.pid);
-                        self.check_child_status()?;
+                        log::trace!("Child #{}: waitid triggered", self.child.pid);
+                        let result = job
+                            .to_result()
+                            .map(|_| unsafe { core::ptr::read_volatile(self.iouring_siginfo.0.get()) });
+                        let status = ChildProcess::extract_status(result)?;
+                        if let Some(interrupt) = self.handle_child_status(status)? {
+                            return Ok(interrupt);
+                        }
                     } else {
                         unreachable!("internal error: unknown io_uring job");
                     }
@@ -2509,7 +2566,10 @@ impl Sandbox {
                     Err(error) if error.errno() == linux_raw::EAGAIN || error.errno() == linux_raw::EINTR => continue,
                     Err(error) if error.errno() == linux_raw::ETIMEDOUT => {
                         log::trace!("Timeout expired while waiting for child #{}...", self.child.pid);
-                        self.check_child_status()?;
+                        let status = self.child.check_status(true)?;
+                        if let Some(interrupt) = self.handle_child_status(status)? {
+                            return Ok(interrupt);
+                        }
                     }
                     Err(error) => return Err(error),
                 }
@@ -2517,13 +2577,29 @@ impl Sandbox {
         }
     }
 
-    fn check_child_status(&mut self) -> Result<(), Error> {
-        let status = self.child.check_status(true)?;
-        if status.is_running() {
-            return Ok(());
+    fn handle_child_status(&mut self, status: ChildStatus) -> Result<Option<Interrupt>, Error> {
+        self.is_borked = true;
+
+        if self.dynamic_paging_enabled && status.is_trapped() {
+            let siginfo = linux_raw::sys_ptrace_get_siginfo(self.child.pid)?;
+            let machine_code_address = self.download_registers()?;
+            let signal = unsafe { siginfo.si_signo() as u32 };
+            log::trace!(
+                "Child #{}: trapped with signal {signal} at rip=0x{machine_code_address:x}",
+                self.child.pid
+            );
+
+            let result = self.handle_guest_signal(machine_code_address)?;
+            self.resume_child()?;
+
+            self.is_borked = false;
+            return Ok(Some(result));
         }
 
-        self.is_borked = true;
+        if status.is_running() {
+            self.is_borked = false;
+            return Ok(None);
+        }
 
         log::trace!("Child #{} is not running anymore: {status}", self.child.pid);
         let message = get_message(self.vmctx());
@@ -2593,15 +2669,15 @@ impl Sandbox {
         Ok(())
     }
 
-    fn cancel_pagefault(&mut self) -> Result<(), Error> {
-        log::trace!("Cancelling pending page fault...");
+    fn resume_child(&mut self) -> Result<(), Error> {
+        log::trace!("Child #{}: resuming...", self.child.pid);
 
         // This will cancel *our own* `futex_wait` which we've queued up with iouring.
         linux_raw::sys_futex_wake_one(&self.vmctx().futex)?;
 
         // Forcibly return the worker to the idle state.
         //
-        // The worker's currently stuck in a page fault somewhere inside guest code,
+        // The worker's currently stuck in a page fault or a trap somewhere inside guest code,
         // so it can't do this by itself.
         self.vmctx().futex.store(VMCTX_FUTEX_IDLE, Ordering::Release);
         linux_raw::sys_ptrace_setregs(self.child.pid, &self.idle_regs)?;

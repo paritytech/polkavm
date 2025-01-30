@@ -1008,6 +1008,99 @@ fn dynamic_paging_read_at_page_boundary(mut engine_config: Config) {
     assert_eq!(instance.reg(Reg::A0), 0x00bbaa00);
 }
 
+fn dynamic_paging_read_at_top_of_address_space(mut engine_config: Config) {
+    engine_config.set_allow_dynamic_paging(true);
+
+    let _ = env_logger::try_init();
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_i32(Reg::A0, 0xffffffff), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().into()).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_dynamic_paging(true);
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let offsets: Vec<_> = module
+        .blob()
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.offset)
+        .collect();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(offsets[0]);
+    let segfault = expect_segfault(instance.run().unwrap());
+    assert_eq!(segfault.page_address, 0xfffff000);
+}
+
+fn dynamic_paging_read_with_upper_bits_set(mut engine_config: Config) {
+    engine_config.set_allow_dynamic_paging(true);
+
+    let _ = env_logger::try_init();
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new_64bit();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::load_imm64(Reg::A0, 0xffffffff10000001),
+            asm::load_indirect_i32(Reg::A1, Reg::A0, 0),
+            asm::ret(),
+        ],
+        &[],
+    );
+
+    let blob = ProgramBlob::parse(builder.into_vec().into()).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_dynamic_paging(true);
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let offsets: Vec<_> = module
+        .blob()
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.offset)
+        .collect();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(offsets[0]);
+    let segfault = expect_segfault(instance.run().unwrap());
+    assert_eq!(segfault.page_address, 0x10000000);
+}
+
+fn dynamic_paging_read_at_bottom_of_address_space(mut engine_config: Config) {
+    engine_config.set_allow_dynamic_paging(true);
+
+    let _ = env_logger::try_init();
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_i32(Reg::A0, 1), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().into()).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_dynamic_paging(true);
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let offsets: Vec<_> = module
+        .blob()
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.offset)
+        .collect();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(offsets[0]);
+    assert_eq!(instance.run().unwrap(), InterruptKind::Trap);
+}
+
 fn dynamic_paging_write_at_page_boundary_with_no_pages(mut engine_config: Config) {
     engine_config.set_allow_dynamic_paging(true);
 
@@ -1339,6 +1432,41 @@ fn dynamic_paging_change_program_counter_during_segfault(mut engine_config: Conf
     instance.zero_memory(segfault.page_address, page_size).unwrap();
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.read_u32(0x11000).unwrap(), 2);
+}
+
+fn dynamic_paging_run_out_of_gas(mut engine_config: Config) {
+    engine_config.set_allow_dynamic_paging(true);
+
+    let _ = env_logger::try_init();
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[asm::load_imm(Reg::A0, 1), asm::fallthrough(), asm::load_imm(Reg::A0, 2), asm::ret()],
+        &[],
+    );
+
+    let blob = ProgramBlob::parse(builder.into_vec().into()).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_dynamic_paging(true);
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let offsets: Vec<_> = module
+        .blob()
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.offset)
+        .collect();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(offsets[0]);
+    instance.set_gas(2);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+    assert_eq!(instance.program_counter(), Some(offsets[2]));
+    assert_eq!(instance.gas(), 0);
 }
 
 fn decompress_zstd(mut bytes: &[u8]) -> Vec<u8> {
@@ -3128,6 +3256,9 @@ run_tests! {
     dynamic_paging_preinitialize_pages
     dynamic_paging_reading_does_not_resolve_segfaults
     dynamic_paging_read_at_page_boundary
+    dynamic_paging_read_at_top_of_address_space
+    dynamic_paging_read_at_bottom_of_address_space
+    dynamic_paging_read_with_upper_bits_set
     dynamic_paging_write_at_page_boundary_with_no_pages
     dynamic_paging_write_at_page_boundary_with_first_page
     dynamic_paging_write_at_page_boundary_with_second_page
@@ -3136,6 +3267,7 @@ run_tests! {
     dynamic_paging_worker_recycle_turn_dynamic_paging_on_and_off
     dynamic_paging_worker_recycle_during_segfault
     dynamic_paging_change_program_counter_during_segfault
+    dynamic_paging_run_out_of_gas
     zero_memory
     doom_o3_dwarf5
     doom_o1_dwarf5
