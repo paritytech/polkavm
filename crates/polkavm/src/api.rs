@@ -372,6 +372,11 @@ impl Module {
             bail!("dynamic paging was not enabled; use `Config::set_allow_dynamic_paging` to enable it");
         }
 
+        log::trace!(
+            "Creating new module from a {}-bit program blob",
+            if blob.is_64_bit() { 64 } else { 32 }
+        );
+
         #[cfg(feature = "module-cache")]
         let module_key = {
             let (module_key, module) = engine.state.module_cache.get(config, &blob);
