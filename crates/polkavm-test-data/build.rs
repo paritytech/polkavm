@@ -1,3 +1,9 @@
+//! # polkavm-test-data
+//!
+//! Filtered environment generation was inspired and further generelized from the
+//! earlier work of Peter Hartley in
+//! [cotton/systemtests/build.rs](https://github.com/pdh11/cotton/blob/main/systemtests/build.rs).
+
 #![allow(clippy::exit)]
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
