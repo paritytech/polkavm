@@ -218,7 +218,7 @@ impl IoUring {
 
     pub unsafe fn submit_and_wait(&mut self, min_complete: u32) -> Result<(), linux_raw::Error> {
         let count = self.queue_length() as u32;
-        if count == 0 {
+        if count == 0 && min_complete == 0 {
             return Ok(());
         }
 
