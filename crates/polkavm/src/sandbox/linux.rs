@@ -2269,6 +2269,7 @@ impl Sandbox {
     fn wait(&mut self) -> Result<Interrupt, Error> {
         use crate::sandbox::Sandbox;
 
+        let mut erestartsys_count = 0;
         'outer: loop {
             self.count_wait_loop_start += 1;
 
@@ -2389,6 +2390,11 @@ impl Sandbox {
                     } else if job.user_data == IO_URING_JOB_USERFAULTFD_READ {
                         self.iouring_uffd_read_queued = false;
                         if job.res == -(linux_raw::ERESTARTSYS as i32) {
+                            erestartsys_count += 1;
+                            if (erestartsys_count % 16) == 0 {
+                                self.check_child_status()?;
+                            }
+
                             log::trace!("Child #{}: ERESTARTSYS", self.child.pid);
                             continue 'outer;
                         }
