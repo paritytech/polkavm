@@ -488,18 +488,27 @@ where
 
     #[cold]
     fn current_instruction(&self, program_counter: u32) -> impl core::fmt::Display {
-        struct MaybeInstruction(Option<ParsedInstruction>);
-        impl core::fmt::Display for MaybeInstruction {
+        struct MaybeInstruction<B>(Option<ParsedInstruction>, PhantomData<B>);
+        impl<B> core::fmt::Display for MaybeInstruction<B>
+        where
+            B: CompilerBitness,
+        {
             fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
                 if let Some(instruction) = self.0 {
-                    instruction.fmt(fmt)
+                    let mut format = polkavm_common::program::InstructionFormat::default();
+                    format.is_64_bit = matches!(B::BITNESS, Bitness::B64);
+                    instruction.display(&format).fmt(fmt)?;
+                    Ok(())
                 } else {
                     write!(fmt, "<NONE>")
                 }
             }
         }
 
-        MaybeInstruction(Instructions::new_bounded(self.instruction_set, self.code, self.bitmask, program_counter).next())
+        MaybeInstruction::<B>(
+            Instructions::new_bounded(self.instruction_set, self.code, self.bitmask, program_counter).next(),
+            PhantomData,
+        )
     }
 
     #[cold]
