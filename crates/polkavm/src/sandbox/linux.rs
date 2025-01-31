@@ -119,11 +119,32 @@ impl GlobalState {
 
             if (api.features & UFFD_REQUIRED_FEATURES) != UFFD_REQUIRED_FEATURES {
                 return Err(Error::from(
-                    "not all required userfaultfd features are available; you need to update your Linux kernel to version 5.19 or newer",
+                    "not all required userfaultfd features are available; you need to update your Linux kernel to version 6.8 or newer",
                 ));
             }
 
             userfaultfd.close()?;
+
+            let utsname = linux_raw::sys_uname()?;
+            fn kernel_version(utsname: &linux_raw::new_utsname) -> Option<(u32, u32)> {
+                let release: &[core::ffi::c_char] = &utsname.release;
+                let release: &[u8] = unsafe { core::slice::from_raw_parts(release.as_ptr().cast(), release.len()) };
+                let mut release = core::ffi::CStr::from_bytes_until_nul(release).ok()?.to_str().ok()?.split('.');
+                let major: u32 = release.next()?.parse().ok()?;
+                let minor: u32 = release.next()?.parse().ok()?;
+                Some((major, minor))
+            }
+
+            if let Some((kernel_major, kernel_minor)) = kernel_version(&utsname) {
+                log::debug!("Detected Linux kernel: {kernel_major}.{kernel_minor}");
+                if kernel_major < 6 || (kernel_major == 6 && kernel_minor < 8) {
+                    return Err(Error::from(
+                        format!("too old Linux kernel detected: {kernel_major}.{kernel_minor}; you need to update your Linux kernel to version 6.8 or newer")
+                    ));
+                }
+            } else {
+                log::warn!("Failed to parse the kernel version; this is a bug, please report it!");
+            }
         }
 
         match clone(SANDBOX_FLAGS)? {
