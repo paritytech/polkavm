@@ -125,6 +125,19 @@ impl GlobalState {
 
             userfaultfd.close()?;
 
+            if let Err(error) = linux_raw::sys_io_uring_setup(1, &mut linux_raw::io_uring_params::default()) {
+                if error.errno() == linux_raw::EPERM
+                    && std::fs::read("/proc/sys/kernel/io_uring_disabled")
+                        .map(|blob| blob == b"1\n")
+                        .unwrap_or(false)
+                {
+                    return Err(Error::from(
+                        "io_uring is disabled; run 'sysctl -w kernel.io_uring_disabled=0' to enable",
+                    ));
+                }
+                return Err(error);
+            }
+
             let utsname = linux_raw::sys_uname()?;
             fn kernel_version(utsname: &linux_raw::new_utsname) -> Option<(u32, u32)> {
                 let release: &[core::ffi::c_char] = &utsname.release;
