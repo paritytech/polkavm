@@ -43,6 +43,54 @@ pub struct GlobalState {
 const UFFD_REQUIRED_FEATURES: u64 =
     (linux_raw::UFFD_FEATURE_MISSING_SHMEM | linux_raw::UFFD_FEATURE_MINOR_SHMEM | linux_raw::UFFD_FEATURE_WP_HUGETLBFS_SHMEM) as u64;
 
+const SANDBOX_FLAGS: u64 = (linux_raw::CLONE_NEWCGROUP
+    | linux_raw::CLONE_NEWIPC
+    | linux_raw::CLONE_NEWNET
+    | linux_raw::CLONE_NEWNS
+    | linux_raw::CLONE_NEWPID
+    | linux_raw::CLONE_NEWUSER
+    | linux_raw::CLONE_NEWUTS) as u64;
+
+enum Fork {
+    Child,
+    Host(ChildProcess),
+}
+
+fn clone(flags: u64) -> Result<Fork, Error> {
+    let mut pidfd: c_int = -1;
+    let args = CloneArgs {
+        flags: linux_raw::CLONE_CLEAR_SIGHAND | u64::from(linux_raw::CLONE_PIDFD) | flags,
+        pidfd: &mut pidfd,
+        child_tid: 0,
+        parent_tid: 0,
+        exit_signal: 0,
+        stack: 0,
+        stack_size: 0,
+        tls: 0,
+    };
+
+    let mut child_pid = unsafe { linux_raw::syscall!(linux_raw::SYS_clone3, core::ptr::addr_of!(args), core::mem::size_of::<CloneArgs>()) };
+
+    if child_pid < 0 {
+        // Fallback for Linux versions older than 5.5.
+        let error = Error::from_syscall("failed to clone the process", child_pid);
+        child_pid = unsafe { linux_raw::syscall!(linux_raw::SYS_clone, flags, 0, 0, 0, 0) };
+
+        if child_pid < 0 {
+            return Err(error.unwrap_err());
+        }
+    }
+
+    if child_pid == 0 {
+        Ok(Fork::Child)
+    } else {
+        Ok(Fork::Host(ChildProcess {
+            pid: child_pid as c_int,
+            pidfd: if pidfd < 0 { None } else { Some(Fd::from_raw_unchecked(pidfd)) },
+        }))
+    }
+}
+
 impl GlobalState {
     pub fn new(config: &Config) -> Result<Self, Error> {
         let uffd_available = config.allow_dynamic_paging;
@@ -76,6 +124,28 @@ impl GlobalState {
             }
 
             userfaultfd.close()?;
+        }
+
+        match clone(SANDBOX_FLAGS)? {
+            Fork::Child => {
+                let exit_code = if linux_raw::sys_sethostname("localhost").is_err() { 1 } else { 0 };
+                let _ = linux_raw::sys_exit(exit_code);
+                linux_raw::abort();
+            }
+            Fork::Host(mut child) => match child.check_status(false)? {
+                ChildStatus::Exited(0) => {}
+                ChildStatus::Exited(1) => {
+                    if std::fs::read("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+                        .map(|blob| blob == b"1\n")
+                        .unwrap_or(false)
+                    {
+                        return Err(Error::from("failed to create a sandboxed worker process; run 'sysctl -w kernel.apparmor_restrict_unprivileged_userns=0' to enable unprivileged user namespaces"));
+                    }
+                }
+                status => {
+                    return Err(Error::from(format!("unexpected sandbox child status: {status:?}")));
+                }
+            },
         }
 
         let zygote_memfd = prepare_zygote()?;
@@ -1251,31 +1321,7 @@ impl super::Sandbox for Sandbox {
         vmctx.init.uffd_available.store(global.uffd_available, Ordering::Relaxed);
         vmctx.init.sandbox_disabled.store(cfg!(polkavm_dev_debug_zygote), Ordering::Relaxed);
 
-        let sandbox_flags = if !cfg!(polkavm_dev_debug_zygote) {
-            u64::from(
-                linux_raw::CLONE_NEWCGROUP
-                    | linux_raw::CLONE_NEWIPC
-                    | linux_raw::CLONE_NEWNET
-                    | linux_raw::CLONE_NEWNS
-                    | linux_raw::CLONE_NEWPID
-                    | linux_raw::CLONE_NEWUSER
-                    | linux_raw::CLONE_NEWUTS,
-            )
-        } else {
-            0
-        };
-
-        let mut pidfd: c_int = -1;
-        let args = CloneArgs {
-            flags: linux_raw::CLONE_CLEAR_SIGHAND | u64::from(linux_raw::CLONE_PIDFD) | sandbox_flags,
-            pidfd: &mut pidfd,
-            child_tid: 0,
-            parent_tid: 0,
-            exit_signal: 0,
-            stack: 0,
-            stack_size: 0,
-            tls: 0,
-        };
+        let sandbox_flags = if !cfg!(polkavm_dev_debug_zygote) { SANDBOX_FLAGS } else { 0 };
 
         let uid = linux_raw::sys_getuid()?;
         let gid = linux_raw::sys_getgid()?;
@@ -1283,55 +1329,46 @@ impl super::Sandbox for Sandbox {
         let uid_map = format!("0 {} 1\n", uid);
         let gid_map = format!("0 {} 1\n", gid);
 
-        // Fork a new process.
-        let mut child_pid =
-            unsafe { linux_raw::syscall!(linux_raw::SYS_clone3, core::ptr::addr_of!(args), core::mem::size_of::<CloneArgs>()) };
+        let mut child = match clone(sandbox_flags)? {
+            Fork::Child => {
+                // We're in the child.
+                //
+                // Calling into libc from here risks a deadlock as other threads might have
+                // been holding onto internal libc locks while we were cloning ourselves,
+                // so from now on we can't use anything from libc anymore.
+                core::mem::forget(sigset);
 
-        if child_pid < 0 {
-            // Fallback for Linux versions older than 5.5.
-            let error = Error::from_last_os_error("clone");
-            child_pid = unsafe { linux_raw::syscall!(linux_raw::SYS_clone, sandbox_flags, 0, 0, 0, 0) };
+                unsafe {
+                    match child_main(
+                        &uid_map,
+                        &gid_map,
+                        ChildFds {
+                            zygote: linux_raw::Fd::from_raw_unchecked(global.zygote_memfd.raw()),
+                            socket: child_socket,
+                            vmctx: vmctx_memfd,
+                            shm: linux_raw::Fd::from_raw_unchecked(global.shared_memory.fd().raw()),
+                            mem: memory_memfd,
+                            lifetime_pipe: lifetime_pipe_child,
+                            logging_pipe: logger_tx,
+                        },
+                    ) {
+                        Ok(()) => {
+                            // This is impossible.
+                            abort();
+                        }
+                        Err(error) => {
+                            let vmctx = &*vmctx_mmap.as_ptr().cast::<VmCtx>();
+                            set_message(vmctx, format_args!("fatal error while spawning child: {error}"));
 
-            if child_pid < 0 {
-                return Err(error);
-            }
-        }
-
-        if child_pid == 0 {
-            // We're in the child.
-            //
-            // Calling into libc from here risks a deadlock as other threads might have
-            // been holding onto internal libc locks while we were cloning ourselves,
-            // so from now on we can't use anything from libc anymore.
-            core::mem::forget(sigset);
-
-            unsafe {
-                match child_main(
-                    &uid_map,
-                    &gid_map,
-                    ChildFds {
-                        zygote: linux_raw::Fd::from_raw_unchecked(global.zygote_memfd.raw()),
-                        socket: child_socket,
-                        vmctx: vmctx_memfd,
-                        shm: linux_raw::Fd::from_raw_unchecked(global.shared_memory.fd().raw()),
-                        mem: memory_memfd,
-                        lifetime_pipe: lifetime_pipe_child,
-                        logging_pipe: logger_tx,
-                    },
-                ) {
-                    Ok(()) => {
-                        // This is impossible.
-                        abort();
-                    }
-                    Err(error) => {
-                        let vmctx = &*vmctx_mmap.as_ptr().cast::<VmCtx>();
-                        set_message(vmctx, format_args!("fatal error while spawning child: {error}"));
-
-                        abort();
+                            abort();
+                        }
                     }
                 }
             }
-        }
+            Fork::Host(child) => child,
+        };
+
+        let child_pid = child.pid;
 
         child_socket.close()?;
         vmctx_memfd.close()?;
@@ -1381,11 +1418,6 @@ impl super::Sandbox for Sandbox {
                 })
                 .map_err(|error| Error::from_os_error("failed to spawn logger thread", error))?;
         }
-
-        let mut child = ChildProcess {
-            pid: child_pid as c_int,
-            pidfd: if pidfd < 0 { None } else { Some(Fd::from_raw_unchecked(pidfd)) },
-        };
 
         // We're in the parent. Restore the signal mask.
         sigset.unblock()?;
