@@ -7960,17 +7960,6 @@ where
                 );
                 continue;
             }
-            [(_, Kind::Mut(MutOp::Add, RelocationSize::U32, target_1)), (_, Kind::Mut(MutOp::Sub, RelocationSize::U32, target_2))] => {
-                relocations.insert(
-                    current_location,
-                    RelocationKind::Offset {
-                        origin: *target_1,
-                        target: *target_2,
-                        size: SizeRelocationSize::Generic(RelocationSize::U32),
-                    },
-                );
-                continue;
-            }
             [(_, Kind::Mut(MutOp::Add, size_1, target_1)), (_, Kind::Mut(MutOp::Sub, size_2, target_2))] if size_1 == size_2 => {
                 relocations.insert(
                     current_location,
