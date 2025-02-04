@@ -3,7 +3,6 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
 use simplealloc::SimpleAlloc;
 
 #[global_allocator]
@@ -19,12 +18,14 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 #[polkavm_derive::polkavm_import]
 extern "C" {
     #[polkavm_import(index = 3)]
-    pub fn write(ko: u32, kz: u32, bo: u32, bz: u32) -> u32;
+    pub fn write(ko: u64, kz: u64, bo: u64, bz: u64) -> u64;
     #[polkavm_import(index = 18)]
-    pub fn import(import_index: u32, out: *mut u8, out_len: u32) -> u32;
+    pub fn fetch(start_address: u64, offset: u64, maxlen: u64, omega_10: u64, omega_11: u64, omega_12: u64) -> u64;
     #[polkavm_import(index = 19)]
-    pub fn export(out: *const u8, out_len: u32) -> u32;
+    pub fn export(out: u64, out_len: u64) -> u64;
 }
+
+pub const NONE: u64 = u64::MAX;
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn is_authorized() -> u32 {
@@ -34,9 +35,20 @@ extern "C" fn is_authorized() -> u32 {
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine() -> u32 {
     let mut buffer = [0u8; 16];
-    let result = unsafe { import(0, buffer.as_mut_ptr(), buffer.len() as u32) };
+    let offset: u64 = 0;
+    let maxlen: u64 = buffer.len() as u64;
+    let result = unsafe { 
+        fetch(
+            buffer.as_mut_ptr() as u64, 
+            offset,
+            maxlen,
+            5,
+            0,
+            0,
+        )
+    };
 
-    if result == 0 {
+    if result != NONE {
         let n = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
         let t_n = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
         let t_n_minus_1 = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
@@ -58,11 +70,10 @@ extern "C" fn refine() -> u32 {
     }
 
     unsafe {
-        export(buffer.as_mut_ptr(), buffer.len() as u32);
+        export(buffer.as_ptr() as u64, buffer.len() as u64);
     }
-
-    let buffer_addr = buffer.as_ptr() as u32;
-    let buffer_len = buffer.len() as u32;
+    let buffer_addr = buffer.as_ptr() as u64;
+    let buffer_len = buffer.len() as u64;
 
     unsafe {
         core::arch::asm!(
@@ -79,10 +90,10 @@ extern "C" fn refine() -> u32 {
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate() -> u32 {
     let key = [0u8; 1];
-    let omega_9: u32 = 0xFEFF0000;
-    let omega_10: u32 = 0xC;
+    let omega_9: u64 = 0xFEFF0000;
+    let omega_10: u64 = 0xC;
     unsafe {
-        write(key.as_ptr() as u32, key.len() as u32, omega_9, omega_10 as u32);
+        write(key.as_ptr() as u64, key.len() as u64, omega_9, omega_10);
     }
     0
 }
