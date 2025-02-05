@@ -9334,7 +9334,7 @@ where
                     )));
                 };
 
-                let range = target_section_address.wrapping_add(target.offset)..origin_section_address.wrapping_add(origin.offset);
+                let range = origin_section_address.wrapping_add(origin.offset)..target_section_address.wrapping_add(target.offset);
                 let data = elf.section_data_mut(relocation_target.section_index);
                 let mut value = range.end.wrapping_sub(range.start);
                 match size {
