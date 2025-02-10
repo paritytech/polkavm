@@ -18,8 +18,7 @@
   "pre-link-args": {
     "ld": [
       "--emit-relocs",
-      "--unique",
-      "--relocatable"
+      "--unique"
     ]
   },
   "env": "polkavm"
