@@ -1639,7 +1639,10 @@ impl super::Sandbox for Sandbox {
             linux_raw::sys_ptrace_attach(child.pid)?;
             let status = child.check_status(false)?;
             if !status.is_trapped() {
-                log::error!("Child #{}: expected child to trap, found: {status}", child.pid);
+                log::error!(
+                    "Child #{}: expected child to trap during initialization, found: {status}",
+                    child.pid
+                );
                 return Err(Error::from_str("internal error: unexpected child status"));
             }
 
@@ -2567,7 +2570,10 @@ impl Sandbox {
                             };
 
                             if !status.is_trapped() {
-                                log::error!("Child #{}: expected child to trap, found: {status}", self.child.pid);
+                                log::error!(
+                                    "Child #{}: expected child to trap when handing a page fault, found: {status}",
+                                    self.child.pid
+                                );
                                 return Err(Error::from_str("internal error: unexpected child status"));
                             }
 
