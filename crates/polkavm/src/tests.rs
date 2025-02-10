@@ -2169,9 +2169,9 @@ struct TestInstance {
 }
 
 impl TestInstance {
-    fn new(config: &Config, elf: &'static [u8], optimize: bool, is_64_bit: bool) -> Self {
+    fn new(config: &Config, elf: &'static [u8], optimize: bool) -> Self {
         let _ = env_logger::try_init();
-        let blob = get_blob_impl(optimize, is_64_bit, false, elf);
+        let blob = get_blob_impl(optimize, false, false, elf);
 
         let engine = Engine::new(config).unwrap();
         let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
@@ -2222,7 +2222,7 @@ impl TestInstance {
 
         linker
             .define_untyped("return_tuple_usize", move |caller: Caller<()>| {
-                if is_64_bit {
+                if caller.instance.is_64_bit() {
                     caller.instance.set_reg(Reg::A0, 0x123456789abcdefe);
                     caller.instance.set_reg(Reg::A1, 0x1122334455667788);
                 } else {
@@ -2251,7 +2251,7 @@ impl TestInstance {
 
 fn test_blob_basic_test(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     assert_eq!(i.call::<(), u32>("push_one_to_global_vec", ()).unwrap(), 1);
     assert_eq!(i.call::<(), u32>("push_one_to_global_vec", ()).unwrap(), 2);
     assert_eq!(i.call::<(), u32>("push_one_to_global_vec", ()).unwrap(), 3);
@@ -2259,7 +2259,7 @@ fn test_blob_basic_test(config: Config, optimize: bool, is_64_bit: bool) {
 
 fn test_blob_atomic_fetch_add(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_add", (1,)).unwrap(), 0);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_add", (1,)).unwrap(), 1);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_add", (1,)).unwrap(), 2);
@@ -2271,7 +2271,7 @@ fn test_blob_atomic_fetch_add(config: Config, optimize: bool, is_64_bit: bool) {
 
 fn test_blob_atomic_fetch_swap(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (10,)).unwrap(), 0);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (100,)).unwrap(), 10);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (1000,)).unwrap(), 100);
@@ -2297,7 +2297,7 @@ fn test_blob_atomic_fetch_minmax(config: Config, optimize: bool, is_64_bit: bool
     ];
 
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     for (name, cb) in list {
         for a in [-10, 0, 10] {
             for b in [-10, 0, 10] {
@@ -2312,19 +2312,19 @@ fn test_blob_atomic_fetch_minmax(config: Config, optimize: bool, is_64_bit: bool
 
 fn test_blob_hostcall(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     assert_eq!(i.call::<(u32,), u32>("test_multiply_by_6", (10,)).unwrap(), 60);
 }
 
 fn test_blob_define_abi(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     assert!(i.call::<(), ()>("test_define_abi", ()).is_ok());
 }
 
 fn test_blob_input_registers(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     assert!(i.call::<(), ()>("test_input_registers", ()).is_ok());
 }
 
@@ -2346,7 +2346,7 @@ fn test_blob_call_sbrk_from_host_function(config: Config, optimize: bool, is_64_
 
 fn test_blob_program_memory_can_be_reused_and_cleared(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     let address = i.call::<(), u32>("get_global_address", ()).unwrap();
 
     assert_eq!(i.instance.read_memory(address, 4).unwrap(), [0x00, 0x00, 0x00, 0x00]);
@@ -2366,7 +2366,7 @@ fn test_blob_program_memory_can_be_reused_and_cleared(config: Config, optimize: 
 
 fn test_blob_out_of_bounds_memory_access_generates_a_trap(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     let address = i.call::<(), u32>("get_global_address", ()).unwrap();
     assert_eq!(i.call::<(u32,), u32>("read_u32", (address,)).unwrap(), 0);
     i.call::<(), ()>("increment_global", ()).unwrap();
@@ -2380,7 +2380,7 @@ fn test_blob_out_of_bounds_memory_access_generates_a_trap(config: Config, optimi
 
 fn test_blob_call_sbrk_impl(config: Config, optimize: bool, is_64_bit: bool, mut call_sbrk: impl FnMut(&mut TestInstance, u32) -> u32) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     let memory_map = i.module.memory_map().clone();
     let heap_base = memory_map.heap_base();
     let page_size = memory_map.page_size();
@@ -2436,7 +2436,7 @@ fn test_blob_call_sbrk_impl(config: Config, optimize: bool, is_64_bit: bool, mut
 
 fn test_blob_add_u32(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     assert_eq!(i.call::<(u32, u32), u32>("add_u32", (1, 2,)).unwrap(), 3);
     assert_eq!(i.instance.reg(Reg::A0), 3);
 
@@ -2454,7 +2454,7 @@ fn test_blob_add_u32(config: Config, optimize: bool, is_64_bit: bool) {
 
 fn test_blob_add_u64(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     assert_eq!(i.call::<(u64, u64), u64>("add_u64", (1, 2,)).unwrap(), 3);
     assert_eq!(i.instance.reg(Reg::A0), 3);
     assert_eq!(
@@ -2465,7 +2465,7 @@ fn test_blob_add_u64(config: Config, optimize: bool, is_64_bit: bool) {
 
 fn test_blob_xor_imm_u32(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     for value in [0, 0xaaaaaaaa, 0x55555555, 0x12345678, 0xffffffff] {
         assert_eq!(i.call::<(u32,), u32>("xor_imm_u32", (value,)).unwrap(), value ^ 0xfb8f5c1e);
     }
@@ -2473,13 +2473,13 @@ fn test_blob_xor_imm_u32(config: Config, optimize: bool, is_64_bit: bool) {
 
 fn test_blob_branch_less_than_zero(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     i.call::<(), ()>("test_branch_less_than_zero", ()).unwrap();
 }
 
 fn test_blob_fetch_add_atomic_u64(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     assert_eq!(i.call::<(u64,), u64>("fetch_add_atomic_u64", (1,)).unwrap(), 0);
     assert_eq!(i.call::<(u64,), u64>("fetch_add_atomic_u64", (0,)).unwrap(), 1);
     assert_eq!(i.call::<(u64,), u64>("fetch_add_atomic_u64", (0,)).unwrap(), 1);
@@ -2489,25 +2489,25 @@ fn test_blob_fetch_add_atomic_u64(config: Config, optimize: bool, is_64_bit: boo
 
 fn test_blob_cmov_if_zero_with_zero_reg(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     i.call::<(), ()>("cmov_if_zero_with_zero_reg", ()).unwrap();
 }
 
 fn test_blob_cmov_if_not_zero_with_zero_reg(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     i.call::<(), ()>("cmov_if_not_zero_with_zero_reg", ()).unwrap();
 }
 
 fn test_blob_min_stack_size(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let i = TestInstance::new(&config, elf, optimize);
     assert_eq!(i.instance.module().memory_map().stack_size(), 65536);
 }
 
 fn test_blob_negate_and_add(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     if !is_64_bit {
         assert_eq!(i.call::<(u32, u32), u32>("negate_and_add", (123, 1,)).unwrap(), 15);
     } else {
@@ -2517,13 +2517,13 @@ fn test_blob_negate_and_add(config: Config, optimize: bool, is_64_bit: bool) {
 
 fn test_blob_return_tuple_from_import(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     i.call::<(), ()>("test_return_tuple", ()).unwrap();
 }
 
 fn test_blob_return_tuple_from_export(config: Config, optimize: bool, is_64_bit: bool) {
     let elf = polkavm_test_data::get_test_blob(is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
     if is_64_bit {
         let a0 = 0x123456789abcdefe_u64;
         let a1 = 0x1122334455667788_u64;
@@ -2555,7 +2555,7 @@ fn test_asm_reloc_add_sub(config: Config, optimize: bool, _is_64_bit: bool) {
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_add_sub_64.elf");
 
     let elf = BLOB_64;
-    let mut i = TestInstance::new(&config, elf, optimize, true);
+    let mut i = TestInstance::new(&config, elf, optimize);
 
     let address = i.call::<(u32,), u32>("get_string", (0,)).unwrap();
     assert_eq!(i.instance.read_u32(address).unwrap(), 0x01010101);
