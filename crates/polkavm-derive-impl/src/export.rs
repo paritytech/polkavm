@@ -200,7 +200,7 @@ pub fn polkavm_export(attributes: ExportBlockAttributes, input: syn::ItemFn) -> 
 
                 #[cfg(target_arch = "riscv32")]
                 ::core::arch::global_asm!(
-                    ".pushsection .polkavm_exports,\"R\",@note\n",
+                    ".pushsection .polkavm_exports,\"Ra\",@note\n",
                     ".byte 1\n", // Version.
                     ".4byte {metadata}",
                     ".4byte {function}",
@@ -211,7 +211,7 @@ pub fn polkavm_export(attributes: ExportBlockAttributes, input: syn::ItemFn) -> 
 
                 #[cfg(target_arch = "riscv64")]
                 ::core::arch::global_asm!(
-                    ".pushsection .polkavm_exports,\"R\",@note\n",
+                    ".pushsection .polkavm_exports,\"Ra\",@note\n",
                     ".byte 1\n", // Version.
                     ".8byte {metadata}",
                     ".8byte {function}",
