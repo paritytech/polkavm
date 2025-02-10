@@ -2521,6 +2521,7 @@ impl Sandbox {
                             let status = if !self.iouring_waitid_queued {
                                 self.child.check_status(false)?
                             } else {
+                                let mut efault_hack_triggered = false;
                                 'wait_loop: loop {
                                     unsafe {
                                         self.iouring
@@ -2535,9 +2536,30 @@ impl Sandbox {
                                             self.iouring_futex_wait_queued = false;
                                         } else if job.user_data == IO_URING_JOB_WAITID {
                                             self.iouring_waitid_queued = false;
-                                            let result = job
-                                                .to_result()
-                                                .map(|_| unsafe { core::ptr::read_volatile(self.iouring_siginfo.0.get()) });
+                                            let result = job.to_result();
+                                            if let Err(ref error) = result {
+                                                // TODO: FIXME: I have no idea why this happens, but when you queue a waitid
+                                                // on one thread and handle the result on another this returns EFAULT.
+                                                if error.errno() == linux_raw::EFAULT && !efault_hack_triggered {
+                                                    efault_hack_triggered = true;
+                                                    self.iouring
+                                                        .as_mut()
+                                                        .unwrap()
+                                                        .queue_waitid(
+                                                            IO_URING_JOB_WAITID,
+                                                            linux_raw::P_PIDFD,
+                                                            self.child.pidfd.as_ref().expect("internal error: no pidfd handle").raw()
+                                                                as u32,
+                                                            self.iouring_siginfo.0.get(),
+                                                            linux_raw::WEXITED | linux_raw::__WALL,
+                                                        )
+                                                        .expect("internal error: io_uring queue overflow");
+
+                                                    self.iouring_waitid_queued = true;
+                                                    continue 'wait_loop;
+                                                }
+                                            }
+                                            let result = result.map(|_| unsafe { core::ptr::read_volatile(self.iouring_siginfo.0.get()) });
                                             break 'wait_loop ChildProcess::extract_status(result)?;
                                         } else {
                                             unreachable!("internal error: unknown io_uring job");
