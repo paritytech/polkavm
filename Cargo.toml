@@ -45,7 +45,7 @@ polkavm-test-data         = { version = "0.20.0", path = "crates/polkavm-test-da
 blake3 = { version = "1.5.4", default-features = false }
 clap = "4.4.6"
 diff = "0.1.13"
-dirs = "6.0.0"
+dirs = "5.0.1"
 env_logger = { version = "0.10.0", default-features = false }
 gimli = { version = "0.31.1", default-features = false }
 hashbrown = { version = "0.14.1", default-features = false }
