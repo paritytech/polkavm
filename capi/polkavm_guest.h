@@ -135,7 +135,7 @@ static struct PolkaVM_Metadata POLKAVM_JOIN(fn_name, __EXPORT_METADATA) __attrib
 }; \
 static void __attribute__ ((naked, used)) POLKAVM_UNIQUE(polkavm_export_dummy)() { \
     __asm__( \
-        ".pushsection .polkavm_exports,\"R\",@note\n" \
+        ".pushsection .polkavm_exports,\"Ra\",@note\n" \
         ".byte 1\n" \
         POLKAVM_EXPORT_DEF() \
         ".popsection\n" \
