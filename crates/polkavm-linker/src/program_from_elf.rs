@@ -8913,9 +8913,19 @@ where
     let mut sections_min_stack_size = Vec::new();
     let mut sections_other = Vec::new();
 
+    log::trace!("ELF sections:");
     for section in elf.sections() {
         let name = section.name();
         let is_writable = section.is_writable();
+        log::trace!(
+            " {}: 0x{:08x}..0x{:08x}: {} ({} bytes)",
+            section.index(),
+            section.original_address(),
+            section.original_address() + section.size(),
+            name,
+            section.size()
+        );
+
         if name == ".rodata"
             || name.starts_with(".rodata.")
             || name.starts_with(".srodata.")
