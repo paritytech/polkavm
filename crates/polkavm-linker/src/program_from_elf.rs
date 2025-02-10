@@ -324,6 +324,29 @@ impl SourceStack {
     fn overlay_on_top_of_inplace(&mut self, stack: &SourceStack) {
         self.0.extend(stack.0.iter().copied());
     }
+
+    fn display(&self, section_to_function_name: &BTreeMap<SectionTarget, &str>) -> String {
+        use core::fmt::Write;
+
+        let mut out = String::new();
+        out.push('[');
+        let mut is_first = true;
+        for source in &self.0 {
+            if is_first {
+                is_first = false;
+            } else {
+                out.push_str(", ");
+            }
+            write!(&mut out, "{}", source).unwrap();
+            if let Some((origin, name)) = section_to_function_name.range(..=source.begin()).next_back() {
+                if origin.section_index == source.section_index {
+                    write!(&mut out, " \"{name}\"+{}", source.offset_range.start - origin.offset).unwrap();
+                }
+            }
+        }
+        out.push(']');
+        out
+    }
 }
 
 impl From<Source> for SourceStack {
@@ -2841,6 +2864,7 @@ where
 
 fn split_code_into_basic_blocks<H>(
     elf: &Elf<H>,
+    #[allow(unused_variables)] section_to_function_name: &BTreeMap<SectionTarget, &str>,
     jump_targets: &HashSet<SectionTarget>,
     instructions: Vec<(Source, InstExt<SectionTarget, SectionTarget>)>,
 ) -> Result<Vec<BasicBlock<SectionTarget, SectionTarget>>, ProgramFromElfError>
@@ -2855,30 +2879,12 @@ where
     let mut block_start_opt = None;
     let mut last_source_in_block = None;
     #[cfg(not(test))]
-    let symbols: HashMap<_, _> = elf
-        .symbols()
-        .filter_map(|symbol| {
-            if symbol.kind() != object::elf::STT_FUNC {
-                return None;
-            }
-
-            let name = symbol.name()?;
-            let (section, offset) = symbol.section_and_offset().ok()?;
-            let target = SectionTarget {
-                section_index: section.index(),
-                offset,
-            };
-            Some((target, name))
-        })
-        .collect();
-
-    #[cfg(not(test))]
     let mut current_symbol = "";
     for (source, op) in instructions {
         // TODO: This panics because we use a dummy ELF in tests; fix it.
         #[cfg(not(test))]
         {
-            if let Some(name) = symbols.get(&source.begin()) {
+            if let Some(name) = section_to_function_name.get(&source.begin()) {
                 current_symbol = name;
             }
             log::trace!(
@@ -5647,7 +5653,7 @@ mod test {
             )
             .unwrap();
 
-            let all_blocks = split_code_into_basic_blocks(&elf, &all_jump_targets, self.instructions.clone()).unwrap();
+            let all_blocks = split_code_into_basic_blocks(&elf, &Default::default(), &all_jump_targets, self.instructions.clone()).unwrap();
             let mut section_to_block = build_section_to_block_map(&all_blocks).unwrap();
             let mut all_blocks = resolve_basic_block_references(&data_sections_set, &section_to_block, &all_blocks).unwrap();
             let mut reachability_graph =
@@ -5675,6 +5681,7 @@ mod test {
 
             let (jump_table, jump_target_for_block) = build_jump_table(all_blocks.len(), &used_blocks, &reachability_graph);
             let code = emit_code(
+                &Default::default(),
                 &imports,
                 &base_address_for_section,
                 section_got,
@@ -7179,6 +7186,7 @@ fn calculate_whether_can_fallthrough(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_code(
+    section_to_function_name: &BTreeMap<SectionTarget, &str>,
     imports: &[Import],
     base_address_for_section: &HashMap<SectionIndex, u64>,
     section_got: SectionIndex,
@@ -7214,10 +7222,13 @@ fn emit_code(
     }
 
     let can_fallthrough_to_next_block = calculate_whether_can_fallthrough(all_blocks, used_blocks);
-    let get_data_address = |target: SectionTarget| -> Result<u32, ProgramFromElfError> {
-        if let Some(base_address) = base_address_for_section.get(&target.section_index) {
+    let get_data_address = |source: &SourceStack, target: SectionTarget| -> Result<u32, ProgramFromElfError> {
+        if let Some(&base_address) = base_address_for_section.get(&target.section_index) {
             let Some(address) = base_address.checked_add(target.offset) else {
-                return Err(ProgramFromElfError::other("address overflow when relocating"));
+                return Err(ProgramFromElfError::other(format!(
+                    "address overflow when relocating instruction in {}",
+                    source.display(section_to_function_name)
+                )));
             };
 
             let Ok(address) = address.try_into() else {
@@ -7284,7 +7295,7 @@ fn emit_code(
                 }
                 BasicInst::LoadAbsolute { kind, dst, target } => {
                     codegen! {
-                        args = (conv_reg(dst), get_data_address(target)?),
+                        args = (conv_reg(dst), get_data_address(source, target)?),
                         kind = kind,
                         {
                             LoadKind::I8 => load_i8,
@@ -7298,7 +7309,7 @@ fn emit_code(
                     }
                 }
                 BasicInst::StoreAbsolute { kind, src, target } => {
-                    let target = get_data_address(target)?;
+                    let target = get_data_address(source, target)?;
                     match src {
                         RegImm::Reg(src) => {
                             codegen! {
@@ -7376,7 +7387,7 @@ fn emit_code(
                             };
                             value
                         }
-                        AnyTarget::Data(target) => get_data_address(target)?,
+                        AnyTarget::Data(target) => get_data_address(source, target)?,
                     };
 
                     Instruction::load_imm(conv_reg(dst), value)
@@ -7393,7 +7404,7 @@ fn emit_code(
                         offset,
                     };
 
-                    let value = get_data_address(target)?;
+                    let value = get_data_address(source, target)?;
                     if is_rv64 {
                         Instruction::load_u64(conv_reg(dst), value)
                     } else {
@@ -9060,8 +9071,25 @@ where
         .copied()
         .collect();
 
+    let section_to_function_name: BTreeMap<_, _> = elf
+        .symbols()
+        .filter_map(|symbol| {
+            if symbol.kind() != object::elf::STT_FUNC {
+                return None;
+            }
+
+            let name = symbol.name()?;
+            let (section, offset) = symbol.section_and_offset().ok()?;
+            let target = SectionTarget {
+                section_index: section.index(),
+                offset,
+            };
+            Some((target, name))
+        })
+        .collect();
+
     let all_jump_targets = harvest_all_jump_targets(&elf, &data_sections_set, &code_sections_set, &instructions, &relocations, &exports)?;
-    let all_blocks = split_code_into_basic_blocks(&elf, &all_jump_targets, instructions)?;
+    let all_blocks = split_code_into_basic_blocks(&elf, &section_to_function_name, &all_jump_targets, instructions)?;
     for block in &all_blocks {
         for source in block.next.source.as_slice() {
             assert!(source.offset_range.start < source.offset_range.end);
@@ -9261,6 +9289,7 @@ where
 
     let (jump_table, jump_target_for_block) = build_jump_table(all_blocks.len(), &used_blocks, &reachability_graph);
     let code = emit_code(
+        &section_to_function_name,
         &imports,
         &base_address_for_section,
         section_got,
