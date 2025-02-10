@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::dwarf::Location;
 use crate::elf::{Elf, Section, SectionIndex};
+use crate::fast_range_map::RangeMap;
 use crate::riscv::DecoderConfig;
 use crate::riscv::Reg as RReg;
 use crate::riscv::{AtomicKind, BranchKind, CmovKind, Inst, LoadKind, RegImmKind, StoreKind};
@@ -8913,6 +8914,8 @@ where
     let mut sections_min_stack_size = Vec::new();
     let mut sections_other = Vec::new();
 
+    let mut section_map = RangeMap::new();
+
     log::trace!("ELF sections:");
     for section in elf.sections() {
         let name = section.name();
@@ -8925,6 +8928,13 @@ where
             name,
             section.size()
         );
+
+        if section.is_allocated() && section.original_address() != 0 {
+            section_map.insert(
+                section.original_address()..section.original_address() + section.size(),
+                section.index(),
+            );
+        }
 
         if name == ".rodata"
             || name.starts_with(".rodata.")
@@ -9537,7 +9547,7 @@ where
     let mut location_map: HashMap<SectionTarget, Arc<[Location]>> = HashMap::new();
     if !config.strip {
         let mut string_cache = crate::utils::StringCache::default();
-        let dwarf_info = crate::dwarf::load_dwarf(&mut string_cache, &elf, &relocations)?;
+        let dwarf_info = crate::dwarf::load_dwarf(&mut string_cache, &elf, &relocations, &section_map)?;
         location_map = dwarf_info.location_map;
 
         // If there is no DWARF info present try to use the symbol table as a fallback.

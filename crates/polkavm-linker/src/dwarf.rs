@@ -781,6 +781,7 @@ where
 fn extract_lines<R>(
     section_index: SectionIndex,
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
+    section_map: &RangeMap<SectionIndex>,
     unit: &Unit<ReaderWrapper<R>>,
     is_64bit: bool,
 ) -> Result<Vec<LineEntry>, ProgramFromElfError>
@@ -921,6 +922,17 @@ where
                 }
             }
 
+            if target.is_none() {
+                if let Some((section_range, &section_index)) = section_map.get(row.address()) {
+                    let section_target = SectionTarget {
+                        section_index,
+                        offset: row.address() - section_range.start,
+                    };
+
+                    target = Some(section_target);
+                }
+            }
+
             let Some(target) = target else {
                 // Sometimes the entries seem to not have any relocation attached to them
                 // and have all zeros set by the compiler, e.g. I've seen this as the end
@@ -1004,6 +1016,7 @@ where
 {
     sections: Sections<'a>,
     relocations: &'a BTreeMap<SectionTarget, RelocationKind>,
+    section_map: &'a RangeMap<SectionIndex>,
     dwarf: &'a gimli::Dwarf<ReaderWrapper<R>>,
     units: &'a [Unit<ReaderWrapper<R>>],
     depth: usize,
@@ -1047,7 +1060,7 @@ where
             subprograms_for_unit.push(subprograms);
 
             let lines = if let Some(debug_line) = self.sections.debug_line {
-                extract_lines(debug_line.index(), self.relocations, unit, self.is_64bit)?
+                extract_lines(debug_line.index(), self.relocations, self.section_map, unit, self.is_64bit)?
             } else {
                 Default::default()
             };
@@ -2202,6 +2215,7 @@ fn extract_symbolic_low_pc<R>(
     dwarf: &gimli::Dwarf<R>,
     sections: &Sections,
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
+    section_map: &RangeMap<SectionIndex>,
     unit: &gimli::Unit<R>,
     is_64bit: bool,
 ) -> Result<Option<SectionTarget>, ProgramFromElfError>
@@ -2243,6 +2257,15 @@ where
                         continue;
                     }
 
+                    if let Some((section_range, &section_index)) = section_map.get(address) {
+                        let section_target = SectionTarget {
+                            section_index,
+                            offset: address - section_range.start,
+                        };
+
+                        return Ok(Some(section_target));
+                    }
+
                     return Err(ProgramFromElfError::other(format!(
                         "failed to process DWARF: failed to fetch DW_AT_low_pc for a unit: {relocation_target} has no relocation"
                     )));
@@ -2281,6 +2304,7 @@ pub(crate) fn load_dwarf<H>(
     string_cache: &mut StringCache,
     elf: &Elf<H>,
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
+    section_map: &RangeMap<SectionIndex>,
 ) -> Result<DwarfInfo, ProgramFromElfError>
 where
     H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
@@ -2341,7 +2365,7 @@ where
             };
 
             log::trace!("Processing unit: {offset:?}");
-            let low_pc = extract_symbolic_low_pc(&dwarf, &sections, relocations, &unit, is_64bit)?;
+            let low_pc = extract_symbolic_low_pc(&dwarf, &sections, relocations, section_map, &unit, is_64bit)?;
             let paths = extract_paths(&dwarf, string_cache, &unit)?;
             units.push(Unit {
                 low_pc,
@@ -2357,6 +2381,7 @@ where
     let walker = DwarfWalker {
         sections,
         relocations,
+        section_map,
         depth: 0,
         inline_depth: 0,
         namespace_buffer: Default::default(),
