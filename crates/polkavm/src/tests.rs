@@ -1469,6 +1469,231 @@ fn dynamic_paging_run_out_of_gas(mut engine_config: Config) {
     assert_eq!(instance.gas(), 0);
 }
 
+#[cfg(not(feature = "std"))]
+fn dynamic_paging_receive_from_another_thread_and_run(_: Config) {}
+
+#[cfg(feature = "std")]
+fn dynamic_paging_receive_from_another_thread_and_run(mut engine_config: Config) {
+    engine_config.set_allow_dynamic_paging(true);
+
+    let _ = env_logger::try_init();
+
+    let mut instance = std::thread::spawn(move || {
+        let engine = Engine::new(&engine_config).unwrap();
+        let page_size = get_native_page_size() as u32;
+        let mut builder = ProgramBlobBuilder::new_64bit();
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(
+            &[
+                asm::load_imm(Reg::A0, 0x10000),
+                asm::fallthrough(),
+                asm::store_indirect_u64(Reg::A0, Reg::A0, 0),
+                asm::add_imm_64(Reg::A0, Reg::A0, 0x1000),
+                asm::jump(1),
+            ],
+            &[],
+        );
+
+        let blob = ProgramBlob::parse(builder.into_vec().into()).unwrap();
+        let mut module_config = ModuleConfig::new();
+        module_config.set_page_size(page_size);
+        module_config.set_dynamic_paging(true);
+        module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let offsets: Vec<_> = module
+            .blob()
+            .instructions(DefaultInstructionSet::default())
+            .map(|inst| inst.offset)
+            .collect();
+
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(offsets[0]);
+        instance.set_gas(1000000);
+        instance
+    })
+    .join()
+    .unwrap();
+
+    let segfault = expect_segfault(instance.run().unwrap());
+    assert_eq!(segfault.page_address, 0x10000);
+}
+
+#[cfg(not(feature = "std"))]
+fn dynamic_paging_instantiate_on_another_thread(_: Config) {}
+
+#[cfg(feature = "std")]
+fn dynamic_paging_instantiate_on_another_thread(mut engine_config: Config) {
+    engine_config.set_allow_dynamic_paging(true);
+
+    let _ = env_logger::try_init();
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new_64bit();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::load_imm(Reg::A0, 0x10000),
+            asm::fallthrough(),
+            asm::store_indirect_u64(Reg::A0, Reg::A0, 0),
+            asm::add_imm_64(Reg::A0, Reg::A0, 0x1000),
+            asm::jump(1),
+        ],
+        &[],
+    );
+
+    let blob = ProgramBlob::parse(builder.into_vec().into()).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_dynamic_paging(true);
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let offsets: Vec<_> = module
+        .blob()
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.offset)
+        .collect();
+
+    {
+        let module = module.clone();
+        let mut instance = std::thread::spawn(move || module.instantiate()).join().unwrap().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(offsets[0]);
+        instance.set_gas(1000000);
+
+        let segfault = expect_segfault(instance.run().unwrap());
+        assert_eq!(segfault.page_address, 0x10000);
+    }
+
+    const THREAD_COUNT: usize = 32;
+
+    let barrier = alloc::sync::Arc::new(std::sync::Barrier::new(THREAD_COUNT));
+    for _ in 0..32 {
+        let mut threads = Vec::new();
+        for _ in 0..THREAD_COUNT {
+            let module = module.clone();
+            let barrier = alloc::sync::Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                module.instantiate()
+            }));
+        }
+        for thread in threads {
+            let mut instance = thread.join().unwrap().unwrap();
+            instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+            instance.set_next_program_counter(offsets[0]);
+            instance.set_gas(1000000);
+
+            let segfault = expect_segfault(instance.run().unwrap());
+            assert_eq!(segfault.page_address, 0x10000);
+        }
+    }
+}
+
+#[cfg(not(feature = "std"))]
+fn dynamic_paging_parallel_page_fault_stress_test(_: Config) {}
+
+#[cfg(feature = "std")]
+fn dynamic_paging_parallel_page_fault_stress_test(mut engine_config: Config) {
+    engine_config.set_allow_dynamic_paging(true);
+
+    let _ = env_logger::try_init();
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new_64bit();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::load_imm(Reg::A0, 0x10000),
+            asm::fallthrough(),
+            asm::store_indirect_u64(Reg::A0, Reg::A0, 0),
+            asm::add_imm_64(Reg::A0, Reg::A0, 0x1000),
+            asm::jump(1),
+        ],
+        &[],
+    );
+
+    let blob = ProgramBlob::parse(builder.into_vec().into()).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_dynamic_paging(true);
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let offsets: Vec<_> = module
+        .blob()
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.offset)
+        .collect();
+    let initial_offset = offsets[0];
+
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    const THREAD_COUNT: usize = 32;
+    let barrier = alloc::sync::Arc::new(std::sync::Barrier::new(THREAD_COUNT));
+    let flag = Arc::new(AtomicBool::new(false));
+
+    let mut threads = Vec::new();
+    for nth_thread in 0..THREAD_COUNT {
+        let module = module.clone();
+        let barrier = alloc::sync::Arc::clone(&barrier);
+        struct InterruptOnDrop(Option<Arc<AtomicBool>>);
+        impl Drop for InterruptOnDrop {
+            fn drop(&mut self) {
+                if let Some(should_interrupt) = self.0.take() {
+                    should_interrupt.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+        impl InterruptOnDrop {
+            fn disarm(&mut self) {
+                self.0.take();
+            }
+
+            fn should_interrupt(&self) -> bool {
+                self.0.as_ref().map_or(false, |flag| flag.load(Ordering::Relaxed))
+            }
+        }
+        let mut flag = InterruptOnDrop(Some(Arc::clone(&flag)));
+        let thread = std::thread::spawn(move || {
+            let mut instance = module.instantiate().unwrap();
+            instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+            instance.set_next_program_counter(initial_offset);
+            instance.set_gas(1000000);
+            let mut address = 0x10000;
+
+            barrier.wait();
+            log::info!("Starting thread #{nth_thread}... (child PID = {:?})", instance.pid());
+            for _ in 0..1000 {
+                if flag.should_interrupt() {
+                    break;
+                }
+                let segfault = expect_segfault(instance.run().unwrap());
+                if flag.should_interrupt() {
+                    break;
+                }
+                assert_eq!(segfault.page_address, address);
+                instance.zero_memory(segfault.page_address, segfault.page_size).unwrap();
+                address += segfault.page_size;
+            }
+            flag.disarm();
+            log::info!("Finished thread #{nth_thread} (child PID = {:?})", instance.pid());
+        });
+        threads.push(thread);
+    }
+
+    let mut results = Vec::new();
+    for thread in threads {
+        results.push(thread.join());
+    }
+
+    for result in results {
+        result.unwrap();
+    }
+}
+
 fn decompress_zstd(mut bytes: &[u8]) -> Vec<u8> {
     use ruzstd::io::Read;
     let mut output = Vec::new();
@@ -3301,6 +3526,9 @@ run_tests! {
     dynamic_paging_worker_recycle_during_segfault
     dynamic_paging_change_program_counter_during_segfault
     dynamic_paging_run_out_of_gas
+    dynamic_paging_receive_from_another_thread_and_run
+    dynamic_paging_instantiate_on_another_thread
+    dynamic_paging_parallel_page_fault_stress_test
     zero_memory
     doom_o3_dwarf5
     doom_o1_dwarf5
