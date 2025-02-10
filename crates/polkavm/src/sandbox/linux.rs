@@ -1619,8 +1619,6 @@ impl super::Sandbox for Sandbox {
             linux_raw::sys_uffdio_api(userfaultfd.borrow(), &mut api)
                 .map_err(|error| Error::from(format!("failed to initialize the userfaultfd API: {error}")))?;
 
-            linux_raw::sys_ptrace_seize(child.pid)?;
-
             (Some(iouring), userfaultfd)
         } else {
             (None, Fd::from_raw_unchecked(-1))
@@ -1638,7 +1636,7 @@ impl super::Sandbox for Sandbox {
             // so let's grab the registers which will allow us to do that.
 
             // First grab all of the general-purpose registers.
-            linux_raw::sys_ptrace_interrupt(child.pid)?;
+            linux_raw::sys_ptrace_attach(child.pid)?;
             let status = child.check_status(false)?;
             if !status.is_trapped() {
                 log::error!("Child #{}: expected child to trap, found: {status}", child.pid);
@@ -1646,7 +1644,7 @@ impl super::Sandbox for Sandbox {
             }
 
             idle_regs = linux_raw::sys_ptrace_getregs(child.pid)?;
-            linux_raw::sys_ptrace_continue(child.pid, None)?;
+            linux_raw::sys_ptrace_detach(child.pid)?;
 
             // Then grab the worker's idle longjmp registers.
             vmctx.jump_into.store(ZYGOTE_TABLES.1.ext_fetch_idle_regs, Ordering::Relaxed);
@@ -1903,11 +1901,11 @@ impl super::Sandbox for Sandbox {
 
             // This acts exactly the same as `UFFDIO_WAKE`.
             log::trace!(
-                "Child #{}: sys_ptrace_continue after page fault at 0x{:x}",
+                "Child #{}: sys_ptrace_detach after page fault at 0x{:x}",
                 self.child.pid,
                 pagefault.address
             );
-            linux_raw::sys_ptrace_continue(self.child.pid, None)?;
+            linux_raw::sys_ptrace_detach(self.child.pid)?;
         } else {
             let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
             debug_assert_eq!(self.vmctx().futex.load(Ordering::Relaxed) & 1, VMCTX_FUTEX_IDLE);
@@ -2517,7 +2515,7 @@ impl Sandbox {
 
                             debug_assert!(address <= u64::from(u32::MAX));
 
-                            linux_raw::sys_ptrace_interrupt(self.child.pid)?;
+                            linux_raw::sys_ptrace_attach(self.child.pid)?;
                             let status = if !self.iouring_waitid_queued {
                                 self.child.check_status(false)?
                             } else {
@@ -2769,6 +2767,6 @@ impl Sandbox {
         // so it can't do this by itself.
         self.vmctx().futex.store(VMCTX_FUTEX_IDLE, Ordering::Release);
         linux_raw::sys_ptrace_setregs(self.child.pid, &self.idle_regs)?;
-        linux_raw::sys_ptrace_continue(self.child.pid, None)
+        linux_raw::sys_ptrace_detach(self.child.pid)
     }
 }
