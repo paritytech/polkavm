@@ -1342,15 +1342,12 @@ where
             };
 
             // Ignore the address as written; we'll just use the relocations instead.
-            let error = if elf.is_64() { b.read_u64().err() } else { b.read_u32().err() };
-
-            if let Some(error) = error {
-                return Err(ProgramFromElfError::other(format!("failed to parse export metadata: {}", error)));
-            }
+            let address = if elf.is_64() { b.read_u64() } else { b.read_u32().map(u64::from) };
+            let address = address.map_err(|error| ProgramFromElfError::other(format!("failed to parse export metadata: {}", error)))?;
 
             let Some(relocation) = relocations.get(&location) else {
                 return Err(ProgramFromElfError::other(format!(
-                    "found an export without a relocation for a pointer to the metadata at {location}"
+                    "found an export without a relocation for a pointer to the metadata at {location} (found address = 0x{address:x})"
                 )));
             };
 
