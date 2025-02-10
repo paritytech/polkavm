@@ -2854,13 +2854,38 @@ where
     let mut current_block: Vec<(SourceStack, BasicInst<SectionTarget>)> = Vec::new();
     let mut block_start_opt = None;
     let mut last_source_in_block = None;
+    #[cfg(not(test))]
+    let symbols: HashMap<_, _> = elf
+        .symbols()
+        .filter_map(|symbol| {
+            if symbol.kind() != object::elf::STT_FUNC {
+                return None;
+            }
+
+            let name = symbol.name()?;
+            let (section, offset) = symbol.section_and_offset().ok()?;
+            let target = SectionTarget {
+                section_index: section.index(),
+                offset,
+            };
+            Some((target, name))
+        })
+        .collect();
+
+    #[cfg(not(test))]
+    let mut current_symbol = "";
     for (source, op) in instructions {
         // TODO: This panics because we use a dummy ELF in tests; fix it.
         #[cfg(not(test))]
-        log::trace!(
-            "Instruction at {source} (0x{:x}): {op:?}",
-            elf.section_by_index(source.section_index).original_address() + source.offset_range.start
-        );
+        {
+            if let Some(name) = symbols.get(&source.begin()) {
+                current_symbol = name;
+            }
+            log::trace!(
+                "Instruction at {source} (0x{:x}) \"{current_symbol}\": {op:?}",
+                elf.section_by_index(source.section_index).original_address() + source.offset_range.start
+            );
+        }
 
         if let Some(last_source_in_block) = last_source_in_block {
             // Handle the case where we've emitted multiple instructions from a single RISC-V instruction.
