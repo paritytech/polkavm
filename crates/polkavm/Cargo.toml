@@ -26,7 +26,6 @@ libc = { workspace = true }
 env_logger = { workspace = true }
 polkavm-common = { workspace = true, features = ["export-internals-for-testing"] }
 polkavm-linker = { workspace = true }
-polkavm-test-data = { workspace = true }
 image = { workspace = true, features = ["tga"] }
 ruzstd = { workspace = true }
 paste = { workspace = true }

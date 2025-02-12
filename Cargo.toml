@@ -10,7 +10,6 @@ members = [
     "crates/polkavm-common",
     "crates/polkavm-linux-raw",
     "crates/polkavm",
-    "crates/polkavm-test-data",
 
     "crates/simplealloc",
 
@@ -40,7 +39,6 @@ polkavm-derive-impl       = { version = "0.21.0", path = "crates/polkavm-derive-
 polkavm-derive-impl-macro = { version = "0.21.0", path = "crates/polkavm-derive-impl-macro" }
 polkavm-linker            = { version = "0.21.0", path = "crates/polkavm-linker" }
 polkavm-linux-raw         = { version = "0.21.0", path = "crates/polkavm-linux-raw" }
-polkavm-test-data         = { version = "0.21.0", path = "crates/polkavm-test-data" }
 
 blake3 = { version = "1.5.4", default-features = false }
 clap = "4.4.6"
@@ -60,7 +58,7 @@ proptest = "1.3.1"
 quote = "1.0.33"
 regalloc2 = "0.9.3"
 rustc-demangle = "0.1.23"
-ruzstd = { version = "0.4.0", default-features = false }
+ruzstd = { version = "0.5.0", default-features = false }
 schnellru = { version = "0.2.3" }
 serde = { version = "1.0.203", features = ["derive"] }
 serde_json = { version = "1.0.117" }
