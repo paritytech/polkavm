@@ -28,6 +28,7 @@ use polkavm_common::{
         VMCTX_FUTEX_GUEST_TRAP,
         VMCTX_FUTEX_GUEST_NOT_ENOUGH_GAS,
         VMCTX_FUTEX_GUEST_SIGNAL,
+        VMCTX_FUTEX_GUEST_PAGEFAULT,
         VMCTX_FUTEX_IDLE,
     },
 };
@@ -103,6 +104,16 @@ impl DisplayLite for i64 {
         };
 
         write_number_base10(value, &mut write_str)
+    }
+}
+
+impl DisplayLite for bool {
+    fn fmt_lite(&self, mut write_str: impl FnMut(&str)) {
+        if *self {
+            write_str("1")
+        } else {
+            write_str("0")
+        }
     }
 }
 
@@ -279,7 +290,7 @@ fn memory_fd() -> linux_raw::FdRef<'static> {
 static IN_SIGNAL_HANDLER: AtomicBool = AtomicBool::new(false);
 static NATIVE_PAGE_SIZE: AtomicUsize = AtomicUsize::new(!0);
 
-unsafe extern "C" fn signal_handler(signal: u32, _info: &linux_raw::siginfo_t, context: &linux_raw::ucontext) {
+unsafe extern "C" fn signal_handler(signal: u32, info: &linux_raw::siginfo_t, context: &linux_raw::ucontext) {
     if IN_SIGNAL_HANDLER.load(Ordering::Relaxed) || signal == linux_raw::SIGIO {
         graceful_abort();
     }
@@ -326,6 +337,46 @@ unsafe extern "C" fn signal_handler(signal: u32, _info: &linux_raw::siginfo_t, c
         Hex(context.uc_mcontext.r15)
     );
 
+    let mut futex_value = VMCTX_FUTEX_GUEST_SIGNAL;
+    if signal == linux_raw::SIGBUS {
+        // In case of a page fault: (from 'set_signal_archinfo' in 'linux/arch/x86/mm/fault.c')
+        //   uc_mcontext.trapno = X86_TRAP_PF;
+        //   uc_mcontext.err = error_code | X86_PF_USER;
+        //   uc_mcontext.cr2 = address;
+        // The error flags are: (from 'linux/arch/x86/include/asm/trap_pf.h')
+        //   X86_PF_PROT    = BIT(0),  // 0: no page found, 1: protection fault
+        //   X86_PF_WRITE   = BIT(1),  // 0: read access, 1: write access
+        //   X86_PF_USER    = BIT(2),  // 0: kernel-mode access, 1: user-mode access
+        //   X86_PF_RSVD    = BIT(3),  // use of reserved bit detected
+        //   X86_PF_INSTR   = BIT(4),  // fault was an instruction fetch
+        //   X86_PF_PK      = BIT(5),  // protection keys block access
+        //   X86_PF_SHSTK   = BIT(6),  // shadow stack access fault
+        //   X86_PF_SGX     = BIT(15), // SGX MMU page-fault
+        //   X86_PF_RMP     = BIT(31), // fault was due to RMP violation
+
+        const X86_TRAP_PF: u64 = 14;
+        if context.uc_mcontext.trapno != X86_TRAP_PF {
+            abort_with_message("SIGBUS with a trap number that isn't X86_TRAP_PF");
+        }
+
+        let address = info.__bindgen_anon_1.__bindgen_anon_1._sifields._sigfault._addr;
+        let is_protection_fault = (context.uc_mcontext.err & 1) != 0;
+        let is_write_fault = (context.uc_mcontext.err & 2) != 0;
+        trace!(
+            "Page fault: address = ",
+            Hex(address as u64),
+            ", page exists = ",
+            is_protection_fault,
+            ", is write = ",
+            is_write_fault
+        );
+
+        VMCTX.arg.store(address as u32, Ordering::Relaxed);
+        if !is_protection_fault {
+            futex_value = VMCTX_FUTEX_GUEST_PAGEFAULT;
+        }
+    }
+
     if rip < VM_ADDR_NATIVE_CODE || rip > VM_ADDR_NATIVE_CODE + VMCTX.shm_code_length.load(Ordering::Relaxed) {
         abort_with_message("segmentation fault")
     }
@@ -366,7 +417,7 @@ unsafe extern "C" fn signal_handler(signal: u32, _info: &linux_raw::siginfo_t, c
 
     VMCTX.rip.store(rip, Ordering::Relaxed);
 
-    signal_host_and_longjmp(VMCTX_FUTEX_GUEST_SIGNAL);
+    signal_host_and_longjmp(futex_value);
 }
 
 static mut RESUME_MAIN_LOOP_JMPBUF: JmpBuf = JmpBuf {
@@ -593,6 +644,9 @@ unsafe fn initialize(mut stack: *mut usize) {
 
     linux_raw::sys_rt_sigaction(linux_raw::SIGSEGV, &sa, None)
         .unwrap_or_else(|error| abort_with_error("failed to set up a signal handler for SIGSEGV", error));
+
+    linux_raw::sys_rt_sigaction(linux_raw::SIGBUS, &sa, None)
+        .unwrap_or_else(|error| abort_with_error("failed to set up a signal handler for SIGBUS", error));
 
     linux_raw::sys_rt_sigaction(linux_raw::SIGILL, &sa, None)
         .unwrap_or_else(|error| abort_with_error("failed to set up a signal handler for SIGILL", error));
@@ -947,7 +1001,6 @@ pub static EXT_TABLE: ExtTableRaw = ExtTableRaw {
     ext_zero_memory_chunk,
     ext_load_program,
     ext_recycle,
-    ext_fetch_idle_regs,
     ext_set_accessible_aux_size,
 };
 
@@ -1111,32 +1164,6 @@ unsafe fn recycle() {
 pub unsafe extern "C" fn ext_recycle() -> ! {
     trace!("Entry point: ext_recycle");
     recycle();
-    signal_host_and_longjmp(VMCTX_FUTEX_IDLE);
-}
-
-#[inline(never)]
-pub unsafe extern "C" fn ext_fetch_idle_regs() -> ! {
-    trace!("Entry point: ext_fetch_idle_regs");
-
-    macro_rules! copy_regs {
-        ($($name:ident),+) => {
-            $(
-                VMCTX.init.idle_regs.$name.store(RESUME_MAIN_LOOP_JMPBUF.$name.load(Ordering::Relaxed), Ordering::Relaxed);
-            )+
-        }
-    }
-
-    copy_regs! {
-        rip,
-        rbp,
-        rsp,
-        rbp,
-        r12,
-        r13,
-        r14,
-        r15
-    }
-
     signal_host_and_longjmp(VMCTX_FUTEX_IDLE);
 }
 
