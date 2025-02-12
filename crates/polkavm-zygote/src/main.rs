@@ -127,21 +127,27 @@ impl DisplayLite for Hex<u64> {
     }
 }
 
+static LOGGING_ENABLED: AtomicBool = AtomicBool::new(true);
+
 macro_rules! trace {
     ($arg:expr) => {{
-        let fd = linux_raw::FdRef::from_raw_unchecked(zygote::FD_LOGGER_STDERR);
-        let _ = linux_raw::sys_write(fd, $arg.as_bytes());
-        let _ = linux_raw::sys_write(fd, b"\n");
+        if LOGGING_ENABLED.load(Ordering::Relaxed) {
+            let fd = linux_raw::FdRef::from_raw_unchecked(zygote::FD_LOGGER_STDERR);
+            let _ = linux_raw::sys_write(fd, $arg.as_bytes());
+            let _ = linux_raw::sys_write(fd, b"\n");
+        }
     }};
 
     ($($arg:expr),+) => {{
-        let fd = linux_raw::FdRef::from_raw_unchecked(zygote::FD_LOGGER_STDERR);
-        $(
-            DisplayLite::fmt_lite(&$arg, |s| {
-                let _ = linux_raw::sys_write(fd, s.as_bytes());
-            });
-        )+
-        let _ = linux_raw::sys_write(fd, b"\n");
+        if LOGGING_ENABLED.load(Ordering::Relaxed) {
+            let fd = linux_raw::FdRef::from_raw_unchecked(zygote::FD_LOGGER_STDERR);
+            $(
+                DisplayLite::fmt_lite(&$arg, |s| {
+                    let _ = linux_raw::sys_write(fd, s.as_bytes());
+                });
+            )+
+            let _ = linux_raw::sys_write(fd, b"\n");
+        }
     }};
 }
 
@@ -644,6 +650,8 @@ unsafe fn initialize(mut stack: *mut usize) {
             .close()
             .unwrap_or_else(|error| abort_with_error("failed to close stdin logger", error));
     }
+
+    LOGGING_ENABLED.store(VMCTX.init.logging_enabled.load(Ordering::Relaxed), Ordering::Relaxed);
 
     if !VMCTX.init.sandbox_disabled.load(Ordering::Relaxed) {
         linux_raw::sys_setrlimit(linux_raw::RLIMIT_NOFILE, &linux_raw::rlimit { rlim_cur: 0, rlim_max: 0 })
