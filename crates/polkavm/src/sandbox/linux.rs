@@ -2541,7 +2541,9 @@ impl Sandbox {
                                             if let Err(ref error) = result {
                                                 // TODO: FIXME: I have no idea why this happens, but when you queue a waitid
                                                 // on one thread and handle the result on another this returns EFAULT.
-                                                if error.errno() == linux_raw::EFAULT && !efault_hack_triggered {
+                                                if (error.errno() == linux_raw::EFAULT || error.errno() == linux_raw::ECHILD)
+                                                    && !efault_hack_triggered
+                                                {
                                                     efault_hack_triggered = true;
                                                     self.iouring
                                                         .as_mut()
