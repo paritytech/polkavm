@@ -1103,6 +1103,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "delay"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "simplealloc",
+]
+
+[[package]]
 name = "der"
 version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
