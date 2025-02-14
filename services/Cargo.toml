@@ -19,7 +19,8 @@ members = [
     "tribonacci",
     "megatron",
     "transfer",
-    "balances"
+    "balances",
+    "delay"
 
  #   "tokens",
 ]

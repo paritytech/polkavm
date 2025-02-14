@@ -526,3 +526,36 @@ extern "C" fn refine() -> u32 {
    ```bash
    cargo run -p polkatool disassemble services/balances/balances_blob.pvm --show-raw-bytes > ./services/balances/balances.txt
    ``` 
+
+### delay
+
+1. **Go to the `delay` Directory**  
+   ```bash
+   cd ./services/delay
+   ```
+
+2. **Build the Service**  
+   ```bash
+   cargo build --release --target-dir ./target
+   ```
+
+3. **Go Back to Root Directory**  
+   ```bash
+   cd ../../
+   ```
+
+4. **Generate Blob**  
+   ```bash
+   cargo run -p polkatool jam-service services/delay/target/riscv64emac-unknown-none-polkavm/release/delay -o services/delay/delay.pvm -d services/delay/delay_blob.pvm
+   ```
+
+5. **Generated Output Files**  
+   After running the above command, two files will be created:
+   - `delay.pvm`: JAM-ready top-level service blob.
+   - `delay_blob.pvm`: This file can be disassembled with `polkatool`.
+
+6. **Disassemble the Code**  
+   To compile and disassemble the code, use:
+   ```bash
+   cargo run -p polkatool disassemble services/delay/delay_blob.pvm --show-raw-bytes > ./services/delay/delay.txt
+   ```
