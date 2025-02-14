@@ -16,21 +16,21 @@
       :                          @3
     15: 28 27                    jump @7
       :                          @4 [export #0: 'is_authorized']
-    17: 33 07                    a0 = 0x0
+    17: 33 07                    a0 = 0
     19: 32 00                    ret
       :                          @5 [export #1: 'refine']
-    21: 95 11 f8                 sp = sp - 8
+    21: 95 11 f8                 sp = sp + 0xfffffffffffffff8
     24: 7b 10                    u64 [sp] = ra
     26: 14 07 00 00 ff fe 00 00 00 00 a0 = 0xfeff0000
-    36: 80 77 04                 a0 = u32 [a0 + 4]
+    36: 80 77 04                 a0 = u32 [a0 + 0x4]
     39: 0a 63                    ecalli 99 // 'delay'
-    41: 33 07                    a0 = 0x0
+    41: 33 07                    a0 = 0
     43: 82 10                    ra = u64 [sp]
     45: 95 11 08                 sp = sp + 0x8
     48: 32 00                    ret
       :                          @6 [export #2: 'accumulate']
-    50: 33 07                    a0 = 0x0
+    50: 33 07                    a0 = 0
     52: 32 00                    ret
       :                          @7 [export #3: 'on_transfer']
-    54: 33 07                    a0 = 0x0
+    54: 33 07                    a0 = 0
     56: 32 00                    ret
