@@ -238,12 +238,7 @@ impl Account {
 }
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn is_authorized() -> u32 {
-    0
-}
-
-#[polkavm_derive::polkavm_export]
-extern "C" fn refine() -> u32 {
+extern "C" fn refine() -> u64 {
     let n: u64 = unsafe { ( *(0xFEFF0004 as *const u64)).into() }; // get extrinsic index from payload
 
     let extrinsic_len = unsafe { fetch(FIRST_WRITEABLE_ADDRESS, BUFFER_SIZE.try_into().unwrap(), 17, n as u64, 0) } as usize;
@@ -263,21 +258,21 @@ extern "C" fn refine() -> u32 {
         )
     };
 
+    let data_addr = data_ptr as u64;
+
     if is_valid == 0 {
         unsafe {
             core::arch::asm!(
-                "mv a3, {0}",
-                "mv a4, {1}",
-                in(reg) data_ptr,
+                "mv a1, {0}",
                 in(reg) data_len,
             );
         }
     }
-    0
+    data_addr
 }
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn accumulate() -> u32 {
+extern "C" fn accumulate() -> u64 {
     let extrinsic_address: u64;
     let extrinsic_len: u64;
 
@@ -308,7 +303,7 @@ extern "C" fn accumulate() -> u32 {
 }
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn on_transfer() -> u32 {
+extern "C" fn on_transfer() -> u64 {
     0
 }
 
