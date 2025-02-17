@@ -28,19 +28,14 @@ extern "C" {
 }
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn is_authorized() -> u64 {
-    0
-}
-
-#[polkavm_derive::polkavm_export]
 extern "C" fn refine() -> u64 {
     unsafe {
         core::arch::asm!(
-            "li a3, 0xFEFF0004",
-            "li a4, 0x24", 
+            "li a1, 0x24", 
+            
         );
     }
-    0
+    0xFEFF0004
 }
 
 #[polkavm_derive::polkavm_export]

@@ -313,7 +313,6 @@ fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path
     let mut config = polkavm_linker::Config::default();
     config.set_strip(true);
     config.set_dispatch_table(vec![
-        b"is_authorized".into(),
         b"refine".into(),
         b"accumulate".into(),
         b"on_transfer".into(),
