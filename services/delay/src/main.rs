@@ -24,11 +24,6 @@ extern "C" {
 pub const NONE: u64 = u64::MAX;
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn is_authorized() -> u32 {
-    0
-}
-
-#[polkavm_derive::polkavm_export]
 extern "C" fn refine() -> u32 {
     let seconds: u64 = unsafe { *(0xFEFF0004 as *const u32) as u64 };
     unsafe {
