@@ -28,12 +28,7 @@ extern "C" {
 pub const NONE: u64 = u64::MAX;
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn is_authorized() -> u32 {
-    0
-}
-
-#[polkavm_derive::polkavm_export]
-extern "C" fn refine() -> u32 {
+extern "C" fn refine() -> u64 {
     let mut buffer = [0u8; 12];
     let offset: u64 = 0;
     let maxlen: u64 = buffer.len() as u64;
@@ -72,17 +67,15 @@ extern "C" fn refine() -> u32 {
     let buffer_len = buffer.len() as u64;
     unsafe {
         core::arch::asm!(
-            "mv a3, {0}",
-            "mv a4, {1}",
-            in(reg) buffer_addr,
+            "mv a1, {0}",
             in(reg) buffer_len,
         );
     }
-    0
+    buffer_addr
 }
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn accumulate() -> u32 {
+extern "C" fn accumulate() -> u64 {
     let key = [0u8; 1];
     let omega_9: u64 = 0xFEFF0000;
     let omega_10: u64 = 0xC;
@@ -93,6 +86,6 @@ extern "C" fn accumulate() -> u32 {
 }
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn on_transfer() -> u32 {
+extern "C" fn on_transfer() -> u64 {
     0
 }

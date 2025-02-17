@@ -4,37 +4,31 @@
 // Jump table entry point size = 0 bytes
 // RO data = []
 // RW data = []
-// Instructions = 23
-// Code size = 84 bytes
+// Instructions = 19
+// Code size = 73 bytes
 
       :                          @0
-     0: 28 11 00 00 00           jump @4
+     0: 28 0c 00 00 00           jump @3
       :                          @1
-     5: 28 10 00 00 00           jump @5
+     5: 28 16 00 00 00           jump @4
       :                          @2
-    10: 28 1c 00 00 00           jump @6
-      :                          @3
-    15: 28 41                    jump @7
-      :                          @4 [export #0: 'is_authorized']
-    17: 33 07                    a0 = 0
-    19: 32 00                    ret
-      :                          @5 [export #1: 'refine']
-    21: 14 0a 04 00 ff fe 00 00 00 00 a3 = 0xfeff0004
-    31: 33 0b 08                 a4 = 0x8
-    34: 33 07                    a0 = 0
-    36: 32 00                    ret
-      :                          @6 [export #2: 'accumulate']
-    38: 95 11 f8                 sp = sp + 0xfffffffffffffff8
-    41: 7b 10                    u64 [sp] = ra
-    43: 14 08 00 00 ff fe 00 00 00 00 a1 = 0xfeff0000
-    53: 80 87                    a0 = u32 [a1]
-    55: 80 88 04                 a1 = u32 [a1 + 0x4]
-    58: 14 0a 00 e0 fd fe 00 00 00 00 a3 = 0xfefde000
-    68: 33 09 64                 a2 = 0x64
-    71: 0a 0b                    ecalli 11 // 'transfer'
-    73: 82 10                    ra = u64 [sp]
-    75: 95 11 08                 sp = sp + 0x8
-    78: 32 00                    ret
-      :                          @7 [export #3: 'on_transfer']
-    80: 33 07                    a0 = 0
-    82: 32 00                    ret
+    10: 28 3b                    jump @5
+      :                          @3 [export #0: 'refine']
+    12: 33 08 08                 a1 = 0x8
+    15: 14 07 04 00 ff fe 00 00 00 00 a0 = 0xfeff0004
+    25: 32 00                    ret
+      :                          @4 [export #1: 'accumulate']
+    27: 95 11 f8                 sp = sp + 0xfffffffffffffff8
+    30: 7b 10                    u64 [sp] = ra
+    32: 14 08 00 00 ff fe 00 00 00 00 a1 = 0xfeff0000
+    42: 80 87                    a0 = u32 [a1]
+    44: 80 88 04                 a1 = u32 [a1 + 0x4]
+    47: 14 0a 00 e0 fd fe 00 00 00 00 a3 = 0xfefde000
+    57: 33 09 64                 a2 = 0x64
+    60: 0a 0b                    ecalli 11 // 'transfer'
+    62: 82 10                    ra = u64 [sp]
+    64: 95 11 08                 sp = sp + 0x8
+    67: 32 00                    ret
+      :                          @5 [export #2: 'on_transfer']
+    69: 33 07                    a0 = 0
+    71: 32 00                    ret
