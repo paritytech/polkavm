@@ -20,7 +20,7 @@ members = [
     "megatron",
     "transfer",
     "balances",
-    "delay"
-
+    "delay",
+    "null_authorizer"
  #   "tokens",
 ]
