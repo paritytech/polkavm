@@ -18,6 +18,9 @@ features = ["export-internals-for-testing"]
 [dependencies.polkavm-linker]
 path = "../crates/polkavm-linker"
 
+[dependencies.polkavm-common]
+path = "../crates/polkavm-common"
+
 [[bin]]
 name = "fuzz_shm_allocator"
 path = "fuzz_targets/fuzz_shm_allocator.rs"
@@ -35,6 +38,13 @@ bench = false
 [[bin]]
 name = "fuzz_linker"
 path = "fuzz_targets/fuzz_linker.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_interpreter"
+path = "fuzz_targets/fuzz_interpreter.rs"
 test = false
 doc = false
 bench = false
