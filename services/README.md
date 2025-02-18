@@ -14,6 +14,10 @@
     - [Bootstrap](#bootstrap)
     - [Tribonacci](#tribonacci)
     - [Megatron](#megatron)
+    - [Transfer](#transfer)
+    - [Balances](#balances)
+    - [Delay](#delay)
+    - [Null_authorizer](#null_authorizer)
 
 ---
 
@@ -558,4 +562,38 @@ extern "C" fn refine() -> u32 {
    To compile and disassemble the code, use:
    ```bash
    cargo run -p polkatool disassemble services/delay/delay_blob.pvm --show-raw-bytes > ./services/delay/delay.txt
+   ```
+
+### null_authorizer
+
+1. **Go to the `null_authorizer` Directory**  
+   ```bash
+   cd ./services/null_authorizer
+   ```
+
+2. **Build the Service**  
+   ```bash
+   cargo build --release --target-dir ./target
+   ```
+
+3. **Go Back to Root Directory**  
+   ```bash
+   cd ../../
+   ```
+
+4. **Generate Blob**  
+   (**Note: Remember to add `-i` when building authorization service**)
+   ```bash
+   cargo run -p polkatool jam-service services/null_authorizer/target/riscv64emac-unknown-none-polkavm/release/null_authorizer -o services/null_authorizer/null_authorizer.pvm -d services/null_authorizer/null_authorizer_blob.pvm -i
+   ```
+
+5. **Generated Output Files**  
+   After running the above command, two files will be created:
+   - `null_authorizer.pvm`: JAM-ready top-level service blob.
+   - `null_authorizer_blob.pvm`: This file can be disassembled with `polkatool`.
+
+6. **Disassemble the Code**  
+   To compile and disassemble the code, use:
+   ```bash
+   cargo run -p polkatool disassemble services/null_authorizer/null_authorizer_blob.pvm --show-raw-bytes > ./services/null_authorizer/null_authorizer.txt
    ```
