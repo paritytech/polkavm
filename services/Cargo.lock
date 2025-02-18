@@ -2839,6 +2839,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "null_authorizer"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "simplealloc",
+]
+
+[[package]]
 name = "num"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

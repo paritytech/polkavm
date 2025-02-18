@@ -101,6 +101,9 @@ enum Args {
         /// The raw code blob (can be disassembled with cargo run -p polkatool disassemble --show-raw-bytes {..})
         #[clap(short = 'd', long)]
         dump: Option<PathBuf>,
+
+        #[clap(short = 'i', action = clap::ArgAction::SetTrue)]
+        is_authorize: bool,
     },
 }
 
@@ -142,7 +145,7 @@ fn main() {
         }
 
         // For JAM service
-        Args::JAMService { input, output, dump} => main_jam_service(input, output, dump),
+        Args::JAMService { input, output, dump, is_authorize} => main_jam_service(input, output, dump, is_authorize),
     };
 
     if let Err(error) = result {
@@ -303,7 +306,7 @@ fn main_assemble(input_path: PathBuf, output_path: PathBuf) -> Result<(), String
     Ok(())
 }
 
-fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path: Option<PathBuf>) -> Result<(), String> {
+fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path: Option<PathBuf>, is_authorize: bool) -> Result<(), String> {
     if !input_path.exists() {
         return Err(format!("File does not exist: {:?}", input_path));
     }
@@ -312,11 +315,17 @@ fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path
 
     let mut config = polkavm_linker::Config::default();
     config.set_strip(true);
-    config.set_dispatch_table(vec![
-        b"refine".into(),
-        b"accumulate".into(),
-        b"on_transfer".into(),
-    ]);
+    if is_authorize {
+        config.set_dispatch_table(vec![
+            b"is_authorize".into(),
+        ]);
+    } else {
+        config.set_dispatch_table(vec![
+            b"refine".into(),
+            b"accumulate".into(),
+            b"on_transfer".into(),
+        ]);
+    }
 
     let elf = fs::read(&input_path).map_err(|err| format!("Failed to read ELF file: {}", err))?;
 
