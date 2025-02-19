@@ -26,23 +26,47 @@ extern "C" {
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine() -> u64 {
+    let omega_7: u64; // refine input start address
     unsafe {
         core::arch::asm!(
-            "li a1, 0x8", 
+            "mv {0}, a0",
+            out(reg) omega_7,
         );
     }
-    0xFEFF0004
+
+    let output_len: u64 = 8; // 4 bytes service index + 4 bytes service index
+    unsafe {
+        core::arch::asm!(
+            "mv a1, {0}",
+            in(reg) output_len,
+        );
+    }
+    omega_7 + 4 // eliminate the first 4 bytes (workitem service index)
 }
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate() -> u64 {
+    let omega_7: u64;
+    let omega_8: u64;
+    unsafe {
+        core::arch::asm!(
+            "mv {0}, a0",
+            "mv {1}, a1",
+            out(reg) omega_7,
+            out(reg) omega_8,
+        );
+    }
+
+    let service0_bytes_start_addr: u64 = omega_7; // 4 bytes service index
+    let service1_bytes_start_addr: u64 = omega_7 + omega_8 - 4; // 4 bytes service index
+
     let buffer0 = [0u8; 12];
     let buffer1 = [0u8; 12];
     let key = [0u8; 1];
     let mut buffer = [0u8; 12];
 
-    let service0: u64 = unsafe { ( *(0xFEFF0000 as *const u32)).into() }; 
-    let service1: u64 = unsafe { ( *(0xFEFF0004 as *const u32)).into() }; 
+    let service0: u64 = unsafe { ( *(service0_bytes_start_addr as *const u32)).into() }; 
+    let service1: u64 = unsafe { ( *(service1_bytes_start_addr as *const u32)).into() }; 
 
     unsafe {
         read(service0, key.as_ptr() as u64, key.len() as u64, buffer0.as_ptr() as u64, buffer0.len() as u64);
