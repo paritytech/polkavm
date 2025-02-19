@@ -84,10 +84,31 @@ extern "C" fn accumulate() -> u64 {
     let key = [0u8; 1];
     let omega_9: u64 = 0xFEFF0000;
     let omega_10: u64 = 0xC;
+    let n: u64 = unsafe { ( *(omega_9 as *const u32)).into() }; 
     unsafe {
         write(key.as_ptr() as u64, key.len() as u64, omega_9, omega_10);
     }
-    0
+    // Option<hash> test
+    let hash_bytes: [u8; 32] = [1; 32];
+    let mut buffer_addr: u64 = hash_bytes.as_ptr() as u64;
+    let buffer_len: u64 = hash_bytes.len() as u64;
+
+    if n % 3 == 0{
+        // trigger PANIC 
+        let buffer_addr = 0;
+        unreachable!();
+    } else if n % 2 == 0 {
+        // Write to invalid memory address to obtain an empty hash
+        let buffer_addr = 0;
+    }
+
+    unsafe {
+        core::arch::asm!(
+            "mv a1, {0}",
+            in(reg) buffer_len,
+        );
+    }
+    buffer_addr
 }
 
 #[polkavm_derive::polkavm_export]
