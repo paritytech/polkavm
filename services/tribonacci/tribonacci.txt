@@ -4,15 +4,15 @@
 // Jump table entry point size = 0 bytes
 // RO data = []
 // RW data = []
-// Instructions = 58
-// Code size = 161 bytes
+// Instructions = 72
+// Code size = 212 bytes
 
       :                          @0
      0: 28 0d 00 00 00           jump @3
       :                          @1
      5: 28 70 00 00 00           jump @8
       :                          @2
-    10: 28 93 00                 jump @9
+    10: 28 c6 00                 jump @12
       :                          @3 [export #0: 'refine']
     13: 95 11 e0                 sp = sp + 0xffffffffffffffe0
     16: 7b 10 18                 u64 [sp + 0x18] = ra
@@ -60,18 +60,35 @@
    112: 95 11 20                 sp = sp + 0x20
    115: 32 00                    ret
       :                          @8 [export #1: 'accumulate']
-   117: 95 11 f0                 sp = sp + 0xfffffffffffffff0
-   120: 7b 10 08                 u64 [sp + 0x8] = ra
-   123: 46 11 07                 u8 [sp + 7] = 0
-   126: 14 09 00 00 ff fe 00 00 00 00 a2 = 0xfeff0000
-   136: 95 17 07                 a0 = sp + 0x7
-   139: 33 08 01                 a1 = 0x1
-   142: 33 0a 0c                 a3 = 0xc
-   145: 0a 03                    ecalli 3 // 'write'
-   147: 33 07                    a0 = 0
-   149: 82 10 08                 ra = u64 [sp + 0x8]
-   152: 95 11 10                 sp = sp + 0x10
-   155: 32 00                    ret
-      :                          @9 [export #2: 'on_transfer']
-   157: 33 07                    a0 = 0
-   159: 32 00                    ret
+   117: 95 11 c8                 sp = sp + 0xffffffffffffffc8
+   120: 7b 10 30                 u64 [sp + 0x30] = ra
+   123: 7b 15 28                 u64 [sp + 0x28] = s0
+   126: 46 11 07                 u8 [sp + 7] = 0
+   129: 14 09 00 00 ff fe 00 00 00 00 a2 = 0xfeff0000
+   139: 81 95                    s0 = i32 [a2]
+   141: 95 17 07                 a0 = sp + 0x7
+   144: 33 08 01                 a1 = 0x1
+   147: 33 0a 0c                 a3 = 0xc
+   150: 0a 03                    ecalli 3 // 'write'
+   152: 01                       fallthrough
+      :                          @9
+   153: 14 07 01 01 01 01 01 01 01 01 a0 = 0x101010101010101
+   163: 7b 17 20                 u64 [sp + 0x20] = a0
+   166: 7b 17 18                 u64 [sp + 0x18] = a0
+   169: 7b 17 10                 u64 [sp + 0x10] = a0
+   172: 87 58 ab aa aa aa        i32 a1 = s0 * 0xffffffffaaaaaaab
+   178: 33 09 55 55 55 55        a2 = 0x55555555
+   184: 7b 17 08                 u64 [sp + 0x8] = a0
+   187: ae 89 14                 jump @11 if a2 >=u a1
+      :                          @10
+   190: 33 08 20                 a1 = 0x20
+   193: 95 17 08                 a0 = sp + 0x8
+   196: 82 10 30                 ra = u64 [sp + 0x30]
+   199: 82 15 28                 s0 = u64 [sp + 0x28]
+   202: 95 11 38                 sp = sp + 0x38
+   205: 32 00                    ret
+      :                          @11
+   207: 00                       trap
+      :                          @12 [export #2: 'on_transfer']
+   208: 33 07                    a0 = 0
+   210: 32 00                    ret
