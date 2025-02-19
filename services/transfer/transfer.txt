@@ -1,34 +1,85 @@
 // RO data = 0/0 bytes
 // RW data = 0/0 bytes
 // Stack size = 8192 bytes
-// Jump table entry point size = 0 bytes
+// Jump table entry point size = 1 bytes
 // RO data = []
 // RW data = []
-// Instructions = 19
-// Code size = 73 bytes
+// Instructions = 58
+// Code size = 171 bytes
 
       :                          @0
      0: 28 0c 00 00 00           jump @3
       :                          @1
-     5: 28 16 00 00 00           jump @4
+     5: 28 0f 00 00 00           jump @4
       :                          @2
-    10: 28 3b                    jump @5
+    10: 28 4b                    jump @6
       :                          @3 [export #0: 'refine']
     12: 33 08 08                 a1 = 0x8
-    15: 14 07 04 00 ff fe 00 00 00 00 a0 = 0xfeff0004
-    25: 32 00                    ret
+    15: 95 77 04                 a0 = a0 + 0x4
+    18: 32 00                    ret
       :                          @4 [export #1: 'accumulate']
-    27: 95 11 f8                 sp = sp + 0xfffffffffffffff8
-    30: 7b 10                    u64 [sp] = ra
-    32: 14 08 00 00 ff fe 00 00 00 00 a1 = 0xfeff0000
-    42: 80 87                    a0 = u32 [a1]
-    44: 80 88 04                 a1 = u32 [a1 + 0x4]
-    47: 14 0a 00 e0 fd fe 00 00 00 00 a3 = 0xfefde000
-    57: 33 09 64                 a2 = 0x64
-    60: 0a 0b                    ecalli 11 // 'transfer'
-    62: 82 10                    ra = u64 [sp]
-    64: 95 11 08                 sp = sp + 0x8
-    67: 32 00                    ret
-      :                          @5 [export #2: 'on_transfer']
-    69: 33 07                    a0 = 0
-    71: 32 00                    ret
+    20: 95 11 68 ff              sp = sp + 0xffffffffffffff68
+    24: 7b 10 90 00              u64 [sp + 0x90] = ra
+    28: 7b 15 88 00              u64 [sp + 0x88] = s0
+    32: 7b 16 80 00              u64 [sp + 0x80] = s1
+    36: 64 75                    s0 = a0
+    38: 64 87                    a0 = a1
+    40: c8 57 06                 s1 = a0 + s0
+    43: 64 17                    a0 = sp
+    45: 33 09 80 00              a2 = 0x80
+    49: 33 08                    a1 = 0
+    51: 50 10 02 26              ra = 2, jump @7
+      :                          @5 [@dyn 1]
+    55: 80 57                    a0 = u32 [s0]
+    57: 80 68 fc                 a1 = u32 [s1 + 0xfffffffffffffffc]
+    60: 33 09 64                 a2 = 0x64
+    63: 64 1a                    a3 = sp
+    65: 0a 0b                    ecalli 11 // 'transfer'
+    67: 82 10 90 00              ra = u64 [sp + 0x90]
+    71: 82 15 88 00              s0 = u64 [sp + 0x88]
+    75: 82 16 80 00              s1 = u64 [sp + 0x80]
+    79: 95 11 98 00              sp = sp + 0x98
+    83: 32 00                    ret
+      :                          @6 [export #2: 'on_transfer']
+    85: 33 07                    a0 = 0
+    87: 32 00                    ret
+      :                          @7
+    89: 8d 7a                    i32 a3 = -a0
+    91: 84 aa 07                 a3 = a3 & 0x7
+    94: c8 a7 0b                 a4 = a0 + a3
+    97: 51 0a 0e                 jump @10 if a3 == 0
+      :                          @8
+   100: 64 7c                    a5 = a0
+   102: 01                       fallthrough
+      :                          @9
+   103: 78 c8                    u8 [a5] = a1
+   105: 95 cc 01                 a5 = a5 + 0x1
+   108: ac bc fb                 jump @9 if a5 <u a4
+      :                          @10
+   111: c9 a9 03                 t1 = a2 - a3
+   114: 84 3c f8                 a5 = t1 & 0xfffffffffffffff8
+   117: c8 cb 0a                 a3 = a4 + a5
+   120: 58 0c 1d                 jump @13 if a5 <=s 0
+      :                          @11
+   123: 84 82 ff 00              t0 = a1 & 0xff
+   127: 14 09 01 01 01 01 01 01 01 01 a2 = 0x101010101010101
+   137: ca 92 0c                 a5 = t0 * a2
+   140: 01                       fallthrough
+      :                          @12
+   141: 7b bc                    u64 [a4] = a5
+   143: 95 bb 08                 a4 = a4 + 0x8
+   146: ac ab fb                 jump @12 if a4 <u a3
+      :                          @13
+   149: 84 39 07                 a2 = t1 & 0x7
+   152: 52 09 05                 jump @15 if a2 != 0
+      :                          @14
+   155: 28 0e                    jump @17
+      :                          @15
+   157: c8 a9 09                 a2 = a2 + a3
+   160: 01                       fallthrough
+      :                          @16
+   161: 78 a8                    u8 [a3] = a1
+   163: 95 aa 01                 a3 = a3 + 0x1
+   166: ac 9a fb                 jump @16 if a3 <u a2
+      :                          @17
+   169: 32 00                    ret

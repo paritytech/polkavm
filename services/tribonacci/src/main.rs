@@ -81,16 +81,25 @@ extern "C" fn refine() -> u64 {
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate() -> u64 {
-    let key = [0u8; 1];
-    let omega_9: u64 = 0xFEFF0000;
-    let omega_10: u64 = 0xC;
-    let n: u64 = unsafe { ( *(omega_9 as *const u32)).into() }; 
+    let omega_7: u64; // accumulate input start address
+    let omega_8: u64; // accumulate input length
     unsafe {
-        write(key.as_ptr() as u64, key.len() as u64, omega_9, omega_10);
+        core::arch::asm!(
+            "mv {0}, a0",
+            "mv {1}, a1",
+            out(reg) omega_7,
+            out(reg) omega_8,
+        );
+    }
+
+    let key = [0u8; 1];
+    let n: u64 = unsafe { ( *(omega_7 as *const u32)).into() }; 
+    unsafe {
+        write(key.as_ptr() as u64, key.len() as u64, omega_7, omega_8);
     }
     // Option<hash> test
     let hash_bytes: [u8; 32] = [1; 32];
-    let mut buffer_addr: u64 = hash_bytes.as_ptr() as u64;
+    let buffer_addr: u64 = hash_bytes.as_ptr() as u64;
     let buffer_len: u64 = hash_bytes.len() as u64;
 
     if n % 3 == 0{
