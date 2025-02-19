@@ -24,22 +24,46 @@ extern "C" {
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine() -> u64 {
+    let omega_7: u64; // refine input start address
     unsafe {
         core::arch::asm!(
-            "li a1, 0x8", 
+            "mv {0}, a0",
+            out(reg) omega_7,
         );
     }
-    0xFEFF0004
+
+    let output_len: u64 = 8; // 4 bytes service index + 4 bytes amount
+    unsafe {
+        core::arch::asm!(
+            "mv a1, {0}",
+            in(reg) output_len,
+        );
+    }
+    omega_7 + 4 // eliminate the first 4 bytes (workitem service index)
 }
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate() -> u64 {
-    let omega_7: u64 = unsafe { *(0xFEFF0000 as *const u32) as u64 }; // reciver
-    let omega_8: u64 = unsafe { *(0xFEFF0004 as *const u32) as u64 }; // amount to transfer
+    let omega_7: u64; // accumulate input start address
+    let omega_8: u64; // accumulate input length
+    unsafe {
+        core::arch::asm!(
+            "mv {0}, a0",
+            "mv {1}, a1",
+            out(reg) omega_7,
+            out(reg) omega_8,
+        );
+    }
+
+    let amount_address = omega_7 + omega_8 - 4;
+    let memo = [0u8; 128];
+
+    let reciver: u64 = unsafe { *(omega_7 as *const u32) as u64 }; // reciver
+    let amount: u64 = unsafe { *(amount_address as *const u32) as u64 }; // amount to transfer
     let omega_9: u64 = 100;  // g -  the minimum gas
-    let omega_10: u64 = 0xFEFDE000; // memo start address
+    let omega_10: u64 = memo.as_ptr() as u64; // memo
     
-    let result = unsafe { transfer(omega_7, omega_8, omega_9, omega_10) };
+    let result = unsafe { transfer(reciver, amount, omega_9, omega_10) };
     result
 }
 
