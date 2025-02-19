@@ -344,7 +344,7 @@ impl<R: gimli::Reader> AttributeParser<R> {
                     value: gimli::AttributeValue::Data8(value),
                     ..
                 } => {
-                    log::trace!("  = DW_AT_low_pc + {value} (size/data4)");
+                    log::trace!("  = DW_AT_low_pc + {value} (size/data8)");
                     self.size = Some(value);
                     Ok(())
                 }
