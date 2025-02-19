@@ -340,6 +340,14 @@ impl<R: gimli::Reader> AttributeParser<R> {
                     self.size = Some(u64::from(value));
                     Ok(())
                 }
+                AttributeValue {
+                    value: gimli::AttributeValue::Data8(value),
+                    ..
+                } => {
+                    log::trace!("  = DW_AT_low_pc + {value} (size/data8)");
+                    self.size = Some(value);
+                    Ok(())
+                }
                 _ => Err(UnsupportedValue(value)),
             },
             gimli::DW_AT_ranges => match value {
