@@ -95,7 +95,7 @@
    Use `polkatool` to generate the JAM FIB service and blob file:
 
    ```bash
-    cargo run -p polkatool jam-service services/fib/target/riscv64emac-unknown-none-polkavm/release/fib -o services/fib/fib.pvm -d services/fib/fib_blob.pvm
+   cargo run -p polkatool jam-service services/fib/target/riscv64emac-unknown-none-polkavm/release/fib -o services/fib/fib.pvm -d services/fib/fib_blob.pvm
    ```
 
 3. **Generated Output Files**  
