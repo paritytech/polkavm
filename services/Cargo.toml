@@ -21,6 +21,7 @@ members = [
     "transfer",
     "balances",
     "delay",
-    "null_authorizer"
- #   "tokens",
-]
+    "null_authorizer",
+    "auth_copy"
+ #   "tokens"
+ ]
