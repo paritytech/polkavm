@@ -22,6 +22,7 @@ members = [
     "balances",
     "delay",
     "null_authorizer",
-    "auth_copy"
+    "auth_copy",
+    "blake2b"
  #   "tokens"
  ]
