@@ -351,6 +351,7 @@ fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path
     let w_byte = blob.rw_data();
     let c_size = e_l(parts.code_and_jump_table.len() as u32, 4);
     let c = parts.code_and_jump_table.clone();
+    let bitmask = blob.bitmask();
 
     println!("o_size: {:?}", o_size);
     println!("w_size: {:?}", w_size);
@@ -360,6 +361,7 @@ fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path
     println!("w_byte: {:?}", w_byte);
     println!("c_size: {:?}", c_size);
     println!("c (code_and_jump_table): {:?}", c);
+    println!("\nbitmask: {:?}", bitmask);
 
     let mut new_blob: Vec<u8> = Vec::new();
     new_blob.extend_from_slice(&o_size);
