@@ -597,3 +597,37 @@ extern "C" fn refine() -> u32 {
    ```bash
    cargo run -p polkatool disassemble services/null_authorizer/null_authorizer_blob.pvm --show-raw-bytes > ./services/null_authorizer/null_authorizer.txt
    ```
+
+### blake2b
+
+1. **Go to the `blake2b` Directory**  
+   ```bash
+   cd ./services/blake2b
+   ```
+
+2. **Build the Service**  
+   ```bash
+   cargo build --release --target-dir ./target
+   ```
+
+3. **Go Back to Root Directory**  
+   ```bash
+   cd ../../
+   ```
+
+4. **Generate Blob**  
+   (**Note: Remember to add `-i` when building authorization service**)
+   ```bash
+   cargo run -p polkatool jam-service services/blake2b/target/riscv64emac-unknown-none-polkavm/release/blake2b -o services/blake2b/blake2b.pvm -d services/blake2b/blake2b_blob.pvm
+   ```
+
+5. **Generated Output Files**  
+   After running the above command, two files will be created:
+   - `blake2b.pvm`: JAM-ready top-level service blob.
+   - `blake2b_blob.pvm`: This file can be disassembled with `polkatool`.
+
+6. **Disassemble the Code**  
+   To compile and disassemble the code, use:
+   ```bash
+   cargo run -p polkatool disassemble services/blake2b/blake2b_blob.pvm --show-raw-bytes > ./services/blake2b/blake2b.txt
+   ```  
