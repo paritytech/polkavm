@@ -162,12 +162,12 @@ extern "C" fn accumulate() -> u64 {
     unsafe { write(omega_7, omega_8, omega_9, omega_10) };
 
     // transfer some token to the new service
-    // let memo = [0u8; 128];
-    // let omega_7 = result; // receiver
-    // let omega_8: u64 = 9999999; // amount
-    // let omega_9: u64 = 100;  // g -  the minimum gas
-    // let omega_10: u64 = memo.as_ptr() as u64; // memo
-    // unsafe { transfer(omega_7, omega_8, omega_9, omega_10) };
+    let memo = [0u8; 128];
+    let omega_7 = result; // receiver
+    let omega_8: u64 = 500000; // amount
+    let omega_9: u64 = 100;  // g -  the minimum gas
+    let omega_10: u64 = memo.as_ptr() as u64; // memo
+    unsafe { transfer(omega_7, omega_8, omega_9, omega_10) };
 
     // Option<hash> test
     // pad result to 32 bytes
