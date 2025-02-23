@@ -18,6 +18,7 @@
     - [Balances](#balances)
     - [Delay](#delay)
     - [Null_authorizer](#null_authorizer)
+    - [Blake2b](#blake2b)
 
 ---
 
