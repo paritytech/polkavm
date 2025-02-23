@@ -180,20 +180,30 @@ extern "C" fn accumulate() -> u64 {
     // Option<hash> test
     // pad result to 32 bytes
     let mut output_bytes_32 = [0u8; 32];
-    output_bytes_32[..work_result_length as usize].copy_from_slice(&unsafe { core::slice::from_raw_parts(work_result_address as *const u8, work_result_address as usize) });
+    output_bytes_32[..work_result_length as usize].copy_from_slice(&unsafe { core::slice::from_raw_parts(work_result_address as *const u8, work_result_length as usize) });
     let omega_7 = output_bytes_32.as_ptr() as u64;
     let omega_8 = output_bytes_32.len() as u64;
 
-    if n % 3 == 0{
-        // trigger PANIC 
-        let omega_7 = 0;
-        unreachable!();
+    if n % 3 == 0 {
+        // trigger PANIC
+        unsafe {
+            core::arch::asm!(
+                "li a0, 0",
+                "li a1, 1",
+                "jalr x0, a0, 0", // djump(0+0) causes panic
+            );
+        }
     } else if n % 2 == 0 {
         // Write to invalid memory address to obtain an empty hash
-        let omega_7 = 0;
+        unsafe {
+            core::arch::asm!(
+                "li a1, 1"
+            );
+        }   
+        return 1;
     }
 
-    // set the result address to register a0 and set the result length to register a1
+    // set the result length to register a1
     unsafe {
         core::arch::asm!(
             "mv a1, {0}",

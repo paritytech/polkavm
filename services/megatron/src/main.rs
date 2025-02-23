@@ -19,7 +19,7 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 #[polkavm_derive::polkavm_import]
 extern "C" {
     #[polkavm_import(index = 2)]
-    pub fn read(service: u64, key_ptr: u64, key_len: u64, out: u64, out_len: u64) -> u64;
+    pub fn read(service: u64, key_ptr: u64, key_len: u64, out: u64, out_offet: u64, out_len: u64) -> u64;
     #[polkavm_import(index = 3)]
     pub fn write(key_ptr: u64, key_len: u64, value: u64, value_len: u64) -> u64;
 }
@@ -154,8 +154,8 @@ extern "C" fn accumulate() -> u64 {
 
     // read the two services' storage
     unsafe {
-        read(service0, key.as_ptr() as u64, key.len() as u64, buffer0.as_ptr() as u64, buffer0.len() as u64);
-        read(service1, key.as_ptr() as u64, key.len() as u64, buffer1.as_ptr() as u64, buffer1.len() as u64);
+        read(service0, key.as_ptr() as u64, key.len() as u64, buffer0.as_ptr() as u64, 0 as u64, buffer0.len() as u64);
+        read(service1, key.as_ptr() as u64, key.len() as u64, buffer1.as_ptr() as u64, 0 as u64, buffer1.len() as u64);
     }
     let s0_n = u32::from_le_bytes(buffer0[0..4].try_into().unwrap());
     let s0_vn = u32::from_le_bytes(buffer0[4..8].try_into().unwrap());
@@ -183,16 +183,26 @@ extern "C" fn accumulate() -> u64 {
     let omega_7 = output_bytes_32.as_ptr() as u64;
     let omega_8 = output_bytes_32.len() as u64;
 
-    if m_n % 3 == 0{
-        // trigger PANIC 
-        let omega_7 = 0;
-        unreachable!();
+    if m_n % 3 == 0 {
+        // trigger PANIC
+        unsafe {
+            core::arch::asm!(
+                "li a0, 0",
+                "li a1, 1",
+                "jalr x0, a0, 0", // djump(0+0) causes panic
+            );
+        }
     } else if m_n % 2 == 0 {
         // Write to invalid memory address to obtain an empty hash
-        let omega_7 = 0;
+        unsafe {
+            core::arch::asm!(
+                "li a1, 1"
+            );
+        }   
+        return 1;
     }
 
-    // set the result address to register a0 and set the result length to register a1
+    // set the result length to register a1
     unsafe {
         core::arch::asm!(
             "mv a1, {0}",
