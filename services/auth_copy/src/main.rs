@@ -156,7 +156,16 @@ extern "C" fn accumulate() -> u64 {
     output_bytes_32[..work_result_length as usize].copy_from_slice(&unsafe { core::slice::from_raw_parts(work_result_address as *const u8, work_result_address as usize) });
     let omega_7 = work_result_address;
     let omega_8 = work_result_length;
-
+    let mut authorization_hashes = [0u8;32*80];
+    for i in 0..80 {
+        let start = i * 32;
+        authorization_hashes[start..start + 32].copy_from_slice(unsafe { core::slice::from_raw_parts(work_result_address as *const u8, 32) });
+    }
+    let hashes_address=(&authorization_hashes).as_ptr() as u64;
+    unsafe{
+        assign(0, hashes_address);
+        assign(1, hashes_address);
+    }
     // set the result address to register a0 and set the result length to register a1
     unsafe {
         core::arch::asm!(
