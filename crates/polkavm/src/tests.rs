@@ -2866,6 +2866,22 @@ fn test_asm_reloc_add_sub(config: Config, optimize: bool, _is_64_bit: bool) {
     assert_eq!(i.instance.read_u32(address).unwrap(), 0x03030303);
 }
 
+fn test_asm_reloc_hi_lo(config: Config, optimize: bool, _is_64_bit: bool) {
+    const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_hi_lo_64.elf");
+
+    let elf = BLOB_64;
+    let mut i = TestInstance::new(&config, elf, optimize);
+
+    let address = i.call::<(u32,), u32>("get_string", (0,)).unwrap();
+    assert_eq!(i.instance.read_u32(address).unwrap(), 0xA1010101);
+
+    let address = i.call::<(u32,), u32>("get_string", (1,)).unwrap();
+    assert_eq!(i.instance.read_u32(address).unwrap(), 0xB2020202);
+
+    let address = i.call::<(u32,), u32>("get_string", (2,)).unwrap();
+    assert_eq!(i.instance.read_u32(address).unwrap(), 0xC3030303);
+}
+
 fn basic_gas_metering(config: Config, gas_metering_kind: GasMeteringKind) {
     let _ = env_logger::try_init();
 
@@ -3664,6 +3680,7 @@ run_test_blob_tests! {
     test_blob_return_tuple_from_import
     test_blob_return_tuple_from_export
     test_asm_reloc_add_sub
+    test_asm_reloc_hi_lo
 }
 
 macro_rules! assert_impl {

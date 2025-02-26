@@ -8487,6 +8487,18 @@ where
 
                                 InstExt::Basic(BasicInst::LoadAddress { dst, target })
                             }
+                            Inst::RegImm {
+                                kind: RegImmKind::Add64,
+                                dst,
+                                src: _,
+                                imm: _,
+                            } => {
+                                let Some(dst) = cast_reg_non_zero(dst)? else {
+                                    return Err(ProgramFromElfError::other("R_RISCV_LO12_I with a zero destination register"));
+                                };
+
+                                InstExt::Basic(BasicInst::LoadAddress { dst, target })
+                            }
                             Inst::Load {
                                 kind,
                                 dst,

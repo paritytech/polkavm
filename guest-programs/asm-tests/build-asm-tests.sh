@@ -11,4 +11,5 @@ function build_asm_tests_64bit() {
 }
 
 build_asm_tests_64bit "reloc_add_sub_64"
+build_asm_tests_64bit "reloc_hi_lo_64"
 
