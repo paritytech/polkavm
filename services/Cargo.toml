@@ -23,6 +23,7 @@ members = [
     "delay",
     "null_authorizer",
     "auth_copy",
-    "blake2b"
+    "blake2b",
+    "fib2"
  #   "tokens"
  ]
