@@ -43,8 +43,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_interpreter"
-path = "fuzz_targets/fuzz_interpreter.rs"
+name = "fuzz_polkavm"
+path = "fuzz_targets/fuzz_polkavm.rs"
 test = false
 doc = false
 bench = false
