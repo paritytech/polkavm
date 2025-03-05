@@ -22,6 +22,8 @@ extern "C" {
     pub fn read(service: u64, key_ptr: u64, key_len: u64, out: u64, out_offet: u64, out_len: u64) -> u64;
     #[polkavm_import(index = 3)]
     pub fn write(key_ptr: u64, key_len: u64, value: u64, value_len: u64) -> u64;
+    #[polkavm_import(index = 16)]
+    pub fn oyield(o: u64) -> u64;
 }
 
 #[polkavm_derive::polkavm_export]
@@ -183,16 +185,7 @@ extern "C" fn accumulate() -> u64 {
     let omega_7 = output_bytes_32.as_ptr() as u64;
     let omega_8 = output_bytes_32.len() as u64;
 
-    if m_n % 3 == 0 {
-        // trigger PANIC
-        unsafe {
-            core::arch::asm!(
-                "li a0, 0",
-                "li a1, 1",
-                "jalr x0, a0, 0", // djump(0+0) causes panic
-            );
-        }
-    } else if m_n % 2 == 0 {
+    if m_n % 2 == 0 {
         // Write to invalid memory address to obtain an empty hash
         unsafe {
             core::arch::asm!(
@@ -201,6 +194,8 @@ extern "C" fn accumulate() -> u64 {
         }   
         return 1;
     }
+
+    unsafe { oyield(omega_7); }
 
     // set the result length to register a1
     unsafe {

@@ -33,6 +33,8 @@ extern "C" {
     #[polkavm_import(index = 6)]
     pub fn assign(c: u64, o: u64) -> u64;
 
+    #[polkavm_import(index = 8)]
+    pub fn checkpoint() -> u64;
     #[polkavm_import(index = 9)]
     pub fn new(o: u64, l: u64, g: u64, m: u64) -> u64;
     #[polkavm_import(index = 10)]
@@ -385,6 +387,11 @@ extern "C" fn accumulate() -> u64 {
 
     // write yield
     if n % 3 == 0 {
+        if n != 9 { // n=3,6 should go through even though there is a panic, 9 does not.
+            let gas_result = unsafe { checkpoint() };
+        }
+        let result42 = n + 42;
+        write_result(result42, 7); // this should not be stored if n = 3, 6, 9 because its after the checkpoint
         unsafe {
             core::arch::asm!(
                 "li a0, 0",
@@ -392,6 +399,7 @@ extern "C" fn accumulate() -> u64 {
                 "jalr x0, a0, 0", // djump(0+0) causes panic
             );
         }
+    } else {
     }
     unsafe { oyield(omega_7); }
     // set the result length to register a1
