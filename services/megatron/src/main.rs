@@ -185,16 +185,6 @@ extern "C" fn accumulate() -> u64 {
     let omega_7 = output_bytes_32.as_ptr() as u64;
     let omega_8 = output_bytes_32.len() as u64;
 
-    if m_n % 2 == 0 {
-        // Write to invalid memory address to obtain an empty hash
-        unsafe {
-            core::arch::asm!(
-                "li a1, 1"
-            );
-        }   
-        return 1;
-    }
-
     unsafe { oyield(omega_7); }
 
     // set the result length to register a1
