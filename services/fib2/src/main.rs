@@ -76,13 +76,14 @@ extern "C" fn refine() -> u64 {
         )
     };
 
+    let mut prev_n : u32 = 0;
     if result != NONE {
         let n = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
         let fib_n = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
         let fib_n_minus_1 = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
 
         let new_fib_n = fib_n + fib_n_minus_1;
-
+        prev_n = n;
         buffer[0..4].copy_from_slice(&(n + 1).to_le_bytes());
         buffer[4..8].copy_from_slice(&new_fib_n.to_le_bytes());
         buffer[8..12].copy_from_slice(&fib_n.to_le_bytes());
@@ -100,7 +101,12 @@ extern "C" fn refine() -> u64 {
         export(buffer_addr, buffer_len);
     }
 
-    // set the output address to register a0 and output length to register a1
+    // Put N additional exports which are identical FOR NOW
+    for _ in 0..prev_n {
+        unsafe {
+            export(buffer_addr, buffer_len);
+        }
+    }
     
     unsafe {
         core::arch::asm!(
@@ -258,8 +264,6 @@ extern "C" fn accumulate() -> u64 {
 
     // Depending on what "n" is, test different host functions
     if n == 1 {
-        // do nothing
-    } else if n == 2 {
         let read_none_result = unsafe { read(SERVICE_INDEX, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // NONE
         write_result(read_none_result, 1);
 
@@ -271,6 +275,18 @@ extern "C" fn accumulate() -> u64 {
 
         let forget_result = unsafe { forget(JAM_KEY_ADDRESS, 0) }; // HUH: not any lookup meet the condition
         write_result(forget_result, 6);
+    } else if n == 2 {
+        let read_result = unsafe { read(SERVICE_INDEX, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // OK: 3
+        write_result(read_result, 1);
+
+        let write_result1 = unsafe { write(JAM_KEY_ADDRESS, JAM_KEY_LENGTH, 0, 0) }; // delete OK
+        write_result(write_result1, 2);
+
+        let read_ok_result = unsafe { read(SERVICE_INDEX, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // NONE: deleted
+        write_result(read_ok_result, 5);
+
+        let solicit_result = unsafe { solicit(JAM_KEY_HASH_ADDRESS, JAM_KEY_LENGTH) }; // OK: insert one timeslot
+        write_result(solicit_result, 6);
     } else if n == 3 {
         let solicit_result = unsafe { solicit(JAM_KEY_HASH_ADDRESS, JAM_KEY_LENGTH) }; // OK: initialize empty timeslot
         write_result(solicit_result, 1);
@@ -356,18 +372,6 @@ extern "C" fn accumulate() -> u64 {
     
         let bless_ok_result = unsafe { bless(0, 1, 1, bless_input_address, 1) };
         write_result(bless_ok_result, 5);
-    } else if n == 10 {
-        let read_result = unsafe { read(SERVICE_INDEX, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // OK: 3
-        write_result(read_result, 1);
-
-        let write_result1 = unsafe { write(JAM_KEY_ADDRESS, JAM_KEY_LENGTH, 0, 0) }; // delete OK
-        write_result(write_result1, 2);
-
-        let read_ok_result = unsafe { read(SERVICE_INDEX, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // NONE: deleted
-        write_result(read_ok_result, 5);
-
-        let solicit_result = unsafe { solicit(JAM_KEY_HASH_ADDRESS, JAM_KEY_LENGTH) }; // OK: insert one timeslot
-        write_result(solicit_result, 6);
     }
 
     // write info to 8
