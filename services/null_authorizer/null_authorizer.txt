@@ -1,0 +1,14 @@
+// RO data = 0/0 bytes
+// RW data = 0/0 bytes
+// Stack size = 8192 bytes
+// Jump table entry point size = 0 bytes
+// RO data = []
+// RW data = []
+// Instructions = 3
+// Code size = 6 bytes
+
+      :                          @0
+     0: 28 02                    jump @1
+      :                          @1 [export #0: 'is_authorize']
+     2: 33 07                    a0 = 0
+     4: 32 00                    ret

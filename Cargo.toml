@@ -16,6 +16,11 @@ members = [
     "tools/polkatool",
     "tools/polkavm-linux-raw-generate",
     "tools/spectool",
+    
+    "services/bootstrap",
+    "services/fib",
+    "services/sp1",
+    "services/sp1verifier",
 
     "examples/doom",
     "examples/hello-world",
