@@ -17,6 +17,8 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 
 #[polkavm_derive::polkavm_import]
 extern "C" {
+    #[polkavm_import(index = 8)]
+    pub fn checkpoint() -> u64;
     #[polkavm_import(index = 3)]
     pub fn write(ko: u64, kz: u64, bo: u64, bz: u64) -> u64;
     #[polkavm_import(index = 18)]
@@ -183,26 +185,7 @@ extern "C" fn accumulate() -> u64 {
     output_bytes_32[..work_result_length as usize].copy_from_slice(&unsafe { core::slice::from_raw_parts(work_result_address as *const u8, work_result_length as usize) });
     let omega_7 = output_bytes_32.as_ptr() as u64;
     let omega_8 = output_bytes_32.len() as u64;
-
-    if n % 3 == 0 {
-        // trigger PANIC
-        unsafe {
-            core::arch::asm!(
-                "li a0, 0",
-                "li a1, 1",
-                "jalr x0, a0, 0", // djump(0+0) causes panic
-            );
-        }
-    } else if n % 2 == 0 {
-        // Write to invalid memory address to obtain an empty hash
-        unsafe {
-            core::arch::asm!(
-                "li a1, 1"
-            );
-        }   
-        return 1;
-    }
-
+    
     // set the result length to register a1
     unsafe {
         core::arch::asm!(
