@@ -354,6 +354,18 @@ extern "C" fn accumulate() -> u64 {
         let query_jamhash_result = unsafe { query(JAM_KEY_HASH_ADDRESS, JAM_KEY_LENGTH) }; // OK: 2
         write_result(query_jamhash_result, 2);
     } else if n == 9 {
+        let read_result = unsafe { read(SERVICE_INDEX, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // OK |v| = 3
+        write_result(read_result, 1);
+
+        let write_result1 = unsafe { write(JAM_KEY_ADDRESS, JAM_KEY_LENGTH, 0, 0) }; // delete OK
+        write_result(write_result1, 2);
+
+        let read_ok_result = unsafe { read(SERVICE_INDEX, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // NONE: deleted
+        write_result(read_ok_result, 5);
+
+        let solicit_result = unsafe { solicit(JAM_KEY_HASH_ADDRESS, JAM_KEY_LENGTH) }; // OK: insert one timeslot
+        write_result(solicit_result, 6);
+    } else if n == 1024 {
         let g: u64 = 911911; // this will trigger error: ServiceItemTooLow: Accumulated gas is below the service minimum.
         let m: u64 = 911911;
         let new_result = unsafe { new(JAM_KEY_HASH_ADDRESS, JAM_KEY_LENGTH, g, m) }; // OK
@@ -374,6 +386,7 @@ extern "C" fn accumulate() -> u64 {
         let bless_ok_result = unsafe { bless(0, 1, 1, bless_input_address, 1) };
         write_result(bless_ok_result, 5);
     }
+
 
     // write info to 8
     let info_result = unsafe { info(SERVICE_INDEX, buffer_address) };
