@@ -104,6 +104,9 @@ enum Args {
 
         #[clap(short = 'i', action = clap::ArgAction::SetTrue)]
         is_authorize: bool,
+
+        #[clap(short = 'm', action = clap::ArgAction::SetTrue)]
+        for_deblob: bool,
     },
 }
 
@@ -145,7 +148,7 @@ fn main() {
         }
 
         // For JAM service
-        Args::JAMService { input, output, dump, is_authorize} => main_jam_service(input, output, dump, is_authorize),
+        Args::JAMService { input, output, dump, is_authorize, for_deblob} => main_jam_service(input, output, dump, is_authorize, for_deblob),
     };
 
     if let Err(error) = result {
@@ -306,7 +309,7 @@ fn main_assemble(input_path: PathBuf, output_path: PathBuf) -> Result<(), String
     Ok(())
 }
 
-fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path: Option<PathBuf>, is_authorize: bool) -> Result<(), String> {
+fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path: Option<PathBuf>, is_authorize: bool, for_deblob: bool) -> Result<(), String> {
     if !input_path.exists() {
         return Err(format!("File does not exist: {:?}", input_path));
     }
@@ -318,6 +321,10 @@ fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path
     if is_authorize {
         config.set_dispatch_table(vec![
             b"is_authorize".into(),
+        ]);
+    } else if for_deblob {
+        config.set_dispatch_table(vec![
+            b"main".into(),
         ]);
     } else {
         config.set_dispatch_table(vec![
@@ -364,15 +371,20 @@ fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path
     println!("\nbitmask: {:?}", bitmask);
 
     let mut new_blob: Vec<u8> = Vec::new();
-    new_blob.extend_from_slice(&o_size);
-    new_blob.extend_from_slice(&w_size);
-    new_blob.extend_from_slice(&z);
-    new_blob.extend_from_slice(&s);
-    new_blob.extend_from_slice(&o_byte);
-    new_blob.extend_from_slice(&w_byte);
-    new_blob.extend_from_slice(&c_size);
-    new_blob.extend_from_slice(&c);
 
+    if for_deblob {
+        new_blob.extend_from_slice(&c);
+    } else {
+        new_blob.extend_from_slice(&o_size);
+        new_blob.extend_from_slice(&w_size);
+        new_blob.extend_from_slice(&z);
+        new_blob.extend_from_slice(&s);
+        new_blob.extend_from_slice(&o_byte);
+        new_blob.extend_from_slice(&w_byte);
+        new_blob.extend_from_slice(&c_size);
+        new_blob.extend_from_slice(&c);
+    }
+    
     match output_path {
         Some(output_path) => {
             println!("Writing JAM-ready code blob {:?}", output_path);
