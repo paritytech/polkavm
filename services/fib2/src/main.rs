@@ -62,7 +62,7 @@ pub const NONE: u64 = u64::MAX;
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine() -> u64 {
-    let mut buffer = [0u8; 12];
+    let mut buffer = [0u8; 16];
     let offset: u64 = 0;
     let maxlen: u64 = buffer.len() as u64;
     let result = unsafe {
@@ -102,7 +102,8 @@ extern "C" fn refine() -> u64 {
     }
 
     // Put N additional exports which are identical FOR NOW
-    for _ in 0..prev_n {
+    for i in 0..prev_n {
+        buffer[12..16].copy_from_slice(&(i + 1).to_le_bytes());
         unsafe {
             export(buffer_addr, buffer_len);
         }
