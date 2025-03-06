@@ -1,0 +1,94 @@
+// RO data = 0/0 bytes
+// RW data = 0/0 bytes
+// Stack size = 8192 bytes
+// Jump table entry point size = 1 bytes
+// RO data = []
+// RW data = []
+// Instructions = 66
+// Code size = 194 bytes
+
+      :                          @0
+     0: 28 02                    jump @1
+      :                          @1 [export #0: 'main']
+     2: 95 11 08 f8              sp = sp + 0xfffffffffffff808
+     6: 7b 10 f0 07              u64 [sp + 0x7f0] = ra
+    10: 7b 15 e8 07              u64 [sp + 0x7e8] = s0
+    14: 7b 16 e0 07              u64 [sp + 0x7e0] = s1
+    18: 95 11 00 f8              sp = sp + 0xfffffffffffff800
+    22: 95 11 d8                 sp = sp + 0xffffffffffffffd8
+    25: 64 76                    s1 = a0
+    27: 95 17 0c                 a0 = sp + 0xc
+    30: 33 05 00 10              s0 = 0x1000
+    34: 33 09 fc 0f              a2 = 0xffc
+    38: 33 08                    a1 = 0
+    40: 50 10 02 48              ra = 2, jump @8
+      :                          @2 [@dyn 1]
+    44: 33 07 03                 a0 = 0x3
+    47: e6 76 09                 a2 = minu(s1, a0)
+    50: 51 09 18                 jump @6 if a2 == 0
+      :                          @3
+    53: 33 08                    a1 = 0
+    55: 33 07                    a0 = 0
+    57: 97 99 0c                 a2 = a2 << 0xc
+    60: 01                       fallthrough
+      :                          @4
+    61: 81 8a                    a3 = i32 [a1]
+    63: c8 58 08                 a1 = a1 + s0
+    66: be a7 07                 i32 a0 = a0 + a3
+    69: ab 89 f8                 jump @4 if a2 != a1
+      :                          @5
+    72: 28 05                    jump @7
+      :                          @6
+    74: 33 07                    a0 = 0
+    76: 01                       fallthrough
+      :                          @7
+    77: 7a 17 08                 u32 [sp + 0x8] = a0
+    80: 33 08 00 10              a1 = 0x1000
+    84: 95 17 08                 a0 = sp + 0x8
+    87: 95 11 f8 07              sp = sp + 0x7f8
+    91: 95 11 30                 sp = sp + 0x30
+    94: 82 10 f0 07              ra = u64 [sp + 0x7f0]
+    98: 82 15 e8 07              s0 = u64 [sp + 0x7e8]
+   102: 82 16 e0 07              s1 = u64 [sp + 0x7e0]
+   106: 95 11 f8 07              sp = sp + 0x7f8
+   110: 32 00                    ret
+      :                          @8
+   112: 8d 7a                    i32 a3 = -a0
+   114: 84 aa 07                 a3 = a3 & 0x7
+   117: c8 a7 0b                 a4 = a0 + a3
+   120: 51 0a 0e                 jump @11 if a3 == 0
+      :                          @9
+   123: 64 7c                    a5 = a0
+   125: 01                       fallthrough
+      :                          @10
+   126: 78 c8                    u8 [a5] = a1
+   128: 95 cc 01                 a5 = a5 + 0x1
+   131: ac bc fb                 jump @10 if a5 <u a4
+      :                          @11
+   134: c9 a9 03                 t1 = a2 - a3
+   137: 84 3c f8                 a5 = t1 & 0xfffffffffffffff8
+   140: c8 cb 0a                 a3 = a4 + a5
+   143: 58 0c 1d                 jump @14 if a5 <=s 0
+      :                          @12
+   146: 84 82 ff 00              t0 = a1 & 0xff
+   150: 14 09 01 01 01 01 01 01 01 01 a2 = 0x101010101010101
+   160: ca 92 0c                 a5 = t0 * a2
+   163: 01                       fallthrough
+      :                          @13
+   164: 7b bc                    u64 [a4] = a5
+   166: 95 bb 08                 a4 = a4 + 0x8
+   169: ac ab fb                 jump @13 if a4 <u a3
+      :                          @14
+   172: 84 39 07                 a2 = t1 & 0x7
+   175: 52 09 05                 jump @16 if a2 != 0
+      :                          @15
+   178: 28 0e                    jump @18
+      :                          @16
+   180: c8 a9 09                 a2 = a2 + a3
+   183: 01                       fallthrough
+      :                          @17
+   184: 78 a8                    u8 [a3] = a1
+   186: 95 aa 01                 a3 = a3 + 0x1
+   189: ac 9a fb                 jump @17 if a3 <u a2
+      :                          @18
+   192: 32 00                    ret

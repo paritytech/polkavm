@@ -1718,6 +1718,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "fib2_WIP"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "simplealloc",
+]
+
+[[package]]
+name = "fib2_child"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "simplealloc",
+]
+
+[[package]]
 name = "fixed-hash"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
