@@ -1,15 +1,7 @@
 #![no_std]
 #![no_main]
 
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe {
-        core::arch::asm!("unimp", options(noreturn));
-    }
-}
-
-pub const NONE: u64 = u64::MAX;
-pub const PAGE_SIZE: u64 = 4096;
+use utils::{PAGE_SIZE};
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn main() -> u64 {

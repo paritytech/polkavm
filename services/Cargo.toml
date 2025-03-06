@@ -14,8 +14,6 @@ resolver = "2"
 members = [
     "fib",
     "bootstrap",
-    "sp1",
-    "sp1verifier",
     "tribonacci",
     "megatron",
     "transfer",
@@ -26,6 +24,6 @@ members = [
     "blake2b",
     "fib2",
     "fib2_WIP",
-    "fib2_child"
- #   "tokens"
- ]
+    "fib2_child",
+    "utils"
+]
