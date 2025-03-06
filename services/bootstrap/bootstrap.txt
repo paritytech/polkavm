@@ -4,461 +4,473 @@
 // Jump table entry point size = 2 bytes
 // RO data = [112, 97, 114, 115, 101, 32, 114, 101, 102, 105, 110, 101, 32, 97, 114, 103, 115, 32, 115, 117, 99, 99, 101, 115, 115, 112, 97, 114, 115, 101, 32, 114, 101, 102, 105, 110, 101, 32, 97, 114, 103, 115, 32, 102, 97, 105, 108, 101, 100]
 // RW data = []
-// Instructions = 354
-// Code size = 1107 bytes
+// Instructions = 365
+// Code size = 1127 bytes
 
       :                          @0
-     0: 28 ab 00 00 00           jump @27
+     0: 28 0d 00 00 00           jump @3
       :                          @1
-     5: 28 8c 01 00 00           jump @43
+     5: 28 fe 00 00 00           jump @19
       :                          @2
-    10: 28 f3 03                 jump @89
-      :                          @3
-    13: 51 08 9b 00              jump @24 if a1 == 0
+    10: 28 69 03                 jump @66
+      :                          @3 [export #0: 'refine']
+    13: 95 11 d8                 sp = sp + 0xffffffffffffffd8
+    16: 7b 10 20                 u64 [sp + 0x20] = ra
+    19: 7b 15 18                 u64 [sp + 0x18] = s0
+    22: 7b 16 10                 u64 [sp + 0x10] = s1
+    25: 33 09 04                 a2 = 0x4
+    28: ac 98 a9 00              jump @16 if a1 <u a2
       :                          @4
-    17: 64 79                    a2 = a0
-    19: 7c 77                    a0 = u8 [a0]
-    21: 51 07 91 00              jump @23 if a0 == 0
+    32: 95 8a fc                 a3 = a1 + 0xfffffffffffffffc
+    35: 51 0a a2 00              jump @16 if a3 == 0
       :                          @5
-    25: 51 27 ff 00 90 00        jump @25 if a0 == 255
+    39: 95 77 04                 a0 = a0 + 0x4
+    42: 7b 17 08                 u64 [sp + 0x8] = a0
+    45: 7d 77                    a0 = i8 [a0]
+    47: 33 06 01                 s1 = 0x1
+    50: 5a 07 6b                 jump @14 if a0 >s 0
       :                          @6
-    31: 6c 7a                    a3 = sext.b a0
-    33: 57 0a 09                 jump @8 if a3 <s 0
+    53: 84 77 ff 00              a0 = a0 & 0xff
+    57: 83 78 ff                 i32 a1 = a0 + 0xffffffffffffffff
+    60: 84 8b ff 00              a4 = a1 & 0xff
+    64: 33 09 bf 00              a2 = 0xbf
+    68: 33 06 02                 s1 = 0x2
+    71: ac 9b 53                 jump @13 if a4 <u a2
       :                          @7
-    36: 33 0a                    a3 = 0
-    38: 33 08                    a1 = 0
-    40: 28 73                    jump @22
+    74: 84 7b e0 00              a4 = a0 & 0xe0
+    78: 33 09 c0 00              a2 = 0xc0
+    82: 33 06 03                 s1 = 0x3
+    85: aa 9b 45                 jump @13 if a4 == a2
       :                          @8
-    42: 55 27 c0 00 0d           jump @10 if a0 >=u 192
+    88: 84 7b f0 00              a4 = a0 & 0xf0
+    92: 33 09 e0 00              a2 = 0xe0
+    96: 33 06 04                 s1 = 0x4
+    99: aa 9b 37                 jump @13 if a4 == a2
       :                          @9
-    47: 33 0a 01                 a3 = 0x1
-    50: 33 0b 80                 a4 = 0xffffffffffffff80
-    53: 28 4a                    jump @19
+   102: 84 7b f8 00              a4 = a0 & 0xf8
+   106: 33 09 f0 00              a2 = 0xf0
+   110: 33 06 05                 s1 = 0x5
+   113: aa 9b 29                 jump @13 if a4 == a2
       :                          @10
-    55: 55 27 e0 00 0e           jump @12 if a0 >=u 224
+   116: 84 7b fc 00              a4 = a0 & 0xfc
+   120: 33 09 f8 00              a2 = 0xf8
+   124: 33 06 06                 s1 = 0x6
+   127: aa 9b 1b                 jump @13 if a4 == a2
       :                          @11
-    60: 33 0a 02                 a3 = 0x2
-    63: 33 0b 40 ff              a4 = 0xffffffffffffff40
-    67: 28 3c                    jump @19
+   130: 84 7b fe 00              a4 = a0 & 0xfe
+   134: 33 09 fc 00              a2 = 0xfc
+   138: 33 06 07                 s1 = 0x7
+   141: aa 9b 0d                 jump @13 if a4 == a2
       :                          @12
-    69: 55 27 f0 00 0e           jump @14 if a0 >=u 240
+   144: 33 09 fe 00              a2 = 0xfe
+   148: 33 06 08                 s1 = 0x8
+   151: ac 97 2e                 jump @16 if a0 <u a2
       :                          @13
-    74: 33 0a 03                 a3 = 0x3
-    77: 33 0b 20 ff              a4 = 0xffffffffffffff20
-    81: 28 2e                    jump @19
+   154: ac 6a 2b                 jump @16 if a3 <u s1
       :                          @14
-    83: 55 27 f8 00 0e           jump @16 if a0 >=u 248
-      :                          @15
-    88: 33 0a 04                 a3 = 0x4
-    91: 33 0b 10 ff              a4 = 0xffffffffffffff10
-    95: 28 20                    jump @19
+   157: 82 17 08                 a0 = u64 [sp + 0x8]
+   160: 64 68                    a1 = s1
+   162: 7b 1a                    u64 [sp] = a3
+   164: 50 10 02 25 03           ra = 2, jump @78
+      :                          @15 [@dyn 1]
+   169: 64 75                    s0 = a0
+   171: 82 17                    a0 = u64 [sp]
+   173: e4 67 07                 a0 = maxu(a0, s1)
+   176: c9 67 07                 a0 = a0 - s1
+   179: d8 57 08                 a1 = a0 <u s0
+   182: e4 57 07                 a0 = maxu(a0, s0)
+   185: c9 57 07                 a0 = a0 - s0
+   188: 88 77 20                 a0 = a0 <u 0x20
+   191: d4 87 07                 a0 = a0 | a1
+   194: 51 07 26                 jump @18 if a0 == 0
       :                          @16
-    97: 55 27 fc 00 0e           jump @18 if a0 >=u 252
+   197: 33 0a 19 00 01           a3 = 0x10019
+   202: 33 07 02                 a0 = 0x2
+   205: 33 0b 18                 a4 = 0x18
+   208: 33 08                    a1 = 0
+   210: 33 09                    a2 = 0
+   212: 0a 64                    ecalli 100 // 'log'
+   214: 33 07 ff                 a0 = 0xffffffffffffffff
+   217: 01                       fallthrough
       :                          @17
-   102: 33 0a 05                 a3 = 0x5
-   105: 33 0b 08 ff              a4 = 0xffffffffffffff08
-   109: 28 12                    jump @19
+   218: 82 10 20                 ra = u64 [sp + 0x20]
+   221: 82 15 18                 s0 = u64 [sp + 0x18]
+   224: 82 16 10                 s1 = u64 [sp + 0x10]
+   227: 95 11 28                 sp = sp + 0x28
+   230: 32 00                    ret
       :                          @18
-   111: 88 7a fe 00              a3 = a0 <u 0xfe
-   115: 33 0b 04 ff              a4 = 0xffffffffffffff04
-   119: 93 ab 02 ff              a4 = 0xffffffffffffff02 if a3 == 0
-   123: 85 aa 07                 a3 = a3 ^ 0x7
-   126: 01                       fallthrough
-      :                          @19
-   127: ae 8a 2b                 jump @26 if a3 >=u a1
+   232: 33 0a 00 00 01           a3 = 0x10000
+   237: 33 07 02                 a0 = 0x2
+   240: 33 0b 19                 a4 = 0x19
+   243: 33 08                    a1 = 0
+   245: 33 09                    a2 = 0
+   247: 0a 64                    ecalli 100 // 'log'
+   249: 64 58                    a1 = s0
+   251: 82 17 08                 a0 = u64 [sp + 0x8]
+   254: c8 67 07                 a0 = a0 + s1
+   257: 28 d9                    jump @17
+      :                          @19 [export #1: 'accumulate']
+   259: 95 11 30 ff              sp = sp + 0xffffffffffffff30
+   263: 7b 10 c8 00              u64 [sp + 0xc8] = ra
+   267: 7b 15 c0 00              u64 [sp + 0xc0] = s0
+   271: 7b 16 b8 00              u64 [sp + 0xb8] = s1
+   275: 64 86                    s1 = a1
+   277: 95 66 f8                 s1 = s1 + 0xfffffffffffffff8
+   280: 33 0a ff                 a3 = 0xffffffffffffffff
+   283: 51 06 42 02              jump @63 if s1 == 0
       :                          @20
-   130: 33 08                    a1 = 0
-   132: c8 b7 07                 a0 = a0 + a4
-   135: 64 ab                    a4 = a3
-   137: 01                       fallthrough
+   287: 95 77 08                 a0 = a0 + 0x8
+   290: 7d 78                    a1 = i8 [a0]
+   292: 33 05 01                 s0 = 0x1
+   295: 5a 08 69                 jump @28 if a1 >s 0
       :                          @21
-   138: c8 b9 0c                 a5 = a2 + a4
-   141: 7c cc                    a5 = u8 [a5]
-   143: 97 88 08                 a1 = a1 << 0x8
-   146: 95 bb ff                 a4 = a4 + 0xffffffffffffffff
-   149: d4 c8 08                 a1 = a1 | a5
-   152: 52 0b f2                 jump @21 if a4 != 0
+   298: 84 8b ff 00              a4 = a1 & 0xff
+   302: 83 b8 ff                 i32 a1 = a4 + 0xffffffffffffffff
+   305: 84 88 ff 00              a1 = a1 & 0xff
+   309: 33 09 bf 00              a2 = 0xbf
+   313: 33 05 02                 s0 = 0x2
+   316: ac 98 54                 jump @28 if a1 <u a2
       :                          @22
-   155: 8a a9 03                 i32 a2 = a3 << 0x3
-   158: cf 97 07                 a0 = a0 << a2
-   161: c8 87 07                 a0 = a0 + a1
-   164: 32 00                    ret
+   319: 84 b8 e0 00              a1 = a4 & 0xe0
+   323: 33 09 c0 00              a2 = 0xc0
+   327: 33 05 03                 s0 = 0x3
+   330: aa 98 46                 jump @28 if a1 == a2
       :                          @23
-   166: 32 00                    ret
+   333: 84 b8 f0 00              a1 = a4 & 0xf0
+   337: 33 09 e0 00              a2 = 0xe0
+   341: 33 05 04                 s0 = 0x4
+   344: aa 98 38                 jump @28 if a1 == a2
       :                          @24
-   168: 00                       trap
+   347: 84 b8 f8 00              a1 = a4 & 0xf8
+   351: 33 09 f0 00              a2 = 0xf0
+   355: 33 05 05                 s0 = 0x5
+   358: aa 98 2a                 jump @28 if a1 == a2
       :                          @25
-   169: 00                       trap
+   361: 84 b8 fc 00              a1 = a4 & 0xfc
+   365: 33 09 f8 00              a2 = 0xf8
+   369: 33 05 06                 s0 = 0x6
+   372: aa 98 1c                 jump @28 if a1 == a2
       :                          @26
-   170: 00                       trap
-      :                          @27 [export #0: 'refine']
-   171: 95 11 d8                 sp = sp + 0xffffffffffffffd8
-   174: 7b 10 20                 u64 [sp + 0x20] = ra
-   177: 7b 15 18                 u64 [sp + 0x18] = s0
-   180: 7b 16 10                 u64 [sp + 0x10] = s1
-   183: 53 18 04 9c 00           jump @40 if a1 <u 4
+   375: 84 b8 fe 00              a1 = a4 & 0xfe
+   379: 33 09 fc 00              a2 = 0xfc
+   383: 33 05 07                 s0 = 0x7
+   386: aa 98 0e                 jump @28 if a1 == a2
+      :                          @27
+   389: 88 b8 fe 00              a1 = a4 <u 0xfe
+   393: 85 85 01                 s0 = a1 ^ 0x1
+   396: 97 55 03                 s0 = s0 << 0x3
+   399: 01                       fallthrough
       :                          @28
-   188: 95 8a fc                 a3 = a1 + 0xfffffffffffffffc
-   191: 51 0a 94 00              jump @40 if a3 == 0
+   400: ac 56 cd 01              jump @63 if s1 <u s0
       :                          @29
-   195: 95 77 04                 a0 = a0 + 0x4
-   198: 7b 17 08                 u64 [sp + 0x8] = a0
-   201: 7d 77                    a0 = i8 [a0]
-   203: 33 06 01                 s1 = 0x1
-   206: 5a 07 5d                 jump @38 if a0 >s 0
-      :                          @30
-   209: 84 77 ff 00              a0 = a0 & 0xff
-   213: 83 78 ff                 i32 a1 = a0 + 0xffffffffffffffff
-   216: 84 8b ff 00              a4 = a1 & 0xff
-   220: 33 06 02                 s1 = 0x2
-   223: 53 2b bf 00 49           jump @37 if a4 <u 191
+   404: 64 58                    a1 = s0
+   406: 7b 17                    u64 [sp] = a0
+   408: 50 10 04 31 02           ra = 4, jump @78
+      :                          @30 [@dyn 2]
+   413: 8e 77                    a0 = a0 >u 0
+   415: d8 65 08                 a1 = s0 <u s1
+   418: d2 87 07                 a0 = a0 & a1
+   421: 51 07 28                 jump @34 if a0 == 0
       :                          @31
-   228: 84 7b e0 00              a4 = a0 & 0xe0
-   232: 33 06 03                 s1 = 0x3
-   235: 51 2b c0 00 3d           jump @37 if a4 == 192
+   424: 82 17                    a0 = u64 [sp]
+   426: c8 57 07                 a0 = a0 + s0
+   429: 7c 78                    a1 = u8 [a0]
+   431: e4 56 06                 s1 = maxu(s1, s0)
+   434: 95 7c 01                 a5 = a0 + 0x1
+   437: 85 57 ff                 a0 = s0 ^ 0xffffffffffffffff
+   440: c8 76 06                 s1 = s1 + a0
+   443: 33 0a ff                 a3 = 0xffffffffffffffff
+   446: 51 08 15                 jump @35 if a1 == 0
       :                          @32
-   240: 84 7b f0 00              a4 = a0 & 0xf0
-   244: 33 06 04                 s1 = 0x4
-   247: 51 2b e0 00 31           jump @37 if a4 == 224
+   449: 33 05                    s0 = 0
+   451: 33 0b                    a4 = 0
+   453: 55 16 40 b4 00           jump @49 if s1 >=u 64
       :                          @33
-   252: 84 7b f8 00              a4 = a0 & 0xf8
-   256: 33 06 05                 s1 = 0x5
-   259: 51 2b f0 00 25           jump @37 if a4 == 240
+   458: 28 93 01                 jump @63
       :                          @34
-   264: 84 7b fc 00              a4 = a0 & 0xfc
-   268: 33 06 06                 s1 = 0x6
-   271: 51 2b f8 00 19           jump @37 if a4 == 248
+   461: 33 0a ff                 a3 = 0xffffffffffffffff
+   464: 28 8d 01                 jump @63
       :                          @35
-   276: 84 7b fe 00              a4 = a0 & 0xfe
-   280: 33 06 07                 s1 = 0x7
-   283: 51 2b fc 00 0d           jump @37 if a4 == 252
+   467: 51 06 87 00              jump @47 if s1 == 0
       :                          @36
-   288: 33 06 08                 s1 = 0x8
-   291: 53 27 fe 00 30           jump @40 if a0 <u 254
+   471: 7d c7                    a0 = i8 [a5]
+   473: 33 05 01                 s0 = 0x1
+   476: 5a 07 68                 jump @44 if a0 >s 0
       :                          @37
-   296: ac 6a 2b                 jump @40 if a3 <u s1
+   479: 84 77 ff 00              a0 = a0 & 0xff
+   483: 83 78 ff                 i32 a1 = a0 + 0xffffffffffffffff
+   486: 84 8b ff 00              a4 = a1 & 0xff
+   490: 33 09 bf 00              a2 = 0xbf
+   494: 33 05 02                 s0 = 0x2
+   497: ac 9b 53                 jump @44 if a4 <u a2
       :                          @38
-   299: 82 17 08                 a0 = u64 [sp + 0x8]
-   302: 64 68                    a1 = s1
-   304: 7b 1a                    u64 [sp] = a3
-   306: 50 10 02 db fe           ra = 2, jump @3
-      :                          @39 [@dyn 1]
-   311: 64 75                    s0 = a0
-   313: 82 17                    a0 = u64 [sp]
-   315: e4 67 07                 a0 = maxu(a0, s1)
-   318: c9 67 07                 a0 = a0 - s1
-   321: d8 57 08                 a1 = a0 <u s0
-   324: e4 57 07                 a0 = maxu(a0, s0)
-   327: c9 57 07                 a0 = a0 - s0
-   330: 88 77 20                 a0 = a0 <u 0x20
-   333: d4 87 07                 a0 = a0 | a1
-   336: 51 07 26                 jump @42 if a0 == 0
+   500: 84 7b e0 00              a4 = a0 & 0xe0
+   504: 33 09 c0 00              a2 = 0xc0
+   508: 33 05 03                 s0 = 0x3
+   511: aa 9b 45                 jump @44 if a4 == a2
+      :                          @39
+   514: 84 7b f0 00              a4 = a0 & 0xf0
+   518: 33 09 e0 00              a2 = 0xe0
+   522: 33 05 04                 s0 = 0x4
+   525: aa 9b 37                 jump @44 if a4 == a2
       :                          @40
-   339: 33 0a 19 00 01           a3 = 0x10019
-   344: 33 07 02                 a0 = 0x2
-   347: 33 0b 18                 a4 = 0x18
-   350: 33 08                    a1 = 0
-   352: 33 09                    a2 = 0
-   354: 0a 64                    ecalli 100 // 'log'
-   356: 33 07 ff                 a0 = 0xffffffffffffffff
-   359: 01                       fallthrough
+   528: 84 7b f8 00              a4 = a0 & 0xf8
+   532: 33 09 f0 00              a2 = 0xf0
+   536: 33 05 05                 s0 = 0x5
+   539: aa 9b 29                 jump @44 if a4 == a2
       :                          @41
-   360: 82 10 20                 ra = u64 [sp + 0x20]
-   363: 82 15 18                 s0 = u64 [sp + 0x18]
-   366: 82 16 10                 s1 = u64 [sp + 0x10]
-   369: 95 11 28                 sp = sp + 0x28
-   372: 32 00                    ret
+   542: 84 7b fc 00              a4 = a0 & 0xfc
+   546: 33 09 f8 00              a2 = 0xf8
+   550: 33 05 06                 s0 = 0x6
+   553: aa 9b 1b                 jump @44 if a4 == a2
       :                          @42
-   374: 33 0a 00 00 01           a3 = 0x10000
-   379: 33 07 02                 a0 = 0x2
-   382: 33 0b 19                 a4 = 0x19
-   385: 33 08                    a1 = 0
-   387: 33 09                    a2 = 0
-   389: 0a 64                    ecalli 100 // 'log'
-   391: 64 58                    a1 = s0
-   393: 82 17 08                 a0 = u64 [sp + 0x8]
-   396: c8 67 07                 a0 = a0 + s1
-   399: 28 d9                    jump @41
-      :                          @43 [export #1: 'accumulate']
-   401: 95 11 30 ff              sp = sp + 0xffffffffffffff30
-   405: 7b 10 c8 00              u64 [sp + 0xc8] = ra
-   409: 7b 15 c0 00              u64 [sp + 0xc0] = s0
-   413: 7b 16 b8 00              u64 [sp + 0xb8] = s1
-   417: 64 86                    s1 = a1
-   419: 95 66 f8                 s1 = s1 + 0xfffffffffffffff8
-   422: 33 0a ff                 a3 = 0xffffffffffffffff
-   425: 51 06 3e 02              jump @86 if s1 == 0
+   556: 84 7b fe 00              a4 = a0 & 0xfe
+   560: 33 09 fc 00              a2 = 0xfc
+   564: 33 05 07                 s0 = 0x7
+   567: aa 9b 0d                 jump @44 if a4 == a2
+      :                          @43
+   570: 33 09 fd 00              a2 = 0xfd
+   574: 33 05 08                 s0 = 0x8
+   577: ae 79 19                 jump @47 if a2 >=u a0
       :                          @44
-   429: 95 77 08                 a0 = a0 + 0x8
-   432: 7d 78                    a1 = i8 [a0]
-   434: 33 05 01                 s0 = 0x1
-   437: 5a 08 69                 jump @52 if a1 >s 0
+   580: ac 56 2d 01              jump @64 if s1 <u s0
       :                          @45
-   440: 84 8b ff 00              a4 = a1 & 0xff
-   444: 83 b8 ff                 i32 a1 = a4 + 0xffffffffffffffff
-   447: 84 88 ff 00              a1 = a1 & 0xff
-   451: 33 09 bf 00              a2 = 0xbf
-   455: 33 05 02                 s0 = 0x2
-   458: ac 98 54                 jump @52 if a1 <u a2
-      :                          @46
-   461: 84 b8 e0 00              a1 = a4 & 0xe0
-   465: 33 09 c0 00              a2 = 0xc0
-   469: 33 05 03                 s0 = 0x3
-   472: aa 98 46                 jump @52 if a1 == a2
+   584: 64 c7                    a0 = a5
+   586: 64 58                    a1 = s0
+   588: 7b 1c                    u64 [sp] = a5
+   590: 50 10 06 7b 01           ra = 6, jump @78
+      :                          @46 [@dyn 3]
+   595: 82 1c                    a5 = u64 [sp]
+   597: 33 0a ff                 a3 = 0xffffffffffffffff
+   600: 28 07                    jump @48
       :                          @47
-   475: 84 b8 f0 00              a1 = a4 & 0xf0
-   479: 33 09 e0 00              a2 = 0xe0
-   483: 33 05 04                 s0 = 0x4
-   486: aa 98 38                 jump @52 if a1 == a2
+   602: 33 05                    s0 = 0
+   604: 33 07                    a0 = 0
+   606: 01                       fallthrough
       :                          @48
-   489: 84 b8 f8 00              a1 = a4 & 0xf8
-   493: 33 09 f0 00              a2 = 0xf0
-   497: 33 05 05                 s0 = 0x5
-   500: aa 98 2a                 jump @52 if a1 == a2
+   607: c8 5c 0b                 a4 = a5 + s0
+   610: e4 56 08                 a1 = maxu(s1, s0)
+   613: c9 58 08                 a1 = a1 - s0
+   616: e6 78 05                 s0 = minu(a1, a0)
+   619: c8 7b 0c                 a5 = a4 + a0
+   622: e4 78 06                 s1 = maxu(a1, a0)
+   625: c9 76 06                 s1 = s1 - a0
+   628: 53 16 40 e9 00           jump @63 if s1 <u 64
       :                          @49
-   503: 84 b8 fc 00              a1 = a4 & 0xfc
-   507: 33 09 f8 00              a2 = 0xf8
-   511: 33 05 06                 s0 = 0x6
-   514: aa 98 1c                 jump @52 if a1 == a2
+   633: 95 68 c0                 a1 = s1 + 0xffffffffffffffc0
+   636: 51 08 84 00              jump @61 if a1 == 0
       :                          @50
-   517: 84 b8 fe 00              a1 = a4 & 0xfe
-   521: 33 09 fc 00              a2 = 0xfc
-   525: 33 05 07                 s0 = 0x7
-   528: aa 98 0e                 jump @52 if a1 == a2
+   640: 95 c7 40                 a0 = a5 + 0x40
+   643: 7d 7a                    a3 = i8 [a0]
+   645: 33 09 01                 a2 = 0x1
+   648: 5a 0a 6c                 jump @59 if a3 >s 0
       :                          @51
-   531: 88 b8 fe 00              a1 = a4 <u 0xfe
-   535: 85 85 01                 s0 = a1 ^ 0x1
-   538: 97 55 03                 s0 = s0 << 0x3
-   541: 01                       fallthrough
+   651: 84 aa ff 00              a3 = a3 & 0xff
+   655: 83 a9 ff                 i32 a2 = a3 + 0xffffffffffffffff
+   658: 84 96 ff 00              s1 = a2 & 0xff
+   662: 33 0c bf 00              a5 = 0xbf
+   666: 33 09 02                 a2 = 0x2
+   669: ac c6 53                 jump @58 if s1 <u a5
       :                          @52
-   542: ac 56 c9 01              jump @86 if s1 <u s0
+   672: 84 a6 e0 00              s1 = a3 & 0xe0
+   676: 33 0c c0 00              a5 = 0xc0
+   680: 33 09 03                 a2 = 0x3
+   683: aa c6 45                 jump @58 if s1 == a5
       :                          @53
-   546: 64 58                    a1 = s0
-   548: 7b 17                    u64 [sp] = a0
-   550: 50 10 04 e7 fd           ra = 4, jump @3
-      :                          @54 [@dyn 2]
-   555: 8e 77                    a0 = a0 >u 0
-   557: d8 65 08                 a1 = s0 <u s1
-   560: d2 87 07                 a0 = a0 & a1
-   563: 51 07 2f                 jump @58 if a0 == 0
+   686: 84 a6 f0 00              s1 = a3 & 0xf0
+   690: 33 0c e0 00              a5 = 0xe0
+   694: 33 09 04                 a2 = 0x4
+   697: aa c6 37                 jump @58 if s1 == a5
+      :                          @54
+   700: 84 a6 f8 00              s1 = a3 & 0xf8
+   704: 33 0c f0 00              a5 = 0xf0
+   708: 33 09 05                 a2 = 0x5
+   711: aa c6 29                 jump @58 if s1 == a5
       :                          @55
-   566: e4 56 07                 a0 = maxu(s1, s0)
-   569: c9 57 07                 a0 = a0 - s0
-   572: 82 18                    a1 = u64 [sp]
-   574: c8 85 05                 s0 = s0 + a1
-   577: 7c 58                    a1 = u8 [s0]
-   579: 95 5b 01                 a4 = s0 + 0x1
-   582: 33 09 01                 a2 = 0x1
-   585: e4 97 09                 a2 = maxu(a0, a2)
-   588: 95 9c ff                 a5 = a2 + 0xffffffffffffffff
-   591: 33 0a ff                 a3 = 0xffffffffffffffff
-   594: 51 08 16                 jump @59 if a1 == 0
+   714: 84 a6 fc 00              s1 = a3 & 0xfc
+   718: 33 0c f8 00              a5 = 0xf8
+   722: 33 09 06                 a2 = 0x6
+   725: aa c6 1b                 jump @58 if s1 == a5
       :                          @56
-   597: 33 06                    s1 = 0
-   599: 33 05 fc                 s0 = 0xfffffffffffffffc
-   602: 55 1c 40 b1 00           jump @73 if a5 >=u 64
+   728: 84 a6 fe 00              s1 = a3 & 0xfe
+   732: 33 0c fc 00              a5 = 0xfc
+   736: 33 09 07                 a2 = 0x7
+   739: aa c6 0d                 jump @58 if s1 == a5
       :                          @57
-   607: 28 88 01                 jump @86
+   742: 33 0c fe 00              a5 = 0xfe
+   746: 33 09 08                 a2 = 0x8
+   749: ac ca 13                 jump @61 if a3 <u a5
       :                          @58
-   610: 33 0a ff                 a3 = 0xffffffffffffffff
-   613: 28 82 01                 jump @86
+   752: ac 98 82 00              jump @65 if a1 <u a2
       :                          @59
-   616: 55 17 02 0a              jump @61 if a0 >=u 2
-      :                          @60
-   620: 33 06                    s1 = 0
-   622: 33 07                    a0 = 0
-   624: 28 7c                    jump @72
+   756: 64 98                    a1 = a2
+   758: 64 b6                    s1 = a4
+   760: 50 10 08 d1 00           ra = 8, jump @78
+      :                          @60 [@dyn 4]
+   765: 64 6b                    a4 = s1
+   767: 01                       fallthrough
       :                          @61
-   626: 7d b7                    a0 = i8 [a4]
-   628: 33 06 01                 s1 = 0x1
-   631: 5a 07 5c                 jump @69 if a0 >s 0
-      :                          @62
-   634: 84 77 ff 00              a0 = a0 & 0xff
-   638: 83 78 ff                 i32 a1 = a0 + 0xffffffffffffffff
-   641: 84 88 ff 00              a1 = a1 & 0xff
-   645: 33 06 02                 s1 = 0x2
-   648: 53 28 bf 00 4b           jump @69 if a1 <u 191
+   768: c8 b5 05                 s0 = s0 + a4
+   771: 80 58 fc                 a1 = u32 [s0 + 0xfffffffffffffffc]
+   774: 33 09 64                 a2 = 0x64
+   777: 33 0a 64                 a3 = 0x64
+   780: 64 b7                    a0 = a4
+   782: 0a 09                    ecalli 9 // 'new'
+   784: 64 75                    s0 = a0
+   786: 7b 17 08                 u64 [sp + 0x8] = a0
+   789: 48 11 14                 u32 [sp + 20] = 0
+   792: 95 17 14                 a0 = sp + 0x14
+   795: 33 08 04                 a1 = 0x4
+   798: 95 19 08                 a2 = sp + 0x8
+   801: 33 0a 04                 a3 = 0x4
+   804: 0a 03                    ecalli 3 // 'write'
+   806: 95 17 18                 a0 = sp + 0x18
+   809: 33 09 80 00              a2 = 0x80
+   813: 33 08                    a1 = 0
+   815: 50 10 0a 48              ra = 10, jump @67
+      :                          @62 [@dyn 5]
+   819: 33 08 20 a1 07           a1 = 0x7a120
+   824: 33 09 64                 a2 = 0x64
+   827: 95 1a 18                 a3 = sp + 0x18
+   830: 64 57                    a0 = s0
+   832: 0a 0b                    ecalli 11 // 'transfer'
+   834: 82 17 08                 a0 = u64 [sp + 0x8]
+   837: 49 21 b0 00              u64 [sp + 176] = 0
+   841: 49 21 a8 00              u64 [sp + 168] = 0
+   845: 49 21 a0 00              u64 [sp + 160] = 0
+   849: 7b 17 98 00              u64 [sp + 0x98] = a0
+   853: 33 08 20                 a1 = 0x20
+   856: 95 1a 98 00              a3 = sp + 0x98
+   860: 01                       fallthrough
       :                          @63
-   653: 84 78 e0 00              a1 = a0 & 0xe0
-   657: 33 06 03                 s1 = 0x3
-   660: 51 28 c0 00 3f           jump @69 if a1 == 192
+   861: 64 a7                    a0 = a3
+   863: 82 10 c8 00              ra = u64 [sp + 0xc8]
+   867: 82 15 c0 00              s0 = u64 [sp + 0xc0]
+   871: 82 16 b8 00              s1 = u64 [sp + 0xb8]
+   875: 95 11 d0 00              sp = sp + 0xd0
+   879: 32 00                    ret
       :                          @64
-   665: 84 78 f0 00              a1 = a0 & 0xf0
-   669: 33 06 04                 s1 = 0x4
-   672: 51 28 e0 00 33           jump @69 if a1 == 224
+   881: 00                       trap
       :                          @65
-   677: 84 78 f8 00              a1 = a0 & 0xf8
-   681: 33 06 05                 s1 = 0x5
-   684: 51 28 f0 00 27           jump @69 if a1 == 240
-      :                          @66
-   689: 84 78 fc 00              a1 = a0 & 0xfc
-   693: 33 06 06                 s1 = 0x6
-   696: 51 28 f8 00 1b           jump @69 if a1 == 248
+   882: 00                       trap
+      :                          @66 [export #2: 'on_transfer']
+   883: 33 07                    a0 = 0
+   885: 32 00                    ret
       :                          @67
-   701: 84 78 fe 00              a1 = a0 & 0xfe
-   705: 33 09 fc 00              a2 = 0xfc
-   709: 33 06 07                 s1 = 0x7
-   712: aa 98 0b                 jump @69 if a1 == a2
+   887: 8d 7a                    i32 a3 = -a0
+   889: 84 aa 07                 a3 = a3 & 0x7
+   892: c8 a7 0b                 a4 = a0 + a3
+   895: 51 0a 0e                 jump @70 if a3 == 0
       :                          @68
-   715: 33 06 08                 s1 = 0x8
-   718: 54 27 fd 00 9e           jump @60 if a0 <=u 253
+   898: 64 7c                    a5 = a0
+   900: 01                       fallthrough
       :                          @69
-   723: 7b 1c                    u64 [sp] = a5
-   725: ac 6c 26 01              jump @87 if a5 <u s1
+   901: 78 c8                    u8 [a5] = a1
+   903: 95 cc 01                 a5 = a5 + 0x1
+   906: ac bc fb                 jump @69 if a5 <u a4
       :                          @70
-   729: 64 b7                    a0 = a4
-   731: 64 68                    a1 = s1
-   733: 64 b5                    s0 = a4
-   735: 50 10 06 2e fd           ra = 6, jump @3
-      :                          @71 [@dyn 3]
-   740: 64 5b                    a4 = s0
-   742: 33 0a ff                 a3 = 0xffffffffffffffff
-   745: 82 1c                    a5 = u64 [sp]
-   747: 01                       fallthrough
+   909: c9 a9 03                 t1 = a2 - a3
+   912: 84 3c f8                 a5 = t1 & 0xfffffffffffffff8
+   915: c8 cb 0a                 a3 = a4 + a5
+   918: 58 0c 1d                 jump @73 if a5 <=s 0
+      :                          @71
+   921: 84 82 ff 00              t0 = a1 & 0xff
+   925: 14 09 01 01 01 01 01 01 01 01 a2 = 0x101010101010101
+   935: ca 92 0c                 a5 = t0 * a2
+   938: 01                       fallthrough
       :                          @72
-   748: c8 6b 0b                 a4 = a4 + s1
-   751: e4 6c 08                 a1 = maxu(a5, s1)
-   754: c9 68 08                 a1 = a1 - s1
-   757: 64 b6                    s1 = a4
-   759: e6 78 05                 s0 = minu(a1, a0)
-   762: c8 7b 0b                 a4 = a4 + a0
-   765: e4 78 08                 a1 = maxu(a1, a0)
-   768: c9 78 0c                 a5 = a1 - a0
-   771: 95 55 fc                 s0 = s0 + 0xfffffffffffffffc
-   774: 53 1c 40 e1 00           jump @86 if a5 <u 64
+   939: 7b bc                    u64 [a4] = a5
+   941: 95 bb 08                 a4 = a4 + 0x8
+   944: ac ab fb                 jump @72 if a4 <u a3
       :                          @73
-   779: 95 c8 c0                 a1 = a5 + 0xffffffffffffffc0
-   782: 51 08 7d                 jump @84 if a1 == 0
+   947: 84 39 07                 a2 = t1 & 0x7
+   950: 52 09 05                 jump @75 if a2 != 0
       :                          @74
-   785: 95 b7 40                 a0 = a4 + 0x40
-   788: 7d 7a                    a3 = i8 [a0]
-   790: 33 09 01                 a2 = 0x1
-   793: 5a 0a 6b                 jump @83 if a3 >s 0
+   953: 28 0e                    jump @77
       :                          @75
-   796: 84 aa ff 00              a3 = a3 & 0xff
-   800: 83 a9 ff                 i32 a2 = a3 + 0xffffffffffffffff
-   803: 84 9b ff 00              a4 = a2 & 0xff
-   807: 33 0c bf 00              a5 = 0xbf
-   811: 33 09 02                 a2 = 0x2
-   814: ac cb 53                 jump @82 if a4 <u a5
+   955: c8 a9 09                 a2 = a2 + a3
+   958: 01                       fallthrough
       :                          @76
-   817: 84 ab e0 00              a4 = a3 & 0xe0
-   821: 33 0c c0 00              a5 = 0xc0
-   825: 33 09 03                 a2 = 0x3
-   828: aa cb 45                 jump @82 if a4 == a5
+   959: 78 a8                    u8 [a3] = a1
+   961: 95 aa 01                 a3 = a3 + 0x1
+   964: ac 9a fb                 jump @76 if a3 <u a2
       :                          @77
-   831: 84 ab f0 00              a4 = a3 & 0xf0
-   835: 33 0c e0 00              a5 = 0xe0
-   839: 33 09 04                 a2 = 0x4
-   842: aa cb 37                 jump @82 if a4 == a5
+   967: 32 00                    ret
       :                          @78
-   845: 84 ab f8 00              a4 = a3 & 0xf8
-   849: 33 0c f0 00              a5 = 0xf0
-   853: 33 09 05                 a2 = 0x5
-   856: aa cb 29                 jump @82 if a4 == a5
+   969: 51 08 9b 00              jump @99 if a1 == 0
       :                          @79
-   859: 84 ab fc 00              a4 = a3 & 0xfc
-   863: 33 0c f8 00              a5 = 0xf8
-   867: 33 09 06                 a2 = 0x6
-   870: aa cb 1b                 jump @82 if a4 == a5
+   973: 64 79                    a2 = a0
+   975: 7c 77                    a0 = u8 [a0]
+   977: 51 07 91 00              jump @98 if a0 == 0
       :                          @80
-   873: 84 ab fe 00              a4 = a3 & 0xfe
-   877: 33 0c fc 00              a5 = 0xfc
-   881: 33 09 07                 a2 = 0x7
-   884: aa cb 0d                 jump @82 if a4 == a5
+   981: 51 27 ff 00 90 00        jump @100 if a0 == 255
       :                          @81
-   887: 33 0b fe 00              a4 = 0xfe
-   891: 33 09 08                 a2 = 0x8
-   894: ac ba 0d                 jump @84 if a3 <u a4
+   987: 6c 7a                    a3 = sext.b a0
+   989: 57 0a 09                 jump @83 if a3 <s 0
       :                          @82
-   897: ac 98 7b                 jump @88 if a1 <u a2
+   992: 33 0a                    a3 = 0
+   994: 33 08                    a1 = 0
+   996: 28 73                    jump @97
       :                          @83
-   900: 64 98                    a1 = a2
-   902: 50 10 08 87 fc           ra = 8, jump @3
-      :                          @84 [@dyn 4]
-   907: c8 65 05                 s0 = s0 + s1
-   910: 80 58                    a1 = u32 [s0]
-   912: 33 09 64                 a2 = 0x64
-   915: 33 0a 64                 a3 = 0x64
-   918: 64 67                    a0 = s1
-   920: 0a 09                    ecalli 9 // 'new'
-   922: 64 75                    s0 = a0
-   924: 7b 17 08                 u64 [sp + 0x8] = a0
-   927: 48 11 14                 u32 [sp + 20] = 0
-   930: 95 17 14                 a0 = sp + 0x14
-   933: 33 08 04                 a1 = 0x4
-   936: 95 19 08                 a2 = sp + 0x8
-   939: 33 0a 04                 a3 = 0x4
-   942: 0a 03                    ecalli 3 // 'write'
-   944: 95 17 18                 a0 = sp + 0x18
-   947: 33 09 80 00              a2 = 0x80
-   951: 33 08                    a1 = 0
-   953: 50 10 0a 48              ra = 10, jump @90
-      :                          @85 [@dyn 5]
-   957: 33 08 20 a1 07           a1 = 0x7a120
-   962: 33 09 64                 a2 = 0x64
-   965: 95 1a 18                 a3 = sp + 0x18
-   968: 64 57                    a0 = s0
-   970: 0a 0b                    ecalli 11 // 'transfer'
-   972: 82 17 08                 a0 = u64 [sp + 0x8]
-   975: 49 21 b0 00              u64 [sp + 176] = 0
-   979: 49 21 a8 00              u64 [sp + 168] = 0
-   983: 49 21 a0 00              u64 [sp + 160] = 0
-   987: 7b 17 98 00              u64 [sp + 0x98] = a0
-   991: 33 08 20                 a1 = 0x20
-   994: 95 1a 98 00              a3 = sp + 0x98
-   998: 01                       fallthrough
+   998: 55 27 c0 00 0d           jump @85 if a0 >=u 192
+      :                          @84
+  1003: 33 0a 01                 a3 = 0x1
+  1006: 33 0b 80                 a4 = 0xffffffffffffff80
+  1009: 28 4a                    jump @94
+      :                          @85
+  1011: 55 27 e0 00 0e           jump @87 if a0 >=u 224
       :                          @86
-   999: 64 a7                    a0 = a3
-  1001: 82 10 c8 00              ra = u64 [sp + 0xc8]
-  1005: 82 15 c0 00              s0 = u64 [sp + 0xc0]
-  1009: 82 16 b8 00              s1 = u64 [sp + 0xb8]
-  1013: 95 11 d0 00              sp = sp + 0xd0
-  1017: 32 00                    ret
+  1016: 33 0a 02                 a3 = 0x2
+  1019: 33 0b 40 ff              a4 = 0xffffffffffffff40
+  1023: 28 3c                    jump @94
       :                          @87
-  1019: 00                       trap
+  1025: 55 27 f0 00 0e           jump @89 if a0 >=u 240
       :                          @88
-  1020: 00                       trap
-      :                          @89 [export #2: 'on_transfer']
-  1021: 33 07                    a0 = 0
-  1023: 32 00                    ret
+  1030: 33 0a 03                 a3 = 0x3
+  1033: 33 0b 20 ff              a4 = 0xffffffffffffff20
+  1037: 28 2e                    jump @94
+      :                          @89
+  1039: 55 27 f8 00 0e           jump @91 if a0 >=u 248
       :                          @90
-  1025: 8d 7a                    i32 a3 = -a0
-  1027: 84 aa 07                 a3 = a3 & 0x7
-  1030: c8 a7 0b                 a4 = a0 + a3
-  1033: 51 0a 0e                 jump @93 if a3 == 0
+  1044: 33 0a 04                 a3 = 0x4
+  1047: 33 0b 10 ff              a4 = 0xffffffffffffff10
+  1051: 28 20                    jump @94
       :                          @91
-  1036: 64 7c                    a5 = a0
-  1038: 01                       fallthrough
+  1053: 55 27 fc 00 0e           jump @93 if a0 >=u 252
       :                          @92
-  1039: 78 c8                    u8 [a5] = a1
-  1041: 95 cc 01                 a5 = a5 + 0x1
-  1044: ac bc fb                 jump @92 if a5 <u a4
+  1058: 33 0a 05                 a3 = 0x5
+  1061: 33 0b 08 ff              a4 = 0xffffffffffffff08
+  1065: 28 12                    jump @94
       :                          @93
-  1047: c9 a9 03                 t1 = a2 - a3
-  1050: 84 3c f8                 a5 = t1 & 0xfffffffffffffff8
-  1053: c8 cb 0a                 a3 = a4 + a5
-  1056: 58 0c 1d                 jump @96 if a5 <=s 0
+  1067: 88 7a fe 00              a3 = a0 <u 0xfe
+  1071: 33 0b 04 ff              a4 = 0xffffffffffffff04
+  1075: 93 ab 02 ff              a4 = 0xffffffffffffff02 if a3 == 0
+  1079: 85 aa 07                 a3 = a3 ^ 0x7
+  1082: 01                       fallthrough
       :                          @94
-  1059: 84 82 ff 00              t0 = a1 & 0xff
-  1063: 14 09 01 01 01 01 01 01 01 01 a2 = 0x101010101010101
-  1073: ca 92 0c                 a5 = t0 * a2
-  1076: 01                       fallthrough
+  1083: ae 8a 2b                 jump @101 if a3 >=u a1
       :                          @95
-  1077: 7b bc                    u64 [a4] = a5
-  1079: 95 bb 08                 a4 = a4 + 0x8
-  1082: ac ab fb                 jump @95 if a4 <u a3
+  1086: 33 08                    a1 = 0
+  1088: c8 b7 07                 a0 = a0 + a4
+  1091: 64 ab                    a4 = a3
+  1093: 01                       fallthrough
       :                          @96
-  1085: 84 39 07                 a2 = t1 & 0x7
-  1088: 52 09 05                 jump @98 if a2 != 0
+  1094: c8 b9 0c                 a5 = a2 + a4
+  1097: 7c cc                    a5 = u8 [a5]
+  1099: 97 88 08                 a1 = a1 << 0x8
+  1102: 95 bb ff                 a4 = a4 + 0xffffffffffffffff
+  1105: d4 c8 08                 a1 = a1 | a5
+  1108: 52 0b f2                 jump @96 if a4 != 0
       :                          @97
-  1091: 28 0e                    jump @100
+  1111: 8a a9 03                 i32 a2 = a3 << 0x3
+  1114: cf 97 07                 a0 = a0 << a2
+  1117: c8 87 07                 a0 = a0 + a1
+  1120: 32 00                    ret
       :                          @98
-  1093: c8 a9 09                 a2 = a2 + a3
-  1096: 01                       fallthrough
+  1122: 32 00                    ret
       :                          @99
-  1097: 78 a8                    u8 [a3] = a1
-  1099: 95 aa 01                 a3 = a3 + 0x1
-  1102: ac 9a fb                 jump @99 if a3 <u a2
+  1124: 00                       trap
       :                          @100
-  1105: 32 00                    ret
+  1125: 00                       trap
+      :                          @101
+  1126: 00                       trap
