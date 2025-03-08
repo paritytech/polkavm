@@ -2,9 +2,8 @@
 #![no_main]
 
 use utils::{NONE};
-use utils::{parse_refine_args, parse_wrangled_operand_tuple};
-use utils::{checkpoint, write, fetch, export};
-use utils::{call_info};
+use utils::{parse_wrangled_operand_tuple};
+use utils::{write, fetch, export};
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine() -> u64 {

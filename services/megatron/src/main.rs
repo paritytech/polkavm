@@ -1,10 +1,9 @@
 #![no_std]
 #![no_main]
 
-use utils::{NONE, OK, PAGE_SIZE, SEGMENT_SIZE};
+use utils::{NONE};
 use utils::{parse_refine_args, parse_wrangled_operand_tuple};
-use utils::{read, write, oyield, log};
-use utils::{call_info};
+use utils::{read, write, oyield};
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine() -> u64 {
@@ -32,11 +31,8 @@ extern "C" fn refine() -> u64 {
             args.wphash,
         )
     } else {
-        call_info("parse refine args failed");
         return NONE;
     };
-
-    call_info("parse refine args success");
     
     unsafe {
         core::arch::asm!(
@@ -63,7 +59,7 @@ extern "C" fn accumulate() -> u64 {
     }
     // fetch service index
     let service_index_address = omega_7 + 4; // skip 4 bytes time slot
-    let SERVICE_INDEX: u64   = unsafe { ( *(service_index_address as *const u32)).into() }; // 4 bytes service index
+    let SERVICE_INDEX: u64 = unsafe { ( *(service_index_address as *const u32)).into() }; // 4 bytes service index
 
     // fetch all_accumulation_o
     let mut start_address = omega_7 + 4 + 4; // 4 bytes time slot + 4 bytes service index
@@ -84,16 +80,19 @@ extern "C" fn accumulate() -> u64 {
     let buffer0 = [0u8; 12];
     let buffer1 = [0u8; 12];
     let key = [0u8; 1];
+    let key_address = key.as_ptr() as u64;
+    let key_length = key.len() as u64;
     let mut buffer = [0u8; 12];
-
+    
     let service0: u64 = unsafe { ( *(service0_bytes_start_addr as *const u32)).into() }; 
     let service1: u64 = unsafe { ( *(service1_bytes_start_addr as *const u32)).into() }; 
 
     // read the two services' storage
     unsafe {
-        read(service0, key.as_ptr() as u64, key.len() as u64, buffer0.as_ptr() as u64, 0 as u64, buffer0.len() as u64);
-        read(service1, key.as_ptr() as u64, key.len() as u64, buffer1.as_ptr() as u64, 0 as u64, buffer1.len() as u64);
-    }
+        read(service0, key_address, key_length, buffer0.as_ptr() as u64, 0 as u64, buffer0.len() as u64);
+        read(service1, key_address, key_length, buffer1.as_ptr() as u64, 0 as u64, buffer1.len() as u64);
+    }; 
+
     let s0_n = u32::from_le_bytes(buffer0[0..4].try_into().unwrap());
     let s0_vn = u32::from_le_bytes(buffer0[4..8].try_into().unwrap());
     let s0_vnminus1 = u32::from_le_bytes(buffer0[8..12].try_into().unwrap());
