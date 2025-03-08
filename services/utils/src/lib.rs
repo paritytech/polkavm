@@ -74,6 +74,8 @@ pub const NONE: u64 = u64::MAX;
 pub const OK: u64 = 0;
 pub const PAGE_SIZE: u64 = 4096;
 pub const SEGMENT_SIZE: u64 = 4104;
+pub const PARENT_MACHINE_INDEX: u64 = (1u64 << 32) - 1;
+
 
 // Helpful functions and structs for refine
 #[repr(C)]
@@ -100,13 +102,7 @@ pub fn parse_refine_args(mut start_address: u64, mut remaining_length: u64) -> O
     if remaining_length < 4 {
         return None;
     }
-    let wi_service_index = {
-        let mut buf = [0u8; 4];
-        unsafe {
-            core::ptr::copy_nonoverlapping(start_address as *const u8, buf.as_mut_ptr(), 4);
-        }
-        u32::from_le_bytes(buf)
-    };
+    let wi_service_index = unsafe { ( *(start_address as *const u32)).into() }; 
     start_address += 4;
     remaining_length = remaining_length.saturating_sub(4);
 
@@ -117,10 +113,12 @@ pub fn parse_refine_args(mut start_address: u64, mut remaining_length: u64) -> O
         core::slice::from_raw_parts(start_address as *const u8, remaining_length as usize)
     };
     let discriminator_len = extract_discriminator(payload_slice);
-    if discriminator_len == 0 || discriminator_len as usize > payload_slice.len() {
-        return None;
-    }
-    let payload_len = decode_e(&payload_slice[..discriminator_len as usize]);
+    let payload_len = if discriminator_len > 0 {
+        decode_e(&payload_slice[..discriminator_len as usize])
+    } else {
+        0
+    };
+
     start_address += discriminator_len as u64;
     remaining_length = remaining_length.saturating_sub(discriminator_len as u64);
 
@@ -151,31 +149,24 @@ pub fn parse_refine_args(mut start_address: u64, mut remaining_length: u64) -> O
 
 pub fn setup_page(segment: &[u8]) {
     if segment.len() < 8 {
-        call_info("setup_page: buffer too small");
-        return;
+        return call_info("setup_page: buffer too small");
     }
 
-    let m: u64 = u32::from_le_bytes(segment[0..4].try_into().unwrap()) as u64;
-    let page_id: u64 = u32::from_le_bytes(segment[4..8].try_into().unwrap()) as u64;
-    let page_address = (page_id as u64) * PAGE_SIZE;
+    let (m, page_id) = (
+        u32::from_le_bytes(segment[0..4].try_into().unwrap()) as u64,
+        u32::from_le_bytes(segment[4..8].try_into().unwrap()) as u64,
+    );
+
+    let page_address = page_id * PAGE_SIZE;
     let data = &segment[8..];
 
-    let zero_result = unsafe { 
-        zero(m, page_id, 1)
-    };
-    
-    if zero_result != OK {
-        call_info("setup_page: zero failed");
+    if unsafe { zero(m, page_id, 1) } != OK {
+        return call_info("setup_page: zero failed");
     }
-    
-    let poke_result = unsafe {
-        poke(m, data.as_ptr() as u64, page_address, PAGE_SIZE)
-    };
 
-    if poke_result != OK {
+    if unsafe { poke(m, data.as_ptr() as u64, page_address, PAGE_SIZE) } != OK {
         call_info("setup_page: poke failed");
     }
-    call_info("setup_page");
 }
 
 pub fn get_page(vm_id: u32, page_id: u32) -> [u8; SEGMENT_SIZE as usize] {
@@ -188,10 +179,7 @@ pub fn get_page(vm_id: u32, page_id: u32) -> [u8; SEGMENT_SIZE as usize] {
     let result_address = result.as_ptr() as u64 + 8;
     let result_length = (SEGMENT_SIZE - 8) as u64;
 
-    let peek_result = unsafe {
-        peek(vm_id as u64, result_address, page_address as u64, result_length)
-    };
-
+    let peek_result = unsafe{ peek(vm_id as u64, result_address, page_address as u64, result_length) };
     if peek_result != OK {
         call_info("get_page: peek failed");
     }
@@ -226,30 +214,35 @@ pub fn deserialize_gas_and_registers(data: &[u8; 112]) -> (u64, [u64; 13]) {
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct WrangledOperandTuple {
+    pub h: [u8; 32],
+    pub e: [u8; 32],
+    pub a: [u8; 32],
+
+    pub o_ptr: u64,
+    pub o_len: u64,
+
+    pub y: [u8; 32],
+
     pub work_result_ptr: u64,
     pub work_result_len: u64,
-
-    pub pauload_hash: [u8; 32],
-    pub workpackage_hash: [u8; 32],
-
-    pub auth_output_ptr: u64,
-    pub auth_output_len: u64,
 }
 
 impl Default for WrangledOperandTuple {
     fn default() -> Self {
         Self {
+            h: [0u8; 32],
+            e: [0u8; 32],
+            a: [0u8; 32],
+            o_ptr: 0,
+            o_len: 0,
+            y: [0u8; 32],
             work_result_ptr: 0,
             work_result_len: 0,
-            pauload_hash: [0u8; 32],
-            workpackage_hash: [0u8; 32],
-            auth_output_ptr: 0,
-            auth_output_len: 0,
         }
     }
 }
 
-pub fn parse_wrangled_operand_tuple(all_accumulation_o_ptr: u64, all_accumulation_o_len: u64, m: u64) -> Option<WrangledOperandTuple> {
+pub fn parse_wrangled_operand_tuple(all_accumulation_o_ptr: u64, all_accumulation_o_len: u64, m: u64,) -> Option<WrangledOperandTuple> {
     if all_accumulation_o_len == 0 {
         return None;
     }
@@ -257,12 +250,8 @@ pub fn parse_wrangled_operand_tuple(all_accumulation_o_ptr: u64, all_accumulatio
     let mut remaining_length = all_accumulation_o_len;
 
     let full_slice = unsafe {
-        core::slice::from_raw_parts(
-            start_address as *const u8,
-            remaining_length as usize
-        )
+        core::slice::from_raw_parts(start_address as *const u8, remaining_length as usize)
     };
-
     let all_accumulation_o_discriminator_length = extract_discriminator(full_slice);
     if all_accumulation_o_discriminator_length as usize > full_slice.len() {
         return None;
@@ -277,29 +266,64 @@ pub fn parse_wrangled_operand_tuple(all_accumulation_o_ptr: u64, all_accumulatio
     }
 
     for i in 0..num_of_accumulation_o {
-        let accumulation_slice = unsafe {
-            core::slice::from_raw_parts(
-                start_address as *const u8,
-                remaining_length as usize
-            )
-        };
+        let mut wrangled = WrangledOperandTuple::default();
 
+        if remaining_length < 96 {
+            return None;
+        }
+        let hash_slice = unsafe {
+            core::slice::from_raw_parts(start_address as *const u8, 96)
+        };
+        wrangled.h.copy_from_slice(&hash_slice[0..32]);
+        wrangled.e.copy_from_slice(&hash_slice[32..64]);
+        wrangled.a.copy_from_slice(&hash_slice[64..96]);
+        start_address += 96;
+        remaining_length = remaining_length.saturating_sub(96);
+
+        {
+            let accumulation_slice = unsafe {
+                core::slice::from_raw_parts(start_address as *const u8, remaining_length as usize)
+            };
+            let auth_output_discriminator_len = extract_discriminator(accumulation_slice);
+            let auth_output_len = if auth_output_discriminator_len > 0 {
+                decode_e(&accumulation_slice[..auth_output_discriminator_len as usize])
+            } else {
+                0
+            };
+
+            start_address += auth_output_discriminator_len as u64;
+            remaining_length = remaining_length.saturating_sub(auth_output_discriminator_len as u64);
+
+            wrangled.o_ptr = start_address;
+            wrangled.o_len = remaining_length.min(auth_output_len);
+
+            start_address += auth_output_len;
+            remaining_length = remaining_length.saturating_sub(auth_output_len);
+        }
+
+        if remaining_length < 32 {
+            return None;
+        }
+        let y_slice = unsafe {
+            core::slice::from_raw_parts(start_address as *const u8, 32)
+        };
+        wrangled.y.copy_from_slice(y_slice);
+        start_address += 32;
+        remaining_length = remaining_length.saturating_sub(32);
+
+        let accumulation_slice = unsafe {
+            core::slice::from_raw_parts(start_address as *const u8, remaining_length as usize)
+        };
         if accumulation_slice.is_empty() {
             return None;
         }
         let work_result_prefix = accumulation_slice[0];
-
         start_address += 1;
         remaining_length = remaining_length.saturating_sub(1);
 
-        let mut wrangled = WrangledOperandTuple::default();
-
         if work_result_prefix == 0 {
             let accumulation_slice = unsafe {
-                core::slice::from_raw_parts(
-                    start_address as *const u8,
-                    remaining_length as usize
-                )
+                core::slice::from_raw_parts(start_address as *const u8, remaining_length as usize)
             };
             let wr_discriminator_len = extract_discriminator(accumulation_slice);
             let wr_len = if wr_discriminator_len > 0 {
@@ -316,52 +340,12 @@ pub fn parse_wrangled_operand_tuple(all_accumulation_o_ptr: u64, all_accumulatio
 
             start_address += wr_len;
             remaining_length = remaining_length.saturating_sub(wr_len);
-        } else {}
-
-        if remaining_length < 64 {
-            return None;
-        }
-        let two_hashes_slice = unsafe {
-            core::slice::from_raw_parts(
-                start_address as *const u8,
-                64
-            )
-        };
-        wrangled.pauload_hash.copy_from_slice(&two_hashes_slice[0..32]);
-        wrangled.workpackage_hash.copy_from_slice(&two_hashes_slice[32..64]);
-
-        start_address += 64;
-        remaining_length -= 64;
-
-        {
-            let accumulation_slice = unsafe {
-                core::slice::from_raw_parts(
-                    start_address as *const u8,
-                    remaining_length as usize
-                )
-            };
-            let auth_output_discriminator_len = extract_discriminator(accumulation_slice);
-            let auth_output_len = if auth_output_discriminator_len > 0 {
-                decode_e(&accumulation_slice[..auth_output_discriminator_len as usize])
-            } else {
-                0
-            };
-
-            start_address += auth_output_discriminator_len as u64;
-            remaining_length = remaining_length.saturating_sub(auth_output_discriminator_len as u64);
-
-            wrangled.auth_output_ptr = start_address;
-            wrangled.auth_output_len = remaining_length.min(auth_output_len);
-
-            start_address += auth_output_len;
-            remaining_length = remaining_length.saturating_sub(auth_output_len);
         }
 
         if i == m {
             return Some(wrangled);
         }
     }
-
     None
 }
 
@@ -381,7 +365,7 @@ pub fn extract_discriminator(input: &[u8]) -> u8 {
 
     let first_byte = input[0];
     match first_byte {
-        1..=127 => 1,
+        0..=127 => 1,
         128..=191 => 2,
         192..=223 => 3,
         224..=239 => 4,
@@ -389,7 +373,6 @@ pub fn extract_discriminator(input: &[u8]) -> u8 {
         248..=251 => 6,
         252..=253 => 7,
         254..=u8::MAX => 8,
-        _ => 0,
     }
 }
 

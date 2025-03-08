@@ -4,7 +4,6 @@
 use utils::{NONE};
 use utils::{parse_refine_args, parse_wrangled_operand_tuple};
 use utils::{write, new, transfer, log};
-use utils::{call_info};
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine() -> u64 {
@@ -32,12 +31,9 @@ extern "C" fn refine() -> u64 {
             args.wphash,
         )
     } else {
-        call_info("parse refine args failed");
         return NONE;
     };
 
-    call_info("parse refine args success");
-    
     unsafe {
         core::arch::asm!(
             "mv a1, {0}",

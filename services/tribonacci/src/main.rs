@@ -2,13 +2,12 @@
 #![no_main]
 
 use utils::{NONE};
-use utils::{parse_refine_args, parse_wrangled_operand_tuple};
-use utils::{checkpoint, write, fetch, export};
-use utils::{call_info};
+use utils::{parse_wrangled_operand_tuple};
+use utils::{write, fetch, export};
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine() -> u64 {
-    let mut buffer = [0u8; 20];
+    let mut buffer = [0u8; 16];
     let offset: u64 = 0;
     let maxlen: u64 = buffer.len() as u64;
     let result = unsafe { 
@@ -53,17 +52,17 @@ extern "C" fn refine() -> u64 {
     let buffer_addr = buffer.as_ptr() as u64;
     let buffer_len = buffer.len() as u64;
 
-    unsafe {
-        export(buffer_addr, buffer_len);
-    }
+    // unsafe {
+    //     export(buffer_addr, buffer_len);
+    // }
 
     // Put N additional exports which are identical FOR NOW
-    for i in 0..prev_n {
-        buffer[16..20].copy_from_slice(&(i + 1).to_le_bytes());
-        unsafe {
-            export(buffer_addr, buffer_len);
-        }
-    }
+    // for i in 0..prev_n {
+    //     buffer[16..20].copy_from_slice(&(i + 1).to_le_bytes());
+    //     unsafe {
+    //         export(buffer_addr, buffer_len);
+    //     }
+    // }
 
 
 
