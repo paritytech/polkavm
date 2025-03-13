@@ -1,0 +1,30 @@
+// RO data = 0/0 bytes
+// RW data = 0/0 bytes
+// Stack size = 40960 bytes
+// Jump table entry point size = 0 bytes
+// RO data = []
+// RW data = []
+// Instructions = 16
+// Code size = 49 bytes
+
+      :                          @0
+     0: 28 02                    jump @1
+      :                          @1 [export #0: 'main']
+     2: 33 09                    a2 = 0
+     4: 51 07 1b                 jump @4 if a0 == 0
+      :                          @2
+     7: 33 08 00 00 01           a1 = 0x10000
+    12: 33 0a 00 10              a3 = 0x1000
+    16: 01                       fallthrough
+      :                          @3
+    17: 81 8b                    a4 = i32 [a1]
+    19: be b9 09                 i32 a2 = a2 + a4
+    22: 95 77 ff                 a0 = a0 + 0xffffffffffffffff
+    25: c8 a8 08                 a1 = a1 + a3
+    28: 52 07 f5                 jump @3 if a0 != 0
+      :                          @4
+    31: 33 0a 00 00 01           a3 = 0x10000
+    36: 33 07 00 00 01           a0 = 0x10000
+    41: 33 08 00 10              a1 = 0x1000
+    45: 7a a9                    u32 [a3] = a2
+    47: 32 00                    ret

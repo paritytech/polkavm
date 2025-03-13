@@ -1,16 +1,14 @@
 #![no_std]
 #![no_main]
 
-use utils::{NONE, OK, PAGE_SIZE, SEGMENT_SIZE};
-use utils::{parse_refine_args, parse_wrangled_operand_tuple};
-use utils::{call_info, setup_page, get_page, serialize_gas_and_registers, deserialize_gas_and_registers};
-use utils::{write_result};
-
-use utils::{historical_lookup, fetch, export, machine, peek, poke, zero, void, invoke, expunge, log};
-use utils::{gas, lookup, read, write, info, bless, assign, checkpoint, new, upgrade, eject, query, solicit, forget, oyield};
+use utils::constants::{NONE, FIRST_READABLE_ADDRESS};
+use utils::functions::{parse_wrangled_operand_tuple, write_result};
+use utils::host_functions::{gas, write, read, lookup, info};
+use utils::host_functions::{bless, assign, checkpoint, new, upgrade, eject, query, solicit, forget, oyield};
+use utils::host_functions::{fetch, export};
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn refine() -> u64 {
+extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     let mut buffer = [0u8; 16];
     let offset: u64 = 0;
     let maxlen: u64 = buffer.len() as u64;
@@ -58,44 +56,25 @@ extern "C" fn refine() -> u64 {
         }
     }
     
-    unsafe {
-        core::arch::asm!(
-            "mv a1, {0}",
-            in(reg) buffer_len,
-        );
-    }
-    // this equals to a0 = buffer_addr
-    buffer_addr
+    return (buffer_addr, buffer_len);
 }
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn accumulate() -> u64 {
-    // read the input start address and length from register a0 and a1
-    let omega_7: u64; // accumulate input start address
-    let omega_8: u64; // accumulate input length
-
-    unsafe {
-        core::arch::asm!(
-            "mv {0}, a0",
-            "mv {1}, a1",
-            out(reg) omega_7,
-            out(reg) omega_8,
-        );
-    }
+extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
     // fetch service index
-    let service_index_address = omega_7 + 4; // skip 4 bytes time slot
-    let SERVICE_INDEX: u64   = unsafe { ( *(service_index_address as *const u32)).into() }; // 4 bytes service index
+    let service_index_address = start_address + 4; // skip 4 bytes time slot
+    let service_index: u64   = unsafe { ( *(service_index_address as *const u32)).into() };
 
     // fetch all_accumulation_o
-    let mut start_address = omega_7 + 4 + 4; // 4 bytes time slot + 4 bytes service index
-    let mut remaining_length = omega_8 - 4 - 4; // 4 bytes time slot + 4 bytes service index
+    let all_accumulation_o_start_address = start_address + 4 + 4; // 4 bytes time slot + 4 bytes service index
+    let remaining_length = length - 4 - 4; // 4 bytes time slot + 4 bytes service index
     
     let (work_result_address, work_result_length) =
-    if let Some(tuple) = parse_wrangled_operand_tuple(start_address, remaining_length, 0)
+    if let Some(tuple) = parse_wrangled_operand_tuple(all_accumulation_o_start_address, remaining_length, 0)
     {
         (tuple.work_result_ptr, tuple.work_result_len)
     } else {
-        return NONE;
+        return (FIRST_READABLE_ADDRESS as u64, 0);
     };
 
     // write FIB result to storage
@@ -148,25 +127,25 @@ extern "C" fn accumulate() -> u64 {
 
     // Depending on what "n" is, test different host functions
     if n == 1 {
-        let read_none_result = unsafe { read(SERVICE_INDEX, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // NONE
+        let read_none_result = unsafe { read(service_index, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // NONE
         write_result(read_none_result, 1);
 
         let write_result1 = unsafe { write(JAM_KEY_ADDRESS, JAM_KEY_LENGTH, DOT_VAL_ADDRESS, DOT_VAL_LENGTH) }; // OK
         write_result(write_result1, 2);
 
-        let read_ok_result = unsafe { read(SERVICE_INDEX, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // OK
+        let read_ok_result = unsafe { read(service_index, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // OK
         write_result(read_ok_result, 5);
 
         let forget_result = unsafe { forget(JAM_KEY_ADDRESS, 0) }; // HUH: not any lookup meet the condition
         write_result(forget_result, 6);
     } else if n == 2 {
-        let read_result = unsafe { read(SERVICE_INDEX, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // OK: 3
+        let read_result = unsafe { read(service_index, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // OK: 3
         write_result(read_result, 1);
 
         let write_result1 = unsafe { write(JAM_KEY_ADDRESS, JAM_KEY_LENGTH, 0, 0) }; // delete OK
         write_result(write_result1, 2);
 
-        let read_ok_result = unsafe { read(SERVICE_INDEX, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // NONE: deleted
+        let read_ok_result = unsafe { read(service_index, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // NONE: deleted
         write_result(read_ok_result, 5);
 
         let solicit_result = unsafe { solicit(JAM_KEY_HASH_ADDRESS, JAM_KEY_LENGTH) }; // OK: insert one timeslot
@@ -187,19 +166,19 @@ extern "C" fn accumulate() -> u64 {
         let query_jamhash_result = unsafe { query(JAM_KEY_HASH_ADDRESS, JAM_KEY_LENGTH) }; // OK: 2
         write_result(query_jamhash_result, 2);
 
-        let lookup_none_result = unsafe { lookup(SERVICE_INDEX, DOT_VAL_HASH_ADDRESS, buffer_address, 0, DOT_VAL_LENGTH) }; // NONE: never written
+        let lookup_none_result = unsafe { lookup(service_index, DOT_VAL_HASH_ADDRESS, buffer_address, 0, DOT_VAL_LENGTH) }; // NONE: never written
         write_result(lookup_none_result, 5);
 
         let assign_result = unsafe { assign(1000, JAM_KEY_ADDRESS) }; // CORE: invalid core number
         write_result(assign_result, 6);
     } else if n == 5 {
-        let lookup_result = unsafe { lookup(SERVICE_INDEX, JAM_KEY_HASH_ADDRESS, buffer_address, 0, JAM_KEY_LENGTH) }; // OK: |v| = 3
+        let lookup_result = unsafe { lookup(service_index, JAM_KEY_HASH_ADDRESS, buffer_address, 0, JAM_KEY_LENGTH) }; // OK: |v| = 3
         write_result(lookup_result, 1);
 
         let read_ok_result = unsafe { query(JAM_KEY_HASH_ADDRESS, JAM_KEY_LENGTH) }; // OK: 2
         write_result(read_ok_result, 2);
 
-        let eject_who_result = unsafe { eject(SERVICE_INDEX, JAM_KEY_HASH_ADDRESS) }; // WHO: invalid service index
+        let eject_who_result = unsafe { eject(service_index, JAM_KEY_HASH_ADDRESS) }; // WHO: invalid service index
         write_result(eject_who_result, 5);
 
         let overflow_s = 0xFFFFFFFFFFFFu64;
@@ -231,19 +210,19 @@ extern "C" fn accumulate() -> u64 {
         let query_jamhash_result = unsafe { query(JAM_KEY_HASH_ADDRESS, JAM_KEY_LENGTH) }; // OK: 2
         write_result(query_jamhash_result, 2);
     } else if n == 8 {
-        let lookup_result = unsafe { lookup(SERVICE_INDEX, JAM_KEY_HASH_ADDRESS, buffer_address, 0, JAM_KEY_LENGTH) }; // OK: |v| = 3
+        let lookup_result = unsafe { lookup(service_index, JAM_KEY_HASH_ADDRESS, buffer_address, 0, JAM_KEY_LENGTH) }; // OK: |v| = 3
         write_result(lookup_result, 1);
 
         let query_jamhash_result = unsafe { query(JAM_KEY_HASH_ADDRESS, JAM_KEY_LENGTH) }; // OK: 2
         write_result(query_jamhash_result, 2);
     } else if n == 9 {
-        let read_result = unsafe { read(SERVICE_INDEX, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // OK |v| = 3
+        let read_result = unsafe { read(service_index, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // OK |v| = 3
         write_result(read_result, 1);
 
         let write_result1 = unsafe { write(JAM_KEY_ADDRESS, JAM_KEY_LENGTH, 0, 0) }; // delete OK
         write_result(write_result1, 2);
 
-        let read_ok_result = unsafe { read(SERVICE_INDEX, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // NONE: deleted
+        let read_ok_result = unsafe { read(service_index, JAM_KEY_ADDRESS, JAM_KEY_LENGTH, buffer_address, 0, buffer_length) }; // NONE: deleted
         write_result(read_ok_result, 5);
 
         let solicit_result = unsafe { solicit(JAM_KEY_HASH_ADDRESS, JAM_KEY_LENGTH) }; // OK: insert one timeslot
@@ -272,7 +251,7 @@ extern "C" fn accumulate() -> u64 {
 
 
     // write info to 8
-    let info_result = unsafe { info(SERVICE_INDEX, buffer_address) };
+    let info_result = unsafe { info(service_index, buffer_address) };
     write_result(info_result, 8);
 
     // write gas to 9
@@ -283,8 +262,8 @@ extern "C" fn accumulate() -> u64 {
     // pad result to 32 bytes
     let mut output_bytes_32 = [0u8; 32];
     output_bytes_32[..work_result_length as usize].copy_from_slice(&unsafe { core::slice::from_raw_parts(work_result_address as *const u8, work_result_length as usize) });
-    let omega_7 = output_bytes_32.as_ptr() as u64;
-    let omega_8 = output_bytes_32.len() as u64;
+    let output_bytes_address = output_bytes_32.as_ptr() as u64;
+    let output_bytes_length = output_bytes_32.len() as u64;
 
     // write yield
     if n % 3 == 0 {
@@ -302,19 +281,12 @@ extern "C" fn accumulate() -> u64 {
         }
     } else {
     }
-    unsafe { oyield(omega_7); }
-    // set the result length to register a1
-    unsafe {
-        core::arch::asm!(
-            "mv a1, {0}",
-            in(reg) omega_8,
-        );
-    }
-    // this equals to a0 = omega_7
-    omega_7
+    unsafe { oyield(output_bytes_address); }
+    
+    return (output_bytes_address, output_bytes_length);
 }
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn on_transfer() -> u64 {
-    0
+extern "C" fn on_transfer(_start_address: u64, _length: u64) -> (u64, u64) {
+    return (FIRST_READABLE_ADDRESS as u64, 0);
 }

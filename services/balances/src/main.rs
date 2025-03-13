@@ -1,32 +1,19 @@
 #![no_std]
 #![no_main]
 
-extern crate alloc;
-use simplealloc::SimpleAlloc;
+// extern crate alloc;
+// use simplealloc::SimpleAlloc;
 
-#[global_allocator]
-static ALLOCATOR: SimpleAlloc<4096> = SimpleAlloc::new();
+// #[global_allocator]
+// static ALLOCATOR: SimpleAlloc<4096> = SimpleAlloc::new();
 
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe {
-        core::arch::asm!("unimp", options(noreturn));
-    }
-}
+use utils::constants::{NONE, OOB, FIRST_READABLE_ADDRESS};
+use utils::host_functions::{read, write, fetch};
 #[polkavm_derive::polkavm_import]
 extern "C" {
-    #[polkavm_import(index = 2)]
-    pub fn read(service: u64, key_ptr: u64, key_len: u64, out: u64, out_len: u64) -> u64;
-    #[polkavm_import(index = 3)]
-    pub fn write(ko: u64, kz: u64, bo: u64, bz: u64) -> u64;
-    #[polkavm_import(index = 30)]
-    pub fn fetch(o: u64, l_off: u64, dataid: u64, work_item_index: u64, extrinsic_index: u64) -> u64;
     #[polkavm_import(index = 65)]
     pub fn ed25519verify(pubkey_addr: u64, data_addr: u64, data_len: u64, signature_addr: u64) -> u64;
 }
-
-pub const NONE: u64 = u64::MAX;
-pub const OOB: u64 = u64::MAX - 2;
 
 pub const SIGNATURE_LEN: usize = 64;
 pub const PUBLIC_KEY_LEN: usize = 32;
@@ -124,6 +111,7 @@ impl Asset {
         let ret = unsafe {
             read(
                 NONE,
+                0,
                 asset_id_bytes.as_ptr() as u64,
                 ASSET_ID_SIZE as u64,
                 asset_buf.as_mut_ptr() as u64,
@@ -207,6 +195,7 @@ impl Account {
         let ret = unsafe {
             read(
                 NONE,
+                0,
                 account_key.as_ptr() as u64,
                 account_key.len() as u64,
                 account_buf.as_mut_ptr() as u64,
@@ -238,10 +227,10 @@ impl Account {
 }
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn refine() -> u64 {
+extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
     let n: u64 = unsafe { ( *(0xFEFF0004 as *const u64)).into() }; // get extrinsic index from payload
 
-    let extrinsic_len = unsafe { fetch(FIRST_WRITEABLE_ADDRESS, BUFFER_SIZE.try_into().unwrap(), 17, n as u64, 0) } as usize;
+    let extrinsic_len = unsafe { fetch(FIRST_WRITEABLE_ADDRESS, 0, BUFFER_SIZE.try_into().unwrap(), 17, n as u64, 0) } as usize;
     let pubkey_ptr = FIRST_WRITEABLE_ADDRESS as *const u8;
 
     let data_ptr = unsafe { pubkey_ptr.add(PUBLIC_KEY_LEN) };
@@ -258,34 +247,12 @@ extern "C" fn refine() -> u64 {
         )
     };
 
-    let data_addr = data_ptr as u64;
-
-    if is_valid == 0 {
-        unsafe {
-            core::arch::asm!(
-                "mv a1, {0}",
-                in(reg) data_len,
-            );
-        }
-    }
-    data_addr
+    (data_ptr as u64, data_len as u64)
 }
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn accumulate() -> u64 {
-    let extrinsic_address: u64;
-    let extrinsic_len: u64;
-
-    unsafe {
-        core::arch::asm!(
-            "mv {0}, a0",
-            "mv {1}, a1",
-            out(reg) extrinsic_address,
-            out(reg) extrinsic_len,
-        );
-    }
-
-    let extrinsic: &[u8] = unsafe { core::slice::from_raw_parts(extrinsic_address as *const u8, extrinsic_len as usize) };
+extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
+    let extrinsic: &[u8] = unsafe { core::slice::from_raw_parts(start_address as *const u8, length as usize) };
 
     let method_id = &extrinsic[..METHOD_ID_LEN];
     let payload = &extrinsic[METHOD_ID_LEN..];
@@ -299,12 +266,12 @@ extern "C" fn accumulate() -> u64 {
         5 => transfer(payload),
         _ => {}
     }
-    0
+    (start_address, length)
 }
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn on_transfer() -> u64 {
-    0
+extern "C" fn on_transfer(_start_address: u64, _length: u64) -> (u64, u64) {
+    return (FIRST_READABLE_ADDRESS as u64, 0);
 }
 
 pub fn create_asset(payload: &[u8]) {
