@@ -4,11 +4,12 @@
 // Jump table entry point size = 0 bytes
 // RO data = []
 // RW data = []
-// Instructions = 3
-// Code size = 6 bytes
+// Instructions = 4
+// Code size = 11 bytes
 
       :                          @0
      0: 28 02                    jump @1
       :                          @1 [export #0: 'is_authorize']
-     2: 33 07                    a0 = 0
-     4: 32 00                    ret
+     2: 33 07 00 00 01           a0 = 0x10000
+     7: 33 08                    a1 = 0
+     9: 32 00                    ret

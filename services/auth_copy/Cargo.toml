@@ -13,4 +13,5 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 polkavm-derive = { path = "../../crates/polkavm-derive" }
-simplealloc = { path = "../../crates/simplealloc" }
+utils = { path = "../utils" }
+# simplealloc = { path = "../../crates/simplealloc" }
