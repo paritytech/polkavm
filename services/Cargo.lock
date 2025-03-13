@@ -7,7 +7,24 @@ name = "auth_copy"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
+ "utils",
+]
+
+[[package]]
+name = "babyvm"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
  "simplealloc",
+ "utils",
+]
+
+[[package]]
+name = "babyvm_child"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "utils",
 ]
 
 [[package]]
@@ -15,7 +32,7 @@ name = "balances"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
- "simplealloc",
+ "utils",
 ]
 
 [[package]]
@@ -52,22 +69,6 @@ dependencies = [
 
 [[package]]
 name = "fib2"
-version = "0.1.0"
-dependencies = [
- "polkavm-derive",
- "utils",
-]
-
-[[package]]
-name = "fib2_WIP"
-version = "0.1.0"
-dependencies = [
- "polkavm-derive",
- "utils",
-]
-
-[[package]]
-name = "fib2_child"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",

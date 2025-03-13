@@ -23,7 +23,7 @@ members = [
     "auth_copy",
     "blake2b",
     "fib2",
-    "fib2_WIP",
-    "fib2_child",
+    "babyvm",
+    "babyvm_child",
     "utils"
 ]
