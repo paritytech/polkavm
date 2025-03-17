@@ -2670,8 +2670,8 @@ where
             let initial_offset = relative_offset as u64;
             let pointer_size = if elf.is_64() { 8 } else { 4 };
 
-            // `ret` can be 2 bytes long, so (on 32-bit): 4 (ecalli) + 4 (pointer) + 2 (ret) = 10
-            if relative_offset + pointer_size + 6 > text.len() {
+            // so (on 32-bit): 4 (ecalli) + 4 (pointer) = 8
+            if relative_offset + pointer_size + 4 > text.len() {
                 return Err(ProgramFromElfError::other("truncated ecalli instruction"));
             }
 
@@ -2723,27 +2723,6 @@ where
                 InstExt::Basic(BasicInst::Ecalli { nth_import }),
             ));
 
-            const INST_RET: Inst = Inst::JumpAndLinkRegister {
-                dst: RReg::Zero,
-                base: RReg::RA,
-                value: 0,
-            };
-
-            let (next_inst_size, next_raw_inst) = read_instruction_bytes(text, relative_offset);
-
-            if Inst::decode(decoder_config, next_raw_inst) != Some(INST_RET) {
-                return Err(ProgramFromElfError::other("external call shim doesn't end with a 'ret'"));
-            }
-
-            output.push((
-                Source {
-                    section_index,
-                    offset_range: AddressRange::from(relative_offset as u64..relative_offset as u64 + next_inst_size),
-                },
-                InstExt::Control(ControlInst::JumpIndirect { base: Reg::RA, offset: 0 }),
-            ));
-
-            relative_offset += next_inst_size as usize;
             continue;
         }
 
