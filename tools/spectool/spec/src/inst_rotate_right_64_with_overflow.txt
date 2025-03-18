@@ -1,0 +1,9 @@
+pre: a0 = 0x800000009
+pre: a1 = 66
+pre: gas = 10000
+
+pub @main:
+    a2 = a0 >>r a1
+
+post: a2 = 0x4000000200000002
+post: gas = 9998
