@@ -11,23 +11,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "babyvm"
-version = "0.1.0"
-dependencies = [
- "polkavm-derive",
- "simplealloc",
- "utils",
-]
-
-[[package]]
-name = "babyvm_child"
-version = "0.1.0"
-dependencies = [
- "polkavm-derive",
- "utils",
-]
-
-[[package]]
 name = "balances"
 version = "0.1.0"
 dependencies = [
@@ -52,6 +35,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "corevm"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "simplealloc",
+ "utils",
+]
+
+[[package]]
+name = "corevm_child"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "utils",
+]
+
+[[package]]
 name = "delay"
 version = "0.1.0"
 dependencies = [
@@ -61,14 +61,6 @@ dependencies = [
 
 [[package]]
 name = "fib"
-version = "0.1.0"
-dependencies = [
- "polkavm-derive",
- "utils",
-]
-
-[[package]]
-name = "fib2"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",

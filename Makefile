@@ -1,4 +1,4 @@
-SERVICES = bootstrap tribonacci megatron transfer balances delay null_authorizer auth_copy blake2b fib fib2 babyvm babyvm_child
+SERVICES = bootstrap tribonacci megatron transfer balances delay null_authorizer auth_copy blake2b fib corevm corevm_child
 
 TARGET_DIR = riscv64emac-unknown-none-polkavm/release
 
@@ -12,7 +12,7 @@ $(SERVICES):
 	cd ../../
 	@if [ "$@" = "null_authorizer" ]; then \
 		cargo run -p polkatool jam-service services/$@/target/$(TARGET_DIR)/$@ -o services/$@/$@.pvm -d services/$@/$@_blob.pvm -i; \
-	elif [ "$@" = "babyvm_child" ]; then \
+	elif [ "$@" = "corevm_child" ]; then \
 		cargo run -p polkatool jam-service services/$@/target/$(TARGET_DIR)/$@ -o services/$@/$@.pvm -d services/$@/$@_blob.pvm -m; \
 	else \
 		cargo run -p polkatool jam-service services/$@/target/$(TARGET_DIR)/$@ -o services/$@/$@.pvm -d services/$@/$@_blob.pvm; \

@@ -153,23 +153,24 @@ pub fn initialize_pvm_registers() -> [u64; 13] {
 // Helpful functions and structs for accumulate
 #[repr(C)]
 #[derive(Debug, Clone)]
-pub struct WrangledOperandTuple {
+pub struct AccumulateArgs {
+    pub t: u32,
+    pub s: u32,
     pub h: [u8; 32],
     pub e: [u8; 32],
     pub a: [u8; 32],
-
     pub o_ptr: u64,
     pub o_len: u64,
-
     pub y: [u8; 32],
-
     pub work_result_ptr: u64,
     pub work_result_len: u64,
 }
 
-impl Default for WrangledOperandTuple {
+impl Default for AccumulateArgs {
     fn default() -> Self {
         Self {
+            t: 0,
+            s: 0,
             h: [0u8; 32],
             e: [0u8; 32],
             a: [0u8; 32],
@@ -182,47 +183,65 @@ impl Default for WrangledOperandTuple {
     }
 }
 
-pub fn parse_wrangled_operand_tuple(all_accumulation_o_ptr: u64, all_accumulation_o_len: u64, m: u64,) -> Option<WrangledOperandTuple> {
-    if all_accumulation_o_len == 0 {
+pub fn parse_accumulate_args(start_address: u64, length: u64, m: u64) -> Option<AccumulateArgs> {
+    if length == 0 {
         return None;
     }
-    let mut start_address = all_accumulation_o_ptr;
-    let mut remaining_length = all_accumulation_o_len;
+    let mut current_address = start_address;
+    let mut remaining_length = length;
+
+    let mut args = AccumulateArgs::default();
+
+    if remaining_length < 8 {
+        return None;
+    }
+    let t_slice = unsafe {
+        core::slice::from_raw_parts(current_address as *const u8, 4)
+    };
+    let s_slice = unsafe {
+        core::slice::from_raw_parts((current_address + 4) as *const u8, 4)
+    };
+    let global_t = u32::from_le_bytes(t_slice[0..4].try_into().unwrap());
+    let global_s = u32::from_le_bytes(s_slice[0..4].try_into().unwrap());
+
+    args.t = global_t;
+    args.s = global_s;
+
+    current_address += 8;
+    remaining_length = remaining_length.saturating_sub(8);
 
     let full_slice = unsafe {
-        core::slice::from_raw_parts(start_address as *const u8, remaining_length as usize)
+        core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize)
     };
-    let all_accumulation_o_discriminator_length = extract_discriminator(full_slice);
-    if all_accumulation_o_discriminator_length as usize > full_slice.len() {
+    let discriminator_len = extract_discriminator(full_slice);
+    if discriminator_len as usize > full_slice.len() {
         return None;
     }
-    let num_of_accumulation_o = decode_e(&full_slice[..all_accumulation_o_discriminator_length as usize]);
+    let num_of_operands = decode_e(&full_slice[..discriminator_len as usize]);
 
-    start_address += all_accumulation_o_discriminator_length as u64;
-    remaining_length = remaining_length.saturating_sub(all_accumulation_o_discriminator_length as u64);
+    current_address += discriminator_len as u64;
+    remaining_length = remaining_length.saturating_sub(discriminator_len as u64);
 
-    if m >= num_of_accumulation_o {
+    if m >= num_of_operands {
         return None;
     }
 
-    for i in 0..num_of_accumulation_o {
-        let mut wrangled = WrangledOperandTuple::default();
-
+    for i in 0..num_of_operands {
         if remaining_length < 96 {
             return None;
         }
         let hash_slice = unsafe {
-            core::slice::from_raw_parts(start_address as *const u8, 96)
+            core::slice::from_raw_parts(current_address as *const u8, 96)
         };
-        wrangled.h.copy_from_slice(&hash_slice[0..32]);
-        wrangled.e.copy_from_slice(&hash_slice[32..64]);
-        wrangled.a.copy_from_slice(&hash_slice[64..96]);
-        start_address += 96;
+        args.h.copy_from_slice(&hash_slice[0..32]);
+        args.e.copy_from_slice(&hash_slice[32..64]);
+        args.a.copy_from_slice(&hash_slice[64..96]);
+        current_address += 96;
         remaining_length = remaining_length.saturating_sub(96);
 
         {
             let accumulation_slice = unsafe {
-                core::slice::from_raw_parts(start_address as *const u8, remaining_length as usize)
+                core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize)
             };
             let auth_output_discriminator_len = extract_discriminator(accumulation_slice);
             let auth_output_len = if auth_output_discriminator_len > 0 {
@@ -231,13 +250,13 @@ pub fn parse_wrangled_operand_tuple(all_accumulation_o_ptr: u64, all_accumulatio
                 0
             };
 
-            start_address += auth_output_discriminator_len as u64;
+            current_address += auth_output_discriminator_len as u64;
             remaining_length = remaining_length.saturating_sub(auth_output_discriminator_len as u64);
 
-            wrangled.o_ptr = start_address;
-            wrangled.o_len = remaining_length.min(auth_output_len);
+            args.o_ptr = current_address;
+            args.o_len = remaining_length.min(auth_output_len);
 
-            start_address += auth_output_len;
+            current_address += auth_output_len;
             remaining_length = remaining_length.saturating_sub(auth_output_len);
         }
 
@@ -245,25 +264,25 @@ pub fn parse_wrangled_operand_tuple(all_accumulation_o_ptr: u64, all_accumulatio
             return None;
         }
         let y_slice = unsafe {
-            core::slice::from_raw_parts(start_address as *const u8, 32)
+            core::slice::from_raw_parts(current_address as *const u8, 32)
         };
-        wrangled.y.copy_from_slice(y_slice);
-        start_address += 32;
+        args.y.copy_from_slice(y_slice);
+        current_address += 32;
         remaining_length = remaining_length.saturating_sub(32);
 
         let accumulation_slice = unsafe {
-            core::slice::from_raw_parts(start_address as *const u8, remaining_length as usize)
+            core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize)
         };
         if accumulation_slice.is_empty() {
             return None;
         }
         let work_result_prefix = accumulation_slice[0];
-        start_address += 1;
+        current_address += 1;
         remaining_length = remaining_length.saturating_sub(1);
 
         if work_result_prefix == 0 {
             let accumulation_slice = unsafe {
-                core::slice::from_raw_parts(start_address as *const u8, remaining_length as usize)
+                core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize)
             };
             let wr_discriminator_len = extract_discriminator(accumulation_slice);
             let wr_len = if wr_discriminator_len > 0 {
@@ -272,18 +291,18 @@ pub fn parse_wrangled_operand_tuple(all_accumulation_o_ptr: u64, all_accumulatio
                 0
             };
 
-            start_address += wr_discriminator_len as u64;
+            current_address += wr_discriminator_len as u64;
             remaining_length = remaining_length.saturating_sub(wr_discriminator_len as u64);
 
-            wrangled.work_result_ptr = start_address;
-            wrangled.work_result_len = remaining_length.min(wr_len);
+            args.work_result_ptr = current_address;
+            args.work_result_len = remaining_length.min(wr_len);
 
-            start_address += wr_len;
+            current_address += wr_len;
             remaining_length = remaining_length.saturating_sub(wr_len);
         }
 
         if i == m {
-            return Some(wrangled);
+            return Some(args);
         }
     }
     None

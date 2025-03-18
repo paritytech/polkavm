@@ -7,7 +7,7 @@ use polkavm_derive::min_stack_size;
 min_stack_size!(8192); // depends on how many pages you need
 
 use utils::constants::{FIRST_READABLE_ADDRESS};
-use utils::functions::{parse_refine_args, parse_wrangled_operand_tuple};
+use utils::functions::{parse_refine_args, parse_accumulate_args};
 use utils::host_functions::{write};
 
 const IV: [u64; 8] = [
@@ -206,14 +206,11 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
-    // fetch all_accumulation_o
-    let all_accumulation_o_start_address = start_address + 4 + 4; // 4 bytes time slot + 4 bytes service index
-    let remaining_length = length - 4 - 4; // 4 bytes time slot + 4 bytes service index
-    
-    let (work_result_address, work_result_length) =
-    if let Some(tuple) = parse_wrangled_operand_tuple(all_accumulation_o_start_address, remaining_length, 0)
+    // parse accumulate args
+    let (_timeslot, service_index, work_result_address, work_result_length) =
+    if let Some(args) = parse_accumulate_args(start_address, length, 0)
     {
-        (tuple.work_result_ptr, tuple.work_result_len)
+        (args.t, args.s, args.work_result_ptr, args.work_result_len)
     } else {
         return (FIRST_READABLE_ADDRESS as u64, 0);
     };
