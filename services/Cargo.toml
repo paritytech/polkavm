@@ -22,8 +22,7 @@ members = [
     "null_authorizer",
     "auth_copy",
     "blake2b",
-    "fib2",
-    "babyvm",
-    "babyvm_child",
+    "corevm",
+    "corevm_child",
     "utils"
 ]
