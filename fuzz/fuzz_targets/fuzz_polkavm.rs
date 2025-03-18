@@ -4,6 +4,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use polkavm::Engine;
+use polkavm::InterruptKind;
 use polkavm::ModuleConfig;
 use polkavm::ProgramCounter;
 
@@ -11,8 +12,9 @@ use polkavm_common::program::asm;
 use polkavm_common::program::Instruction;
 use polkavm_common::program::ProgramBlob;
 use polkavm_common::program::Reg;
-
 use polkavm_common::writer::ProgramBlobBuilder;
+
+use polkavm::RETURN_TO_HOST;
 
 #[derive(Arbitrary, Debug)]
 enum ArglessKind {
@@ -514,7 +516,7 @@ fn build_program_blob(data: Vec<OperationKind>) -> ProgramBlob {
     ProgramBlob::parse(builder.into_vec().into()).unwrap()
 }
 
-fuzz_target!(|data: Vec<OperationKind>| {
+fn interpreter_fuzzer_harness(data: Vec<OperationKind>) {
     let blob = build_program_blob(data);
 
     let mut config = polkavm::Config::new();
@@ -532,4 +534,92 @@ fuzz_target!(|data: Vec<OperationKind>| {
     instance.set_next_program_counter(ProgramCounter(0));
 
     instance.run().unwrap();
+}
+
+fn correctness_fuzzer_harness(data: Vec<OperationKind>) {
+    let blob = build_program_blob(data);
+
+    let mut instance_interpreter = {
+        let mut config = polkavm::Config::new();
+        config.set_backend(Some(polkavm::BackendKind::Interpreter));
+
+        let engine = Engine::new(&config).unwrap();
+
+        let mut module_config = ModuleConfig::default();
+        module_config.set_strict(false);
+        module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
+
+        let module = polkavm::Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+        let mut instance = module.instantiate().unwrap();
+        instance.set_gas(10000);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::RA, RETURN_TO_HOST);
+
+        instance
+    };
+
+    let mut instance_recompiler = {
+        let mut config = polkavm::Config::new();
+        config.set_backend(Some(polkavm::BackendKind::Compiler));
+
+        let engine = Engine::new(&config).unwrap();
+
+        let mut module_config = ModuleConfig::default();
+        module_config.set_strict(false);
+        module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
+
+        let module = polkavm::Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+        let mut instance = module.instantiate().unwrap();
+        instance.set_gas(10000);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::RA, RETURN_TO_HOST);
+
+        instance
+    };
+
+    loop {
+        let interrupt_interpreter = instance_interpreter.run().unwrap();
+        let interrupt_recompiler = instance_recompiler.run().unwrap();
+
+        if interrupt_interpreter != interrupt_recompiler {
+            panic!("interrupt code mismatch (interpreter: {:?}, recompiler: {:?})", interrupt_interpreter, interrupt_recompiler);
+        }
+
+        if instance_interpreter.program_counter() != instance_recompiler.program_counter() {
+            panic!("program counter mismatch (interpreter: {:?}, recompiler: {:?})", instance_interpreter.program_counter(), instance_recompiler.program_counter());
+        }
+
+        //
+        // Compare the registers.
+        //
+
+        for reg in Reg::ALL {
+            let reg_interpreter = instance_interpreter.reg(reg);
+            let reg_recompiler = instance_recompiler.reg(reg);
+
+            assert_eq!(reg_interpreter, reg_recompiler, "register comparison failed for {:?} (interpreter: {:?}, recompiler: {:?})", reg, reg_interpreter, reg_recompiler);
+        }
+
+        //
+        // Compare interrupt code.
+        //
+
+        match interrupt_interpreter.clone() {
+            InterruptKind::NotEnoughGas | InterruptKind::Trap => {
+                break;
+            }
+            polkavm::InterruptKind::Ecalli(_) => {
+                continue;
+            }
+            _ => panic!("unexpected interrupt code {:?}", interrupt_interpreter),
+        }
+    }
+}
+
+fuzz_target!(|data: Vec<OperationKind>| {
+    if std::env::var("CORRECTNESS_FUZZER").is_ok() {
+        correctness_fuzzer_harness(data);
+    } else {
+        interpreter_fuzzer_harness(data);
+    }
 });
