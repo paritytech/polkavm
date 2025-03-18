@@ -382,13 +382,13 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         }
         let result42 = n + 42;
         write_result(result42, 7); // this should not be stored if n = 3, 6, 9 because its after the checkpoint
-        // unsafe {
-        //     core::arch::asm!(
-        //         "li a0, 0",
-        //         "li a1, 1",
-        //         "jalr x0, a0, 0", // djump(0+0) causes panic
-        //     );
-        // }
+        unsafe {
+             core::arch::asm!(
+                 "li a0, 0",
+                 "li a1, 1",
+                 "jalr x0, a0, 0", // djump(0+0) causes panic
+             );
+        }
     } else {
     }
     unsafe { oyield(output_address); }
