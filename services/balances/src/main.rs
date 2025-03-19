@@ -7,8 +7,8 @@
 // #[global_allocator]
 // static ALLOCATOR: SimpleAlloc<4096> = SimpleAlloc::new();
 
-use utils::constants::{NONE, OOB, FIRST_READABLE_ADDRESS};
-use utils::host_functions::{read, write, fetch};
+use utils::constants::{FIRST_READABLE_ADDRESS, NONE, OOB};
+use utils::host_functions::{fetch, read, write};
 #[polkavm_derive::polkavm_import]
 extern "C" {
     #[polkavm_import(index = 65)]
@@ -179,11 +179,7 @@ impl Account {
             temp.copy_from_slice(&bytes[offset..offset + 8]);
             u64::from_le_bytes(temp)
         };
-        Self {
-            nonce,
-            free,
-            reserved,
-        }
+        Self { nonce, free, reserved }
     }
 
     pub fn read_from_storage(asset_id_bytes: &[u8], account_id_bytes: &[u8]) -> Option<Self> {
@@ -228,7 +224,7 @@ impl Account {
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
-    let n: u64 = unsafe { ( *(0xFEFF0004 as *const u64)).into() }; // get extrinsic index from payload
+    let n: u64 = unsafe { (*(0xFEFF0004 as *const u64)).into() }; // get extrinsic index from payload
 
     let extrinsic_len = unsafe { fetch(FIRST_WRITEABLE_ADDRESS, 0, BUFFER_SIZE.try_into().unwrap(), 17, n as u64, 0) } as usize;
     let pubkey_ptr = FIRST_WRITEABLE_ADDRESS as *const u8;
@@ -238,14 +234,7 @@ extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
 
     let sig_ptr = unsafe { pubkey_ptr.add(extrinsic_len - SIGNATURE_LEN) };
 
-    let is_valid = unsafe {
-        ed25519verify(
-            pubkey_ptr as u64,
-            data_ptr as u64,
-            data_len as u64,
-            sig_ptr as u64,
-        )
-    };
+    let is_valid = unsafe { ed25519verify(pubkey_ptr as u64, data_ptr as u64, data_len as u64, sig_ptr as u64) };
 
     (data_ptr as u64, data_len as u64)
 }
@@ -291,7 +280,9 @@ pub fn mint(payload: &[u8]) {
     let account_id_bytes = &payload[8..40];
     let amount = extract_u64(&payload[40..48]);
 
-    let Some(mut asset) = Asset::read_from_storage(asset_id_bytes) else { return };
+    let Some(mut asset) = Asset::read_from_storage(asset_id_bytes) else {
+        return;
+    };
     asset.total_supply = asset.total_supply.saturating_add(amount);
     asset.write_to_storage(asset_id_bytes);
 
@@ -309,14 +300,18 @@ pub fn burn(payload: &[u8]) {
     let account_id_bytes = &payload[8..40];
     let amount = extract_u64(&payload[40..48]);
 
-    let Some(mut asset) = Asset::read_from_storage(asset_id_bytes) else { return };
+    let Some(mut asset) = Asset::read_from_storage(asset_id_bytes) else {
+        return;
+    };
     if asset.total_supply < amount {
         return;
     }
     asset.total_supply -= amount;
     asset.write_to_storage(asset_id_bytes);
 
-    let Some(mut account) = Account::read_from_storage(asset_id_bytes, account_id_bytes) else { return };
+    let Some(mut account) = Account::read_from_storage(asset_id_bytes, account_id_bytes) else {
+        return;
+    };
     if account.free < amount {
         return;
     }
@@ -331,7 +326,9 @@ pub fn bond(payload: &[u8]) {
     let account_id_bytes = &payload[8..40];
     let amount = extract_u64(&payload[40..48]);
 
-    let Some(mut account) = Account::read_from_storage(asset_id_bytes, account_id_bytes) else { return };
+    let Some(mut account) = Account::read_from_storage(asset_id_bytes, account_id_bytes) else {
+        return;
+    };
     if account.free < amount {
         return;
     }
@@ -346,7 +343,9 @@ pub fn unbond(payload: &[u8]) {
     let account_id_bytes = &payload[8..40];
     let amount = extract_u64(&payload[40..48]);
 
-    let Some(mut account) = Account::read_from_storage(asset_id_bytes, account_id_bytes) else { return };
+    let Some(mut account) = Account::read_from_storage(asset_id_bytes, account_id_bytes) else {
+        return;
+    };
     if account.reserved < amount {
         return;
     }
@@ -363,7 +362,9 @@ pub fn transfer(payload: &[u8]) {
     let receiver_account_bytes = &payload[40..72];
     let amount = extract_u64(&payload[72..80]);
 
-    let Some(mut sender_account) = Account::read_from_storage(asset_id_bytes, sender_account_bytes) else { return };
+    let Some(mut sender_account) = Account::read_from_storage(asset_id_bytes, sender_account_bytes) else {
+        return;
+    };
     if sender_account.free < amount {
         return;
     }
