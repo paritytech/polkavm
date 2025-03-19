@@ -10,7 +10,7 @@ extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
     let mut buffer = [0u8; 16];
     let offset: u64 = 0;
     let maxlen: u64 = buffer.len() as u64;
-    let result = unsafe { fetch(buffer.as_mut_ptr() as u64, offset, maxlen, 5, 0, 0) };
+    let result = unsafe { fetch(buffer.as_mut_ptr() as u64, offset, maxlen, 5, 0, 1) };
 
     // let mut prev_n : u32 = 0;
     if result != NONE {
@@ -21,7 +21,6 @@ extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
         // prev_n = n;
 
         let new_t_n = t_n + t_n_minus_1 + t_n_minus_2;
-
         let n_new = n + 1;
 
         buffer[0..4].copy_from_slice(&n_new.to_le_bytes());
@@ -29,10 +28,10 @@ extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
         buffer[8..12].copy_from_slice(&t_n.to_le_bytes());
         buffer[12..16].copy_from_slice(&t_n_minus_1.to_le_bytes());
     } else {
-        buffer[0..4].copy_from_slice(&1_i32.to_le_bytes());
-        buffer[4..8].copy_from_slice(&1_i32.to_le_bytes());
-        buffer[8..12].copy_from_slice(&0_i32.to_le_bytes());
-        buffer[12..16].copy_from_slice(&0_i32.to_le_bytes());
+        buffer[0..4].copy_from_slice(&1_u32.to_le_bytes());
+        buffer[4..8].copy_from_slice(&1_u32.to_le_bytes());
+        buffer[8..12].copy_from_slice(&0_u32.to_le_bytes());
+        buffer[12..16].copy_from_slice(&0_u32.to_le_bytes());
     }
 
     unsafe {

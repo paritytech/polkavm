@@ -80,21 +80,23 @@ A **guest program** running on CoreVM performs **Fibonacci calculations** by **i
 
 Accumulate extensively tests **Accumulate host functions** by invoking different host calls based on `n`.
 
+There are two key, value pairs:
 - Key: jam, Value: DOT
-- The table below contains the host function calls and their respective results.
+- Key: DOT, Value: jam
 
+The table below contains the host function calls and their respective results.
 
-| n  | EP in                | Key 0                              | Key 1                                  | Key 2                          | Key 5                      | Key 6                        | Key 7 | Key 8       | Key 9       |
-|----|----------------------|-----------------------------------|----------------------------------------|--------------------------------|----------------------------|------------------------------|------|------------|------------|
-| 0  |                      | FIB result_0                      |                                        |                                |                            |                              |      | info result | gas result |
-| 1  |                      | FIB result_1                      | read jam NONE                          | write jam NONE                 | read jam (OK:3)            | forget HUH                   |      | info result | gas result |
-| 2  |                      | FIB result_2                      | read jam (OK:3)                        | write deleted jam OK           | read jam NONE              |                              |    | info result | gas result |
-| 3  |                      | FIB result_3                      | solicit hash("jam") (OK)               | query hash("jam") (OK:0)       | query hash("dot") NONE     |                              | 45   | info result | gas result |
-| 4  | EP ("jam") in, (insert t) | FIB result_4              | forget hash("jam") (OK, insert t)      | query hash("jam") (OK:2)       | lookup hash("dot") NONE    | assign CORE                  |      | info result | gas result |
-| 5  |                      | FIB result_5                      | lookup hash("jam") (OK:3)              | query hash("jam") (OK:2)       | eject WHO                 | bless WHO                    |      | info result | gas result |
-| 6  |                      | FIB result_6                      | solicit hash("jam") (OK) (insert t)    | query hash("jam") (OK:3)       | assign OK                  |                              | 48   | info result | gas result |
-| 7  | EP ("jam") in,       | FIB result_7                      | forget hash("jam")                     | query hash("jam") (OK:2)       |                            |                              |      | info result | gas result |
-| 8  |                      | FIB result_8                      | lookup hash("jam") (OK:3)              | query hash("jam") (OK:2)       |                            |                              |      | info result | gas result |
-| 9  |                      | FIB result_10                   | new (OK: service index)                | upgrade OK                     | bless OK                   |                              |  51    | info result | gas result |
-
+| n  | EP in                 | Key 0                           | Key 1                                  | Key 2                          | Key 5                  | Key 6                    | Key 7                | Key 8       | Key 9       |
+|----|----------------------|--------------------------------|----------------------------------------|--------------------------------|------------------------|--------------------------|----------------------|------------|------------|
+| 0  |                      | FIB result_0                   |                                        |                                |                        |                          |                      | info OK    | gas result |
+| 1  |                      | FIB result_1                   | read jam NONE                          | write jam NONE                 | read jam (OK:3)        | forget HUH               |                      | info OK    | gas result |
+| 2  |                      | FIB result_2                   | read jam (OK:3)                        | write deleted jam OK:3         | read jam NONE          |                          |                      | info OK    | gas result |
+| 3  |                      | FIB result_3                   | solicit hash("jam") (OK)               | query hash("jam") (OK:0)       | query hash("dot") NONE |                          |                      | info OK    | gas result |
+| 4  | EP ("jam") in, (insert t) | FIB result_4             | forget hash("jam") (OK, insert t)      | query hash("jam") (OK:2+2^32*x) | lookup hash("dot") NONE | assign CORE              |                      | info OK    | gas result |
+| 5  |                      | FIB result_5                   | lookup hash("jam") (OK:3)              | query hash("jam") (OK:2+2^32*x) | eject WHO              | bless WHO                |                      | info OK    | gas result |
+| 6  |                      | FIB result_6                   | solicit hash("jam") (OK) (insert t)    | query hash("jam") (OK:3+2^32*x) | assign OK              |                          |                      | info OK    | gas result |
+| 7  | EP ("jam") in        | FIB result_7                   | forget hash("jam") (OK) (insert w,t)          | query hash("jam") (OK:2+2^32*x) |                        |                          |                      | info OK    | gas result |
+| 8  |                      | FIB result_8                   | lookup hash("jam") (OK:3)              | query hash("jam") (OK:2+2^32*x) |                        |                          |                      | info OK    | gas result |
+| 9  |                      | FIB result_9                   | new (OK: service index) (checkpointed, same as previous) | upgrade OK (checkpointed, same as previous)   | bless OK (checkpointed, same as previous)   |                          |                      | info OK    | gas result |
+| 10 |                      | FIB result_10                  | write delete DOT NONE                  | write DOT NONE                 | write delete DOT OK:3  | read DOT NONE            | write delete DOT NONE | info OK    | gas result |
 
