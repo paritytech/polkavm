@@ -1,12 +1,13 @@
+extern crate alloc;
+// use alloc::string::String;
+use alloc::format;
+
+use simplealloc::SimpleAlloc;
+#[global_allocator]
+static ALLOCATOR: SimpleAlloc<4096> = SimpleAlloc::new();
+
 use crate::constants::*;
 use crate::host_functions::*;
-
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    unsafe {
-        core::arch::asm!("unimp", options(noreturn));
-    }
-}
 
 // Helpful functions and structs for refine
 #[repr(C)]
@@ -76,7 +77,7 @@ pub fn parse_refine_args(mut start_address: u64, mut remaining_length: u64) -> O
 
 pub fn setup_page(segment: &[u8]) {
     if segment.len() < 8 {
-        return call_info("setup_page: buffer too small");
+        return call_log(0, None, "setup_page: buffer too small");
     }
 
     let (m, page_id) = (
@@ -88,11 +89,11 @@ pub fn setup_page(segment: &[u8]) {
     let data = &segment[8..];
 
     if unsafe { zero(m, page_id, 1) } != OK {
-        return call_info("setup_page: zero failed");
+        return call_log(0, None, "setup_page: zero failed");
     }
 
     if unsafe { poke(m, data.as_ptr() as u64, page_address, PAGE_SIZE) } != OK {
-        call_info("setup_page: poke failed");
+        call_log(0, None, "setup_page: poke failed");
     }
 }
 
@@ -108,7 +109,7 @@ pub fn get_page(vm_id: u32, page_id: u32) -> [u8; SEGMENT_SIZE as usize] {
 
     let peek_result = unsafe { peek(vm_id as u64, result_address as u64, page_address as u64, result_length) };
     if peek_result != OK {
-        call_info("get_page: peek failed");
+        call_log(0, None, "get_page: peek failed");
     }
     result
 }
@@ -299,14 +300,20 @@ pub fn write_result(result: u64, key: u8) {
             result_bytes.len() as u64,
         );
     }
-    // log_debug("write_result key=%x result=%x", key_bytes, result_bytes)
+    call_log(2, None, &format!("write_result key={:x?}, result={:x?}", key_bytes, result));
 }
 
-pub fn call_info(msg: &str) {
-    let ascii_bytes = msg.as_bytes();
-    let ascii_address = ascii_bytes.as_ptr() as u64;
-    let ascii_length = ascii_bytes.len() as u64;
-    unsafe { log(2, 0, 0, ascii_address, ascii_length) };
+pub fn call_log(level: u64, target: Option<&str>, msg: &str) {
+    let (target_address, target_length) = if let Some(target_str) = target {
+        let target_bytes = target_str.as_bytes();
+        (target_bytes.as_ptr() as u64, target_bytes.len() as u64)
+    } else {
+        (0, 0)
+    };
+    let msg_bytes = msg.as_bytes();
+    let msg_address = msg_bytes.as_ptr() as u64;
+    let msg_length = msg_bytes.len() as u64;
+    unsafe { log(level, target_address, target_length, msg_address, msg_length) };
 }
 
 // Helpful functions for both refine and accumulate
