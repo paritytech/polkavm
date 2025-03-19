@@ -6,9 +6,9 @@
 use polkavm_derive::min_stack_size;
 min_stack_size!(8192); // depends on how many pages you need
 
-use utils::constants::{FIRST_READABLE_ADDRESS};
-use utils::functions::{parse_refine_args, parse_accumulate_args};
-use utils::host_functions::{write};
+use utils::constants::FIRST_READABLE_ADDRESS;
+use utils::functions::{parse_accumulate_args, parse_refine_args};
+use utils::host_functions::write;
 
 const IV: [u64; 8] = [
     0x6A09_E667_F3BC_C908,
@@ -22,18 +22,18 @@ const IV: [u64; 8] = [
 ];
 
 const SIGMA: [[u8; 16]; 12] = [
-    [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15],
-    [14, 10,  4,  8,  9, 15, 13,  6,  1, 12,  0,  2, 11,  7,  5,  3],
-    [11,  8, 12,  0,  5,  2, 15, 13, 10, 14,  3,  6,  7,  1,  9,  4],
-    [ 7,  9,  3,  1, 13, 12, 11, 14,  2,  6,  5, 10,  4,  0, 15,  8],
-    [ 9,  0,  5,  7,  2,  4, 10, 15, 14,  1, 11, 12,  6,  8,  3, 13],
-    [ 2, 12,  6, 10,  0, 11,  8,  3,  4, 13,  7,  5, 15, 14,  1,  9],
-    [12,  5,  1, 15, 14, 13,  4, 10,  0,  7,  6,  3,  9,  2,  8, 11],
-    [13, 11,  7, 14, 12,  1,  3,  9,  5,  0, 15,  4,  8,  6,  2, 10],
-    [ 6, 15, 14,  9, 11,  3,  0,  8, 12,  2, 13,  7,  1,  4, 10,  5],
-    [10,  2,  8,  4,  7,  6,  1,  5, 15, 11,  9, 14,  3, 12, 13,  0],
-    [ 0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15],
-    [14, 10,  4,  8,  9, 15, 13,  6,  1, 12,  0,  2, 11,  7,  5,  3],
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
+    [11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4],
+    [7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8],
+    [9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13],
+    [2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9],
+    [12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11],
+    [13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10],
+    [6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5],
+    [10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0],
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
 ];
 
 #[inline(always)]
@@ -64,8 +64,8 @@ fn compress(h: &mut [u64; 8], block: &[u8], t0: u64, t1: u64, is_final: bool) {
     for i in 0..8 {
         v[i] = h[i];
     }
-    v[8]  = IV[0];
-    v[9]  = IV[1];
+    v[8] = IV[0];
+    v[9] = IV[1];
     v[10] = IV[2];
     v[11] = IV[3];
     v[12] = IV[4] ^ t0;
@@ -142,8 +142,7 @@ impl Blake2b {
                 self.buflen = 0;
             }
             let n = core::cmp::min(128 - self.buflen, data.len() - offset);
-            self.buf[self.buflen..self.buflen + n]
-                .copy_from_slice(&data[offset..offset + n]);
+            self.buf[self.buflen..self.buflen + n].copy_from_slice(&data[offset..offset + n]);
             self.buflen += n;
             offset += n;
         }
@@ -180,25 +179,24 @@ fn blake2b_hash(data: &[u8]) -> [u8; Blake2b::DIGEST_LENGTH] {
 extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     // parse refine args
     let (_wi_service_index, wi_payload_start_address, _wi_payload_length, _wphash) =
-    if let Some(args) = parse_refine_args(start_address, length)
-    {
-        (
-            args.wi_service_index,
-            args.wi_payload_start_address,
-            args.wi_payload_length,
-            args.wphash,
-        )
-    } else {
-        return (FIRST_READABLE_ADDRESS as u64, 0);
-    };
+        if let Some(args) = parse_refine_args(start_address, length) {
+            (
+                args.wi_service_index,
+                args.wi_payload_start_address,
+                args.wi_payload_length,
+                args.wphash,
+            )
+        } else {
+            return (FIRST_READABLE_ADDRESS as u64, 0);
+        };
 
     let input_length_address: u64 = wi_payload_start_address;
-    let input_length: u64  = unsafe { ( *(input_length_address  as *const u32)).into() }; // skip service index
+    let input_length: u64 = unsafe { (*(input_length_address as *const u32)).into() }; // skip service index
 
     let input_address: u64 = wi_payload_start_address + 4;
     let input = unsafe { core::slice::from_raw_parts(input_address as *const u8, input_length as usize) };
     let output = blake2b_hash(input);
-    
+
     let output_address = output.as_ptr() as u64;
     let output_length = output.len() as u64;
     (output_address, output_length)
@@ -208,12 +206,11 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
     // parse accumulate args
     let (_timeslot, service_index, work_result_address, work_result_length) =
-    if let Some(args) = parse_accumulate_args(start_address, length, 0)
-    {
-        (args.t, args.s, args.work_result_ptr, args.work_result_len)
-    } else {
-        return (FIRST_READABLE_ADDRESS as u64, 0);
-    };
+        if let Some(args) = parse_accumulate_args(start_address, length, 0) {
+            (args.t, args.s, args.work_result_ptr, args.work_result_len)
+        } else {
+            return (FIRST_READABLE_ADDRESS as u64, 0);
+        };
 
     // write FIB result to storage
     let key = [0u8; 1];

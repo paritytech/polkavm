@@ -5,7 +5,7 @@
 use polkavm_derive::min_stack_size;
 min_stack_size!(40960);
 
-use utils::constants::{PAGE_SIZE, FIRST_READABLE_ADDRESS};
+use utils::constants::{FIRST_READABLE_ADDRESS, PAGE_SIZE};
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn main(num_pages: u64) -> (u64, u64) {
@@ -19,8 +19,8 @@ extern "C" fn main(num_pages: u64) -> (u64, u64) {
     }
 
     let out_ptr = FIRST_READABLE_ADDRESS as *mut u32;
-    unsafe { 
+    unsafe {
         core::ptr::write_volatile(out_ptr, sum);
     }
-    return (FIRST_READABLE_ADDRESS as u64, PAGE_SIZE)
+    return (FIRST_READABLE_ADDRESS as u64, PAGE_SIZE);
 }
