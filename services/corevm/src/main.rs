@@ -9,6 +9,8 @@ use utils::constants::{FIRST_READABLE_ADDRESS, FIRST_READABLE_PAGE, NONE, PAGE_S
 use utils::functions::{write_result, call_log};
 use utils::functions::{deserialize_gas_and_registers, get_page, initialize_pvm_registers, serialize_gas_and_registers, setup_page};
 use utils::functions::{parse_accumulate_args, parse_refine_args};
+extern crate alloc;
+use alloc::format;
 
 use utils::host_functions::{
     assign, bless, checkpoint, eject, forget, gas, info, lookup, new, oyield, query, read, solicit, upgrade, write,
@@ -64,6 +66,10 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     let num_payload = wi_payload_length / 8;
     let mut child_vm_ids = [0u32; 16];
     let num_child_vm = num_payload - 1;
+    call_log(2, None, &format!("wi_payload_length={:?}", wi_payload_length));
+    call_log(2, None, &format!("num_payload={:?}", num_payload));
+    call_log(2, None, &format!("num_child_vm={:?}", num_child_vm));
+
     let payload = unsafe { core::slice::from_raw_parts(wi_payload_start_address as *const u8, wi_payload_length as usize) };
     for i in 0..num_child_vm {
         let new_idx = unsafe { machine(child_vm_blob_address, child_vm_blob_length, 0) };
@@ -93,6 +99,8 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     let mut output_12_bytes: [u8; 16] = [0; 16];
     let output_12_bytes_address = output_12_bytes.as_ptr() as u64;
     let output_12_bytes_length = output_12_bytes.len() as u64;
+
+    call_log(2, None, &format!("num_child_vm={:?}", num_child_vm));
 
     for i in 0..num_child_vm {
         buffer_0.fill(0);
@@ -152,6 +160,7 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
         unsafe {
             export(result_buffer.as_ptr() as u64, SEGMENT_SIZE);
         }
+        call_log(2, None, &format!("export i={:?}", i));
     }
 
     for i in 0..num_child_vm {
