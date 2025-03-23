@@ -75,28 +75,6 @@ pub fn parse_refine_args(mut start_address: u64, mut remaining_length: u64) -> O
     })
 }
 
-pub fn setup_page(segment: &[u8]) {
-    if segment.len() < 8 {
-        return call_log(0, None, "setup_page: buffer too small");
-    }
-
-    let (m, page_id) = (
-        u32::from_le_bytes(segment[0..4].try_into().unwrap()) as u64,
-        u32::from_le_bytes(segment[4..8].try_into().unwrap()) as u64,
-    );
-
-    let page_address = page_id * PAGE_SIZE;
-    let data = &segment[8..];
-
-    if unsafe { zero(m, page_id, 1) } != OK {
-        return call_log(0, None, "setup_page: zero failed");
-    }
-
-    if unsafe { poke(m, data.as_ptr() as u64, page_address, PAGE_SIZE) } != OK {
-        call_log(0, None, "setup_page: poke failed");
-    }
-}
-
 pub fn get_page(vm_id: u32, page_id: u32) -> [u8; SEGMENT_SIZE as usize] {
     let mut result = [0u8; SEGMENT_SIZE as usize];
 
