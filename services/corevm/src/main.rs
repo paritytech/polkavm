@@ -5,15 +5,17 @@
 use polkavm_derive::min_stack_size;
 min_stack_size!(40960); // depends on how many pages you need
 
-use utils::constants::{FIRST_READABLE_ADDRESS, FIRST_READABLE_PAGE, NONE, PAGE_SIZE, SEGMENT_SIZE};
+use utils::constants::{FIRST_READABLE_ADDRESS, FIRST_READABLE_PAGE, NONE, CORE, OK, WHO, HUH, PAGE_SIZE, SEGMENT_SIZE};
 use utils::functions::{write_result, call_log};
 use utils::functions::{deserialize_gas_and_registers, get_page, initialize_pvm_registers, serialize_gas_and_registers, setup_page};
 use utils::functions::{parse_accumulate_args, parse_refine_args};
+extern crate alloc;
+use alloc::format;
 
 use utils::host_functions::{
     assign, bless, checkpoint, eject, forget, gas, info, lookup, new, oyield, query, read, solicit, upgrade, write,
 };
-use utils::host_functions::{export, expunge, fetch, historical_lookup, invoke, machine, peek};
+use utils::host_functions::{export, expunge, fetch, historical_lookup, invoke, machine, poke, peek};
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
@@ -64,10 +66,15 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     let num_payload = wi_payload_length / 8;
     let mut child_vm_ids = [0u32; 16];
     let num_child_vm = num_payload - 1;
+    let mut gas_result = unsafe { gas() };
+
+    call_log(2, None, &format!("num_child_vm={:?} gas_result={:?}", num_child_vm, gas_result));
+
     let payload = unsafe { core::slice::from_raw_parts(wi_payload_start_address as *const u8, wi_payload_length as usize) };
     for i in 0..num_child_vm {
         let new_idx = unsafe { machine(child_vm_blob_address, child_vm_blob_length, 0) };
         child_vm_ids[i as usize] = new_idx as u32;
+        call_log(2, None, &format!("machine new index={:?}", new_idx));
     }
 
     // fetch segments for all child VMs
@@ -78,6 +85,7 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
         if result == NONE {
             break;
         }
+        call_log(2, None, &format!("fetch segment_index={:?} fetch_result={:?}", segment_index, result));
         setup_page(&segment_buf);
         segment_index += 1;
     }
@@ -93,6 +101,8 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     let mut output_12_bytes: [u8; 16] = [0; 16];
     let output_12_bytes_address = output_12_bytes.as_ptr() as u64;
     let output_12_bytes_length = output_12_bytes.len() as u64;
+
+    call_log(2, None, &format!("num_child_vm={:?}", num_child_vm));
 
     for i in 0..num_child_vm {
         buffer_0.fill(0);
@@ -130,17 +140,21 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
             setup_page(&buffer_0);
             setup_page(&buffer_1);
 
-            unsafe {
+            let invoke_result = unsafe {
                 invoke(child_vm_id as u64, g_w_address);
-            }
+            };
+            gas_result = unsafe { gas() };
+            call_log(2, None, &format!("invoke i={:?} invoke_result={:?} gas={:?}", i, invoke_result, gas_result));
 
             let result_buffer_data_address = unsafe { result_buffer.as_mut_ptr().add(8) };
             let (_, new_child_vm_registers) = deserialize_gas_and_registers(&g_w);
             let output_address = new_child_vm_registers[7];
 
-            unsafe {
+            let peek_result = unsafe {
                 peek(child_vm_id as u64, result_buffer_data_address as u64, output_address, PAGE_SIZE);
-            }
+            };
+            gas_result = unsafe { gas() };
+            call_log(2, None, &format!("peek i={:?}, expect OK {:?}, got {:?} gas={:?}", i, OK, peek_result, gas_result));
 
             result_buffer[0..4].copy_from_slice(&child_vm_id.to_le_bytes());
             result_buffer[4..8].copy_from_slice(&FIRST_READABLE_PAGE.to_le_bytes());
@@ -149,38 +163,22 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
 
             setup_page(&result_buffer);
         }
-        unsafe {
+        let export_result = unsafe {
             export(result_buffer.as_ptr() as u64, SEGMENT_SIZE);
-        }
+        };
+
+        gas_result = unsafe { gas() };
+        call_log(2, None, &format!("export i={:?}: expect OK {:?}, got {:?} gas={:?}", i, OK, export_result, gas_result));
     }
 
     for i in 0..num_child_vm {
         let child_vm_id = child_vm_ids[i as usize];
-        unsafe {
+        let expunge_result = unsafe {
             expunge(child_vm_id as u64);
-        }
+        };
+        gas_result = unsafe { gas() };
+        call_log(2, None, &format!("expunge i={:?}: expect OK {:?}, got {:?} gas={:?}", i, OK, expunge_result, gas_result));
     }
-
-    // let parent_payload_index = num_payload - 1;
-    // let parent_payload = &payload[(parent_payload_index * 8) as usize..((parent_payload_index + 1) * 8) as usize];
-    // let _parent_n = u32::from_le_bytes(parent_payload[0..4].try_into().unwrap());
-    // let parent_f = u32::from_le_bytes(parent_payload[4..8].try_into().unwrap());
-
-    // let mut sum: u32 = 0;
-    // for i in 0..num_child_vm {
-    //     let child_vm_id = child_vm_ids[i as usize];
-    //     if parent_f == 16 {
-    //         buffer_0 = get_page(child_vm_id, 0);
-    //         let mut bytes = [0u8; 4];
-    //         bytes.copy_from_slice(&buffer_0[8..12]);
-    //         sum = sum.wrapping_add(u32::from_le_bytes(bytes));
-    //     } else if parent_f == 17 {
-    //         buffer_0 = get_page(child_vm_id, 0);
-    //         let mut bytes = [0u8; 4];
-    //         bytes.copy_from_slice(&buffer_0[8..12]);
-    //         sum = sum.wrapping_mul(u32::from_le_bytes(bytes));
-    //     }
-    // }
 
     (output_12_bytes_address, output_12_bytes_length)
 }
@@ -247,85 +245,85 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
     // Depending on what "n" is, test different host functions
     if n == 1 {
         let read_none_result = unsafe {read(service_index as u64, jam_address, jam_length, buffer_address, 0, buffer_length)};
+        call_log(2, None, &format!("read from jam: expect NONE {:?}, got {:?} (recorded at key 1)", NONE,read_none_result));
         write_result(read_none_result, 1);
-        call_log(2, Some("1"), "read from jam, expect NONE");
 
         let write_result1 = unsafe { write(jam_address, jam_length, dot_address, dot_length) };
+        call_log(2, None, &format!("write to jam: expect NONE {:?}, got {:?} (recorded at key 2)", NONE, write_result1));
         write_result(write_result1, 2);
-        call_log(2, Some("2"), "write to jam, expect NONE");
 
         let read_ok_result = unsafe {read( service_index as u64, jam_address, jam_length, buffer_address, 0, buffer_length)};
+        call_log(2, None, &format!("read from jam: expect OK {:?}, got {:?} (recorded at key 5)", OK, read_ok_result));
         write_result(read_ok_result, 5);
-        call_log(2, Some("5"), "read from jam, expect OK: 3");
 
         let forget_result = unsafe { forget(jam_address, 0) };
+        call_log(2, None, &format!("forget jam: expect HUH {:?}, got {:?} (recorded at key 6)", HUH, forget_result));
         write_result(forget_result, 6);
-        call_log(2, Some("6"), "forget jam, expect HUH");
     } else if n == 2 {
         let read_result = unsafe {read(service_index as u64, jam_address, jam_length, buffer_address, 0, buffer_length)};
+        call_log(2, None, &format!("read jam: expect OK {:?}, got {:?} (recorded at key 1)", OK, read_result));
         write_result(read_result, 1);
-        call_log(2, Some("1"), "read from JAM, expect OK: 3");
 
         let write_result1 = unsafe { write(jam_address, jam_length, 0, 0) };
+        call_log(2, None, &format!("write deleted jam: expect OK {:?}, got {:?} (recorded at key 2)", OK, write_result1));
         write_result(write_result1, 2);
-        call_log(2, Some("2"), "write deleted JAM, expect OK: 3");
 
         let read_ok_result = unsafe {read(service_index as u64, jam_address, jam_length, buffer_address, 0, buffer_length)};
+        call_log(2, None, &format!("read jam: expect NONE {:?}, got {:?} (recorded at key 5)", NONE, read_ok_result));
         write_result(read_ok_result, 5);
-        call_log(2, Some("5"), "read from JAM, expect NONE");
     } else if n == 3 {
         let solicit_result = unsafe { solicit(jam_hash_address, jam_length) };
+        call_log(2, None, &format!("solicit hash(jam): expect OK {:?}, got {:?} (recorded at key 1)", OK, solicit_result));
         write_result(solicit_result, 1);
-        call_log(2, Some("1"), "solicit hash(jam), expect OK");
 
         let query_jamhash_result = unsafe { query(jam_hash_address, jam_length) };
+        call_log(2, None, &format!("query hash(jam): expect OK {:?}, got {:?} (recorded at key 2)", OK, query_jamhash_result));
         write_result(query_jamhash_result, 2);
-        call_log(2, Some("2"), "query hash(jam), expect OK");
 
         let query_none_result = unsafe { query(dot_hash_address, dot_length) };
+        call_log(2, None, &format!("query hash(dot): expect NONE {:?}, got {:?} (recorded at key 5)", NONE, query_none_result));
         write_result(query_none_result, 5);
-        call_log(2, Some("5"), "query hash(dot), expect NONE");
     } else if n == 4 {
         let forget_result = unsafe { forget(jam_hash_address, jam_length) };
+        call_log(2, None, &format!("forget hash(jam): expect OK {:?}, got {:?} (recorded at key 1)", OK, forget_result));
         write_result(forget_result, 1);
-        call_log(2, Some("1"), "forget hash(jam), expect OK: insert t");
 
         let query_jamhash_result = unsafe { query(jam_hash_address, jam_length) };
+        call_log(2, None, &format!("query hash(jam): expect OK {:?} 2+2^32*x, got {:?} (recorded at key 2)", OK, forget_result));
         write_result(query_jamhash_result, 2);
-        call_log(2, Some("2"), "query hash(jam), expect OK: 2+2^32*x");
 
         let lookup_none_result = unsafe { lookup(service_index as u64, dot_hash_address, buffer_address, 0, dot_length) };
+        call_log(2, None, &format!("lookup hash(dot): expect NONE {:?}, got {:?} (recorded at key 5)", NONE, lookup_none_result));
         write_result(lookup_none_result, 5);
-        call_log(2, Some("5"), "lookup hash(dot), expect NONE");
 
         let assign_result = unsafe { assign(1000, jam_address) };
+        call_log(2, None, &format!("assign jam: expect CORE {:?}, got {:?} (recorded at key 6)", CORE, assign_result));
         write_result(assign_result, 6);
-        call_log(2, Some("6"), "assign jam, expect CORE");
     } else if n == 5 {
         let lookup_result = unsafe { lookup(service_index as u64, jam_hash_address, buffer_address, 0, jam_length) };
+        call_log(2, None, &format!("lookup hash(jam): expect OK {:?}, got {:?} (recorded at key 1)", OK, lookup_result));
         write_result(lookup_result, 1);
-        call_log(2, Some("1"), "lookup hash(jam), expect OK: 3");
 
-        let read_ok_result = unsafe { query(jam_hash_address, jam_length) };
-        write_result(read_ok_result, 2);
-        call_log(2, Some("2"), "query hash(jam), expect OK: 2+2^32*x");
+        let query_ok_result = unsafe { query(jam_hash_address, jam_length) };
+        call_log(2, None, &format!("query hash(jam): expect OK {:?}, got {:?} (recorded at key 2)", OK, query_ok_result));
+        write_result(query_ok_result, 2);
 
         let eject_who_result = unsafe { eject(service_index as u64, jam_hash_address) };
+        call_log(2, None, &format!("eject: expect WHO {:?}, got {:?} (recorded at key 5)", WHO, eject_who_result));
         write_result(eject_who_result, 5);
-        call_log(2, Some("5"), "eject, expect WHO");
 
         let overflow_s = 0xFFFFFFFFFFFFu64;
         let bless_who_result = unsafe { bless(overflow_s, 0, 0, jam_hash_address, 0) };
+        call_log(2, None, &format!("bless: expect WHO {:?}, got {:?} (recorded at key 6)", WHO, bless_who_result));
         write_result(bless_who_result, 6);
-        call_log(2, Some("6"), "bless, expect WHO");
     } else if n == 6 {
         let solicit_result = unsafe { solicit(jam_hash_address, jam_length) };
         write_result(solicit_result, 1);
-        call_log(2, Some("1"), "solicit hash(jam), expect OK: insert t");
+        call_log(2, None, &format!("solicit hash(jam), expect OK {:?}: insert t, got {:?} (recorded at key 1)", OK, solicit_result));
 
         let query_jamhash_result = unsafe { query(jam_hash_address, jam_length) };
+        call_log(2, None, &format!("query hash(jam): expect OK {:?}, got {:?} (recorded at key 2)", OK, query_jamhash_result));
         write_result(query_jamhash_result, 2);
-        call_log(2, Some("2"), "query hash(jam), expect OK: 3+2^32*x");
 
         let core_index = 0;
 
@@ -338,34 +336,34 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         }
 
         let assign_ok_result = unsafe { assign(core_index, auth_hashes.as_ptr() as u64) };
+        call_log(2, None, &format!("assign: expect OK {:?}, got {:?} (recorded at key 5)", OK, assign_ok_result));
         write_result(assign_ok_result, 5);
-        call_log(2, Some("5"), "assign, expect OK");
     } else if n == 7 {
         let forget_result = unsafe { forget(jam_hash_address, jam_length) };
+        call_log(2, None, &format!("forget hash(jam): expect OK {:?}, got {:?} (recorded at key 1)", OK, forget_result));
         write_result(forget_result, 1);
-        call_log(2, Some("1"), "forget hash(jam), expect OK");
 
         let query_jamhash_result = unsafe { query(jam_hash_address, jam_length) };
+        call_log(2, None, &format!("query hash(jam): expect OK {:?} (2+2^32*x), got {:?} (recorded at key 1)", OK, query_jamhash_result));
         write_result(query_jamhash_result, 2);
-        call_log(2, Some("2"), "query hash(jam), expect OK: 2+2^32*x");
     } else if n == 8 {
         let lookup_result = unsafe { lookup(service_index as u64, jam_hash_address, buffer_address, 0, jam_length) };
+        call_log(2, None, &format!("lookup hash(jam), expect OK {:?}: 3 (2+2^32*x), got {:?} (recorded at key 1)", OK, lookup_result));
         write_result(lookup_result, 1);
-        call_log(2, Some("1"), "lookup hash(jam), expect OK: 3");
 
         let query_jamhash_result = unsafe { query(jam_hash_address, jam_length) };
+        call_log(2, None, &format!("query hash(jam): expect OK {:?} (2+2^32*x), got {:?} (recorded at key 2)", OK, query_jamhash_result));
         write_result(query_jamhash_result, 2);
-        call_log(2, Some("2"), "query hash(jam), expect OK: 2+2^32*x");
     } else if n == 9 {
         let g: u64 = 911;
         let m: u64 = 911;
         let new_result = unsafe { new(jam_hash_address, jam_length, g, m) };
+        call_log(2, None, &format!("new: expect OK {:?} (service_index), got {:?} (recorded at key 1)", OK, new_result));
         write_result(new_result, 1);
-        call_log(2, Some("1"), "new, expect OK: service_index");
 
         let upgrade_result = unsafe { upgrade(jam_hash_address, g, m) };
+        call_log(2, None, &format!("upgrade: expect OK {:?}, got {:?} (recorded at key 2)", OK, upgrade_result));
         write_result(upgrade_result, 2);
-        call_log(2, Some("2"), "upgrade, expect OK");
 
         let s: u32 = 911;
         let s_bytes = s.to_le_bytes();
@@ -376,37 +374,37 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         let bless_input_address = bless_input.as_ptr() as u64;
 
         let bless_ok_result = unsafe { bless(0, 1, 1, bless_input_address, 1) };
+        call_log(2, None, &format!("bless: expect OK {:?}, got {:?} (recorded at key 5)", OK, bless_ok_result));
         write_result(bless_ok_result, 5);
-        call_log(2, Some("5"), "bless, expect OK");
     } else if n == 10 {
         let delete_result = unsafe { write(dot_address, dot_length, 0, 0) };
+        call_log(2, None, &format!("write deleted DOT: expect NONE {:?}, got {:?} (recorded at key 1)", NONE, delete_result));
         write_result(delete_result, 1);
-        call_log(2, Some("1"), "write deleted DOT, expect NONE");
 
         let write_result1 = unsafe { write(dot_address, dot_length, jam_address, jam_length) };
+        call_log(2, None, &format!("write to DOT: expect NONE {:?}, got {:?} (recorded at key 1)", NONE, write_result1));
         write_result(write_result1, 2);
-        call_log(2, Some("2"), "write to DOT, expect NONE");
 
         let delete_result = unsafe { write(dot_address, dot_length, 0, 0) };
+        call_log(2, None, &format!("write deleted DOT: expect OK {:?}: 3, got {:?} (recorded at key 5)", OK, delete_result));
         write_result(delete_result, 5);
-        call_log(2, Some("5"), "write deleted DOT, expect OK: 3");
 
         let read_result = unsafe { read(service_index as u64, dot_address, dot_length, buffer_address, 0, buffer_length) };
+        call_log(2, None, &format!("read from DOT: expect NONE {:?}, got {:?} (recorded at key 6)", NONE, read_result));
         write_result(read_result, 6);
-        call_log(2, Some("6"), "read from DOT, expect NONE");
 
         let delete_result = unsafe { write(dot_address, dot_length, 0, 0) };
+        call_log(2, None, &format!("write deleted DOT: expect NONE {:?}, got {:?} (recorded at key 7)", NONE, delete_result));
         write_result(delete_result, 7);
-        call_log(2, Some("7"), "write deleted DOT, expect NONE");
     }
 
     let info_result = unsafe { info(service_index as u64, buffer_address) };
     write_result(info_result, 8);
-    call_log(2, Some("8"), "info, expect OK");
+    call_log(2, None, &format!("info: expect OK {:?}, got {:?} (recorded at key 8)", OK, info_result));
 
     let gas_result = unsafe { gas() };
     write_result(gas_result, 9);
-    call_log(2, Some("9"), "gas, expect OK: gas");
+    call_log(2, None, &format!("gas: expect OK {:?}, got {:?} (recorded at key 9)", OK, gas_result));
 
     let mut output_bytes_32 = [0u8; 32];
     output_bytes_32[..work_result_length as usize]
@@ -430,7 +428,7 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
                 "jalr x0, a0, 0", // djump(0+0) causes panic
             );
         }
-        call_log(2, None, "corevm PANIC");
+        call_log(1, None, "corevm PANIC");
     } else {
     }
     unsafe {
