@@ -23,6 +23,9 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     return (wi_payload_start_address, wi_payload_length);
 }
 
+#[no_mangle]
+static mut OUTPUT_BUFFER: [u8; 32] = [0; 32];
+
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
     // parse accumulate args
@@ -41,14 +44,14 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
     let omega_10: u64 = 100; // m -  the minimum required for the On Transfer entry-point
     // create new service with host New
     let result = unsafe { new(work_result_address, code_length, omega_9, omega_10) };
-    let result_bytes: [u8; 8] = result.to_le_bytes();
+    let result_bytes = &result.to_le_bytes()[..4];
 
     // write the new service index to the storage
     let storage_key: [u8; 4] = [0; 4];
     let omega_7: u64 = storage_key.as_ptr() as u64;
     let omega_8: u64 = storage_key.len() as u64;
     let omega_9: u64 = result_bytes.as_ptr() as u64; // new service index bytes address
-    let omega_10: u64 = 4; // service index is u32
+    let omega_10: u64 = result_bytes.len() as u64; // new service index bytes length
     unsafe { write(omega_7, omega_8, omega_9, omega_10) };
 
     // transfer some token to the new service
@@ -61,12 +64,12 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
 
     // Option<hash> test
     // pad result to 32 bytes
-    let mut output_bytes_32 = [0u8; 32];
-    output_bytes_32[..result_bytes.len()].copy_from_slice(&result_bytes);
-    let output_bytes_address: u64 = output_bytes_32.as_ptr() as u64;
-    let output_bytes_length: u64 = output_bytes_32.len() as u64;
-
-    return (output_bytes_address, output_bytes_length);
+    unsafe {
+        OUTPUT_BUFFER[..result_bytes.len()].copy_from_slice(&result_bytes);
+        let output_bytes_address: u64 = OUTPUT_BUFFER.as_ptr() as u64;
+        let output_bytes_length: u64 = OUTPUT_BUFFER.len() as u64;
+        return (output_bytes_address, output_bytes_length);
+    }
 }
 
 #[polkavm_derive::polkavm_export]
