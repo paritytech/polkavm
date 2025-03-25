@@ -151,12 +151,10 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
         let export_result = unsafe {
             export(segment_buf.as_ptr() as u64, SEGMENT_SIZE);
         };
-        call_log(2, None, "fooF");
         gas_result = unsafe { gas() };
         call_log(2, None, &format!("export i={:?}: expect OK {:?}, got {:?} gas={:?} output={:?}", i, OK, export_result, gas_result, output_bytes[0]));
     }
     call_log(2, None, &format!("output_bytes={:?}|{:?}|{:?}", output_bytes[0], output_bytes[4], output_bytes[8]));
-
 
     let expunge_result = unsafe {
         expunge(child_vm_id as u64);
@@ -261,7 +259,7 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         write_result(solicit_result, 1);
 
         let query_jamhash_result = unsafe { query(jam_hash_address, jam_length) };
-        call_log(2, None, &format!("query hash(jam): expect OK {:?}, got {:?} (recorded at key 2)", OK, query_jamhash_result));
+        call_log(2, None, &format!("query hash(jam): expect non-ZERO, got {:?} (recorded at key 2)", query_jamhash_result));
         write_result(query_jamhash_result, 2);
 
         let query_none_result = unsafe { query(dot_hash_address, dot_length) };
@@ -273,7 +271,7 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         write_result(forget_result, 1);
 
         let query_jamhash_result = unsafe { query(jam_hash_address, jam_length) };
-        call_log(2, None, &format!("query hash(jam): expect OK {:?} 2+2^32*x, got {:?} (recorded at key 2)", OK, forget_result));
+        call_log(2, None, &format!("query hash(jam): expect non-zero, got {:?} (recorded at key 2)", query_jamhash_result));
         write_result(query_jamhash_result, 2);
 
         let lookup_none_result = unsafe { lookup(service_index as u64, dot_hash_address, buffer_address, 0, dot_length) };
@@ -388,7 +386,7 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
 
     let gas_result = unsafe { gas() };
     write_result(gas_result, 9);
-    call_log(2, None, &format!("gas: expect OK {:?}, got {:?} (recorded at key 9)", OK, gas_result));
+    call_log(2, None, &format!("gas: got {:?} (recorded at key 9)", gas_result));
 
     let mut output_bytes_32 = [0u8; 32];
     output_bytes_32[..work_result_length as usize]
