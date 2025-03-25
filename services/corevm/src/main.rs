@@ -2,21 +2,22 @@
 #![no_main]
 #![feature(asm_const)]
 
-use polkavm_derive::min_stack_size;
-min_stack_size!(40960); // depends on how many pages you need
-
-use utils::constants::{FIRST_READABLE_ADDRESS, NONE, CORE, OK, WHO, HUH, FIRST_READABLE_PAGE, PAGE_SIZE, SEGMENT_SIZE}; 
-use utils::functions::{write_result, call_log};
-use utils::functions::{deserialize_gas_and_registers, initialize_pvm_registers, serialize_gas_and_registers};
-use utils::functions::{parse_accumulate_args, parse_refine_args};
 extern crate alloc;
 use alloc::format;
 
-use utils::host_functions::{
-    assign, bless, checkpoint, eject, forget, gas, info, lookup, new, oyield, query, read, solicit, upgrade, write,
-};
-use utils::host_functions::{export, expunge, fetch, historical_lookup, invoke, machine, poke, peek, zero};
+use polkavm_derive::min_stack_size;
+min_stack_size!(40960); // depends on how many pages you need
 
+use utils::constants::{FIRST_READABLE_ADDRESS, INPUT_ARGS_PAGE, PAGE_SIZE, SEGMENT_SIZE};
+use utils::constants::{NONE, CORE, OK, WHO, HUH, HALT, HOST, LOG};
+
+use utils::functions::{write_result, call_log};
+use utils::functions::{initialize_pvm_registers, serialize_gas_and_registers, deserialize_gas_and_registers};
+use utils::functions::{parse_standard_program_initialization_args, standard_program_initialization_for_child};
+use utils::functions::{parse_accumulate_args, parse_refine_args};
+
+use utils::host_functions::{assign, bless, checkpoint, eject, forget, gas, info, lookup, new, oyield, query, read, solicit, upgrade, write};
+use utils::host_functions::{export, expunge, fetch, historical_lookup, invoke, machine, poke, peek, zero, log};
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
@@ -47,61 +48,77 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     }
 
     // fetch child VM blob
-    let mut child_vm_blob = [0u8; 512 as usize];
-    let child_vm_blob_address = child_vm_blob.as_mut_ptr() as u64;
-    let mut child_vm_blob_length = child_vm_blob.len() as u64;
-    child_vm_blob_length = unsafe {
+    let mut raw_blob = [0u8; 8192 as usize];
+    let raw_blob_address = raw_blob.as_mut_ptr() as u64;
+    let mut raw_blob_length = raw_blob.len() as u64;
+    raw_blob_length = unsafe {
         historical_lookup(
             wi_service_index as u64,
             code_hash_address,
-            child_vm_blob_address,
+            raw_blob_address,
             0,
-            child_vm_blob_length,
+            raw_blob_length,
         )
     };
-    if child_vm_blob_length == NONE {
+    if raw_blob_length == NONE {
         return (FIRST_READABLE_ADDRESS as u64, 0);
     }
 
-    // new child VM
-    //let num_payload = wi_payload_length / 8;
-    let mut child_vm_ids = [0u32; 16];
-    let num_child_vm = 1; // num_payload - 1;
+    // parse raw blob
+    let (z, s, o_bytes_address, o_bytes_length, w_bytes_address, w_bytes_length, c_bytes_address, c_bytes_length) =
+        if let Some(blob) = parse_standard_program_initialization_args(raw_blob_address, raw_blob_length) {
+            (
+                blob.z,
+                blob.s,
+                blob.o_bytes_address,
+                blob.o_bytes_length,
+                blob.w_bytes_address,
+                blob.w_bytes_length,
+                blob.c_bytes_address,
+                blob.c_bytes_length,
+            )
+        } else {
+            return (FIRST_READABLE_ADDRESS as u64, 0);
+        };
+    call_log(2, None, &format!("z={:?} s={:?} o_bytes_address={:?} o_bytes_length={:?} w_bytes_address={:?} w_bytes_length={:?} c_bytes_address={:?} c_bytes_length={:?}",
+        z, s, o_bytes_address, o_bytes_length, w_bytes_address, w_bytes_length, c_bytes_address, c_bytes_length));
+
     let mut gas_result = unsafe { gas() };
-    call_log(2, None, &format!("num_child_vm={:?} gas_result={:?}", num_child_vm, gas_result));
+    call_log(2, None, &format!("gas_result={:?}", gas_result));
 
-    //let payload = unsafe { core::slice::from_raw_parts(wi_payload_start_address as *const u8, wi_payload_length as usize) };
-    for i in 0..num_child_vm {
-        let new_idx = unsafe { machine(child_vm_blob_address, child_vm_blob_length, 0) };
-        child_vm_ids[i as usize] = new_idx as u32;
-        call_log(2, None, &format!("machine new index={:?}", new_idx));
-    }
+    // new child VM
+    let new_machine_idx = unsafe { machine(c_bytes_address, c_bytes_length, 0) };
+    call_log(2, None, &format!("machine new index={:?}", new_machine_idx));
 
-    // invoke all child VMs
-    let init_gas: u64 = 0x10000;
-    let child_vm_registers = initialize_pvm_registers();
-    let g_w = serialize_gas_and_registers(init_gas, &child_vm_registers);
-    let g_w_address = g_w.as_ptr() as u64;
+    // StandardProgramInitializationForChild
+    standard_program_initialization_for_child(
+        z,
+        s,
+        o_bytes_address,
+        o_bytes_length,
+        w_bytes_address,
+        w_bytes_length,
+        new_machine_idx as u32,
+    );
 
-    call_log(2, None, &format!("num_child_vm={:?}", num_child_vm));
- 
-    let child_vm_id = child_vm_ids[0];
     // fetch segments, poke child VM
     let mut segment_buf = [0u8; SEGMENT_SIZE as usize];
     let mut segment_index = 0u64;
     let segment_buf_segment_address = segment_buf.as_mut_ptr() as u64;
     let segment_buf_page_address = segment_buf_segment_address + 8;
+    let mut m = 0u64;
+    let mut page_id = 0u64;
     loop {
         let fetch_result = unsafe { fetch(segment_buf_segment_address as u64, 0, SEGMENT_SIZE as u64, 6, segment_index, 0) };
         if fetch_result == NONE {
             break;
         }
         call_log(2, None, &format!("fetch segment_index={:?} fetch_result={:?}", segment_index, fetch_result));
-        let (m, page_id) = (
+        (m, page_id) = (
             u32::from_le_bytes(segment_buf[0..4].try_into().unwrap()) as u64,
             u32::from_le_bytes(segment_buf[4..8].try_into().unwrap()) as u64,
         );
-        
+
         let zero_result = unsafe { zero(m, page_id, 1) };
         call_log(2, None, &format!("zero m={:?}, page_id={:?} zero_result={:?}",  m, page_id, zero_result));
 
@@ -110,62 +127,106 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
         let page_address = page_id * PAGE_SIZE as u64;
         let poke_result = unsafe { poke(m, segment_buf_page_address, page_address, PAGE_SIZE) };
         call_log(2, None, &format!("poke m={:?} s={:?} o={:?} z={:?} poke_result={:?}", m, s, page_address, PAGE_SIZE, poke_result));
-        
+
         segment_index += 1;
     }
 
-    let invoke_result = unsafe {
-        invoke(child_vm_id as u64, g_w_address);
-    };
+    // zero one more page for result
+    page_id = if page_id == 0 { INPUT_ARGS_PAGE as u64 } else { page_id + 1 };
+    let zero_result = unsafe { zero(m, page_id, 1) };
+    call_log(2, None, &format!("zero for result m={:?}, page_id={:?} zero_result={:?}",  m, page_id, zero_result));
+
+    // invoke child VM
+    let init_gas: u64 = 0x10000;
+    let mut child_vm_registers = initialize_pvm_registers();
+    child_vm_registers[7] = segment_index;
+
+    call_log(2, None, &format!("before child_vm_registers={:?}", child_vm_registers));
+    let g_w = serialize_gas_and_registers(init_gas, &child_vm_registers);
+    let g_w_address = g_w.as_ptr() as u64;
+
+    let mut invoke_result: u64;
+    let mut omega_8: u64;
+
+    loop {
+        (invoke_result, omega_8) = unsafe { invoke(new_machine_idx as u64, g_w_address) };
+        call_log(2, None, &format!("invoke {:?} invoke_result={:?} gas={:?}", new_machine_idx, invoke_result, gas_result));
+
+        if invoke_result == HALT {
+            break;
+        }
+
+        // only process hostlog
+        if invoke_result == HOST && omega_8 == LOG {
+            (_, child_vm_registers) = deserialize_gas_and_registers(&g_w);
+            let level = child_vm_registers[7];
+            let target_address = child_vm_registers[8];
+            let target_length = child_vm_registers[9];
+            let message_address = child_vm_registers[10];
+            let message_length = child_vm_registers[11];
+
+            let target_buffer = [0u8; 64];
+            let target_buffer_address = target_buffer.as_ptr() as u64;
+
+            let message_buffer = [0u8; 256];
+            let message_buffer_address = message_buffer.as_ptr() as u64;
+
+            unsafe { peek(new_machine_idx, target_buffer_address, target_address, target_length) };
+            unsafe { peek(new_machine_idx, message_buffer_address, message_address, message_length) };
+
+            unsafe {
+                log(level, target_buffer_address, target_length, message_buffer_address, message_length);
+            }
+        }
+    }
 
     gas_result = unsafe { gas() };
-    call_log(2, None, &format!("invoke {:?} invoke_result={:?} gas={:?}", child_vm_id, invoke_result, gas_result));
+    call_log(2, None, &format!("gas_result={:?}", gas_result));
 
-    let (_, new_child_vm_registers) = deserialize_gas_and_registers(&g_w);
-    let output_address = new_child_vm_registers[7];
-
+    // peek child VM, process output and export segments
     let mut output_bytes: [u8; 12] = [0;12];
     let output_bytes_address = output_bytes.as_ptr() as u64;
     let output_bytes_length = output_bytes.len() as u64;
-    let child_id = child_vm_id as u32;
+    let child_id = new_machine_idx as u32;
     for i in 0..segment_index+1 {
         let i_32 = i as u32;
-        let child_page_address = ((FIRST_READABLE_PAGE + i_32) as u64) * PAGE_SIZE as u64;
-        let peek_result = unsafe {
-            peek(child_vm_id as u64, segment_buf_page_address, child_page_address, PAGE_SIZE);
-        };
+        let child_page_address = ((INPUT_ARGS_PAGE + i_32) as u64) * PAGE_SIZE as u64;
+        let peek_result = unsafe { peek(new_machine_idx, segment_buf_page_address, child_page_address, PAGE_SIZE) };
+
         call_log(2, None, &format!("peek child_vm_id={:?}, segment_buf_page_address={:?}, child_page_address={:?} PAGE_SIZE={:?} peek_result={:?}",
-         child_vm_id, segment_buf_page_address, child_page_address, PAGE_SIZE, peek_result));
-        let seg_index = FIRST_READABLE_PAGE + i as u32;
+        new_machine_idx, segment_buf_page_address, child_page_address, PAGE_SIZE, peek_result));
+
+        let seg_index = INPUT_ARGS_PAGE + i as u32;
+
+        // page metadata (child_vm_id, page index)
+        segment_buf[0..4].copy_from_slice(&child_id.to_le_bytes());
+        segment_buf[4..8].copy_from_slice(&seg_index.to_le_bytes());
+        call_log(2, None, &format!(" segment_buf[0..8]={:?}, child_id={:?}, seg_index={:?}", &segment_buf[0..8], child_id, seg_index));
+
         if i == segment_index {
-            // page metadata (child_vm_id, page index)
-            segment_buf[0..4].copy_from_slice(&child_id.to_le_bytes());
-            segment_buf[4..8].copy_from_slice(&seg_index.to_le_bytes());
-            call_log(2, None, &format!(" seg_buf={:?}|{:?}", segment_buf[0], segment_buf[4]));
             // output_bytes: n, f(n), f(n-1)
             output_bytes[0..4].copy_from_slice(&i_32.to_le_bytes());
             output_bytes[4..8].copy_from_slice(&segment_buf[8..12]);
         } else if i == segment_index - 1 {
             output_bytes[8..12].copy_from_slice(&segment_buf[8..12]);
         }
-        let export_result = unsafe {
-            export(segment_buf.as_ptr() as u64, SEGMENT_SIZE);
-        };
-        call_log(2, None, "fooF");
+
+        let export_result = unsafe { export(segment_buf.as_ptr() as u64, SEGMENT_SIZE) };
         gas_result = unsafe { gas() };
-        call_log(2, None, &format!("export i={:?}: expect OK {:?}, got {:?} gas={:?} output={:?}", i, OK, export_result, gas_result, output_bytes[0]));
+        call_log(2, None, &format!("export i={:?}: expect ς+|e|={:?}, got {:?} gas={:?} output={:?}", i, i, export_result, gas_result, output_bytes[0]));
     }
     call_log(2, None, &format!("output_bytes={:?}|{:?}|{:?}", output_bytes[0], output_bytes[4], output_bytes[8]));
 
-
-    let expunge_result = unsafe {
-        expunge(child_vm_id as u64);
-    };
+    // expunge child VM
+    let expunge_result = unsafe { expunge(new_machine_idx as u64) };
     gas_result = unsafe { gas() };
-    call_log(2, None, &format!("expunge {:?}: expect OK {:?}, got {:?} gas={:?}", child_vm_id, OK, expunge_result, gas_result));
+    call_log(2, None, &format!("expunge {:?}: child VM instruction counter={:?} gas={:?}", new_machine_idx, expunge_result, gas_result));
 
     (output_bytes_address, output_bytes_length)
 }
+
+#[no_mangle]
+static mut output_bytes_32: [u8; 32] = [0; 32];
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
@@ -261,7 +322,7 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         write_result(solicit_result, 1);
 
         let query_jamhash_result = unsafe { query(jam_hash_address, jam_length) };
-        call_log(2, None, &format!("query hash(jam): expect OK {:?}, got {:?} (recorded at key 2)", OK, query_jamhash_result));
+        call_log(2, None, &format!("query hash(jam): expect non-ZERO, got {:?} (recorded at key 2)", query_jamhash_result));
         write_result(query_jamhash_result, 2);
 
         let query_none_result = unsafe { query(dot_hash_address, dot_length) };
@@ -273,7 +334,7 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         write_result(forget_result, 1);
 
         let query_jamhash_result = unsafe { query(jam_hash_address, jam_length) };
-        call_log(2, None, &format!("query hash(jam): expect OK {:?} 2+2^32*x, got {:?} (recorded at key 2)", OK, forget_result));
+        call_log(2, None, &format!("query hash(jam): expect non-zero, got {:?} (recorded at key 2)", query_jamhash_result));
         write_result(query_jamhash_result, 2);
 
         let lookup_none_result = unsafe { lookup(service_index as u64, dot_hash_address, buffer_address, 0, dot_length) };
@@ -388,13 +449,18 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
 
     let gas_result = unsafe { gas() };
     write_result(gas_result, 9);
-    call_log(2, None, &format!("gas: expect OK {:?}, got {:?} (recorded at key 9)", OK, gas_result));
+    call_log(2, None, &format!("gas: got {:?} (recorded at key 9)", gas_result));
 
-    let mut output_bytes_32 = [0u8; 32];
-    output_bytes_32[..work_result_length as usize]
-        .copy_from_slice(&unsafe { core::slice::from_raw_parts(work_result_address as *const u8, work_result_length as usize) });
-    let output_address = output_bytes_32.as_ptr() as u64;
-    let output_length = output_bytes_32.len() as u64;
+    
+    let output_address: u64;
+    let output_length: u64;
+    unsafe {
+        output_bytes_32[..work_result_length as usize]
+            .copy_from_slice(&core::slice::from_raw_parts(work_result_address as *const u8, work_result_length as usize));
+
+        output_address = output_bytes_32.as_ptr() as u64;
+        output_length = output_bytes_32.len() as u64;
+    }
 
     // write yield
     if n % 3 == 0 {
@@ -415,9 +481,7 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         call_log(1, None, "corevm PANIC");
     } else {
     }
-    unsafe {
-        oyield(output_address);
-    }
+    unsafe { oyield(output_address); }
     call_log(2, None, "yield, expect OK");
     return (output_address, output_length);
 }

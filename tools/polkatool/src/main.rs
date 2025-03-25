@@ -372,18 +372,14 @@ fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path
 
     let mut new_blob: Vec<u8> = Vec::new();
 
-    if for_deblob {
-        new_blob.extend_from_slice(&c);
-    } else {
-        new_blob.extend_from_slice(&o_size);
-        new_blob.extend_from_slice(&w_size);
-        new_blob.extend_from_slice(&z);
-        new_blob.extend_from_slice(&s);
-        new_blob.extend_from_slice(&o_byte);
-        new_blob.extend_from_slice(&w_byte);
-        new_blob.extend_from_slice(&c_size);
-        new_blob.extend_from_slice(&c);
-    }
+    new_blob.extend_from_slice(&o_size);
+    new_blob.extend_from_slice(&w_size);
+    new_blob.extend_from_slice(&z);
+    new_blob.extend_from_slice(&s);
+    new_blob.extend_from_slice(&o_byte);
+    new_blob.extend_from_slice(&w_byte);
+    new_blob.extend_from_slice(&c_size);
+    new_blob.extend_from_slice(&c);
     
     match output_path {
         Some(output_path) => {

@@ -1,4 +1,4 @@
-SERVICES = bootstrap tribonacci megatron transfer balances delay null_authorizer auth_copy blake2b fib corevm corevm_child
+SERVICES = bootstrap tribonacci megatron transfer balances delay null_authorizer auth_copy blake2b fib corevm corevm_child game_of_life
 
 TARGET_DIR = riscv64emac-unknown-none-polkavm/release
 
