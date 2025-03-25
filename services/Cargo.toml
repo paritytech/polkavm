@@ -24,5 +24,6 @@ members = [
     "blake2b",
     "corevm",
     "corevm_child",
+    "game_of_life",
     "utils"
 ]

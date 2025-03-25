@@ -68,6 +68,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "game_of_life"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "simplealloc",
+ "utils",
+]
+
+[[package]]
 name = "megatron"
 version = "0.1.0"
 dependencies = [

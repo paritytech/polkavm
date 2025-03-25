@@ -79,7 +79,7 @@ extern "C" {
     pub fn void(n: u64, p: u64, c: u64) -> u64;
 
     #[polkavm_import(index = 25)]
-    pub fn invoke(n: u64, o: u64) -> u64;
+    pub fn invoke(n: u64, o: u64) -> (u64, u64);
 
     #[polkavm_import(index = 26)]
     pub fn expunge(n: u64) -> u64;

@@ -3,6 +3,7 @@
 pub mod constants;
 pub mod functions;
 pub mod host_functions;
+pub mod hash_functions;
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
