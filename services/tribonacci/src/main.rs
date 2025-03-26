@@ -10,7 +10,7 @@ extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
     let mut buffer = [0u8; 16];
     let offset: u64 = 0;
     let maxlen: u64 = buffer.len() as u64;
-    let result = unsafe { fetch(buffer.as_mut_ptr() as u64, offset, maxlen, 5, 0, 1) };
+    let result = unsafe { fetch(buffer.as_mut_ptr() as u64, offset, maxlen, 5, 1, 0) }; // fetch segment 0 from work item 1
 
     // let mut prev_n : u32 = 0;
     if result != NONE {
@@ -42,20 +42,11 @@ extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
     let buffer_addr = buffer.as_ptr() as u64;
     let buffer_len = buffer.len() as u64;
 
-    // unsafe {
-    //     export(buffer_addr, buffer_len);
-    // }
-
-    // Put N additional exports which are identical FOR NOW
-    // for i in 0..prev_n {
-    //     buffer[16..20].copy_from_slice(&(i + 1).to_le_bytes());
-    //     unsafe {
-    //         export(buffer_addr, buffer_len);
-    //     }
-    // }
-
     return (buffer_addr, buffer_len);
 }
+
+#[no_mangle]
+static mut output_bytes_32: [u8; 32] = [0; 32];
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
@@ -76,13 +67,17 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
 
     // Option<hash> test
     // pad result to 32 bytes
-    let mut output_bytes_32 = [0u8; 32];
-    output_bytes_32[..work_result_length as usize]
-        .copy_from_slice(&unsafe { core::slice::from_raw_parts(work_result_address as *const u8, work_result_length as usize) });
-    let output_bytes_address = output_bytes_32.as_ptr() as u64;
-    let output_bytes_length = output_bytes_32.len() as u64;
+    let output_address: u64;
+    let output_length: u64;
+    unsafe {
+        output_bytes_32[..work_result_length as usize]
+            .copy_from_slice(&core::slice::from_raw_parts(work_result_address as *const u8, work_result_length as usize));
 
-    return (output_bytes_address, output_bytes_length);
+        output_address = output_bytes_32.as_ptr() as u64;
+        output_length = output_bytes_32.len() as u64;
+    }
+
+    return (output_address, output_length);
 }
 
 #[polkavm_derive::polkavm_export]
