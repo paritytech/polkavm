@@ -5,6 +5,7 @@
 extern crate alloc;
 use alloc::string::String;
 use alloc::format;
+use alloc::vec;
 
 use polkavm_derive::min_stack_size;
 min_stack_size!(409600);
@@ -26,6 +27,24 @@ const TOTAL_BYTES: usize = PAGE_SIZE * NUM_PAGES;
 const ROWS_WITH_GHOST: usize = TOTAL_ROWS + 2;
 const COLS_WITH_GHOST: usize = TOTAL_COLS + 2;
 
+/* glider pattern (3×3):
+   row=0: [0,1,0]
+   row=1: [0,0,1]
+   row=2: [1,1,1]
+*/
+const GLIDER_PATTERN: [(usize, usize); 5] = [
+    (0, 1),
+    (1, 2),
+    (2, 0),
+    (2, 1),
+    (2, 2),
+];
+
+const H_SPACING: usize = 5;
+const V_SPACING: usize = 5;
+const MARGIN: usize = 2;
+const GLIDERS_PER_ROW: usize = (PAGE_DIM - MARGIN) / H_SPACING;
+
 fn bytes_to_hex(data: &[u8]) -> String {
     data.iter().map(|b| format!("{:02x}", b)).collect()
 }
@@ -42,25 +61,37 @@ impl Grid {
     }
 
     fn init_hash_chain(&mut self) {
-        let num_hashes = TOTAL_BYTES / 32;
-        let mut hash_chain: [u8; TOTAL_BYTES] = [0; TOTAL_BYTES];
+        // let num_hashes = TOTAL_BYTES / 32;
+        let num_hashes = 20;
+        let hash_data_size = 32 * num_hashes;
+        let mut hash_data = vec![0u8; hash_data_size];
         let mut current = String::new();
-        let num_hashes = 100;
+        let mut first_hash = [0u8; 32];
 
         for i in 0..num_hashes {
             let hash_bytes = blake2b_hash(current.as_bytes());
-            hash_chain[i * 32..(i + 1) * 32].copy_from_slice(&hash_bytes);
+            if i == 0 {
+                first_hash.copy_from_slice(&hash_bytes);
+            }
+            hash_data[i * 32..(i + 1) * 32].copy_from_slice(&hash_bytes);
             current = bytes_to_hex(&hash_bytes);
         }
-
-        call_log(2, None, &format!("Finish hash: {}", current));
-
-        for byte in hash_chain.iter_mut() {
-            // *byte = if (*byte & 0x80) != 0 { 1 } else { 0 };
+    
+        let mut hash_chain = [0u8; TOTAL_BYTES];
+        for (i, byte) in hash_chain.iter_mut().enumerate() {
+            *byte = hash_data[i % hash_data_size];
             *byte >>= 7;
         }
 
-        call_log(2, None, &format!("Finish hash chain"));
+        call_log(
+            2,
+            None,
+            &format!(
+                "Finish {:?} hashes and shift, first hash: {:?}",
+                num_hashes,
+                bytes_to_hex(&first_hash)
+            ),
+        );
 
         for i in 0..NUM_PAGES {
             let start = i * PAGE_SIZE;
@@ -70,9 +101,34 @@ impl Grid {
         call_log(2, None, &format!("Finish hash chain copy"));
     }
 
+    fn init_gliders(&mut self, num_gliders: usize) {
+        self.pages = [[0; PAGE_SIZE]; NUM_PAGES];
+
+        let mut placed_count = 0;
+        for i in 0..num_gliders {
+            let row_index = i / GLIDERS_PER_ROW;
+            let col_index = i % GLIDERS_PER_ROW;
+
+            let row_offset = row_index * V_SPACING + MARGIN;
+            let col_offset = col_index * H_SPACING + MARGIN;
+
+            if row_offset + 2 >= PAGE_DIM || col_offset + 2 >= PAGE_DIM {
+                break;
+            }
+
+            for &(r, c) in &GLIDER_PATTERN {
+                let row = row_offset + r;
+                let col = col_offset + c;
+                self.pages[0][row * PAGE_DIM + col] = 1;
+            }
+            placed_count += 1;
+        }
+        call_log(2, None, &format!("Finish glider init, placed {} gliders", placed_count));
+    }
 
     fn step(&self) -> Grid {
-        let mut in_buf: [[u8; COLS_WITH_GHOST]; ROWS_WITH_GHOST] = [[0; COLS_WITH_GHOST]; ROWS_WITH_GHOST];
+        let mut in_buf: [[u8; COLS_WITH_GHOST]; ROWS_WITH_GHOST] =
+            [[0; COLS_WITH_GHOST]; ROWS_WITH_GHOST];
 
         for page in 0..NUM_PAGES {
             let page_row = page / PAGES_PER_ROW;
@@ -87,6 +143,7 @@ impl Grid {
             }
         }
 
+        // ghost border wrap-around
         for j in 1..=TOTAL_COLS {
             in_buf[0][j] = in_buf[TOTAL_ROWS][j];
             in_buf[TOTAL_ROWS + 1][j] = in_buf[1][j];
@@ -156,29 +213,38 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
 
     let mut grid = Grid::new();
 
-    let steps: u32 = unsafe { (*(wi_payload_start_address as *const u32)).into() };
+    let step_n: u32 = unsafe { (*(wi_payload_start_address as *const u32)).into() };
 
-    call_log(2, None, &format!("Step {}: (get steps)", steps));
+    let num_of_gloders_address: u64 = wi_payload_start_address + 4;
+    let num_of_gloders: u32 = unsafe { (*(num_of_gloders_address as *const u32)).into() };
 
-    if steps > 0 {
-        for i in 0..NUM_PAGES {
-            let page_address = grid.pages[i].as_ptr() as u64;
-            let page_length = PAGE_SIZE as u64;
-            let fetch_result = unsafe { fetch(page_address, 0, page_length, 6, i as u64, 0) };
-            if fetch_result == NONE {
-                break;
-            }
+    let total_execution_steps_address: u64 = wi_payload_start_address + 8;
+    let total_execution_steps: u32 = unsafe { (*(total_execution_steps_address as *const u32)).into() };
+
+    call_log(2, None, &format!("Step_n: {:?}, gliders: {:?}, total_steps: {:?}", step_n, num_of_gloders, total_execution_steps));
+
+    let mut seg_cnt = 0;
+    for i in 0..NUM_PAGES {
+        let page_address = grid.pages[i].as_ptr() as u64;
+        let page_length = PAGE_SIZE as u64;
+        let fetch_result = unsafe { fetch(page_address, 0, page_length, 6, i as u64, 0) };
+        if fetch_result == NONE {
+            break;
         }
-    } else {
-        grid.init_hash_chain();
+        seg_cnt += 1;
     }
 
-    call_log(2, None, &format!("Step {}: (inited)", steps));
+    if seg_cnt > 0 {
+        call_log(2, None, &format!("Step_n: {:?}, Fetched {:?} segments", step_n, seg_cnt));
+    } else {
+        grid.init_gliders(num_of_gloders as usize);
+    }
 
-    grid = grid.step();
-
-    call_log(2, None, &format!("Step {}: (stepped)", steps));
-
+    for _ in 0..total_execution_steps {
+        grid = grid.step();
+    }
+    
+    /*
     let total_cells = TOTAL_ROWS * TOTAL_COLS;
     let poke_index = (steps as usize) % total_cells;
     let poke_row = poke_index / TOTAL_COLS;
@@ -189,43 +255,21 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     let local_row = poke_row % PAGE_DIM;
     let local_col = poke_col % PAGE_DIM;
     grid.pages[page_index][local_row * PAGE_DIM + local_col] = 1;
+    */
 
     for i in 0..NUM_PAGES {
         let page_address = grid.pages[i].as_ptr() as u64;
         let page_length = PAGE_SIZE as u64;
-        unsafe { export(page_address, page_length,); }
+        unsafe { export(page_address, page_length); }
     }
 
-    // if steps % 5 == 0 {
-    //     call_log(2, None, &format!("Step {}: (hashes)", steps));
-    //     for (index, page) in grid.pages.iter().enumerate() {
-    //         let hash = blake2b_hash(page);
-    //         call_log(2, None, &format!("Page: {} hash: {}", index, bytes_to_hex(&hash)));
-    //     }
-    // }
-
-    // if steps % 10 == 0 {
-    //     call_log(2, None, &format!("Step {}: (full page contents)", steps));
-    //     for (index, page) in grid.pages.iter().enumerate() {
-    //         call_log(2, None, &format!("Page: {} contents: {}", index, bytes_to_hex(page)));
-    //     }
-    // }
-
-    call_log(2, None, &format!("Step {}: (done)", steps));
+    call_log(2, None, &format!("Step_n: {:?}, exported {:?} segments, done", step_n, NUM_PAGES));
 
     return (FIRST_READABLE_ADDRESS as u64, 0);
 }
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
-    // let (_timeslot, _service_index, work_result_address, work_result_length) =
-    //     if let Some(args) = parse_accumulate_args(start_address, length, 0) {
-    //         (args.t, args.s, args.work_result_ptr, args.work_result_len)
-    //     } else {
-    //         return (FIRST_READABLE_ADDRESS as u64, 0);
-    //     };
-
-    // return (work_result_address, work_result_length);
     return (FIRST_READABLE_ADDRESS as u64, 0);
 }
 
@@ -233,4 +277,3 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
 extern "C" fn on_transfer(_start_address: u64, _length: u64) -> (u64, u64) {
     return (FIRST_READABLE_ADDRESS as u64, 0);
 }
-
