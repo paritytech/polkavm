@@ -2,8 +2,10 @@
 #![no_main]
 
 use utils::constants::{FIRST_READABLE_ADDRESS, NONE};
-use utils::functions::parse_accumulate_args;
-use utils::host_functions::{export, fetch, write};
+use utils::functions::{parse_accumulate_args, call_log};
+use utils::host_functions::{export, fetch, write, gas};
+extern crate alloc;
+use alloc::format;
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
@@ -81,6 +83,16 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
 }
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn on_transfer(_start_address: u64, _length: u64) -> (u64, u64) {
+extern "C" fn on_transfer(start_address: u64, length: u64) -> (u64, u64) {
+    call_log(2, None, &format!("trib on_transfer: start_address={:?} length={:?}", start_address, length));
+    // parse transfer args
+/*    let (timeslot, service_index, transfer_result_address, transfer_result_length) =
+        if let Some(args) = parse_transfer_args(start_address, length) {
+            (args.t, args.s, args.transfer_result_ptr, args.transfer_result_len)
+        } else {
+            return (FIRST_READABLE_ADDRESS as u64, 0);
+        };
+
+    call_log(2, None, &format!("on_transfer: timeslot={:?} service_index={:?}", timeslot, service_index)); */
     return (FIRST_READABLE_ADDRESS as u64, 0);
 }

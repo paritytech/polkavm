@@ -479,8 +479,9 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
             );
         }
         call_log(1, None, "corevm PANIC");
-    } else {
     }
+
+    
     unsafe { oyield(output_address); }
     call_log(2, None, "yield, expect OK");
     return (output_address, output_length);
@@ -488,5 +489,10 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn on_transfer(_start_address: u64, _length: u64) -> (u64, u64) {
+
+    let gas_result = unsafe { gas() };
+    write_result(gas_result, 4);
+    call_log(2, None, &format!("on_transfer gas: got {:?} (recorded at key 4)", gas_result));
+    
     return (FIRST_READABLE_ADDRESS as u64, 0);
 }

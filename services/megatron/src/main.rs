@@ -6,8 +6,8 @@ extern crate alloc;
 use alloc::format;
 
 use utils::constants::FIRST_READABLE_ADDRESS;
-use utils::functions::{parse_accumulate_args, parse_refine_args, call_log};
-use utils::host_functions::{oyield, read, write, transfer};
+use utils::functions::{parse_accumulate_args, parse_refine_args, call_log, write_result};
+use utils::host_functions::{oyield, read, write, transfer, gas};
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
@@ -135,5 +135,9 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn on_transfer(_start_address: u64, _length: u64) -> (u64, u64) {
+
+    let gas_result = unsafe { gas() };
+    write_result(gas_result, 4);
+    call_log(2, None, &format!("on_transfer gas: got {:?} (recorded at key 4)", gas_result));
     return (FIRST_READABLE_ADDRESS as u64, 0);
 }
