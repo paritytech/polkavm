@@ -2,7 +2,7 @@
 #![no_main]
 
 use utils::constants::{FIRST_READABLE_ADDRESS, NONE};
-use utils::functions::{parse_accumulate_args, call_log};
+use utils::functions::{parse_accumulate_args, parse_transfer_args, call_log, write_result};
 use utils::host_functions::{export, fetch, write, gas};
 extern crate alloc;
 use alloc::format;
@@ -77,27 +77,34 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn on_transfer(start_address: u64, length: u64) -> (u64, u64) {
-    call_log(2, None, &format!("FIB on_transfer: start_address={:?} length={:?}", start_address, length));
-    // parse transfer args
-    //let (timeslot, service_index, transfer_result_address, transfer_result_length) =
-    //    if let Some(args) = parse_transfer_args(start_address, length) {
-    //        (args.t, args.s, args.transfer_result_ptr, args.transfer_result_len)
-    //    } else {
-    //        return (FIRST_READABLE_ADDRESS as u64, 0);
-    //    };
+    // Note: This part executes only if there are deferred transfers AND this service is the receiver.
+    let mut i: u64 = 0;
 
-    //call_log(2, None, &format!("on_transfer: timeslot={:?} service_index={:?}", timeslot, service_index));
-    // TODO: for each transfer, split into these fields but log the values of each tran
-    //let sender_index : u32 = 0;
-    //let receiver_index : u32 = 0;
-    //let amount : u64 = 0;
-    // memo_ptr  128 bytes
-    //let gas_limit : u64 = 0;
-    //call_log(2, None, &format!("on_transfer: timeslot={:?} service_index={:?}, receiver_index={:?} amount={:?} gas_limit={:?} transfer_result_length={:?} ", timeslot, service_index, receiver_index, amount, gas_limit, transfer_result_length));
+    loop {
+        let (timeslot, service_index, sender, receiver, amount, memo, gas_limit) =
+        if let Some(args) = parse_transfer_args(start_address, length, i) {
+            (args.t, args.s, args.ts, args.td, args.ta, args.tm, args.tg)
+        } else {
+            break;
+        };
 
-    // TODO: write (key=senderindex, value=memo_ptr) 
-    // unsafe {        write(sender_index_ptr, 4, memo_ptr, 128);     }
+        call_log(2, None, &format!("FIB on_transfer: timeslot={:?} service_index={:?} sender={:?} receiver={:?} amount={:?} memo={:?} gas_limit={:?}", timeslot, service_index, sender, receiver, amount, memo, gas_limit));
 
+        let service_index_bytes = service_index.to_le_bytes();
+        let service_index_ptr: u64 = service_index_bytes.as_ptr() as u64;
+        let service_index_length: u64 = service_index_bytes.len() as u64;
+
+        let memo_ptr: u64 = memo.as_ptr() as u64;
+        let memo_length: u64 = memo.len() as u64;
+    
+        unsafe { write(service_index_ptr, service_index_length, memo_ptr, memo_length) };
+
+        let gas_result = unsafe { gas() };
+        write_result(gas_result, 4);
+        call_log(2, None, &format!("FIB on_transfer gas: got {:?} (recorded at key 4)", gas_result));
+        
+        i += 1;
+    }
 
     return (FIRST_READABLE_ADDRESS as u64, 0);
 }
