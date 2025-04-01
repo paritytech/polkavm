@@ -310,7 +310,7 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         write_result(read_result, 1);
 
         let write_result1 = unsafe { write(jam_address, jam_length, 0, 0) };
-        call_log(2, None, &format!("write deleted jam: expect OK {:?}, got {:?} (recorded at key 2)", OK, write_result1));
+        call_log(2, None, &format!("write deleted jam: expect NONE {:?}, got {:?} (recorded at key 2)", NONE, write_result1));
         write_result(write_result1, 2);
 
         let read_ok_result = unsafe {read(service_index as u64, jam_address, jam_length, buffer_address, 0, buffer_length)};
@@ -431,7 +431,7 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         write_result(write_result1, 2);
 
         let delete_result = unsafe { write(dot_address, dot_length, 0, 0) };
-        call_log(2, None, &format!("write deleted DOT: expect OK {:?}: 3, got {:?} (recorded at key 5)", OK, delete_result));
+        call_log(2, None, &format!("write deleted DOT: expect NONE {:?}: 3, got {:?} (recorded at key 5)", NONE, delete_result));
         write_result(delete_result, 5);
 
         let read_result = unsafe { read(service_index as u64, dot_address, dot_length, buffer_address, 0, buffer_length) };
