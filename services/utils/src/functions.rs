@@ -3,6 +3,7 @@
  * 1. Parsing Functions
  *    - parse_refine_args and RefineArgs struct
  *    - parse_accumulate_args and AccumulateArgs struct
+ *    - parse_transfer_args and TransferArgs struct
  *    - parse_standard_program_initialization_args and StandardProgramInitializationArgs struct
  *
  * 2. Child VM Related Functions
@@ -102,6 +103,7 @@ pub fn parse_refine_args(mut start_address: u64, mut remaining_length: u64) -> O
         wphash,
     })
 }
+
 // Parse accumulate args
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -243,6 +245,118 @@ pub fn parse_accumulate_args(start_address: u64, length: u64, m: u64) -> Option<
     }
     None
 }
+
+// Parse transfer args
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct TransferArgs {
+    pub t: u32,
+    pub s: u32,
+    pub ts: u32,
+    pub td: u32,
+    pub ta: u64,
+    pub tm: [u8; 128],
+    pub tg: u64,
+}
+
+impl Default for TransferArgs {
+    fn default() -> Self {
+        Self {
+            t: 0,
+            s: 0,
+            ts: 0,
+            td: 0,
+            ta: 0,
+            tm: [0u8; 128],
+            tg: 0,
+        }
+    }
+}
+
+pub fn parse_transfer_args(start_address: u64, length: u64, m: u64) -> Option<TransferArgs> {
+    if length == 0 {
+        return None;
+    }
+    let mut current_address = start_address;
+    let mut remaining_length = length;
+
+    let mut args = TransferArgs::default();
+
+    if remaining_length < 8 {
+        return None;
+    }
+    let t_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 4) };
+    let s_slice = unsafe { core::slice::from_raw_parts((current_address + 4) as *const u8, 4) };
+    let global_t = u32::from_le_bytes(t_slice[0..4].try_into().unwrap());
+    let global_s = u32::from_le_bytes(s_slice[0..4].try_into().unwrap());
+
+    args.t = global_t;
+    args.s = global_s;
+
+    current_address += 8;
+    remaining_length = remaining_length.saturating_sub(8);
+
+    let full_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
+    let discriminator_len = extract_discriminator(full_slice);
+    if discriminator_len as usize > full_slice.len() {
+        return None;
+    }
+    let num_of_operands = decode_e(&full_slice[..discriminator_len as usize]);
+
+    current_address += discriminator_len as u64;
+    remaining_length = remaining_length.saturating_sub(discriminator_len as u64);
+
+    if m >= num_of_operands {
+        return None;
+    }
+
+    for i in 0..num_of_operands {
+        if remaining_length < 8 {
+            return None;
+        }
+        let ts_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 4) };
+        let td_slice = unsafe { core::slice::from_raw_parts((current_address + 4) as *const u8, 4) };
+        let global_ts = u32::from_le_bytes(ts_slice[0..4].try_into().unwrap());
+        let global_td = u32::from_le_bytes(td_slice[0..4].try_into().unwrap());
+
+        args.ts = global_ts;
+        args.td = global_td;
+
+        current_address += 8;
+        remaining_length = remaining_length.saturating_sub(8);
+
+        if remaining_length < 8 {
+            return None;
+        }
+        let ta_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 8) };
+        args.ta = decode_e_l(ta_slice);
+        current_address += 8;
+        remaining_length = remaining_length.saturating_sub(8);
+
+        if remaining_length < 128 {
+            return None;
+        }
+        let tm_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 128) };
+        args.tm.copy_from_slice(tm_slice);
+        current_address += 128;
+        remaining_length = remaining_length.saturating_sub(128);
+
+        if remaining_length < 8 {
+            return None;
+        }
+
+        let tg_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 8) };
+        args.tg = decode_e_l(tg_slice);
+        current_address += 8;
+        remaining_length = remaining_length.saturating_sub(8);
+
+        if i == m {
+            return Some(args);
+        } 
+    }
+    None
+}
+
 // Parse standard program initialization args
 #[repr(C)]
 #[derive(Debug, Clone)]
