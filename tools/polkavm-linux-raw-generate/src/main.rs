@@ -77,6 +77,7 @@ fn main() {
         "IOSQE.+",
         "FUTEX2.+",
         "PTRACE_.+",
+        "MCL_.+",
     ]
     .join("|");
 
