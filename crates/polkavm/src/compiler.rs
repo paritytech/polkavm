@@ -12,7 +12,7 @@ use polkavm_common::zygote::VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH;
 use crate::error::Error;
 
 use crate::api::RuntimeInstructionSet;
-use crate::config::{GasMeteringKind, ModuleConfig, SandboxKind};
+use crate::config::{CustomCodegen, GasMeteringKind, ModuleConfig, SandboxKind};
 use crate::gas::GasVisitor;
 use crate::mutex::Mutex;
 use crate::sandbox::{Sandbox, SandboxInit, SandboxProgram};
@@ -116,6 +116,7 @@ where
     instruction_set: RuntimeInstructionSet,
     memset_trampoline_start: usize,
     memset_trampoline_end: usize,
+    custom_codegen: Option<Arc<dyn CustomCodegen>>,
 
     _phantom: PhantomData<(S, B)>,
 }
@@ -259,6 +260,7 @@ where
             instruction_set,
             memset_trampoline_start: 0,
             memset_trampoline_end: 0,
+            custom_codegen: config.custom_codegen.clone(),
             _phantom: PhantomData,
         };
 
@@ -454,7 +456,7 @@ where
     fn after_instruction<const KIND: usize>(&mut self, program_counter: u32, args_length: u32) {
         assert!(KIND == CONTINUE_BASIC_BLOCK || KIND == END_BASIC_BLOCK || KIND == END_BASIC_BLOCK_INVALID);
 
-        if cfg!(debug_assertions) && !self.step_tracing {
+        if cfg!(debug_assertions) && !self.step_tracing && self.custom_codegen.is_none() {
             let offset = self.program_counter_to_machine_code_offset_list.last().unwrap().1 as usize;
             let instruction_length = self.asm.len() - offset;
             if instruction_length > VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH as usize {

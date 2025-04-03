@@ -100,6 +100,7 @@ pub struct Engine {
     crosscheck: bool,
     state: Arc<EngineState>,
     allow_dynamic_paging: bool,
+    allow_experimental: bool,
 }
 
 impl Engine {
@@ -210,6 +211,7 @@ impl Engine {
             crosscheck,
             state,
             allow_dynamic_paging: config.allow_dynamic_paging(),
+            allow_experimental: config.allow_experimental,
         })
     }
 
@@ -392,6 +394,10 @@ impl Module {
     pub fn from_blob(engine: &Engine, config: &ModuleConfig, blob: ProgramBlob) -> Result<Self, Error> {
         if config.dynamic_paging() && !engine.allow_dynamic_paging {
             bail!("dynamic paging was not enabled; use `Config::set_allow_dynamic_paging` to enable it");
+        }
+
+        if config.custom_codegen.is_some() && !engine.allow_experimental {
+            bail!("cannot use custom codegen: `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` is not enabled");
         }
 
         log::trace!(

@@ -1280,6 +1280,12 @@ where
 
     #[inline(always)]
     pub fn ecalli(&mut self, code_offset: u32, args_length: u32, imm: u32) {
+        if let Some(ref custom_codegen) = self.0.custom_codegen {
+            if !custom_codegen.should_emit_ecalli(imm, &mut self.0.asm) {
+                return;
+            }
+        }
+
         let ecall_label = self.ecall_label;
         let asm = self.asm.reserve::<U4>();
         let asm = asm.push(mov_imm(Self::vmctx_field(S::offset_table().arg), imm32(imm)));
