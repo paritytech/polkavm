@@ -2016,7 +2016,10 @@ where
         }
         Inst::Load { kind, dst, base, offset } => {
             let Some(base) = cast_reg_non_zero(base)? else {
-                return Err(ProgramFromElfError::other("found an unrelocated absolute load"));
+                return Err(ProgramFromElfError::other(format!(
+                    "found an unrelocated absolute load at {}",
+                    current_location.fmt_human_readable(elf)
+                )));
             };
 
             // LLVM riscv-enable-dead-defs pass may rewrite dst to the zero register.
@@ -2029,7 +2032,10 @@ where
         }
         Inst::Store { kind, src, base, offset } => {
             let Some(base) = cast_reg_non_zero(base)? else {
-                return Err(ProgramFromElfError::other("found an unrelocated absolute store"));
+                return Err(ProgramFromElfError::other(format!(
+                    "found an unrelocated absolute store at {}",
+                    current_location.fmt_human_readable(elf)
+                )));
             };
 
             let src = cast_reg_any(src)?;
