@@ -24,7 +24,7 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
 
     let hash = unsafe { core::slice::from_raw_parts(work_result_address as *const u8, work_result_length as usize) };
     assert!(32 == hash.len());
-    const N_Q: usize = 2;
+    const N_Q: usize = 80;
     let mut authorization_hashes = [0u8; 32 * N_Q];
     for i in 0..N_Q {
         let start = i * 32;
