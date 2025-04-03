@@ -1307,6 +1307,23 @@ impl RawInstance {
         Ok(buffer)
     }
 
+    /// A convenience function to read an `u64` from the VM's memory.
+    ///
+    /// This is equivalent to calling [`RawInstance::read_memory_into`].
+    pub fn read_u64(&self, address: u32) -> Result<u64, MemoryAccessError> {
+        let mut buffer = [0; 8];
+        self.read_memory_into(address, &mut buffer)?;
+
+        Ok(u64::from_le_bytes(buffer))
+    }
+
+    /// A convenience function to write an `u64` into the VM's memory.
+    ///
+    /// This is equivalent to calling [`RawInstance::write_memory`].
+    pub fn write_u64(&mut self, address: u32, value: u64) -> Result<(), MemoryAccessError> {
+        self.write_memory(address, &value.to_le_bytes())
+    }
+
     /// A convenience function to read an `u32` from the VM's memory.
     ///
     /// This is equivalent to calling [`RawInstance::read_memory_into`].
