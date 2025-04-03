@@ -70,6 +70,7 @@ fn main() {
         "ETOOMANYREFS",
         "ETXTBSY",
         "EXDEV",
+        "ERESTARTSYS",
         "_?UFFD.+",
         "_IOC.*",
         "IORING.+",

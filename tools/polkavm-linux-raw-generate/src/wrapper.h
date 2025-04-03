@@ -12,6 +12,7 @@
 #include <asm-generic/siginfo.h>
 #include <asm-generic/posix_types.h>
 #include <asm-generic/errno.h>
+#define ERESTARTSYS 512
 
 #include <linux/futex.h>
 #include <linux/seccomp.h>
