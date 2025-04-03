@@ -1568,6 +1568,17 @@ pub mod inst {
             None,
             (fmt.write_fmt(core::format_args!("ror {}, cl", self.1.display(Size::from(self.0))))),
 
+        rcr_imm(RegSize, RegMem, u8) =>
+            {
+                if self.2 == 1 {
+                    Inst::new(0xd1)
+                } else {
+                    Inst::new(0xc1).imm8(self.2)
+                }.rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b011).encode()
+            },
+            None,
+            (fmt.write_fmt(core::format_args!("rcr {}, 0x{:x}", self.1.display(Size::from(self.0)), self.2))),
+
         // https://www.felixcloutier.com/x86/popcnt
         popcnt(RegSize, Reg, RegMem) =>
             {
@@ -2383,6 +2394,7 @@ mod tests {
         pop,
         push,
         push_imm,
+        rcr_imm,
         ret,
         ror_imm,
         rol_cl,
