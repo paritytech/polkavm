@@ -1,8 +1,8 @@
 use object::{read::elf::Sym, LittleEndian, Object, ObjectSection, ObjectSymbol};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use crate::program_from_elf::ProgramFromElfError;
+use crate::program_from_elf::{ProgramFromElfError, SectionTarget};
 
 type ElfFile<'a, H> = object::read::elf::ElfFile<'a, H, &'a [u8]>;
 type ElfSymbol<'data, 'file, H> = object::read::elf::ElfSymbol<'data, 'file, H, &'data [u8]>;
@@ -453,5 +453,23 @@ where
 
     pub fn is_64(&self) -> bool {
         self.is_64_bit
+    }
+
+    pub fn section_to_function_name(&self) -> BTreeMap<SectionTarget, &'data str> {
+        self.symbols()
+            .filter_map(|symbol| {
+                if symbol.kind() != object::elf::STT_FUNC {
+                    return None;
+                }
+
+                let name = symbol.name()?;
+                let (section, offset) = symbol.section_and_offset().ok()?;
+                let target = SectionTarget {
+                    section_index: section.index(),
+                    offset,
+                };
+                Some((target, name))
+            })
+            .collect()
     }
 }

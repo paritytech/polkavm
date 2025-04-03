@@ -9079,23 +9079,7 @@ where
         .copied()
         .collect();
 
-    let section_to_function_name: BTreeMap<_, _> = elf
-        .symbols()
-        .filter_map(|symbol| {
-            if symbol.kind() != object::elf::STT_FUNC {
-                return None;
-            }
-
-            let name = symbol.name()?;
-            let (section, offset) = symbol.section_and_offset().ok()?;
-            let target = SectionTarget {
-                section_index: section.index(),
-                offset,
-            };
-            Some((target, name))
-        })
-        .collect();
-
+    let section_to_function_name = elf.section_to_function_name();
     let all_jump_targets = harvest_all_jump_targets(&elf, &data_sections_set, &code_sections_set, &instructions, &relocations, &exports)?;
     let all_blocks = split_code_into_basic_blocks(&elf, &section_to_function_name, &all_jump_targets, instructions)?;
     for block in &all_blocks {
