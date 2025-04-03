@@ -18,6 +18,7 @@ if_compiler_is_supported! {
 
 use crate::config::{BackendKind, Config, GasMeteringKind, ModuleConfig, SandboxKind};
 use crate::error::{bail, bail_static, Error};
+use crate::gas::CostModelRef;
 use crate::interpreter::{InterpretedInstance, InterpretedModule};
 use crate::utils::{GuestInit, InterruptKind};
 use crate::{Gas, ProgramCounter};
@@ -270,6 +271,7 @@ pub(crate) struct ModulePrivate {
     page_size_mask: u32,
     page_shift: u32,
     instruction_set: RuntimeInstructionSet,
+    cost_model: CostModelRef,
     #[cfg(feature = "module-cache")]
     pub(crate) module_key: Option<ModuleKey>,
 }
@@ -370,6 +372,10 @@ impl Module {
 
     pub(crate) fn round_to_page_size_up(&self, value: u32) -> u32 {
         self.round_to_page_size_down(value) + (u32::from((value & self.state().page_size_mask) != 0) << self.state().page_shift)
+    }
+
+    pub(crate) fn cost_model(&self) -> CostModelRef {
+        self.state().cost_model.clone()
     }
 
     if_compiler_is_supported! {
@@ -501,6 +507,7 @@ impl Module {
                     config.step_tracing || engine.crosscheck,
                     cast(blob.code().len()).assert_always_fits_in_u32(),
                     init,
+                    config.cost_model.clone(),
                 )?;
 
                 if config.allow_sbrk {
@@ -633,6 +640,7 @@ impl Module {
             crosscheck: engine.crosscheck,
             page_size_mask,
             page_shift,
+            cost_model: config.cost_model().clone(),
 
             #[cfg(feature = "module-cache")]
             module_key,
@@ -809,7 +817,7 @@ impl Module {
             return None;
         }
 
-        let gas = crate::gas::calculate_for_block(self.instructions_bounded_at(code_offset));
+        let gas = crate::gas::calculate_for_block(self.state().cost_model.clone(), self.instructions_bounded_at(code_offset));
         Some(i64::from(gas.0))
     }
 

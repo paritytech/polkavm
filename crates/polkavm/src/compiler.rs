@@ -13,7 +13,7 @@ use crate::error::Error;
 
 use crate::api::RuntimeInstructionSet;
 use crate::config::{CustomCodegen, GasMeteringKind, ModuleConfig, SandboxKind};
-use crate::gas::GasVisitor;
+use crate::gas::{CostModelRef, GasVisitor};
 use crate::mutex::Mutex;
 use crate::sandbox::{Sandbox, SandboxInit, SandboxProgram};
 use crate::utils::{FlatMap, GuestInit};
@@ -165,6 +165,7 @@ where
         step_tracing: bool,
         code_length: u32,
         init: GuestInit<'a>,
+        cost_model: CostModelRef,
     ) -> Result<(Self, S::AddressSpace), Error>
     where
         S: Sandbox,
@@ -234,7 +235,7 @@ where
         asm.set_origin(native_code_origin);
 
         let mut visitor = CompilerVisitor {
-            gas_visitor: GasVisitor::default(),
+            gas_visitor: GasVisitor::new(cost_model),
             asm,
             exports,
             program_counter_to_label,

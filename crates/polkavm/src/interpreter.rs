@@ -858,7 +858,7 @@ impl InterpretedInstance {
             log::debug!("Compiling block:");
         }
 
-        let mut gas_visitor = GasVisitor::default();
+        let mut gas_visitor = GasVisitor::new(self.module.cost_model());
         let mut charge_gas_index = None;
         let mut is_jump_target_valid = self.module.is_jump_target_valid(program_counter);
         for instruction in self.module.instructions_bounded_at(program_counter) {
@@ -932,7 +932,7 @@ impl InterpretedInstance {
         }
 
         let gas_cost = if self.module.gas_metering().is_some() {
-            crate::gas::trap_cost()
+            crate::gas::trap_cost(self.module.cost_model())
         } else {
             0
         };

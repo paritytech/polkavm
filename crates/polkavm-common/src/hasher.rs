@@ -84,3 +84,14 @@ impl Hasher {
         }
     }
 }
+
+impl core::hash::Hasher for Hasher {
+    fn finish(&self) -> u64 {
+        let h = self.finalize().0;
+        u64::from_le_bytes([h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]])
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.update(bytes);
+    }
+}

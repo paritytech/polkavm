@@ -1,4 +1,5 @@
 use crate::error::{bail, Error};
+use crate::gas::{CostModel, CostModelRef};
 use alloc::sync::Arc;
 use polkavm_assembler::Assembler;
 
@@ -399,6 +400,7 @@ pub struct ModuleConfig {
     pub(crate) allow_sbrk: bool,
     cache_by_hash: bool,
     pub(crate) custom_codegen: Option<Arc<dyn CustomCodegen>>,
+    pub(crate) cost_model: CostModelRef,
 }
 
 impl Default for ModuleConfig {
@@ -420,6 +422,7 @@ impl ModuleConfig {
             allow_sbrk: true,
             cache_by_hash: false,
             custom_codegen: None,
+            cost_model: CostModel::naive_ref(),
         }
     }
 
@@ -526,6 +529,17 @@ impl ModuleConfig {
         self
     }
 
+    /// Gets the currently set gas cost model.
+    pub fn cost_model(&self) -> &CostModelRef {
+        &self.cost_model
+    }
+
+    /// Sets a custom gas cost model.
+    pub fn set_cost_model(&mut self, cost_model: CostModelRef) -> &mut Self {
+        self.cost_model = cost_model;
+        self
+    }
+
     #[cfg(feature = "module-cache")]
     pub(crate) fn hash(&self) -> Option<polkavm_common::hasher::Hash> {
         if self.custom_codegen.is_some() {
@@ -540,6 +554,7 @@ impl ModuleConfig {
             step_tracing,
             dynamic_paging,
             allow_sbrk,
+            ref cost_model,
             // Deliberately ignored.
             cache_by_hash: _,
             custom_codegen: _,
@@ -559,6 +574,9 @@ impl ModuleConfig {
             u32::from(dynamic_paging),
             u32::from(allow_sbrk),
         ]);
+
+        use core::hash::Hash;
+        cost_model.hash(&mut hasher);
 
         Some(hasher.finalize())
     }
