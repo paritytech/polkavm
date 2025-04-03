@@ -117,6 +117,7 @@ pub use crate::arch_bindings::{
     __NR_munmap as SYS_munmap,
     __NR_open as SYS_open,
     __NR_openat as SYS_openat,
+    __NR_perf_event_open as SYS_perf_event_open,
     __NR_pidfd_send_signal as SYS_pidfd_send_signal,
     __NR_pipe2 as SYS_pipe2,
     __NR_pivot_root as SYS_pivot_root,
