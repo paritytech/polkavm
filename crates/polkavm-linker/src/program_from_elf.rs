@@ -649,6 +649,9 @@ enum BasicInst<T> {
     },
     Memset,
     Nop,
+    LoadHeapBase {
+        dst: Reg,
+    },
 }
 
 #[derive(Copy, Clone)]
@@ -670,6 +673,7 @@ impl<T> BasicInst<T> {
     fn src_mask(&self, imports: &[Import]) -> RegMask {
         match *self {
             BasicInst::Nop
+            | BasicInst::LoadHeapBase { .. }
             | BasicInst::LoadImmediate { .. }
             | BasicInst::LoadImmediate64 { .. }
             | BasicInst::LoadAbsolute { .. }
@@ -692,6 +696,7 @@ impl<T> BasicInst<T> {
         match *self {
             BasicInst::Nop | BasicInst::StoreAbsolute { .. } | BasicInst::StoreIndirect { .. } => RegMask::empty(),
             BasicInst::MoveReg { dst, .. }
+            | BasicInst::LoadHeapBase { dst }
             | BasicInst::LoadImmediate { dst, .. }
             | BasicInst::LoadImmediate64 { dst, .. }
             | BasicInst::LoadAbsolute { dst, .. }
@@ -717,6 +722,7 @@ impl<T> BasicInst<T> {
             | BasicInst::Memset { .. } => true,
             BasicInst::LoadAbsolute { .. } | BasicInst::LoadIndirect { .. } => !config.elide_unnecessary_loads,
             BasicInst::Nop
+            | BasicInst::LoadHeapBase { .. }
             | BasicInst::MoveReg { .. }
             | BasicInst::Reg { .. }
             | BasicInst::LoadImmediate { .. }
@@ -808,6 +814,9 @@ impl<T> BasicInst<T> {
                 assert_eq!(map(Reg::A2, OpKind::ReadWrite), Reg::A2);
                 Some(BasicInst::Memset)
             }
+            BasicInst::LoadHeapBase { dst } => Some(BasicInst::LoadHeapBase {
+                dst: map(dst, OpKind::Write),
+            }),
             BasicInst::Nop => Some(BasicInst::Nop),
         }
     }
@@ -876,6 +885,7 @@ impl<T> BasicInst<T> {
             BasicInst::Cmov { kind, dst, src, cond } => BasicInst::Cmov { kind, dst, src, cond },
             BasicInst::Ecalli { nth_import } => BasicInst::Ecalli { nth_import },
             BasicInst::Sbrk { dst, size } => BasicInst::Sbrk { dst, size },
+            BasicInst::LoadHeapBase { dst } => BasicInst::LoadHeapBase { dst },
             BasicInst::Memset => BasicInst::Memset,
             BasicInst::Nop => BasicInst::Nop,
         })
@@ -889,6 +899,7 @@ impl<T> BasicInst<T> {
             BasicInst::LoadAbsolute { target, .. } | BasicInst::StoreAbsolute { target, .. } => (Some(*target), None),
             BasicInst::LoadAddress { target, .. } | BasicInst::LoadAddressIndirect { target, .. } => (None, Some(*target)),
             BasicInst::Nop
+            | BasicInst::LoadHeapBase { .. }
             | BasicInst::MoveReg { .. }
             | BasicInst::LoadImmediate { .. }
             | BasicInst::LoadImmediate64 { .. }
@@ -1143,6 +1154,7 @@ struct MemoryConfig {
     ro_data_size: u32,
     rw_data_size: u32,
     min_stack_size: u32,
+    heap_base: u32,
 }
 
 fn get_padding(memory_end: u64, align: u64) -> Option<u64> {
@@ -1270,7 +1282,7 @@ where
     let rw_data_size = u32::try_from(rw_data_size).expect("overflow");
 
     // Sanity check that the memory configuration is actually valid.
-    {
+    let heap_base = {
         let rw_data_size_physical: u64 = rw_data.iter().map(|x| x.size() as u64).sum();
         let rw_data_size_physical = u32::try_from(rw_data_size_physical).expect("overflow");
         assert!(rw_data_size_physical <= rw_data_size);
@@ -1289,7 +1301,9 @@ where
 
         assert_eq!(u64::from(config.ro_data_address()), ro_data_address);
         assert_eq!(u64::from(config.rw_data_address()), rw_data_address);
-    }
+
+        config.heap_base()
+    };
 
     let memory_config = MemoryConfig {
         ro_data,
@@ -1297,6 +1311,7 @@ where
         ro_data_size,
         rw_data_size,
         min_stack_size,
+        heap_base,
     };
 
     Ok(memory_config)
@@ -2671,6 +2686,7 @@ where
         const FUNC3_ECALLI: u32 = 0b000;
         const FUNC3_SBRK: u32 = 0b001;
         const FUNC3_MEMSET: u32 = 0b010;
+        const FUNC3_HEAP_BASE: u32 = 0b011;
 
         if crate::riscv::R(raw_inst).unpack() == (crate::riscv::OPCODE_CUSTOM_0, FUNC3_ECALLI, 0, RReg::Zero, RReg::Zero, RReg::Zero) {
             let initial_offset = relative_offset as u64;
@@ -2764,6 +2780,22 @@ where
                     offset_range: (relative_offset as u64..relative_offset as u64 + inst_size).into(),
                 },
                 InstExt::Basic(BasicInst::Memset),
+            ));
+
+            relative_offset += inst_size as usize;
+            continue;
+        }
+
+        if let (crate::riscv::OPCODE_CUSTOM_0, FUNC3_HEAP_BASE, 0, dst, RReg::Zero, RReg::Zero) = crate::riscv::R(raw_inst).unpack() {
+            output.push((
+                Source {
+                    section_index,
+                    offset_range: (relative_offset as u64..relative_offset as u64 + inst_size).into(),
+                },
+                match cast_reg_non_zero(dst)? {
+                    Some(dst) => InstExt::Basic(BasicInst::LoadHeapBase { dst }),
+                    None => InstExt::Basic(BasicInst::Nop),
+                },
             ));
 
             relative_offset += inst_size as usize;
@@ -5675,6 +5707,7 @@ mod test {
                 &jump_target_for_block,
                 true,
                 false,
+                0,
             )
             .unwrap();
 
@@ -7180,6 +7213,7 @@ fn emit_code(
     jump_target_for_block: &[Option<JumpTarget>],
     is_optimized: bool,
     is_rv64: bool,
+    heap_base: u32,
 ) -> Result<Vec<(SourceStack, Instruction)>, ProgramFromElfError> {
     use polkavm_common::program::Reg as PReg;
     fn conv_reg(reg: Reg) -> polkavm_common::program::RawReg {
@@ -7276,6 +7310,7 @@ fn emit_code(
                         Instruction::load_imm64(conv_reg(dst), cast(imm).to_unsigned())
                     }
                 }
+                BasicInst::LoadHeapBase { dst } => Instruction::load_imm(conv_reg(dst), heap_base),
                 BasicInst::LoadAbsolute { kind, dst, target } => {
                     codegen! {
                         args = (conv_reg(dst), get_data_address(source, target)?),
@@ -9302,6 +9337,7 @@ where
         &jump_target_for_block,
         matches!(config.opt_level, OptLevel::O2),
         is_rv64,
+        memory_config.heap_base,
     )?;
 
     {

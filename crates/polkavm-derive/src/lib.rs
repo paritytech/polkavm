@@ -53,6 +53,24 @@ pub unsafe fn memset(mut dst: *mut u8, value: usize, mut count: usize) {
     }
 }
 
+#[inline]
+pub fn heap_base() -> *mut core::ffi::c_void {
+    #[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+    unsafe {
+        let mut output;
+        core::arch::asm!(
+            ".insn r 0xb, 3, 0, {dst}, zero, zero",
+            dst = out(reg) output,
+        );
+        output
+    }
+
+    #[cfg(not(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e")))]
+    {
+        core::ptr::null_mut()
+    }
+}
+
 /// A basic memory allocator which doesn't support deallocation.
 pub struct LeakingAllocator;
 

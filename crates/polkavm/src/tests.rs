@@ -2850,6 +2850,13 @@ fn test_blob_return_tuple_from_export(config: Config, optimize: bool, is_64_bit:
     }
 }
 
+fn test_blob_get_heap_base(config: Config, optimize: bool, is_64_bit: bool) {
+    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
+    let mut i = TestInstance::new(&config, elf, optimize);
+    let heap_base = i.call::<(), u32>("get_heap_base", ()).unwrap();
+    assert_eq!(heap_base, i.instance.module().memory_map().heap_base());
+}
+
 fn test_asm_reloc_add_sub(config: Config, optimize: bool, _is_64_bit: bool) {
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_add_sub_64.elf");
 
@@ -3679,6 +3686,7 @@ run_test_blob_tests! {
     test_blob_negate_and_add
     test_blob_return_tuple_from_import
     test_blob_return_tuple_from_export
+    test_blob_get_heap_base
     test_asm_reloc_add_sub
     test_asm_reloc_hi_lo
 }
