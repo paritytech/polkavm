@@ -787,13 +787,6 @@ where
 
         let count = conv_reg(Reg::A2.into());
 
-        // // Store the address to restart the memset in case we trigger a page fault.
-        // self.push(store(
-        //     RegSize::R64,
-        //     Self::vmctx_field(S::offset_table().next_native_program_counter),
-        //     rcx,
-        // ));
-
         // Grab the amount of gas we have (this will always be negative), and zero the gas counter.
         // (We assume the memset will consume all of the gas.)
         self.push(xor((RegSize::R32, rcx, rcx)));
