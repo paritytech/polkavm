@@ -206,6 +206,17 @@ impl Engine {
     pub fn backend(&self) -> BackendKind {
         self.selected_backend
     }
+
+    /// Returns the PIDs of the idle worker processes. Only useful for debugging.
+    pub fn idle_worker_pids(&self) -> Vec<u32> {
+        if_compiler_is_supported! {
+            {
+                self.state.sandbox_cache.as_ref().map(|cache| cache.idle_worker_pids()).unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        }
+    }
 }
 
 if_compiler_is_supported! {

@@ -305,6 +305,15 @@ impl WorkerCacheKind {
             WorkerCacheKind::Generic(ref cache) => cache.spawn(crate::sandbox::generic::Sandbox::downcast_global_state(global)),
         }
     }
+
+    pub(crate) fn idle_worker_pids(&self) -> Vec<u32> {
+        match self {
+            #[cfg(target_os = "linux")]
+            WorkerCacheKind::Linux(ref cache) => cache.idle_worker_pids(),
+            #[cfg(feature = "generic-sandbox")]
+            WorkerCacheKind::Generic(ref cache) => cache.idle_worker_pids(),
+        }
+    }
 }
 
 pub(crate) struct WorkerCache<S> {
@@ -396,6 +405,16 @@ where
             }
             self.available_workers.store(sandboxes.len(), Ordering::Relaxed);
         }
+    }
+
+    fn idle_worker_pids(&self) -> Vec<u32> {
+        let mut output = Vec::new();
+        for sandbox in &*self.sandboxes.lock() {
+            if let Some(pid) = sandbox.pid() {
+                output.push(pid);
+            }
+        }
+        output
     }
 }
 
