@@ -35,6 +35,7 @@
 #include <linux/io_uring.h>
 #include <linux/utsname.h>
 #include <linux/ptrace.h>
+#include <linux/rseq.h>
 
 #define u64 __u64
 #define s64 __s64

@@ -32,6 +32,10 @@ pub type _bindgen_ty_2 = ::core::ffi::c_uint;
 pub type _bindgen_ty_3 = ::core::ffi::c_uint;
 pub type _bindgen_ty_4 = ::core::ffi::c_uint;
 pub type _bindgen_ty_7 = ::core::ffi::c_uint;
+pub type rseq_cpu_id_state = ::core::ffi::c_int;
+pub type rseq_flags = ::core::ffi::c_uint;
+pub type rseq_cs_flags_bit = ::core::ffi::c_uint;
+pub type rseq_cs_flags = ::core::ffi::c_uint;
 #[repr(C)]
 #[derive(Default)]
 pub struct __IncompleteArrayField<T>(::core::marker::PhantomData<T>, [T; 0]);
@@ -551,6 +555,28 @@ pub struct new_utsname {
     pub version: [::core::ffi::c_char; 65usize],
     pub machine: [::core::ffi::c_char; 65usize],
     pub domainname: [::core::ffi::c_char; 65usize],
+}
+#[repr(C)]
+#[repr(align(32))]
+#[derive(Debug, Copy, Clone)]
+pub struct rseq_cs {
+    pub version: __u32,
+    pub flags: __u32,
+    pub start_ip: __u64,
+    pub post_commit_offset: __u64,
+    pub abort_ip: __u64,
+}
+#[repr(C)]
+#[repr(align(32))]
+#[derive(Debug)]
+pub struct rseq {
+    pub cpu_id_start: __u32,
+    pub cpu_id: __u32,
+    pub rseq_cs: __u64,
+    pub flags: __u32,
+    pub node_id: __u32,
+    pub mm_cid: __u32,
+    pub end: __IncompleteArrayField<::core::ffi::c_char>,
 }
 #[repr(C)]
 #[derive(Debug)]
@@ -1818,6 +1844,15 @@ pub const IORING_RESTRICTION_SQE_OP: _bindgen_ty_7 = 1;
 pub const IORING_RESTRICTION_SQE_FLAGS_ALLOWED: _bindgen_ty_7 = 2;
 pub const IORING_RESTRICTION_SQE_FLAGS_REQUIRED: _bindgen_ty_7 = 3;
 pub const IORING_RESTRICTION_LAST: _bindgen_ty_7 = 4;
+pub const rseq_cpu_id_state_RSEQ_CPU_ID_UNINITIALIZED: rseq_cpu_id_state = -1;
+pub const rseq_cpu_id_state_RSEQ_CPU_ID_REGISTRATION_FAILED: rseq_cpu_id_state = -2;
+pub const rseq_flags_RSEQ_FLAG_UNREGISTER: rseq_flags = 1;
+pub const rseq_cs_flags_bit_RSEQ_CS_FLAG_NO_RESTART_ON_PREEMPT_BIT: rseq_cs_flags_bit = 0;
+pub const rseq_cs_flags_bit_RSEQ_CS_FLAG_NO_RESTART_ON_SIGNAL_BIT: rseq_cs_flags_bit = 1;
+pub const rseq_cs_flags_bit_RSEQ_CS_FLAG_NO_RESTART_ON_MIGRATE_BIT: rseq_cs_flags_bit = 2;
+pub const rseq_cs_flags_RSEQ_CS_FLAG_NO_RESTART_ON_PREEMPT: rseq_cs_flags = 1;
+pub const rseq_cs_flags_RSEQ_CS_FLAG_NO_RESTART_ON_SIGNAL: rseq_cs_flags = 2;
+pub const rseq_cs_flags_RSEQ_CS_FLAG_NO_RESTART_ON_MIGRATE: rseq_cs_flags = 4;
 #[test]
 fn bindgen_test_layout_sigaction() {
     const UNINIT: ::core::mem::MaybeUninit<sigaction> = ::core::mem::MaybeUninit::uninit();
@@ -4850,6 +4885,88 @@ fn bindgen_test_layout_new_utsname() {
         unsafe { ::core::ptr::addr_of!((*ptr).domainname) as usize - ptr as usize },
         325usize,
         concat!("Offset of field: ", stringify!(new_utsname), "::", stringify!(domainname))
+    );
+}
+#[test]
+fn bindgen_test_layout_rseq_cs() {
+    const UNINIT: ::core::mem::MaybeUninit<rseq_cs> = ::core::mem::MaybeUninit::uninit();
+    let ptr = UNINIT.as_ptr();
+    assert_eq!(
+        ::core::mem::size_of::<rseq_cs>(),
+        32usize,
+        concat!("Size of: ", stringify!(rseq_cs))
+    );
+    assert_eq!(
+        ::core::mem::align_of::<rseq_cs>(),
+        32usize,
+        concat!("Alignment of ", stringify!(rseq_cs))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).version) as usize - ptr as usize },
+        0usize,
+        concat!("Offset of field: ", stringify!(rseq_cs), "::", stringify!(version))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).flags) as usize - ptr as usize },
+        4usize,
+        concat!("Offset of field: ", stringify!(rseq_cs), "::", stringify!(flags))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).start_ip) as usize - ptr as usize },
+        8usize,
+        concat!("Offset of field: ", stringify!(rseq_cs), "::", stringify!(start_ip))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).post_commit_offset) as usize - ptr as usize },
+        16usize,
+        concat!("Offset of field: ", stringify!(rseq_cs), "::", stringify!(post_commit_offset))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).abort_ip) as usize - ptr as usize },
+        24usize,
+        concat!("Offset of field: ", stringify!(rseq_cs), "::", stringify!(abort_ip))
+    );
+}
+#[test]
+fn bindgen_test_layout_rseq() {
+    const UNINIT: ::core::mem::MaybeUninit<rseq> = ::core::mem::MaybeUninit::uninit();
+    let ptr = UNINIT.as_ptr();
+    assert_eq!(::core::mem::size_of::<rseq>(), 32usize, concat!("Size of: ", stringify!(rseq)));
+    assert_eq!(::core::mem::align_of::<rseq>(), 32usize, concat!("Alignment of ", stringify!(rseq)));
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).cpu_id_start) as usize - ptr as usize },
+        0usize,
+        concat!("Offset of field: ", stringify!(rseq), "::", stringify!(cpu_id_start))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).cpu_id) as usize - ptr as usize },
+        4usize,
+        concat!("Offset of field: ", stringify!(rseq), "::", stringify!(cpu_id))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).rseq_cs) as usize - ptr as usize },
+        8usize,
+        concat!("Offset of field: ", stringify!(rseq), "::", stringify!(rseq_cs))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).flags) as usize - ptr as usize },
+        16usize,
+        concat!("Offset of field: ", stringify!(rseq), "::", stringify!(flags))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).node_id) as usize - ptr as usize },
+        20usize,
+        concat!("Offset of field: ", stringify!(rseq), "::", stringify!(node_id))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).mm_cid) as usize - ptr as usize },
+        24usize,
+        concat!("Offset of field: ", stringify!(rseq), "::", stringify!(mm_cid))
+    );
+    assert_eq!(
+        unsafe { ::core::ptr::addr_of!((*ptr).end) as usize - ptr as usize },
+        28usize,
+        concat!("Offset of field: ", stringify!(rseq), "::", stringify!(end))
     );
 }
 #[test]

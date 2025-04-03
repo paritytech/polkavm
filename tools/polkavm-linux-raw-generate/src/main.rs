@@ -102,6 +102,7 @@ fn main() {
         "uffdio.+",
         "io_uring.+",
         "new_utsname",
+        "rseq.*",
     ]
     .join("|");
 
