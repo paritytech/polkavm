@@ -64,6 +64,14 @@
     ".byte %[arg_4]\n" \
     ".byte %[arg_5]\n" \
     ".byte %[arg_6]\n"
+#define POLKAVM_ARG_ASM_4_7(A, B, C, D, E, F, G) \
+    ".byte %[arg_1]\n" \
+    ".byte %[arg_2]\n" \
+    ".byte %[arg_3]\n" \
+    ".byte %[arg_4]\n" \
+    ".byte %[arg_5]\n" \
+    ".byte %[arg_6]\n" \
+    ".byte %[arg_7]\n"
 
 #define POLKAVM_ARG_ASM_3(N, ...) POLKAVM_ARG_ASM_4_ ## N(__VA_ARGS__)
 #define POLKAVM_ARG_ASM_2(N, ...) POLKAVM_ARG_ASM_3(N, ## __VA_ARGS__)
@@ -83,6 +91,8 @@
     POLKAVM_REGS_FOR_TY(A) + POLKAVM_REGS_FOR_TY(B) + POLKAVM_REGS_FOR_TY(C) + POLKAVM_REGS_FOR_TY(D) + POLKAVM_REGS_FOR_TY(E)
 #define POLKAVM_COUNT_REGS_4_6(A, B, C, D, E, F) \
     POLKAVM_REGS_FOR_TY(A) + POLKAVM_REGS_FOR_TY(B) + POLKAVM_REGS_FOR_TY(C) + POLKAVM_REGS_FOR_TY(D) + POLKAVM_REGS_FOR_TY(E) + POLKAVM_REGS_FOR_TY(F)
+#define POLKAVM_COUNT_REGS_4_7(A, B, C, D, E, F, G) \
+    POLKAVM_REGS_FOR_TY(A) + POLKAVM_REGS_FOR_TY(B) + POLKAVM_REGS_FOR_TY(C) + POLKAVM_REGS_FOR_TY(D) + POLKAVM_REGS_FOR_TY(E) + POLKAVM_REGS_FOR_TY(F) + POLKAVM_REGS_FOR_TY(G)
 
 #define POLKAVM_COUNT_REGS_3(N, ...) POLKAVM_COUNT_REGS_4_ ## N(__VA_ARGS__)
 #define POLKAVM_COUNT_REGS_2(N, ...) POLKAVM_COUNT_REGS_3(N, ## __VA_ARGS__)
@@ -95,6 +105,7 @@
 #define POLKAVM_IMPORT_ARGS_IMPL_4_4(A0, A1, A2, A3) A0 a0, A1 a1, A2 a2, A3 a3
 #define POLKAVM_IMPORT_ARGS_IMPL_4_5(A0, A1, A2, A3, A4) A0 a0, A1 a1, A2 a2, A3 a3, A4 a4
 #define POLKAVM_IMPORT_ARGS_IMPL_4_6(A0, A1, A2, A3, A4, A5) A0 a0, A1 a1, A2 a2, A3 a3, A4 a4, A5 a5
+#define POLKAVM_IMPORT_ARGS_IMPL_4_7(A0, A1, A2, A3, A4, A5, A6) A0 a0, A1 a1, A2 a2, A3 a3, A4 a4, A5 a5, A6 a6
 
 #define POLKAVM_IMPORT_ARGS_IMPL_3(N, ...) POLKAVM_IMPORT_ARGS_IMPL_4_ ## N(__VA_ARGS__)
 #define POLKAVM_IMPORT_ARGS_IMPL_2(N, ...) POLKAVM_IMPORT_ARGS_IMPL_3(N, ## __VA_ARGS__)
