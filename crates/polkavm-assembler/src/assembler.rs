@@ -180,11 +180,17 @@ impl Assembler {
 
     pub fn create_label(&mut self) -> Label {
         let label = self.labels.len() as u32;
+        #[cfg(debug_assertions)]
+        log::trace!("{:08x}: {}:", self.origin + self.code.len() as u64, Label::from_raw(label));
+
         self.labels.push(self.code.len() as isize);
         Label::from_raw(label)
     }
 
     pub fn define_label(&mut self, label: Label) -> &mut Self {
+        #[cfg(debug_assertions)]
+        log::trace!("{:08x}: {}:", self.origin + self.code.len() as u64, label);
+
         assert_eq!(
             self.labels[label.raw() as usize],
             isize::MAX,
