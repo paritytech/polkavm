@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-env_logger = { version = "0.10.0", default-features = false }
+env_logger = { workspace = true }
 polkavm = { path = "../../crates/polkavm" }
 sdl2 = { workspace = true }
 
