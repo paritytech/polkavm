@@ -1738,6 +1738,24 @@ pub mod inst {
             None,
             (fmt.write_fmt(core::format_args!("lea {}, {}", self.1.name_from(self.0), self.2))),
 
+        // https://www.felixcloutier.com/x86/mfence
+        mfence() =>
+            InstBuf::from_array([0x0f, 0xae, 0xf0]),
+            None,
+            (fmt.write_str("mfence")),
+
+        // https://www.felixcloutier.com/x86/lfence
+        lfence() =>
+            InstBuf::from_array([0x0f, 0xae, 0xe8]),
+            None,
+            (fmt.write_str("lfence")),
+
+        // https://www.felixcloutier.com/x86/rdtscp
+        rdtscp() =>
+            InstBuf::from_array([0x0f, 0x01, 0xf9]),
+            None,
+            (fmt.write_str("rdtscp")),
+
         // https://www.felixcloutier.com/x86/call
         call(RegMem) => {
             Inst::new(0xff).modrm_opext(0b010).regmem(self.0).encode()
@@ -2367,7 +2385,9 @@ mod tests {
         jmp_rel8,
         jmp,
         lea,
+        lfence,
         load,
+        mfence,
         mov_imm,
         mov_imm64,
         mov,
@@ -2395,6 +2415,7 @@ mod tests {
         push,
         push_imm,
         rcr_imm,
+        rdtscp,
         ret,
         ror_imm,
         rol_cl,
