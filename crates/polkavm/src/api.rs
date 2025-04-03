@@ -36,6 +36,7 @@ if_compiler_is_supported! {
         use crate::sandbox::generic::Sandbox as SandboxGeneric;
 
         pub(crate) struct EngineState {
+            pub(crate) sandboxing_enabled: bool,
             pub(crate) sandbox_global: Option<crate::sandbox::GlobalStateKind>,
             pub(crate) sandbox_cache: Option<crate::sandbox::WorkerCacheKind>,
             compiler_cache: CompilerCache,
@@ -117,6 +118,14 @@ impl Engine {
             bail!("cannot enable execution cross-checking: `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` is not enabled");
         }
 
+        if !config.sandboxing_enabled {
+            if !config.allow_experimental {
+                bail!("cannot disable security sandboxing: `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` is not enabled");
+            } else {
+                log::warn!("SECURITY SANDBOXING IS DISABLED; THIS IS UNSUPPORTED; YOU HAVE BEEN WARNED");
+            }
+        }
+
         let crosscheck = config.crosscheck;
         let default_backend = if BackendKind::Compiler.is_supported() && SandboxKind::Linux.is_supported() {
             BackendKind::Compiler
@@ -165,6 +174,7 @@ impl Engine {
                     }
 
                     let state = Arc::new(EngineState {
+                        sandboxing_enabled: config.sandboxing_enabled,
                         sandbox_global: Some(sandbox_global),
                         sandbox_cache: Some(sandbox_cache),
                         compiler_cache: Default::default(),
@@ -176,6 +186,7 @@ impl Engine {
                     (Some(selected_sandbox), state)
                 } else {
                     (None, Arc::new(EngineState {
+                        sandboxing_enabled: config.sandboxing_enabled,
                         sandbox_global: None,
                         sandbox_cache: None,
                         compiler_cache: Default::default(),

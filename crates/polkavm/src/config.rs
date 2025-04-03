@@ -104,6 +104,7 @@ pub struct Config {
     pub(crate) worker_count: usize,
     pub(crate) cache_enabled: bool,
     pub(crate) lru_cache_size: u32,
+    pub(crate) sandboxing_enabled: bool,
 }
 
 impl Default for Config {
@@ -156,6 +157,7 @@ impl Config {
             worker_count: 2,
             cache_enabled: cfg!(feature = "module-cache"),
             lru_cache_size: 0,
+            sandboxing_enabled: true,
         }
     }
 
@@ -191,6 +193,10 @@ impl Config {
 
             if let Some(value) = env_usize("POLKAVM_LRU_CACHE_SIZE")? {
                 config.lru_cache_size = if value > u32::MAX as usize { u32::MAX } else { value as u32 };
+            }
+
+            if let Some(value) = env_bool("POLKAVM_SANDBOXING_ENABLED")? {
+                config.sandboxing_enabled = value;
             }
         }
 
@@ -337,6 +343,23 @@ impl Config {
     pub fn set_lru_cache_size(&mut self, value: u32) -> &mut Self {
         self.lru_cache_size = value;
         self
+    }
+
+    /// Sets whether security sandboxing is enabled.
+    ///
+    /// Should only be used for debugging purposes and *never* disabled in production.
+    ///
+    /// Default: `true`
+    ///
+    /// Corresponding environment variable: `POLKAVM_SANDBOXING_ENABLED`
+    pub fn set_sandboxing_enabled(&mut self, value: bool) -> &mut Self {
+        self.sandboxing_enabled = value;
+        self
+    }
+
+    /// Returns whether security sandboxing is enabled.
+    pub fn sandboxing_enabled(&self) -> bool {
+        self.sandboxing_enabled
     }
 }
 

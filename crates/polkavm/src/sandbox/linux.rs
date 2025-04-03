@@ -181,17 +181,25 @@ impl GlobalState {
 
 pub struct SandboxConfig {
     enable_logger: bool,
+    enable_sandboxing: bool,
 }
 
 impl SandboxConfig {
     pub fn new() -> Self {
-        SandboxConfig { enable_logger: false }
+        SandboxConfig {
+            enable_logger: false,
+            enable_sandboxing: true,
+        }
     }
 }
 
 impl super::SandboxConfig for SandboxConfig {
     fn enable_logger(&mut self, value: bool) {
         self.enable_logger = value;
+    }
+
+    fn enable_sandboxing(&mut self, value: bool) {
+        self.enable_sandboxing = value;
     }
 }
 
@@ -728,11 +736,11 @@ struct ChildFds {
     logging_pipe: Option<Fd>,
 }
 
-unsafe fn child_main(uid_map: &str, gid_map: &str, fds: ChildFds) -> Result<(), Error> {
+unsafe fn child_main(uid_map: &str, gid_map: &str, fds: ChildFds, sandboxing_enabled: bool) -> Result<(), Error> {
     // Change the name of the process.
     linux_raw::sys_prctl_set_name(b"polkavm-sandbox\0")?;
 
-    if !cfg!(polkavm_dev_debug_zygote) {
+    if sandboxing_enabled {
         // Overwrite the hostname and domainname.
         linux_raw::sys_sethostname("localhost")?;
         linux_raw::sys_setdomainname("localhost")?;
@@ -832,7 +840,7 @@ unsafe fn child_main(uid_map: &str, gid_map: &str, fds: ChildFds) -> Result<(), 
     let fd_zygote = move_fd(fd_zygote, FD_ZYGOTE, linux_raw::O_CLOEXEC)?;
     close_fd_range(NEXT_FREE_FD, c_int::MAX)?;
 
-    if !cfg!(polkavm_dev_debug_zygote) {
+    if sandboxing_enabled {
         // Hide the host filesystem.
         let mount_flags = linux_raw::MS_REC | linux_raw::MS_NODEV | linux_raw::MS_NOEXEC | linux_raw::MS_NOSUID | linux_raw::MS_RDONLY;
         linux_raw::sys_mount(cstr!("none"), cstr!("/tmp"), cstr!("tmpfs"), mount_flags, Some(cstr!("size=0")))?;
@@ -1298,13 +1306,14 @@ impl super::Sandbox for Sandbox {
         // TODO: If not using userfaultfd then don't mmap all of this immediately.
         let (memory_memfd, memory_mmap) = prepare_memory()?;
 
+        let sandboxing_enabled = config.enable_sandboxing && !cfg!(polkavm_dev_debug_zygote);
         let (vmctx_memfd, vmctx_mmap) = prepare_vmctx()?;
         let vmctx = unsafe { &*vmctx_mmap.as_ptr().cast::<VmCtx>() };
         vmctx.init.logging_enabled.store(config.enable_logger, Ordering::Relaxed);
         vmctx.init.uffd_available.store(global.uffd_available, Ordering::Relaxed);
-        vmctx.init.sandbox_disabled.store(cfg!(polkavm_dev_debug_zygote), Ordering::Relaxed);
+        vmctx.init.sandbox_disabled.store(!sandboxing_enabled, Ordering::Relaxed);
 
-        let sandbox_flags = if !cfg!(polkavm_dev_debug_zygote) { SANDBOX_FLAGS } else { 0 };
+        let sandbox_flags = if sandboxing_enabled { SANDBOX_FLAGS } else { 0 };
 
         let uid = linux_raw::sys_getuid()?;
         let gid = linux_raw::sys_getgid()?;
@@ -1334,6 +1343,7 @@ impl super::Sandbox for Sandbox {
                             lifetime_pipe: lifetime_pipe_child,
                             logging_pipe: logger_tx,
                         },
+                        sandboxing_enabled,
                     ) {
                         Ok(()) => {
                             // This is impossible.

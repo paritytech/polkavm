@@ -64,6 +64,7 @@ pub(crate) fn get_native_page_size() -> usize {
 
 pub trait SandboxConfig: Default {
     fn enable_logger(&mut self, value: bool);
+    fn enable_sandboxing(&mut self, value: bool);
 }
 
 pub trait SandboxAddressSpace {
@@ -165,6 +166,7 @@ where
 
         let mut sandbox_config = S::Config::default();
         sandbox_config.enable_logger(is_sandbox_logging_enabled());
+        sandbox_config.enable_sandboxing(engine_state.sandboxing_enabled);
 
         let global = S::downcast_global_state(engine_state.sandbox_global.as_ref().unwrap());
         let mut sandbox = if let Some(sandbox) = engine_state
@@ -317,6 +319,7 @@ impl WorkerCacheKind {
 }
 
 pub(crate) struct WorkerCache<S> {
+    sandboxing_enabled: bool,
     sandboxes: Mutex<Vec<S>>,
     available_workers: AtomicUsize,
     worker_limit: usize,
@@ -328,6 +331,7 @@ where
 {
     pub(crate) fn new(config: &Config) -> Self {
         WorkerCache {
+            sandboxing_enabled: config.sandboxing_enabled,
             sandboxes: Mutex::new(Vec::new()),
             available_workers: AtomicUsize::new(0),
             worker_limit: config.worker_count,
@@ -337,6 +341,7 @@ where
     fn spawn(&self, global: &S::GlobalState) -> Result<(), Error> {
         let mut sandbox_config = S::Config::default();
         sandbox_config.enable_logger(is_sandbox_logging_enabled());
+        sandbox_config.enable_sandboxing(self.sandboxing_enabled);
 
         let sandbox = S::spawn(global, &sandbox_config)
             .map_err(crate::Error::from_display)
