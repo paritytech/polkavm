@@ -901,6 +901,12 @@ impl core::fmt::Display for MemoryAccessError {
     }
 }
 
+impl From<MemoryAccessError> for alloc::string::String {
+    fn from(error: MemoryAccessError) -> alloc::string::String {
+        alloc::string::ToString::to_string(&error)
+    }
+}
+
 if_compiler_is_supported! {
     {
         macro_rules! access_backend {
