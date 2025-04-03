@@ -120,6 +120,17 @@ struct PolkaVM_Metadata {
     unsigned char output_regs;
 } __attribute__ ((packed));
 
+struct PolkaVM_Metadata_V2 {
+    unsigned char version;
+    unsigned int flags;
+    unsigned int symbol_length;
+    const char * symbol;
+    unsigned char input_regs;
+    unsigned char output_regs;
+    unsigned char has_index;
+    unsigned int index;
+} __attribute__ ((packed));
+
 #ifdef _LP64
     #define POLKAVM_EXPORT_DEF()  \
         ".quad %[metadata]\n" \
@@ -161,6 +172,21 @@ static void __attribute__ ((naked, used)) POLKAVM_UNIQUE(polkavm_export_dummy)()
 #define POLKAVM_IMPORT(arg_return_ty, fn_name, ...) \
 static struct PolkaVM_Metadata POLKAVM_JOIN(fn_name, __IMPORT_METADATA) __attribute__ ((section(".polkavm_metadata"))) = { \
     1, 0, sizeof(#fn_name) - 1, #fn_name, POLKAVM_COUNT_REGS(__VA_ARGS__), POLKAVM_COUNT_REGS(arg_return_ty) \
+}; \
+static arg_return_ty __attribute__ ((naked)) fn_name(POLKAVM_IMPORT_ARGS_IMPL(__VA_ARGS__)) { \
+    __asm__( \
+        POLKAVM_IMPORT_DEF() \
+        "ret\n" \
+        : \
+        : \
+          [metadata] "i" (&POLKAVM_JOIN(fn_name, __IMPORT_METADATA)) \
+        : "memory" \
+    ); \
+}
+
+#define POLKAVM_IMPORT_WITH_INDEX(index, arg_return_ty, fn_name, ...) \
+static struct PolkaVM_Metadata_V2 POLKAVM_JOIN(fn_name, __IMPORT_METADATA) __attribute__ ((section(".polkavm_metadata"))) = { \
+    2, 0, sizeof(#fn_name) - 1, #fn_name, POLKAVM_COUNT_REGS(__VA_ARGS__), POLKAVM_COUNT_REGS(arg_return_ty), 1, index \
 }; \
 static arg_return_ty __attribute__ ((naked)) fn_name(POLKAVM_IMPORT_ARGS_IMPL(__VA_ARGS__)) { \
     __asm__( \
