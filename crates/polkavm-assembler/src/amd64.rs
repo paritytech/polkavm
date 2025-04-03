@@ -1756,6 +1756,12 @@ pub mod inst {
             None,
             (fmt.write_str("rdtscp")),
 
+        // https://www.felixcloutier.com/x86/cpuid
+        cpuid() =>
+            InstBuf::from_array([0x0f, 0xa2]),
+            None,
+            (fmt.write_str("cpuid")),
+
         // https://www.felixcloutier.com/x86/call
         call(RegMem) => {
             Inst::new(0xff).modrm_opext(0b010).regmem(self.0).encode()
@@ -2371,6 +2377,7 @@ mod tests {
         cdq,
         cmov,
         cmp,
+        cpuid,
         cqo,
         div,
         endbr64,
