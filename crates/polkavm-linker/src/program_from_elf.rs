@@ -2030,6 +2030,12 @@ where
             Ok(())
         }
         Inst::Load { kind, dst, base, offset } => {
+            if dst == RReg::Zero && base == RReg::Zero && offset == 0 {
+                // These are sometimes used as a poor man's trap.
+                emit(InstExt::Control(ControlInst::Unimplemented));
+                return Ok(());
+            }
+
             let Some(base) = cast_reg_non_zero(base)? else {
                 return Err(ProgramFromElfError::other(format!(
                     "found an unrelocated absolute load at {}",
@@ -2046,6 +2052,11 @@ where
             Ok(())
         }
         Inst::Store { kind, src, base, offset } => {
+            if src == RReg::Zero && base == RReg::Zero && offset == 0 {
+                emit(InstExt::Control(ControlInst::Unimplemented));
+                return Ok(());
+            }
+
             let Some(base) = cast_reg_non_zero(base)? else {
                 return Err(ProgramFromElfError::other(format!(
                     "found an unrelocated absolute store at {}",
