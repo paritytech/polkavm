@@ -103,6 +103,10 @@ where
         }
     }
 
+    pub fn is_undefined(&self) -> bool {
+        matches!(self.elf_symbol.section(), object::read::SymbolSection::Undefined)
+    }
+
     pub fn section_and_offset(&self) -> Result<(&Section, u64), ProgramFromElfError> {
         let elf_section_index = match self.elf_symbol.section() {
             object::read::SymbolSection::Section(section_index) => section_index,

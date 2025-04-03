@@ -8786,6 +8786,10 @@ where
     for sym in elf.symbols() {
         match sym.kind() {
             object::elf::STT_FUNC => {
+                if sym.is_undefined() {
+                    continue;
+                }
+
                 let (section, offset) = sym.section_and_offset()?;
                 let Some(name) = sym.name() else { continue };
 
