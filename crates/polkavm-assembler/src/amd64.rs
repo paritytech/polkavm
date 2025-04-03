@@ -1756,6 +1756,12 @@ pub mod inst {
             None,
             (fmt.write_str("rdtscp")),
 
+        // https://www.felixcloutier.com/x86/rdpmc
+        rdpmc() =>
+            InstBuf::from_array([0x0f, 0x33]),
+            None,
+            (fmt.write_str("rdpmc")),
+
         // https://www.felixcloutier.com/x86/cpuid
         cpuid() =>
             InstBuf::from_array([0x0f, 0xa2]),
@@ -2422,6 +2428,7 @@ mod tests {
         push,
         push_imm,
         rcr_imm,
+        rdpmc,
         rdtscp,
         ret,
         ror_imm,
