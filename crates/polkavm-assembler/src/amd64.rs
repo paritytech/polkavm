@@ -1444,6 +1444,12 @@ pub mod inst {
             None,
             (fmt.write_fmt(core::format_args!("inc {}", self.1.display(self.0)))),
 
+        // https://www.felixcloutier.com/x86/dec
+        dec(Size, RegMem) =>
+            new_rm(0xfe, self.0, self.1, None).modrm_opext(0b001).encode(),
+            None,
+            (fmt.write_fmt(core::format_args!("dec {}", self.1.display(self.0)))),
+
         // https://www.felixcloutier.com/x86/sub
         sub(Operands) =>
             alu_impl(0x28, 0x2a, 0b101, self.0),
@@ -2386,6 +2392,7 @@ mod tests {
         cmp,
         cpuid,
         cqo,
+        dec,
         div,
         endbr64,
         idiv,
