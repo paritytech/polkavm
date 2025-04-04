@@ -18,6 +18,7 @@ members = [
     "tools/spectool",
 
     "examples/doom",
+    "examples/quake",
     "examples/hello-world",
 ]
 
