@@ -557,6 +557,7 @@ impl ModuleConfig {
             u32::from(is_strict),
             u32::from(step_tracing),
             u32::from(dynamic_paging),
+            u32::from(allow_sbrk),
         ]);
 
         Some(hasher.finalize())
