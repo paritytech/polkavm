@@ -485,33 +485,33 @@ pub fn standard_program_initialization_for_child(z: u64, s: u64, o_bytes_address
     let o_start_page = Z_Z / PAGE_SIZE;
     let zero_result = unsafe { zero(machine_index as u64, o_start_page, o_bytes_page_len) };
     if zero_result != OK {
-        return call_log(2, None, "StandardProgramInitializationForChild: zero failed for o_bytes");
+        return call_log(0, None, "StandardProgramInitializationForChild: zero failed for o_bytes");
     }
 
     let w_start_address = 2 * Z_Z + z_func(o_bytes_length);
     let w_start_page = w_start_address / PAGE_SIZE; 
     let zero_result = unsafe { zero(machine_index as u64, w_start_page, w_bytes_page_len) };
     if zero_result != OK {
-        return call_log(2, None, "StandardProgramInitializationForChild: zero failed for w_bytes");
+        return call_log(0, None, "StandardProgramInitializationForChild: zero failed for w_bytes");
     }
 
     let s_start_address = (1u64 << 32) - 2 * Z_Z - Z_I - p_func(s);
     let s_start_page = s_start_address / PAGE_SIZE;
     let zero_result = unsafe { zero(machine_index as u64, s_start_page, stack_page_len) };
     if zero_result != OK {
-        return call_log(2, None, "StandardProgramInitializationForChild: zero failed for stack");
+        return call_log(0, None, "StandardProgramInitializationForChild: zero failed for stack");
     }
 
     let poke_result = unsafe { poke(machine_index as u64, o_bytes_address, o_start_addreess, o_bytes_length) };
     if poke_result != OK {
-        return call_log(2, None, "StandardProgramInitializationForChild: poke failed for o_bytes");
+        return call_log(0, None, "StandardProgramInitializationForChild: poke failed for o_bytes");
     }
 
     let poke_result = unsafe { poke(machine_index as u64, w_bytes_address, w_start_address, w_bytes_length) };
     if poke_result != OK {
-        return call_log(2, None, "StandardProgramInitializationForChild: poke failed for w_bytes");
+        return call_log(0, None, "StandardProgramInitializationForChild: poke failed for w_bytes");
     }
-    call_log(2, None, "StandardProgramInitializationForChild: success");
+    call_log(3, None, "StandardProgramInitializationForChild: success");
 }
 
 // Child VM related functions
