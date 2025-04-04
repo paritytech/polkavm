@@ -33,7 +33,7 @@ jobs:
     - name: Check (FreeBSD)
       run: ./ci/jobs/check-freebsd.sh
   build-and-test-macos:
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
     - uses: actions/checkout@v4
     - name: Build and test
@@ -41,7 +41,7 @@ jobs:
     - name: Build and test (macOS-only)
       run: ./ci/jobs/build-and-test-macos.sh
   clippy-macos:
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
     - uses: actions/checkout@v4
     - name: Install clippy (base toolchain)
@@ -49,7 +49,7 @@ jobs:
     - name: Run clippy
       run: ./ci/jobs/clippy.sh
   build-and-test-windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
     - uses: actions/checkout@v4
     - name: Build and test
