@@ -1,7 +1,6 @@
 // RO data = 24/24 bytes
 // RW data = 0/0 bytes
 // Stack size = 8192 bytes
-// Jump table entry point size = 2 bytes
 // RO data = [2, 0, 255, 255, 4, 0, 255, 255, 10, 0, 255, 255, 18, 0, 255, 255, 24, 0, 255, 255, 30, 0, 255, 255]
 // RW data = []
 // Instructions = 1155

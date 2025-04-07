@@ -1,0 +1,17 @@
+cargo-features = ["edition2024"]
+
+[package]
+name = "game_of_life_parent_only"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "game_of_life_parent_only"
+path = "src/main.rs"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+polkavm-derive = { path = "../../crates/polkavm-derive" }
+utils = { path = "../utils" }
+simplealloc = { path = "../../crates/simplealloc" }

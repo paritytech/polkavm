@@ -352,7 +352,7 @@ fn main_jam_service(input_path: PathBuf, output_path: Option<PathBuf>, dump_path
 
     let o_size = e_l(blob.ro_data().len().try_into().unwrap(), 3);
     let w_size = e_l(blob.rw_data().len().try_into().unwrap(), 3);
-    let z = e_l(blob.jump_table_entry_size() as u32, 2);
+    let z = e_l(blob.rw_data_size() as u32, 2);
     let s = e_l(blob.stack_size(), 3);
     let o_byte = blob.ro_data();
     let w_byte = blob.rw_data();

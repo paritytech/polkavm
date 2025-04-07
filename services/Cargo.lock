@@ -77,6 +77,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "game_of_life_child"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "simplealloc",
+ "utils",
+]
+
+[[package]]
+name = "game_of_life_parent_only"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "simplealloc",
+ "utils",
+]
+
+[[package]]
 name = "megatron"
 version = "0.1.0"
 dependencies = [
@@ -94,18 +112,18 @@ dependencies = [
 
 [[package]]
 name = "polkavm-common"
-version = "0.21.0"
+version = "0.22.0"
 
 [[package]]
 name = "polkavm-derive"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "polkavm-derive-impl-macro",
 ]
 
 [[package]]
 name = "polkavm-derive-impl"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "polkavm-common",
  "proc-macro2",
@@ -115,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-derive-impl-macro"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "polkavm-derive-impl",
  "syn",
@@ -141,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "simplealloc"
-version = "0.21.0"
+version = "0.22.0"
 
 [[package]]
 name = "syn"

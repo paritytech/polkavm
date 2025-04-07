@@ -5,201 +5,25 @@
 extern crate alloc;
 use alloc::string::String;
 use alloc::format;
-use alloc::vec;
 
 use polkavm_derive::min_stack_size;
 min_stack_size!(409600);
 
-use utils::constants::{FIRST_READABLE_ADDRESS, FIRST_READABLE_PAGE, NONE, SEGMENT_SIZE};
-use utils::functions::{parse_accumulate_args, parse_refine_args, call_log};
-use utils::host_functions::{export, fetch};
-use utils::hash_functions::blake2b_hash;
+use utils::constants::{FIRST_READABLE_ADDRESS, PAGE_SIZE, SEGMENT_SIZE};
+use utils::constants::{NONE, HOST, LOG};
 
-const PAGE_SIZE: usize = 4096;
-const PAGE_DIM: usize = 64;
-const NUM_PAGES: usize = 9;
-const PAGES_PER_ROW: usize = 3;
-const TOTAL_ROWS: usize = PAGE_DIM * 3;
-const TOTAL_COLS: usize = PAGE_DIM * 3;
+use utils::functions::{call_log};
+use utils::functions::{initialize_pvm_registers, serialize_gas_and_registers, deserialize_gas_and_registers};
+use utils::functions::{parse_standard_program_initialization_args, standard_program_initialization_for_child};
+use utils::functions::{parse_accumulate_args, parse_refine_args};
 
-const TOTAL_BYTES: usize = PAGE_SIZE * NUM_PAGES;
+use utils::host_functions::{solicit};
+use utils::host_functions::{export, expunge, fetch, historical_lookup, invoke, machine, poke, peek, zero, log};
 
-const ROWS_WITH_GHOST: usize = TOTAL_ROWS + 2;
-const COLS_WITH_GHOST: usize = TOTAL_COLS + 2;
-
-/* glider pattern (3×3):
-   row=0: [0,1,0]
-   row=1: [0,0,1]
-   row=2: [1,1,1]
-*/
-const GLIDER_PATTERN: [(usize, usize); 5] = [
-    (0, 1),
-    (1, 2),
-    (2, 0),
-    (2, 1),
-    (2, 2),
-];
-
-const H_SPACING: usize = 5;
-const V_SPACING: usize = 5;
-const MARGIN: usize = 2;
-const GLIDERS_PER_ROW: usize = (PAGE_DIM - MARGIN) / H_SPACING;
-
-fn bytes_to_hex(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-struct Grid {
-    pages: [[u8; PAGE_SIZE]; NUM_PAGES],
-}
-
-impl Grid {
-    fn new() -> Self {
-        Self {
-            pages: [[0; PAGE_SIZE]; NUM_PAGES],
-        }
-    }
-
-    fn init_hash_chain(&mut self) {
-        // let num_hashes = TOTAL_BYTES / 32;
-        let num_hashes = 20;
-        let hash_data_size = 32 * num_hashes;
-        let mut hash_data = vec![0u8; hash_data_size];
-        let mut current = String::new();
-        let mut first_hash = [0u8; 32];
-
-        for i in 0..num_hashes {
-            let hash_bytes = blake2b_hash(current.as_bytes());
-            if i == 0 {
-                first_hash.copy_from_slice(&hash_bytes);
-            }
-            hash_data[i * 32..(i + 1) * 32].copy_from_slice(&hash_bytes);
-            current = bytes_to_hex(&hash_bytes);
-        }
-    
-        let mut hash_chain = [0u8; TOTAL_BYTES];
-        for (i, byte) in hash_chain.iter_mut().enumerate() {
-            *byte = hash_data[i % hash_data_size];
-            *byte >>= 7;
-        }
-
-        call_log(
-            2,
-            None,
-            &format!(
-                "Finish {:?} hashes and shift, first hash: {:?}",
-                num_hashes,
-                bytes_to_hex(&first_hash)
-            ),
-        );
-
-        for i in 0..NUM_PAGES {
-            let start = i * PAGE_SIZE;
-            self.pages[i].copy_from_slice(&hash_chain[start..start + PAGE_SIZE]);
-        }
-
-        call_log(2, None, &format!("Finish hash chain copy"));
-    }
-
-    fn init_gliders(&mut self, num_gliders: usize) {
-        self.pages = [[0; PAGE_SIZE]; NUM_PAGES];
-
-        let mut placed_count = 0;
-        for i in 0..num_gliders {
-            let row_index = i / GLIDERS_PER_ROW;
-            let col_index = i % GLIDERS_PER_ROW;
-
-            let row_offset = row_index * V_SPACING + MARGIN;
-            let col_offset = col_index * H_SPACING + MARGIN;
-
-            if row_offset + 2 >= PAGE_DIM || col_offset + 2 >= PAGE_DIM {
-                break;
-            }
-
-            for &(r, c) in &GLIDER_PATTERN {
-                let row = row_offset + r;
-                let col = col_offset + c;
-                self.pages[0][row * PAGE_DIM + col] = 1;
-            }
-            placed_count += 1;
-        }
-        call_log(2, None, &format!("Finish glider init, placed {} gliders", placed_count));
-    }
-
-    fn step(&self) -> Grid {
-        let mut in_buf: [[u8; COLS_WITH_GHOST]; ROWS_WITH_GHOST] =
-            [[0; COLS_WITH_GHOST]; ROWS_WITH_GHOST];
-
-        for page in 0..NUM_PAGES {
-            let page_row = page / PAGES_PER_ROW;
-            let page_col = page % PAGES_PER_ROW;
-            for i in 0..PAGE_DIM {
-                for j in 0..PAGE_DIM {
-                    let global_row = page_row * PAGE_DIM + i;
-                    let global_col = page_col * PAGE_DIM + j;
-                    in_buf[global_row + 1][global_col + 1] =
-                        self.pages[page][i * PAGE_DIM + j];
-                }
-            }
-        }
-
-        // ghost border wrap-around
-        for j in 1..=TOTAL_COLS {
-            in_buf[0][j] = in_buf[TOTAL_ROWS][j];
-            in_buf[TOTAL_ROWS + 1][j] = in_buf[1][j];
-        }
-        for i in 1..=TOTAL_ROWS {
-            in_buf[i][0] = in_buf[i][TOTAL_COLS];
-            in_buf[i][TOTAL_COLS + 1] = in_buf[i][1];
-        }
-        in_buf[0][0] = in_buf[TOTAL_ROWS][TOTAL_COLS];
-        in_buf[0][TOTAL_COLS + 1] = in_buf[TOTAL_ROWS][1];
-        in_buf[TOTAL_ROWS + 1][0] = in_buf[1][TOTAL_COLS];
-        in_buf[TOTAL_ROWS + 1][TOTAL_COLS + 1] = in_buf[1][1];
-
-        let mut out_buf: [[u8; TOTAL_COLS]; TOTAL_ROWS] = [[0; TOTAL_COLS]; TOTAL_ROWS];
-        for i in 1..=TOTAL_ROWS {
-            for j in 1..=TOTAL_COLS {
-                let live_neighbors =
-                    in_buf[i - 1][j - 1] as u32 +
-                    in_buf[i - 1][j] as u32 +
-                    in_buf[i - 1][j + 1] as u32 +
-                    in_buf[i][j - 1] as u32 +
-                    in_buf[i][j + 1] as u32 +
-                    in_buf[i + 1][j - 1] as u32 +
-                    in_buf[i + 1][j] as u32 +
-                    in_buf[i + 1][j + 1] as u32;
-                let current = in_buf[i][j];
-                out_buf[i - 1][j - 1] = if (current == 1 && (live_neighbors == 2 || live_neighbors == 3))
-                    || (current == 0 && live_neighbors == 3)
-                {
-                    1
-                } else {
-                    0
-                };
-            }
-        }
-
-        let mut new_pages = [[0u8; PAGE_SIZE]; NUM_PAGES];
-        for page in 0..NUM_PAGES {
-            let page_row = page / PAGES_PER_ROW;
-            let page_col = page % PAGES_PER_ROW;
-            for i in 0..PAGE_DIM {
-                for j in 0..PAGE_DIM {
-                    let global_row = page_row * PAGE_DIM + i;
-                    let global_col = page_col * PAGE_DIM + j;
-                    new_pages[page][i * PAGE_DIM + j] = out_buf[global_row][global_col];
-                }
-            }
-        }
-
-        Grid { pages: new_pages }
-    }
-}
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
-    let (_wi_service_index, wi_payload_start_address, _wi_payload_length, _wphash) =
+    let (wi_service_index, wi_payload_start_address, wi_payload_length, _wphash) =
         if let Some(args) = parse_refine_args(start_address, length) {
             (
                 args.wi_service_index,
@@ -211,7 +35,19 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
             return (FIRST_READABLE_ADDRESS as u64, 0);
         };
 
-    let mut grid = Grid::new();
+    // fetch extrinsic
+    let mut extrinsic = [0u8; 36];
+    let extrinsic_address = extrinsic.as_mut_ptr() as u64;
+    let code_hash_address = extrinsic_address;
+    let extrinsic_length = extrinsic.len() as u64;
+    unsafe {
+        let _ = fetch(extrinsic_address, 0, extrinsic_length, 3, 0, 0);
+    }
+
+    if wi_payload_length < 8 {
+        call_log(2, None, &format!("Parent: First time setup: wi_payload_length={:?}", wi_payload_length));
+        return (extrinsic_address, extrinsic_length);
+    }
 
     let step_n: u32 = unsafe { (*(wi_payload_start_address as *const u32)).into() };
 
@@ -221,56 +57,179 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     let total_execution_steps_address: u64 = wi_payload_start_address + 8;
     let total_execution_steps: u32 = unsafe { (*(total_execution_steps_address as *const u32)).into() };
 
-    call_log(2, None, &format!("Step_n: {:?}, gliders: {:?}, total_steps: {:?}", step_n, num_of_gloders, total_execution_steps));
+    // fetch child VM blob
+    let mut raw_blob = [0u8; 81920];
+    let raw_blob_address = raw_blob.as_mut_ptr() as u64;
+    let mut raw_blob_length = raw_blob.len() as u64;
+    raw_blob_length = unsafe {
+        historical_lookup(
+            wi_service_index as u64,
+            code_hash_address,
+            raw_blob_address,
+            0,
+            raw_blob_length,
+        )
+    };
+    if raw_blob_length == NONE {
+        return (FIRST_READABLE_ADDRESS as u64, 0);
+    }
 
-    let mut seg_cnt = 0;
-    for i in 0..NUM_PAGES {
-        let page_address = grid.pages[i].as_ptr() as u64;
-        let page_length = PAGE_SIZE as u64;
-        let fetch_result = unsafe { fetch(page_address, 0, page_length, 6, i as u64, 0) };
+    // parse raw blob
+    let (z, s, o_bytes_address, o_bytes_length, w_bytes_address, w_bytes_length, c_bytes_address, c_bytes_length) =
+        if let Some(blob) = parse_standard_program_initialization_args(raw_blob_address, raw_blob_length) {
+            (
+                blob.z,
+                blob.s,
+                blob.o_bytes_address,
+                blob.o_bytes_length,
+                blob.w_bytes_address,
+                blob.w_bytes_length,
+                blob.c_bytes_address,
+                blob.c_bytes_length,
+            )
+        } else {
+            return (FIRST_READABLE_ADDRESS as u64, 0);
+        };
+    call_log(2, None, &format!("Parent: z={:?} s={:?} o_bytes_address={:?} o_bytes_length={:?} w_bytes_address={:?} w_bytes_length={:?} c_bytes_address={:?} c_bytes_length={:?}",
+        z, s, o_bytes_address, o_bytes_length, w_bytes_address, w_bytes_length, c_bytes_address, c_bytes_length));
+
+    // new child VM
+    let new_machine_idx = unsafe { machine(c_bytes_address, c_bytes_length, 0) };
+    call_log(2, None, &format!("Parent: machine new index={:?}", new_machine_idx));
+
+    // StandardProgramInitializationForChild
+    standard_program_initialization_for_child(
+        z,
+        s,
+        o_bytes_address,
+        o_bytes_length,
+        w_bytes_address,
+        w_bytes_length,
+        new_machine_idx as u32,
+    );
+
+    // fetch segments, poke child VM
+    let mut segment_buf = [0u8; SEGMENT_SIZE as usize];
+    let mut segment_index = 0u64;
+    let segment_buf_segment_address = segment_buf.as_mut_ptr() as u64;
+    let segment_buf_page_address = segment_buf_segment_address + 8;
+    let mut m: u64;
+    let mut page_id: u64;
+    let mut first_page_address: u64 = 0;
+    loop {
+        let fetch_result = unsafe { fetch(segment_buf_segment_address as u64, 0, SEGMENT_SIZE as u64, 6, segment_index, 0) };
         if fetch_result == NONE {
             break;
         }
-        seg_cnt += 1;
+        call_log(2, None, &format!("Parent: fetch segment_index={:?} fetch_result={:?}", segment_index, fetch_result));
+        (m, page_id) = (
+            u32::from_le_bytes(segment_buf[0..4].try_into().unwrap()) as u64,
+            u32::from_le_bytes(segment_buf[4..8].try_into().unwrap()) as u64,
+        );
+
+        if segment_index == 0 {
+            first_page_address = page_id * PAGE_SIZE as u64;
+        }
+
+        let zero_result = unsafe { zero(m, page_id, 1) };
+        call_log(2, None, &format!("Parent: zero m={:?}, page_id={:?} zero_result={:?}",  m, page_id, zero_result));
+
+        // poke(machine n, source s, dest o, # bytes z)
+        let s = segment_buf.as_mut_ptr() as u64;
+        let page_address = page_id * PAGE_SIZE as u64;
+        let poke_result = unsafe { poke(m, segment_buf_page_address, page_address, PAGE_SIZE) };
+        call_log(2, None, &format!("Parent: poke m={:?} s={:?} o={:?} z={:?} poke_result={:?}", m, s, page_address, PAGE_SIZE, poke_result));
+
+        segment_index += 1;
     }
 
-    if seg_cnt > 0 {
-        call_log(2, None, &format!("Step_n: {:?}, Fetched {:?} segments", step_n, seg_cnt));
-    } else {
-        grid.init_gliders(num_of_gloders as usize);
+    // invoke child VM
+    let init_gas: u64 = 0x10000;
+    let mut child_vm_registers = initialize_pvm_registers();
+    child_vm_registers[7] = first_page_address;
+    child_vm_registers[8] = segment_index * PAGE_SIZE as u64;
+    child_vm_registers[9] = step_n as u64;
+    child_vm_registers[10] = num_of_gloders as u64;
+    child_vm_registers[11] = total_execution_steps as u64;
+    call_log(2, None, &format!("Parent: child_vm_registers={:?}", child_vm_registers));
+
+    let g_w = serialize_gas_and_registers(init_gas, &child_vm_registers);
+    let g_w_address = g_w.as_ptr() as u64;
+
+    let mut invoke_result: u64;
+    let mut omega_8: u64;
+
+    loop {
+        call_log(2, None, &format!("Parent: invoke child VM, segment_index={:?}", segment_index));
+        (invoke_result, omega_8) = unsafe { invoke(new_machine_idx as u64, g_w_address) };
+        call_log(2, None, &format!("Parent: invoke {:?} invoke_result={:?} omega_8={:?}", new_machine_idx, invoke_result, omega_8));
+
+        // only process hostlog
+        if invoke_result == HOST && omega_8 == LOG {
+            (_, child_vm_registers) = deserialize_gas_and_registers(&g_w);
+            let level = child_vm_registers[7];
+            let target_address = child_vm_registers[8];
+            let target_length = child_vm_registers[9];
+            let message_address = child_vm_registers[10];
+            let message_length = child_vm_registers[11];
+
+            let target_buffer = [0u8; 64];
+            let target_buffer_address = target_buffer.as_ptr() as u64;
+
+            let message_buffer = [0u8; 256];
+            let message_buffer_address = message_buffer.as_ptr() as u64;
+
+            unsafe { peek(new_machine_idx, target_buffer_address, target_address, target_length) };
+            unsafe { peek(new_machine_idx, message_buffer_address, message_address, message_length) };
+
+            unsafe {
+                log(level, target_buffer_address, target_length, message_buffer_address, message_length);
+            }
+        } else {
+            (_, child_vm_registers) = deserialize_gas_and_registers(&g_w);
+            break;
+        }
     }
 
-    for _ in 0..total_execution_steps {
-        grid = grid.step();
-    }
-    
-    /*
-    let total_cells = TOTAL_ROWS * TOTAL_COLS;
-    let poke_index = (steps as usize) % total_cells;
-    let poke_row = poke_index / TOTAL_COLS;
-    let poke_col = poke_index % TOTAL_COLS;
-    let page_row = poke_row / PAGE_DIM;
-    let page_col = poke_col / PAGE_DIM;
-    let page_index = page_row * PAGES_PER_ROW + page_col;
-    let local_row = poke_row % PAGE_DIM;
-    let local_col = poke_col % PAGE_DIM;
-    grid.pages[page_index][local_row * PAGE_DIM + local_col] = 1;
-    */
+    // peek child VM output and export it
+    let output_start_address = child_vm_registers[7];
 
-    for i in 0..NUM_PAGES {
-        let page_address = grid.pages[i].as_ptr() as u64;
-        let page_length = PAGE_SIZE as u64;
-        unsafe { export(page_address, page_length); }
+    for i in 0..9 {
+        segment_buf.fill(0);
+        segment_buf[0..4].copy_from_slice(&(new_machine_idx as u32).to_le_bytes());
+        let page_address = output_start_address + i * PAGE_SIZE as u64;
+        let page_id = page_address / PAGE_SIZE as u64;
+        segment_buf[4..8].copy_from_slice(&(page_id as u32).to_le_bytes());
+        unsafe { peek(new_machine_idx, segment_buf_page_address, page_address, PAGE_SIZE) };
+        unsafe { export(segment_buf_segment_address, SEGMENT_SIZE) };
     }
 
-    call_log(2, None, &format!("Step_n: {:?}, exported {:?} segments, done", step_n, NUM_PAGES));
+    unsafe { expunge(new_machine_idx as u64) };
 
+    call_log(2, None, &format!("Parent: done with child VM, segment_index={:?}", segment_index));
     return (FIRST_READABLE_ADDRESS as u64, 0);
 }
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
-    return (FIRST_READABLE_ADDRESS as u64, 0);
+    // parse accumulate args
+    let (_timeslot, _service_index, work_result_address, work_result_length) =
+    if let Some(args) = parse_accumulate_args(start_address, length, 0) {
+        (args.t, args.s, args.work_result_ptr, args.work_result_len)
+    } else {
+        return (FIRST_READABLE_ADDRESS as u64, 0);
+    };
+
+    // first time setup: do nothing but solicit code for child VM
+    if work_result_length == 36 {
+        let code_hash_address = work_result_address;
+        let code_length_address = work_result_address + 32;
+        let code_length: u64 = unsafe { (*(code_length_address as *const u32)).into() };
+        unsafe { solicit(code_hash_address, code_length) };
+        call_log(2, None, &format!("Parent: solicit code_hash_address={:?} code_length={:?}", code_hash_address, code_length));
+        return (FIRST_READABLE_ADDRESS as u64, 0);
+    }
+    return (FIRST_READABLE_ADDRESS as u64, 0)
 }
 
 #[polkavm_derive::polkavm_export]
