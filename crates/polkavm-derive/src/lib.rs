@@ -105,3 +105,14 @@ macro_rules! min_stack_size {
         );
     }
 }
+
+#[cfg(target_pointer_width = "32")]
+#[cfg(any(all(target_arch = "riscv32", target_feature = "e"), doc))]
+#[no_mangle]
+pub unsafe extern "C" fn __atomic_fetch_add_8(address: *mut u64, value: u64) -> u64 {
+    unsafe {
+        let old_value = *address;
+        *address += value;
+        old_value
+    }
+}

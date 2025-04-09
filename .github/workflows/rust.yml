@@ -103,6 +103,18 @@ jobs:
       run: sudo apt-get install -y lld
     - name: Build and test
       run: ./ci/jobs/build-and-test-pallet-revive.sh
+  run-substrate-node:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+    - name: Enable unprivileged userfaultfd
+      run: echo "1" | sudo tee /proc/sys/vm/unprivileged_userfaultfd
+    - name: Enable unprivileged user namespaces
+      run: echo "0" | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+    - name: Install LLD and protobuf compiler
+      run: sudo apt-get install -y lld protobuf-compiler
+    - name: Build and test
+      run: ./ci/jobs/build-and-run-substrate-node.sh
   link-westend-runtime-blob:
     runs-on: ubuntu-22.04
     steps:
