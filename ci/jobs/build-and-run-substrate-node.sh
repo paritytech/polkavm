@@ -50,7 +50,7 @@ cargo build \
 echo "Running Node in background..."
 SUBSTRATE_RUNTIME_TARGET=riscv \
 SUBSTRATE_ENABLE_POLKAVM=1 \
-./target/release/substrate-node --dev --tmp > "$LOG_FILE" 2>&1 &
+./target/release/substrate-node --dev --tmp
 
 CARGO_PID=$!
 sleep $NODE_RUN_DURATION
