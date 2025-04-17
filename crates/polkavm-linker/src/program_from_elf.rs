@@ -7934,7 +7934,7 @@ where
     let mut for_address = BTreeMap::new();
     for (absolute_address, relocation) in section.relocations() {
         let Some(relative_address) = absolute_address.checked_sub(section.original_address()) else {
-            return Err(ProgramFromElfError::other("invalid relocation offset"));
+            return Err(ProgramFromElfError::other("invalid data relocation offset"));
         };
 
         if relocation.has_implicit_addend() {
@@ -8258,7 +8258,7 @@ where
     let section_data = section.data();
     for (absolute_address, relocation) in section.relocations() {
         let Some(relative_address) = absolute_address.checked_sub(section.original_address()) else {
-            return Err(ProgramFromElfError::other("invalid relocation offset"));
+            return Err(ProgramFromElfError::other("invalid code relocation offset"));
         };
 
         if relocation.has_implicit_addend() {
