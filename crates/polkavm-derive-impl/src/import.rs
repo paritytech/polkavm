@@ -321,7 +321,7 @@ pub fn polkavm_import(attributes: ImportBlockAttributes, input: syn::ItemForeign
                                 unsafe {
                                     core::arch::asm!(
                                         ".insn r 0xb, 0, 0, zero, zero, zero\n",
-                                        ".4byte {metadata}\n",
+                                        "auipc zero, %pcrel_hi({metadata})\n",
                                         in("a0") a0,
                                         in("a1") a1,
                                         in("a2") a2,
@@ -345,7 +345,8 @@ pub fn polkavm_import(attributes: ImportBlockAttributes, input: syn::ItemForeign
                                 unsafe {
                                     core::arch::asm!(
                                         ".insn r 0xb, 0, 0, zero, zero, zero\n",
-                                        ".8byte {metadata}\n",
+                                        "auipc zero, %pcrel_hi({metadata})\n",
+                                        ".4byte 0\n",
                                         in("a0") a0,
                                         in("a1") a1,
                                         in("a2") a2,
