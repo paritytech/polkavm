@@ -236,8 +236,13 @@ where
             return Err(ProgramFromElfError::other("file doesn't use the System V nor GNU ABI"));
         }
 
-        if !matches!(elf.elf_header().e_type(LittleEndian), object::elf::ET_EXEC | object::elf::ET_REL) {
-            return Err(ProgramFromElfError::other("file is not a supported ELF file (ET_EXEC or ET_REL)"));
+        if !matches!(
+            elf.elf_header().e_type(LittleEndian),
+            object::elf::ET_EXEC | object::elf::ET_REL | object::elf::ET_DYN
+        ) {
+            return Err(ProgramFromElfError::other(
+                "file is not a supported ELF file (ET_EXEC or ET_REL or ET_DYN)",
+            ));
         }
 
         if elf.elf_header().e_machine(LittleEndian) != object::elf::EM_RISCV {

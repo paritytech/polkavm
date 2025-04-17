@@ -9071,9 +9071,22 @@ where
             sections_exports.push(section.index());
         } else if name == ".polkavm_min_stack_size" {
             sections_min_stack_size.push(section.index());
-        } else if name == ".eh_frame" || name == ".got" {
+        } else if name == ".eh_frame"
+            || name == ".got"
+            || name == ".dynsym"
+            || name == ".dynstr"
+            || name == ".rela.dyn"
+            || name == ".dynamic"
+        {
             continue;
         } else if section.is_allocated() {
+            if matches!(
+                kind,
+                object::elf::SHT_HASH | object::elf::SHT_GNU_HASH | object::elf::SHT_DYNSYM | object::elf::SHT_STRTAB
+            ) {
+                continue;
+            }
+
             // We're supposed to load this section into memory at runtime, but we don't know what it is.
             return Err(ProgramFromElfErrorKind::UnsupportedSection(name.to_owned()).into());
         } else {
