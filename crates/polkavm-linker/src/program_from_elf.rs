@@ -9057,7 +9057,7 @@ where
             }
 
             sections_bss.push(section.index());
-        } else if name == ".text" || name.starts_with(".text.") {
+        } else if name == ".text" || name.starts_with(".text.") || (section.is_allocated() && section.is_executable()) {
             if is_writable {
                 return Err(ProgramFromElfError::other(format!(
                     "expected section '{name}' to be read-only, yet it is writable"
@@ -9071,18 +9071,16 @@ where
             sections_exports.push(section.index());
         } else if name == ".polkavm_min_stack_size" {
             sections_min_stack_size.push(section.index());
-        } else if name == ".eh_frame"
-            || name == ".got"
-            || name == ".dynsym"
-            || name == ".dynstr"
-            || name == ".rela.dyn"
-            || name == ".dynamic"
-        {
+        } else if name == ".eh_frame" || name == ".got" || name == ".dynsym" || name == ".dynstr" || name == ".dynamic" {
             continue;
         } else if section.is_allocated() {
             if matches!(
                 kind,
-                object::elf::SHT_HASH | object::elf::SHT_GNU_HASH | object::elf::SHT_DYNSYM | object::elf::SHT_STRTAB
+                object::elf::SHT_HASH
+                    | object::elf::SHT_GNU_HASH
+                    | object::elf::SHT_DYNSYM
+                    | object::elf::SHT_STRTAB
+                    | object::elf::SHT_RELA
             ) {
                 continue;
             }

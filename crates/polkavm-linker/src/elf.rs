@@ -70,6 +70,10 @@ impl<'a> Section<'a> {
         self.flags & u64::from(object::elf::SHF_ALLOC) != 0
     }
 
+    pub fn is_executable(&self) -> bool {
+        self.flags & u64::from(object::elf::SHF_EXECINSTR) != 0
+    }
+
     pub fn data(&self) -> &[u8] {
         &self.data
     }
