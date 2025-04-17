@@ -21,6 +21,7 @@ use paste::paste;
 enum TestProgram {
     Pinky,
     TestBlob,
+    TestBlobSo,
 }
 
 #[cfg(feature = "std")]
@@ -45,9 +46,10 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
         ("riscv32emac-unknown-none-polkavm", polkavm_linker::target_json_32_path().unwrap())
     };
 
-    let (project, profile) = match kind {
-        TestProgram::Pinky => ("bench-pinky", "release"),
-        TestProgram::TestBlob => ("test-blob", "no-lto"),
+    let (project, filename, profile, is_bin) = match kind {
+        TestProgram::Pinky => ("bench-pinky", "bench-pinky", "release", true),
+        TestProgram::TestBlob => ("test-blob", "test-blob", "no-lto", true),
+        TestProgram::TestBlobSo => ("test-blob", "test_blob.elf", "no-lto", false),
     };
 
     let mut cmd = std::process::Command::new("cargo");
@@ -56,8 +58,6 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
         .arg("-q")
         .arg("--profile")
         .arg(profile)
-        .arg("--bin")
-        .arg(project)
         .arg("-p")
         .arg(project)
         .arg("--target")
@@ -66,13 +66,19 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
         .current_dir(path.to_str().unwrap())
         .envs(envs);
 
+    if is_bin {
+        cmd.arg("--bin").arg(project);
+    } else {
+        cmd.arg("--lib");
+    }
+
     let res = cmd.output().unwrap();
     if !res.status.success() {
         core::mem::drop(elf_map);
         panic!("{}", String::from_utf8_lossy(&res.stderr));
     }
 
-    let blob = std::fs::read(path.join("target").join(target).join(profile).join(project))
+    let blob = std::fs::read(path.join("target").join(target).join(profile).join(filename))
         .unwrap()
         .leak();
 
@@ -90,6 +96,12 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
         (TestProgram::TestBlob, true) => include_bytes!("../../../guest-programs/target/riscv64emac-unknown-none-polkavm/no-lto/test-blob"),
         (TestProgram::TestBlob, false) => {
             include_bytes!("../../../guest-programs/target/riscv32emac-unknown-none-polkavm/no-lto/test-blob")
+        }
+        (TestProgram::TestBlobSo, true) => {
+            include_bytes!("../../../guest-programs/target/riscv64emac-unknown-none-polkavm/no-lto/test_blob.elf")
+        }
+        (TestProgram::TestBlobSo, false) => {
+            include_bytes!("../../../guest-programs/target/riscv32emac-unknown-none-polkavm/no-lto/test_blob.elf")
         }
     }
 }
@@ -167,30 +179,112 @@ macro_rules! run_test_blob_tests {
     ($($test_name:ident)+) => {
         paste! {
             run_tests! {
-                $([<unoptimized_32_ $test_name>])+
-                $([<unoptimized_64_ $test_name>])+
+                $([<unoptimized_bin_32_ $test_name>])+
+                $([<unoptimized_bin_64_ $test_name>])+
+                $([<unoptimized_cdylib_32_ $test_name>])+
+                $([<unoptimized_cdylib_64_ $test_name>])+
+                $([<optimized_bin_32_ $test_name>])+
+                $([<optimized_bin_64_ $test_name>])+
+                $([<optimized_cdylib_32_ $test_name>])+
+                $([<optimized_cdylib_64_ $test_name>])+
+            }
+        }
 
-                $([<optimized_32_ $test_name>])+
+        $(
+            paste! {
+                fn [<unoptimized_bin_32_ $test_name>](config: Config) {
+                    $test_name(TestBlobArgs {
+                        config,
+                        optimize: false,
+                        is_64_bit: false,
+                        is_cdylib: false
+                    })
+                }
+
+                fn [<unoptimized_bin_64_ $test_name>](config: Config) {
+                    $test_name(TestBlobArgs {
+                        config,
+                        optimize: false,
+                        is_64_bit: true,
+                        is_cdylib: false
+                    })
+                }
+
+                fn [<unoptimized_cdylib_32_ $test_name>](config: Config) {
+                    $test_name(TestBlobArgs {
+                        config,
+                        optimize: false,
+                        is_64_bit: false,
+                        is_cdylib: true
+                    })
+                }
+
+                fn [<unoptimized_cdylib_64_ $test_name>](config: Config) {
+                    $test_name(TestBlobArgs {
+                        config,
+                        optimize: false,
+                        is_64_bit: true,
+                        is_cdylib: true
+                    })
+                }
+
+                fn [<optimized_bin_32_ $test_name>](config: Config) {
+                    $test_name(TestBlobArgs {
+                        config,
+                        optimize: true,
+                        is_64_bit: false,
+                        is_cdylib: false
+                    })
+                }
+
+                fn [<optimized_bin_64_ $test_name>](config: Config) {
+                    $test_name(TestBlobArgs {
+                        config,
+                        optimize: true,
+                        is_64_bit: true,
+                        is_cdylib: false
+                    })
+                }
+
+                fn [<optimized_cdylib_32_ $test_name>](config: Config) {
+                    $test_name(TestBlobArgs {
+                        config,
+                        optimize: true,
+                        is_64_bit: false,
+                        is_cdylib: true
+                    })
+                }
+
+                fn [<optimized_cdylib_64_ $test_name>](config: Config) {
+                    $test_name(TestBlobArgs {
+                        config,
+                        optimize: true,
+                        is_64_bit: true,
+                        is_cdylib: true
+                    })
+                }
+            }
+        )+
+    }
+}
+
+macro_rules! run_asm_tests {
+    ($($test_name:ident)+) => {
+        paste! {
+            run_tests! {
+                $([<unoptimized_64_ $test_name>])+
                 $([<optimized_64_ $test_name>])+
             }
         }
 
         $(
             paste! {
-                fn [<unoptimized_32_ $test_name>](config: Config) {
-                    $test_name(config, false, false)
-                }
-
                 fn [<unoptimized_64_ $test_name>](config: Config) {
-                    $test_name(config, false, true)
-                }
-
-                fn [<optimized_32_ $test_name>](config: Config) {
-                    $test_name(config, true, false)
+                    $test_name(config, false)
                 }
 
                 fn [<optimized_64_ $test_name>](config: Config) {
-                    $test_name(config, true, true)
+                    $test_name(config, true)
                 }
             }
         )+
@@ -2548,17 +2642,37 @@ impl TestInstance {
     }
 }
 
-fn test_blob_basic_test(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+struct TestBlobArgs {
+    config: Config,
+    optimize: bool,
+    is_64_bit: bool,
+    is_cdylib: bool,
+}
+
+impl TestBlobArgs {
+    fn get_test_program(&self) -> &'static [u8] {
+        get_test_program(
+            if self.is_cdylib {
+                TestProgram::TestBlobSo
+            } else {
+                TestProgram::TestBlob
+            },
+            self.is_64_bit,
+        )
+    }
+}
+
+fn test_blob_basic_test(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     assert_eq!(i.call::<(), u32>("push_one_to_global_vec", ()).unwrap(), 1);
     assert_eq!(i.call::<(), u32>("push_one_to_global_vec", ()).unwrap(), 2);
     assert_eq!(i.call::<(), u32>("push_one_to_global_vec", ()).unwrap(), 3);
 }
 
-fn test_blob_atomic_fetch_add(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_atomic_fetch_add(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_add", (1,)).unwrap(), 0);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_add", (1,)).unwrap(), 1);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_add", (1,)).unwrap(), 2);
@@ -2568,15 +2682,15 @@ fn test_blob_atomic_fetch_add(config: Config, optimize: bool, is_64_bit: bool) {
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_add", (0,)).unwrap(), 5);
 }
 
-fn test_blob_atomic_fetch_swap(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_atomic_fetch_swap(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (10,)).unwrap(), 0);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (100,)).unwrap(), 10);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (1000,)).unwrap(), 100);
 }
 
-fn test_blob_atomic_fetch_minmax(config: Config, optimize: bool, is_64_bit: bool) {
+fn test_blob_atomic_fetch_minmax(args: TestBlobArgs) {
     use core::cmp::{max, min};
 
     fn maxu(a: i32, b: i32) -> i32 {
@@ -2595,8 +2709,8 @@ fn test_blob_atomic_fetch_minmax(config: Config, optimize: bool, is_64_bit: bool
         ("atomic_fetch_min_unsigned", minu),
     ];
 
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     for (name, cb) in list {
         for a in [-10, 0, 10] {
             for b in [-10, 0, 10] {
@@ -2609,43 +2723,39 @@ fn test_blob_atomic_fetch_minmax(config: Config, optimize: bool, is_64_bit: bool
     }
 }
 
-fn test_blob_hostcall(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_hostcall(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     assert_eq!(i.call::<(u32,), u32>("test_multiply_by_6", (10,)).unwrap(), 60);
 }
 
-fn test_blob_define_abi(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_define_abi(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     assert!(i.call::<(), ()>("test_define_abi", ()).is_ok());
 }
 
-fn test_blob_input_registers(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_input_registers(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     assert!(i.call::<(), ()>("test_input_registers", ()).is_ok());
 }
 
-fn test_blob_call_sbrk_from_guest(config: Config, optimize: bool, is_64_bit: bool) {
-    test_blob_call_sbrk_impl(config, optimize, is_64_bit, |i, size| {
-        i.call::<(u32,), u32>("call_sbrk", (size,)).unwrap()
-    })
+fn test_blob_call_sbrk_from_guest(args: TestBlobArgs) {
+    test_blob_call_sbrk_impl(args, |i, size| i.call::<(u32,), u32>("call_sbrk", (size,)).unwrap())
 }
 
-fn test_blob_call_sbrk_from_host_instance(config: Config, optimize: bool, is_64_bit: bool) {
-    test_blob_call_sbrk_impl(config, optimize, is_64_bit, |i, size| i.instance.sbrk(size).unwrap().unwrap_or(0))
+fn test_blob_call_sbrk_from_host_instance(args: TestBlobArgs) {
+    test_blob_call_sbrk_impl(args, |i, size| i.instance.sbrk(size).unwrap().unwrap_or(0))
 }
 
-fn test_blob_call_sbrk_from_host_function(config: Config, optimize: bool, is_64_bit: bool) {
-    test_blob_call_sbrk_impl(config, optimize, is_64_bit, |i, size| {
-        i.call::<(u32,), u32>("call_sbrk_indirectly", (size,)).unwrap()
-    })
+fn test_blob_call_sbrk_from_host_function(args: TestBlobArgs) {
+    test_blob_call_sbrk_impl(args, |i, size| i.call::<(u32,), u32>("call_sbrk_indirectly", (size,)).unwrap())
 }
 
-fn test_blob_program_memory_can_be_reused_and_cleared(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_program_memory_can_be_reused_and_cleared(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     let address = i.call::<(), u32>("get_global_address", ()).unwrap();
 
     assert_eq!(i.instance.read_memory(address, 4).unwrap(), [0x00, 0x00, 0x00, 0x00]);
@@ -2663,9 +2773,9 @@ fn test_blob_program_memory_can_be_reused_and_cleared(config: Config, optimize: 
     assert_eq!(i.instance.read_memory(address, 4).unwrap(), [0x01, 0x00, 0x00, 0x00]);
 }
 
-fn test_blob_out_of_bounds_memory_access_generates_a_trap(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_out_of_bounds_memory_access_generates_a_trap(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     let address = i.call::<(), u32>("get_global_address", ()).unwrap();
     assert_eq!(i.call::<(u32,), u32>("read_u32", (address,)).unwrap(), 0);
     i.call::<(), ()>("increment_global", ()).unwrap();
@@ -2677,9 +2787,9 @@ fn test_blob_out_of_bounds_memory_access_generates_a_trap(config: Config, optimi
     assert_eq!(i.call::<(u32,), u32>("read_u32", (address,)).unwrap(), 2);
 }
 
-fn test_blob_call_sbrk_impl(config: Config, optimize: bool, is_64_bit: bool, mut call_sbrk: impl FnMut(&mut TestInstance, u32) -> u32) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_call_sbrk_impl(args: TestBlobArgs, mut call_sbrk: impl FnMut(&mut TestInstance, u32) -> u32) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     let memory_map = i.module.memory_map().clone();
     let heap_base = memory_map.heap_base();
     let page_size = memory_map.page_size();
@@ -2733,9 +2843,9 @@ fn test_blob_call_sbrk_impl(config: Config, optimize: bool, is_64_bit: bool, mut
     assert_eq!(i.instance.read_memory(heap_base, 1).unwrap(), vec![0]);
 }
 
-fn test_blob_add_u32(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_add_u32(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     assert_eq!(i.call::<(u32, u32), u32>("add_u32", (1, 2,)).unwrap(), 3);
     assert_eq!(i.instance.reg(Reg::A0), 3);
 
@@ -2745,15 +2855,15 @@ fn test_blob_add_u32(config: Config, optimize: bool, is_64_bit: bool) {
     assert_eq!(i.call::<(u32, u32), u32>("add_u32", (0xffffffff, 2,)).unwrap(), 1);
     assert_eq!(i.instance.reg(Reg::A0), 1);
 
-    if is_64_bit {
+    if args.is_64_bit {
         assert_eq!(i.call::<(u32, u32), u32>("add_u32_asm", (0xfffffffa, 2,)).unwrap(), 0xfffffffc);
         assert_eq!(i.instance.reg(Reg::A0), 0xfffffffffffffffc);
     }
 }
 
-fn test_blob_add_u64(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_add_u64(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     assert_eq!(i.call::<(u64, u64), u64>("add_u64", (1, 2,)).unwrap(), 3);
     assert_eq!(i.instance.reg(Reg::A0), 3);
     assert_eq!(
@@ -2762,23 +2872,23 @@ fn test_blob_add_u64(config: Config, optimize: bool, is_64_bit: bool) {
     );
 }
 
-fn test_blob_xor_imm_u32(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_xor_imm_u32(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     for value in [0, 0xaaaaaaaa, 0x55555555, 0x12345678, 0xffffffff] {
         assert_eq!(i.call::<(u32,), u32>("xor_imm_u32", (value,)).unwrap(), value ^ 0xfb8f5c1e);
     }
 }
 
-fn test_blob_branch_less_than_zero(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_branch_less_than_zero(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     i.call::<(), ()>("test_branch_less_than_zero", ()).unwrap();
 }
 
-fn test_blob_fetch_add_atomic_u64(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_fetch_add_atomic_u64(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     assert_eq!(i.call::<(u64,), u64>("fetch_add_atomic_u64", (1,)).unwrap(), 0);
     assert_eq!(i.call::<(u64,), u64>("fetch_add_atomic_u64", (0,)).unwrap(), 1);
     assert_eq!(i.call::<(u64,), u64>("fetch_add_atomic_u64", (0,)).unwrap(), 1);
@@ -2786,44 +2896,44 @@ fn test_blob_fetch_add_atomic_u64(config: Config, optimize: bool, is_64_bit: boo
     assert_eq!(i.call::<(u64,), u64>("fetch_add_atomic_u64", (0,)).unwrap(), 0x100000000);
 }
 
-fn test_blob_cmov_if_zero_with_zero_reg(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_cmov_if_zero_with_zero_reg(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     i.call::<(), ()>("cmov_if_zero_with_zero_reg", ()).unwrap();
 }
 
-fn test_blob_cmov_if_not_zero_with_zero_reg(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_cmov_if_not_zero_with_zero_reg(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     i.call::<(), ()>("cmov_if_not_zero_with_zero_reg", ()).unwrap();
 }
 
-fn test_blob_min_stack_size(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let i = TestInstance::new(&config, elf, optimize);
+fn test_blob_min_stack_size(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let i = TestInstance::new(&args.config, elf, args.optimize);
     assert_eq!(i.instance.module().memory_map().stack_size(), 65536);
 }
 
-fn test_blob_negate_and_add(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
-    if !is_64_bit {
+fn test_blob_negate_and_add(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    if !args.is_64_bit {
         assert_eq!(i.call::<(u32, u32), u32>("negate_and_add", (123, 1,)).unwrap(), 15);
     } else {
         assert_eq!(i.call::<(u64, u64), u64>("negate_and_add", (123, 1,)).unwrap(), 15);
     }
 }
 
-fn test_blob_return_tuple_from_import(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_return_tuple_from_import(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     i.call::<(), ()>("test_return_tuple", ()).unwrap();
 }
 
-fn test_blob_return_tuple_from_export(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
-    if is_64_bit {
+fn test_blob_return_tuple_from_export(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    if args.is_64_bit {
         let a0 = 0x123456789abcdefe_u64;
         let a1 = 0x1122334455667788_u64;
         i.call::<(), ()>("export_return_tuple_u64", ()).unwrap();
@@ -2850,14 +2960,14 @@ fn test_blob_return_tuple_from_export(config: Config, optimize: bool, is_64_bit:
     }
 }
 
-fn test_blob_get_heap_base(config: Config, optimize: bool, is_64_bit: bool) {
-    let elf = get_test_program(TestProgram::TestBlob, is_64_bit);
-    let mut i = TestInstance::new(&config, elf, optimize);
+fn test_blob_get_heap_base(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
     let heap_base = i.call::<(), u32>("get_heap_base", ()).unwrap();
     assert_eq!(heap_base, i.instance.module().memory_map().heap_base());
 }
 
-fn test_asm_reloc_add_sub(config: Config, optimize: bool, _is_64_bit: bool) {
+fn test_asm_reloc_add_sub(config: Config, optimize: bool) {
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_add_sub_64.elf");
 
     let elf = BLOB_64;
@@ -2873,7 +2983,7 @@ fn test_asm_reloc_add_sub(config: Config, optimize: bool, _is_64_bit: bool) {
     assert_eq!(i.instance.read_u32(address).unwrap(), 0x03030303);
 }
 
-fn test_asm_reloc_hi_lo(config: Config, optimize: bool, _is_64_bit: bool) {
+fn test_asm_reloc_hi_lo(config: Config, optimize: bool) {
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_hi_lo_64.elf");
 
     let elf = BLOB_64;
@@ -3687,6 +3797,9 @@ run_test_blob_tests! {
     test_blob_return_tuple_from_import
     test_blob_return_tuple_from_export
     test_blob_get_heap_base
+}
+
+run_asm_tests! {
     test_asm_reloc_add_sub
     test_asm_reloc_hi_lo
 }

@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[lib]
+name = "test_blob"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "test-blob"
+path = "src/main.rs"
+
 [dependencies]
 polkavm-derive = { path = "../../crates/polkavm-derive" }
 simplealloc = { path = "../../crates/simplealloc" }
