@@ -2660,6 +2660,11 @@ fn read_instruction_bytes(text: &[u8], relative_offset: usize) -> (u64, u32) {
     }
 }
 
+const FUNC3_ECALLI: u32 = 0b000;
+const FUNC3_SBRK: u32 = 0b001;
+const FUNC3_MEMSET: u32 = 0b010;
+const FUNC3_HEAP_BASE: u32 = 0b011;
+
 #[allow(clippy::too_many_arguments)]
 fn parse_code_section<H>(
     elf: &Elf<H>,
@@ -2693,11 +2698,6 @@ where
         };
 
         let (inst_size, raw_inst) = read_instruction_bytes(text, relative_offset);
-
-        const FUNC3_ECALLI: u32 = 0b000;
-        const FUNC3_SBRK: u32 = 0b001;
-        const FUNC3_MEMSET: u32 = 0b010;
-        const FUNC3_HEAP_BASE: u32 = 0b011;
 
         if crate::riscv::R(raw_inst).unpack() == (crate::riscv::OPCODE_CUSTOM_0, FUNC3_ECALLI, 0, RReg::Zero, RReg::Zero, RReg::Zero) {
             let initial_offset = relative_offset as u64;
@@ -7946,6 +7946,26 @@ where
             continue;
         };
 
+        if relocation.flags()
+            == (object::RelocationFlags::Elf {
+                r_type: object::elf::R_RISCV_PCREL_HI20,
+            })
+            && section_name == ".polkavm_exports"
+        {
+            relocations.insert(
+                SectionTarget {
+                    section_index: section.index(),
+                    offset: relative_address,
+                },
+                RelocationKind::Abs {
+                    target,
+                    size: if elf.is_64() { RelocationSize::U64 } else { RelocationSize::U32 },
+                },
+            );
+
+            continue;
+        }
+
         let (relocation_name, kind) = match (relocation.kind(), relocation.flags()) {
             (object::RelocationKind::Absolute, _)
                 if relocation.encoding() == object::RelocationEncoding::Generic && relocation.size() == 32 =>
@@ -8361,6 +8381,25 @@ where
                         );
                     }
                     object::elf::R_RISCV_PCREL_HI20 => {
+                        if let Some(raw_inst) = section_data
+                            .get((relative_address as usize).wrapping_sub(4)..)
+                            .and_then(|slice| slice.get(..4))
+                        {
+                            let raw_inst = u32::from_le_bytes([raw_inst[0], raw_inst[1], raw_inst[2], raw_inst[3]]);
+                            if crate::riscv::R(raw_inst).unpack()
+                                == (crate::riscv::OPCODE_CUSTOM_0, FUNC3_ECALLI, 0, RReg::Zero, RReg::Zero, RReg::Zero)
+                            {
+                                data_relocations.insert(
+                                    current_location,
+                                    RelocationKind::Abs {
+                                        target,
+                                        size: if elf.is_64() { RelocationSize::U64 } else { RelocationSize::U32 },
+                                    },
+                                );
+                                continue;
+                            }
+                        }
+
                         // This relocation is for an AUIPC.
                         pcrel_relocations
                             .reloc_pcrel_hi20
