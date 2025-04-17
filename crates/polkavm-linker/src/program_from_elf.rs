@@ -8967,12 +8967,15 @@ where
     for section in elf.sections() {
         let name = section.name();
         let is_writable = section.is_writable();
+        let kind = section.elf_section_type();
+
         log::trace!(
-            " {}: 0x{:08x}..0x{:08x}: {} ({} bytes)",
+            " {}: 0x{:08x}..0x{:08x}: {} [ty={}] ({} bytes)",
             section.index(),
             section.original_address(),
             section.original_address() + section.size(),
             name,
+            kind,
             section.size()
         );
 

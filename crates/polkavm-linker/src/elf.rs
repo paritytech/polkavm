@@ -38,6 +38,7 @@ pub struct Section<'a> {
     flags: u64,
     raw_section_index: Option<ElfSectionIndex>,
     relocations: Vec<(u64, Relocation)>,
+    elf_section_type: u32,
 }
 
 impl<'a> Section<'a> {
@@ -75,6 +76,10 @@ impl<'a> Section<'a> {
 
     pub fn relocations(&'_ self) -> impl Iterator<Item = (u64, Relocation)> + '_ {
         self.relocations.iter().copied()
+    }
+
+    pub fn elf_section_type(&self) -> u32 {
+        self.elf_section_type
     }
 }
 
@@ -360,6 +365,7 @@ where
                 flags,
                 raw_section_index: Some(section.index()),
                 relocations: Vec::new(),
+                elf_section_type: section.elf_section_header().sh_type(LittleEndian),
             });
 
             section_index_by_name.entry(name.to_owned()).or_insert_with(Vec::new).push(index);
@@ -439,6 +445,7 @@ where
             flags: u64::from(object::elf::SHF_ALLOC),
             raw_section_index: None,
             relocations: Vec::new(),
+            elf_section_type: 0,
         });
 
         index
