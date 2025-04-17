@@ -18,8 +18,20 @@
   "pre-link-args": {
     "ld": [
       "--emit-relocs",
-      "--unique"
+      "--unique",
+      "--apply-dynamic-relocs",
+      "--no-allow-shlib-undefined",
+      "-Bsymbolic"
     ]
   },
-  "env": "polkavm"
+  "env": "polkavm",
+  "dynamic-linking": true,
+  "only-cdylib": true,
+  "position-independent-executables": true,
+  "static-position-independent-executables": true,
+  "relro-level": "full",
+  "default-visibility": "hidden",
+  "exe-suffix": "",
+  "dll-prefix": "",
+  "dll-suffix": ".elf"
 }
