@@ -1,0 +1,26 @@
+cargo-features = ["edition2024"]
+
+[package]
+name = "revm_test"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "revm_test"
+path = "src/main.rs"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+polkavm-derive = { path = "../../crates/polkavm-derive" }
+utils = { path = "../utils" }
+
+bytes = { version = "1", default-features = false }
+
+# revm
+revm = { version = "22.0.1", default-features = false }
+revm-database = { version = "3.0.0", default-features = false }
+# serde = { version = "1.0", default-features = false, features = ["derive"] }
+# example-my-evm = { git = "https://github.com/bluealloy/revm", default-features = false}
+
+# bincode = { version = "1.3.3", default-features = false}

@@ -3,3 +3,6 @@ target = ["../crates/polkavm-linker/riscv64emac-unknown-none-polkavm.json"]
 
 [unstable]
 build-std = ["core", "alloc"]
+
+[target.riscv64emac-unknown-none-polkavm]
+rustflags = ["-C", "relocation-model=static"]

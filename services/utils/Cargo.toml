@@ -1,7 +1,9 @@
+cargo-features = ["edition2024"]
+
 [package]
 name = "utils"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 polkavm-derive = { path = "../../crates/polkavm-derive" }
