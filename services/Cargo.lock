@@ -112,18 +112,18 @@ dependencies = [
 
 [[package]]
 name = "polkavm-common"
-version = "0.22.0"
+version = "0.23.0"
 
 [[package]]
 name = "polkavm-derive"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "polkavm-derive-impl-macro",
 ]
 
 [[package]]
 name = "polkavm-derive-impl"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "polkavm-common",
  "proc-macro2",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-derive-impl-macro"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
  "polkavm-derive-impl",
  "syn",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "simplealloc"
-version = "0.22.0"
+version = "0.23.0"
 
 [[package]]
 name = "syn"

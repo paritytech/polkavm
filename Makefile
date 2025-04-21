@@ -7,6 +7,7 @@ TARGET_DIR = riscv64emac-unknown-none-polkavm/release
 all: $(SERVICES)
 
 $(SERVICES):
+	clear
 	@echo "Building $@ service..."
 	cd ./services/$@ && cargo build --release --target-dir ./target
 	cd ../../

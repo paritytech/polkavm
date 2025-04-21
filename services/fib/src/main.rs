@@ -40,7 +40,7 @@ extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
     return (buffer_addr, buffer_len);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 static mut output_bytes_32: [u8; 32] = [0; 32];
 
 #[polkavm_derive::polkavm_export]
@@ -68,8 +68,8 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         output_bytes_32[..work_result_length as usize]
             .copy_from_slice(&core::slice::from_raw_parts(work_result_address as *const u8, work_result_length as usize));
 
-        output_address = output_bytes_32.as_ptr() as u64;
-        output_length = output_bytes_32.len() as u64;
+        output_address = core::ptr::addr_of!(output_bytes_32) as u64;
+        output_length = 32_u64;
     }
 
     return (output_address, output_length);
