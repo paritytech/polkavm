@@ -116,6 +116,7 @@ pub struct AccumulateArgs {
     pub o_ptr: u64,
     pub o_len: u64,
     pub y: [u8; 32],
+    pub g: u64,
     pub work_result_ptr: u64,
     pub work_result_len: u64,
 }
@@ -211,6 +212,12 @@ pub fn parse_accumulate_args(start_address: u64, length: u64, m: u64) -> Option<
         args.y.copy_from_slice(y_slice);
         current_address += 32;
         remaining_length = remaining_length.saturating_sub(32);
+
+        // 0.6.5 -- add gas limit
+        let g_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 8) };
+        u64::from_le_bytes(g_slice[0..8].try_into().unwrap());
+        current_address += 8;
+        remaining_length = remaining_length.saturating_sub(8);
 
         let accumulation_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
         if accumulation_slice.is_empty() {
