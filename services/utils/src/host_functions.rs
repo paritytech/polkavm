@@ -84,6 +84,9 @@ extern "C" {
     #[polkavm_import(index = 26)]
     pub fn expunge(n: u64) -> u64;
 
+    #[polkavm_import(index = 27)]
+    pub fn provide(s: u64, o: u64, z: u64) -> u64;
+
     #[polkavm_import(index = 100)]
     pub fn log(level: u64, target: u64, target_len: u64, message: u64, message_len: u64) -> u64; //https://hackmd.io/@polkadot/jip1
 }

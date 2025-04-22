@@ -344,6 +344,14 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         let assign_result = unsafe { assign(1000, jam_address) };
         call_log(2, None, &format!("assign jam: expect CORE {:?}, got {:?} (recorded at key 6)", CORE, assign_result));
         write_result(assign_result, 6);
+
+        let provide_jamhash_result = unsafe { provide(666, jam_hash_address, jam_length) };
+        call_log(2, None, &format!("provide hash(jam): expect WHO, got {:?} (recorded at key 2)", query_jamhash_result));
+        write_result(provide_jamhash_result, 7);
+
+        let provide_jamhash_result2 = unsafe { provide(0, jam_hash_address, jam_length) };
+        call_log(2, None, &format!("provide hash(jam): expect OK, got {:?} (recorded at key 2)", provide_jamhash_result2));
+        write_result(provide_jamhash_result, 8);
     } else if n == 5 {
         let lookup_result = unsafe { lookup(service_index as u64, jam_hash_address, buffer_address, 0, jam_length) };
         call_log(2, None, &format!("lookup hash(jam): expect OK {:?}, got {:?} (recorded at key 1)", OK, lookup_result));
@@ -361,6 +369,10 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         let bless_who_result = unsafe { bless(overflow_s, 0, 0, jam_hash_address, 0) };
         call_log(2, None, &format!("bless: expect WHO {:?}, got {:?} (recorded at key 6)", WHO, bless_who_result));
         write_result(bless_who_result, 6);
+
+        let provide_jamhash_result = unsafe { provide(0, jam_hash_address, jam_length) };
+        call_log(2, None, &format!("provide hash(jam): expect HUH, got {:?} (recorded at key 8)", provide_jamhash_result2));
+        write_result(provide_jamhash_result, 8);
     } else if n == 6 {
         let solicit_result = unsafe { solicit(jam_hash_address, jam_length) };
         write_result(solicit_result, 1);
