@@ -502,9 +502,9 @@ checksum = "01cda141df6706de531b6c46c3a33ecca755538219bd484262fa09410c13539c"
 
 [[package]]
 name = "log"
-version = "0.4.20"
+version = "0.4.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5e6163cb8c49088c2c36f57875e58ccd8c87c7427f7fbd50ea6710b2f3f2e8f"
+checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 
 [[package]]
 name = "memchr"
@@ -585,6 +585,14 @@ name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
+name = "polkakernel"
+version = "0.1.0"
+source = "git+https://github.com/paritytech/polkaports?rev=56e103cdbef318f075c18bd79442257cfb63a18c#56e103cdbef318f075c18bd79442257cfb63a18c"
+dependencies = [
+ "log",
+]
 
 [[package]]
 name = "polkatool"
@@ -754,6 +762,7 @@ version = "0.1.0"
 dependencies = [
  "env_logger",
  "log",
+ "polkakernel",
  "polkavm",
  "sdl2",
 ]

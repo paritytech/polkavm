@@ -10,6 +10,7 @@ use sdl2::pixels::{Color, PixelFormatEnum};
 use sdl2::rect::Rect;
 
 mod keys;
+mod machine;
 mod vm;
 
 fn get_queued_audio_frames(queue: &sdl2::audio::AudioQueue<i16>) -> f32 {
@@ -17,6 +18,12 @@ fn get_queued_audio_frames(queue: &sdl2::audio::AudioQueue<i16>) -> f32 {
     let samples_per_frame = (spec.freq / 60) as u32;
     let samples_queued = queue.size() / (2 * u32::from(spec.channels));
     samples_queued as f32 / samples_per_frame as f32
+}
+
+macro_rules! c_str {
+    ($s: literal) => {
+        unsafe { ::core::ffi::CStr::from_bytes_with_nul_unchecked(concat!($s, "\0").as_bytes()) }
+    };
 }
 
 fn main() {
@@ -33,10 +40,10 @@ fn main() {
     let blob = ProgramBlob::parse(program_override.as_deref().unwrap_or(DEFAULT_PROGRAM).into()).unwrap();
     let mut vm = Vm::from_blob(blob).unwrap();
 
-    vm.register_file("./pak0.pak", include_bytes!("../data/pak0.pak").as_slice().into());
-    vm.register_file("./autoexec.cfg", include_bytes!("../data/autoexec.cfg").as_slice().into());
+    vm.register_file(c_str!("./pak0.pak"), include_bytes!("../data/pak0.pak").as_slice().into());
+    vm.register_file(c_str!("./autoexec.cfg"), include_bytes!("../data/autoexec.cfg").as_slice().into());
 
-    vm.setup(["./quake"]).unwrap();
+    vm.setup([c_str!("./quake")]).unwrap();
 
     let sdl_context = sdl2::init().unwrap();
     let video_context = sdl_context.video().unwrap();
