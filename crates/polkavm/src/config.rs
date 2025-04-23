@@ -1,4 +1,7 @@
 use crate::error::{bail, Error};
+use crate::gas::{CostModel, CostModelRef};
+use alloc::sync::Arc;
+use polkavm_assembler::Assembler;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum BackendKind {
@@ -104,6 +107,7 @@ pub struct Config {
     pub(crate) worker_count: usize,
     pub(crate) cache_enabled: bool,
     pub(crate) lru_cache_size: u32,
+    pub(crate) sandboxing_enabled: bool,
 }
 
 impl Default for Config {
@@ -156,6 +160,7 @@ impl Config {
             worker_count: 2,
             cache_enabled: cfg!(feature = "module-cache"),
             lru_cache_size: 0,
+            sandboxing_enabled: true,
         }
     }
 
@@ -191,6 +196,10 @@ impl Config {
 
             if let Some(value) = env_usize("POLKAVM_LRU_CACHE_SIZE")? {
                 config.lru_cache_size = if value > u32::MAX as usize { u32::MAX } else { value as u32 };
+            }
+
+            if let Some(value) = env_bool("POLKAVM_SANDBOXING_ENABLED")? {
+                config.sandboxing_enabled = value;
             }
         }
 
@@ -338,6 +347,23 @@ impl Config {
         self.lru_cache_size = value;
         self
     }
+
+    /// Sets whether security sandboxing is enabled.
+    ///
+    /// Should only be used for debugging purposes and *never* disabled in production.
+    ///
+    /// Default: `true`
+    ///
+    /// Corresponding environment variable: `POLKAVM_SANDBOXING_ENABLED`
+    pub fn set_sandboxing_enabled(&mut self, value: bool) -> &mut Self {
+        self.sandboxing_enabled = value;
+        self
+    }
+
+    /// Returns whether security sandboxing is enabled.
+    pub fn sandboxing_enabled(&self) -> bool {
+        self.sandboxing_enabled
+    }
 }
 
 /// The type of gas metering.
@@ -358,6 +384,10 @@ pub enum GasMeteringKind {
     Async,
 }
 
+pub trait CustomCodegen: Send + Sync + 'static {
+    fn should_emit_ecalli(&self, number: u32, asm: &mut Assembler) -> bool;
+}
+
 /// The configuration for a module.
 #[derive(Clone)]
 pub struct ModuleConfig {
@@ -369,6 +399,8 @@ pub struct ModuleConfig {
     pub(crate) aux_data_size: u32,
     pub(crate) allow_sbrk: bool,
     cache_by_hash: bool,
+    pub(crate) custom_codegen: Option<Arc<dyn CustomCodegen>>,
+    pub(crate) cost_model: CostModelRef,
 }
 
 impl Default for ModuleConfig {
@@ -389,6 +421,8 @@ impl ModuleConfig {
             aux_data_size: 0,
             allow_sbrk: true,
             cache_by_hash: false,
+            custom_codegen: None,
+            cost_model: CostModel::naive_ref(),
         }
     }
 
@@ -489,8 +523,29 @@ impl ModuleConfig {
         self
     }
 
+    /// Sets a custom codegen handler.
+    pub fn set_custom_codegen(&mut self, custom_codegen: impl CustomCodegen) -> &mut Self {
+        self.custom_codegen = Some(Arc::new(custom_codegen));
+        self
+    }
+
+    /// Gets the currently set gas cost model.
+    pub fn cost_model(&self) -> &CostModelRef {
+        &self.cost_model
+    }
+
+    /// Sets a custom gas cost model.
+    pub fn set_cost_model(&mut self, cost_model: CostModelRef) -> &mut Self {
+        self.cost_model = cost_model;
+        self
+    }
+
     #[cfg(feature = "module-cache")]
-    pub(crate) fn hash(&self) -> polkavm_common::hasher::Hash {
+    pub(crate) fn hash(&self) -> Option<polkavm_common::hasher::Hash> {
+        if self.custom_codegen.is_some() {
+            return None;
+        }
+
         let &ModuleConfig {
             page_size,
             aux_data_size,
@@ -499,8 +554,10 @@ impl ModuleConfig {
             step_tracing,
             dynamic_paging,
             allow_sbrk,
+            ref cost_model,
             // Deliberately ignored.
             cache_by_hash: _,
+            custom_codegen: _,
         } = self;
 
         let mut hasher = polkavm_common::hasher::Hasher::new();
@@ -515,7 +572,12 @@ impl ModuleConfig {
             u32::from(is_strict),
             u32::from(step_tracing),
             u32::from(dynamic_paging),
+            u32::from(allow_sbrk),
         ]);
-        hasher.finalize()
+
+        use core::hash::Hash;
+        cost_model.hash(&mut hasher);
+
+        Some(hasher.finalize())
     }
 }

@@ -12,6 +12,7 @@
 #include <asm-generic/siginfo.h>
 #include <asm-generic/posix_types.h>
 #include <asm-generic/errno.h>
+#define ERESTARTSYS 512
 
 #include <linux/futex.h>
 #include <linux/seccomp.h>
@@ -34,6 +35,7 @@
 #include <linux/io_uring.h>
 #include <linux/utsname.h>
 #include <linux/ptrace.h>
+#include <linux/rseq.h>
 
 #define u64 __u64
 #define s64 __s64

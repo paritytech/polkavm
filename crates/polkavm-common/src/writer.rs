@@ -80,7 +80,7 @@ struct SerializedInstruction {
     minimum_size: u8,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ProgramBlobBuilder {
     is_64: bool,
     ro_data_size: u32,

@@ -200,10 +200,10 @@ pub fn polkavm_export(attributes: ExportBlockAttributes, input: syn::ItemFn) -> 
 
                 #[cfg(target_arch = "riscv32")]
                 ::core::arch::global_asm!(
-                    ".pushsection .polkavm_exports,\"R\",@note\n",
+                    ".pushsection .polkavm_exports,\"Ra\",@note\n",
                     ".byte 1\n", // Version.
-                    ".4byte {metadata}",
-                    ".4byte {function}",
+                    "auipc zero, %pcrel_hi({metadata})\n",
+                    "auipc zero, %pcrel_hi({function})\n",
                     ".popsection\n",
                     metadata = sym METADATA,
                     function = sym trampoline,
@@ -211,10 +211,12 @@ pub fn polkavm_export(attributes: ExportBlockAttributes, input: syn::ItemFn) -> 
 
                 #[cfg(target_arch = "riscv64")]
                 ::core::arch::global_asm!(
-                    ".pushsection .polkavm_exports,\"R\",@note\n",
+                    ".pushsection .polkavm_exports,\"Ra\",@note\n",
                     ".byte 1\n", // Version.
-                    ".8byte {metadata}",
-                    ".8byte {function}",
+                    "auipc zero, %pcrel_hi({metadata})\n",
+                    ".4byte 0\n",
+                    "auipc zero, %pcrel_hi({function})\n",
+                    ".4byte 0\n",
                     ".popsection\n",
                     metadata = sym METADATA,
                     function = sym trampoline,

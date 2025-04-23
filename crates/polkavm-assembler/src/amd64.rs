@@ -1444,6 +1444,12 @@ pub mod inst {
             None,
             (fmt.write_fmt(core::format_args!("inc {}", self.1.display(self.0)))),
 
+        // https://www.felixcloutier.com/x86/dec
+        dec(Size, RegMem) =>
+            new_rm(0xfe, self.0, self.1, None).modrm_opext(0b001).encode(),
+            None,
+            (fmt.write_fmt(core::format_args!("dec {}", self.1.display(self.0)))),
+
         // https://www.felixcloutier.com/x86/sub
         sub(Operands) =>
             alu_impl(0x28, 0x2a, 0b101, self.0),
@@ -1567,6 +1573,17 @@ pub mod inst {
             Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b001).encode(),
             None,
             (fmt.write_fmt(core::format_args!("ror {}, cl", self.1.display(Size::from(self.0))))),
+
+        rcr_imm(RegSize, RegMem, u8) =>
+            {
+                if self.2 == 1 {
+                    Inst::new(0xd1)
+                } else {
+                    Inst::new(0xc1).imm8(self.2)
+                }.rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b011).encode()
+            },
+            None,
+            (fmt.write_fmt(core::format_args!("rcr {}, 0x{:x}", self.1.display(Size::from(self.0)), self.2))),
 
         // https://www.felixcloutier.com/x86/popcnt
         popcnt(RegSize, Reg, RegMem) =>
@@ -1726,6 +1743,36 @@ pub mod inst {
                 .mem(self.2).encode(),
             None,
             (fmt.write_fmt(core::format_args!("lea {}, {}", self.1.name_from(self.0), self.2))),
+
+        // https://www.felixcloutier.com/x86/mfence
+        mfence() =>
+            InstBuf::from_array([0x0f, 0xae, 0xf0]),
+            None,
+            (fmt.write_str("mfence")),
+
+        // https://www.felixcloutier.com/x86/lfence
+        lfence() =>
+            InstBuf::from_array([0x0f, 0xae, 0xe8]),
+            None,
+            (fmt.write_str("lfence")),
+
+        // https://www.felixcloutier.com/x86/rdtscp
+        rdtscp() =>
+            InstBuf::from_array([0x0f, 0x01, 0xf9]),
+            None,
+            (fmt.write_str("rdtscp")),
+
+        // https://www.felixcloutier.com/x86/rdpmc
+        rdpmc() =>
+            InstBuf::from_array([0x0f, 0x33]),
+            None,
+            (fmt.write_str("rdpmc")),
+
+        // https://www.felixcloutier.com/x86/cpuid
+        cpuid() =>
+            InstBuf::from_array([0x0f, 0xa2]),
+            None,
+            (fmt.write_str("cpuid")),
 
         // https://www.felixcloutier.com/x86/call
         call(RegMem) => {
@@ -2154,7 +2201,7 @@ mod tests {
     impl GenerateTestValues for u16 {
         fn generate_test_values(cb: impl FnMut(Self)) {
             [
-                0, 0x7f, 0x80, 0x81, 0xfe, 0xff, 0x100, 0x101, 0x7fff, 0x8000, 0x8001, 0xfffe, 0xffff,
+                0, 1, 0x7f, 0x80, 0x81, 0xfe, 0xff, 0x100, 0x101, 0x7fff, 0x8000, 0x8001, 0xfffe, 0xffff,
             ]
             .into_iter()
             .for_each(cb);
@@ -2170,7 +2217,7 @@ mod tests {
     impl GenerateTestValues for u32 {
         fn generate_test_values(cb: impl FnMut(Self)) {
             [
-                0, 0x7f, 0x80, 0x81, 0xfe, 0xff, 0x100, 0x101, 0x7fff, 0x8000, 0x8001, 0xfffe, 0xffff, 0x10000, 0x10001, 0x7fffffff,
+                0, 1, 0x7f, 0x80, 0x81, 0xfe, 0xff, 0x100, 0x101, 0x7fff, 0x8000, 0x8001, 0xfffe, 0xffff, 0x10000, 0x10001, 0x7fffffff,
                 0x80000000, 0x80000001, 0xfffffffe, 0xffffffff,
             ]
             .into_iter()
@@ -2188,6 +2235,7 @@ mod tests {
         fn generate_test_values(cb: impl FnMut(Self)) {
             [
                 0,
+                1,
                 0x7f,
                 0x80,
                 0x81,
@@ -2342,7 +2390,9 @@ mod tests {
         cdq,
         cmov,
         cmp,
+        cpuid,
         cqo,
+        dec,
         div,
         endbr64,
         idiv,
@@ -2356,7 +2406,9 @@ mod tests {
         jmp_rel8,
         jmp,
         lea,
+        lfence,
         load,
+        mfence,
         mov_imm,
         mov_imm64,
         mov,
@@ -2383,6 +2435,9 @@ mod tests {
         pop,
         push,
         push_imm,
+        rcr_imm,
+        rdpmc,
+        rdtscp,
         ret,
         ror_imm,
         rol_cl,

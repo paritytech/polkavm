@@ -53,6 +53,24 @@ pub unsafe fn memset(mut dst: *mut u8, value: usize, mut count: usize) {
     }
 }
 
+#[inline]
+pub fn heap_base() -> *mut core::ffi::c_void {
+    #[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+    unsafe {
+        let mut output;
+        core::arch::asm!(
+            ".insn r 0xb, 3, 0, {dst}, zero, zero",
+            dst = out(reg) output,
+        );
+        output
+    }
+
+    #[cfg(not(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e")))]
+    {
+        core::ptr::null_mut()
+    }
+}
+
 /// A basic memory allocator which doesn't support deallocation.
 pub struct LeakingAllocator;
 
@@ -85,5 +103,16 @@ macro_rules! min_stack_size {
             ".popsection\n",
             size = const $size,
         );
+    }
+}
+
+#[cfg(target_pointer_width = "32")]
+#[cfg(any(all(target_arch = "riscv32", target_feature = "e"), doc))]
+#[no_mangle]
+pub unsafe extern "C" fn __atomic_fetch_add_8(address: *mut u64, value: u64) -> u64 {
+    unsafe {
+        let old_value = *address;
+        *address += value;
+        old_value
     }
 }

@@ -18,6 +18,7 @@ if_compiler_is_supported! {
 
 use crate::config::{BackendKind, Config, GasMeteringKind, ModuleConfig, SandboxKind};
 use crate::error::{bail, bail_static, Error};
+use crate::gas::CostModelRef;
 use crate::interpreter::{InterpretedInstance, InterpretedModule};
 use crate::utils::{GuestInit, InterruptKind};
 use crate::{Gas, ProgramCounter};
@@ -36,6 +37,7 @@ if_compiler_is_supported! {
         use crate::sandbox::generic::Sandbox as SandboxGeneric;
 
         pub(crate) struct EngineState {
+            pub(crate) sandboxing_enabled: bool,
             pub(crate) sandbox_global: Option<crate::sandbox::GlobalStateKind>,
             pub(crate) sandbox_cache: Option<crate::sandbox::WorkerCacheKind>,
             compiler_cache: CompilerCache,
@@ -99,6 +101,7 @@ pub struct Engine {
     crosscheck: bool,
     state: Arc<EngineState>,
     allow_dynamic_paging: bool,
+    allow_experimental: bool,
 }
 
 impl Engine {
@@ -115,6 +118,14 @@ impl Engine {
 
         if !config.allow_experimental && config.crosscheck {
             bail!("cannot enable execution cross-checking: `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` is not enabled");
+        }
+
+        if !config.sandboxing_enabled {
+            if !config.allow_experimental {
+                bail!("cannot disable security sandboxing: `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` is not enabled");
+            } else {
+                log::warn!("SECURITY SANDBOXING IS DISABLED; THIS IS UNSUPPORTED; YOU HAVE BEEN WARNED");
+            }
         }
 
         let crosscheck = config.crosscheck;
@@ -165,6 +176,7 @@ impl Engine {
                     }
 
                     let state = Arc::new(EngineState {
+                        sandboxing_enabled: config.sandboxing_enabled,
                         sandbox_global: Some(sandbox_global),
                         sandbox_cache: Some(sandbox_cache),
                         compiler_cache: Default::default(),
@@ -176,6 +188,7 @@ impl Engine {
                     (Some(selected_sandbox), state)
                 } else {
                     (None, Arc::new(EngineState {
+                        sandboxing_enabled: config.sandboxing_enabled,
                         sandbox_global: None,
                         sandbox_cache: None,
                         compiler_cache: Default::default(),
@@ -199,12 +212,24 @@ impl Engine {
             crosscheck,
             state,
             allow_dynamic_paging: config.allow_dynamic_paging(),
+            allow_experimental: config.allow_experimental,
         })
     }
 
     /// Returns the backend used by the engine.
     pub fn backend(&self) -> BackendKind {
         self.selected_backend
+    }
+
+    /// Returns the PIDs of the idle worker processes. Only useful for debugging.
+    pub fn idle_worker_pids(&self) -> Vec<u32> {
+        if_compiler_is_supported! {
+            {
+                self.state.sandbox_cache.as_ref().map(|cache| cache.idle_worker_pids()).unwrap_or_default()
+            } else {
+                Vec::new()
+            }
+        }
     }
 }
 
@@ -246,6 +271,7 @@ pub(crate) struct ModulePrivate {
     page_size_mask: u32,
     page_shift: u32,
     instruction_set: RuntimeInstructionSet,
+    cost_model: CostModelRef,
     #[cfg(feature = "module-cache")]
     pub(crate) module_key: Option<ModuleKey>,
 }
@@ -348,6 +374,10 @@ impl Module {
         self.round_to_page_size_down(value) + (u32::from((value & self.state().page_size_mask) != 0) << self.state().page_shift)
     }
 
+    pub(crate) fn cost_model(&self) -> CostModelRef {
+        self.state().cost_model.clone()
+    }
+
     if_compiler_is_supported! {
         pub(crate) fn address_to_page(&self, address: u32) -> u32 {
             address >> self.state().page_shift
@@ -370,6 +400,10 @@ impl Module {
     pub fn from_blob(engine: &Engine, config: &ModuleConfig, blob: ProgramBlob) -> Result<Self, Error> {
         if config.dynamic_paging() && !engine.allow_dynamic_paging {
             bail!("dynamic paging was not enabled; use `Config::set_allow_dynamic_paging` to enable it");
+        }
+
+        if config.custom_codegen.is_some() && !engine.allow_experimental {
+            bail!("cannot use custom codegen: `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` is not enabled");
         }
 
         log::trace!(
@@ -473,6 +507,7 @@ impl Module {
                     config.step_tracing || engine.crosscheck,
                     cast(blob.code().len()).assert_always_fits_in_u32(),
                     init,
+                    config.cost_model.clone(),
                 )?;
 
                 if config.allow_sbrk {
@@ -605,6 +640,7 @@ impl Module {
             crosscheck: engine.crosscheck,
             page_size_mask,
             page_shift,
+            cost_model: config.cost_model().clone(),
 
             #[cfg(feature = "module-cache")]
             module_key,
@@ -781,7 +817,7 @@ impl Module {
             return None;
         }
 
-        let gas = crate::gas::calculate_for_block(self.instructions_bounded_at(code_offset));
+        let gas = crate::gas::calculate_for_block(self.state().cost_model.clone(), self.instructions_bounded_at(code_offset));
         Some(i64::from(gas.0))
     }
 
@@ -862,6 +898,12 @@ impl core::fmt::Display for MemoryAccessError {
                 write!(fmt, "memory access failed: {error}")
             }
         }
+    }
+}
+
+impl From<MemoryAccessError> for alloc::string::String {
+    fn from(error: MemoryAccessError) -> alloc::string::String {
+        alloc::string::ToString::to_string(&error)
     }
 }
 
@@ -1283,6 +1325,23 @@ impl RawInstance {
         }
 
         Ok(buffer)
+    }
+
+    /// A convenience function to read an `u64` from the VM's memory.
+    ///
+    /// This is equivalent to calling [`RawInstance::read_memory_into`].
+    pub fn read_u64(&self, address: u32) -> Result<u64, MemoryAccessError> {
+        let mut buffer = [0; 8];
+        self.read_memory_into(address, &mut buffer)?;
+
+        Ok(u64::from_le_bytes(buffer))
+    }
+
+    /// A convenience function to write an `u64` into the VM's memory.
+    ///
+    /// This is equivalent to calling [`RawInstance::write_memory`].
+    pub fn write_u64(&mut self, address: u32, value: u64) -> Result<(), MemoryAccessError> {
+        self.write_memory(address, &value.to_le_bytes())
     }
 
     /// A convenience function to read an `u32` from the VM's memory.

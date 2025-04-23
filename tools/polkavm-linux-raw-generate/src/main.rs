@@ -70,12 +70,14 @@ fn main() {
         "ETOOMANYREFS",
         "ETXTBSY",
         "EXDEV",
+        "ERESTARTSYS",
         "_?UFFD.+",
         "_IOC.*",
         "IORING.+",
         "IOSQE.+",
         "FUTEX2.+",
         "PTRACE_.+",
+        "MCL_.+",
     ]
     .join("|");
 
@@ -100,6 +102,7 @@ fn main() {
         "uffdio.+",
         "io_uring.+",
         "new_utsname",
+        "rseq.*",
     ]
     .join("|");
 

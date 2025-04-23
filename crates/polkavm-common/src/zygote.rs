@@ -71,7 +71,6 @@ define_address_table! {
     ext_zero_memory_chunk: unsafe extern "C" fn() -> !,
     ext_load_program: unsafe extern "C" fn() -> !,
     ext_recycle: unsafe extern "C" fn() -> !,
-    ext_fetch_idle_regs: unsafe extern "C" fn() -> !,
     ext_set_accessible_aux_size: unsafe extern "C" fn() -> !,
 }
 
@@ -166,8 +165,6 @@ pub struct VmInit {
 
     /// Whether the logger is enabled.
     pub logging_enabled: AtomicBool,
-
-    pub idle_regs: JmpBuf,
 }
 
 const MESSAGE_BUFFER_SIZE: usize = 512;
@@ -336,6 +333,9 @@ pub const VMCTX_FUTEX_GUEST_STEP: u32 = VMCTX_FUTEX_IDLE | (4 << 1);
 /// The VM gas ran out of gas.
 pub const VMCTX_FUTEX_GUEST_NOT_ENOUGH_GAS: u32 = VMCTX_FUTEX_IDLE | (5 << 1);
 
+/// The VM has triggered a page fault.
+pub const VMCTX_FUTEX_GUEST_PAGEFAULT: u32 = VMCTX_FUTEX_IDLE | (6 << 1);
+
 #[allow(clippy::declare_interior_mutable_const)]
 const ATOMIC_U64_ZERO: AtomicU64 = AtomicU64::new(0);
 
@@ -394,16 +394,6 @@ impl VmCtx {
                 uffd_available: AtomicBool::new(false),
                 sandbox_disabled: AtomicBool::new(false),
                 logging_enabled: AtomicBool::new(false),
-                idle_regs: JmpBuf {
-                    rip: AtomicU64::new(0),
-                    rbx: AtomicU64::new(0),
-                    rsp: AtomicU64::new(0),
-                    rbp: AtomicU64::new(0),
-                    r12: AtomicU64::new(0),
-                    r13: AtomicU64::new(0),
-                    r14: AtomicU64::new(0),
-                    r15: AtomicU64::new(0),
-                },
             },
 
             message_length: UnsafeCell::new(0),

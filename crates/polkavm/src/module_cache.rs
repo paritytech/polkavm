@@ -78,9 +78,13 @@ impl ModuleCache {
             return (None, None);
         }
 
+        let Some(config_hash) = config.hash() else {
+            return (None, None);
+        };
+
         let key = ModuleKey {
             unique_id: blob.unique_id(),
-            config_hash: config.hash(),
+            config_hash,
             module_hash: if config.cache_by_hash() {
                 Some(blob.unique_hash(true))
             } else {

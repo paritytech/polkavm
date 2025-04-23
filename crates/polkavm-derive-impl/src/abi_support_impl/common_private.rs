@@ -118,6 +118,14 @@ pub type ReturnTy = u64;
 #[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 pub type ReturnTy = u128;
 
+#[cfg(all(target_arch = "riscv32", target_feature = "e"))]
+#[repr(C, packed(1))]
+pub struct PackedReturnTy(pub u32, pub u32);
+
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
+#[repr(C, packed(1))]
+pub struct PackedReturnTy(pub u64, pub u64);
+
 #[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
 #[inline(always)]
 pub extern fn pack_return_ty(a0: Reg, a1: Reg) -> ReturnTy {
@@ -154,7 +162,7 @@ impl IntoTuple for (Reg, Reg) {
 
 #[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
 pub trait ImportSymbol {
-    extern fn trampoline(a0: Reg, a1: Reg, a2: Reg, a3: Reg, a4: Reg, a5: Reg);
+    extern fn trampoline(a0: Reg, a1: Reg, a2: Reg, a3: Reg, a4: Reg, a5: Reg) -> PackedReturnTy;
 }
 
 #[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]

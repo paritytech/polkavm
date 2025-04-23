@@ -16,8 +16,8 @@ gimli = { workspace = true, features = ["std", "read", "endian-reader"] }
 polkavm-common = { workspace = true, features = ["alloc"] }
 rustc-demangle = { workspace = true }
 hashbrown = { workspace = true, features = ["raw"] }
-regalloc2 = "0.9.3"
-dirs = "5.0.1"
+regalloc2 = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 diff = { workspace = true }

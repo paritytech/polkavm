@@ -1,8 +1,8 @@
 use object::{read::elf::Sym, LittleEndian, Object, ObjectSection, ObjectSymbol};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use crate::program_from_elf::ProgramFromElfError;
+use crate::program_from_elf::{ProgramFromElfError, SectionTarget};
 
 type ElfFile<'a, H> = object::read::elf::ElfFile<'a, H, &'a [u8]>;
 type ElfSymbol<'data, 'file, H> = object::read::elf::ElfSymbol<'data, 'file, H, &'data [u8]>;
@@ -38,6 +38,7 @@ pub struct Section<'a> {
     flags: u64,
     raw_section_index: Option<ElfSectionIndex>,
     relocations: Vec<(u64, Relocation)>,
+    elf_section_type: u32,
 }
 
 impl<'a> Section<'a> {
@@ -69,12 +70,20 @@ impl<'a> Section<'a> {
         self.flags & u64::from(object::elf::SHF_ALLOC) != 0
     }
 
+    pub fn is_executable(&self) -> bool {
+        self.flags & u64::from(object::elf::SHF_EXECINSTR) != 0
+    }
+
     pub fn data(&self) -> &[u8] {
         &self.data
     }
 
     pub fn relocations(&'_ self) -> impl Iterator<Item = (u64, Relocation)> + '_ {
         self.relocations.iter().copied()
+    }
+
+    pub fn elf_section_type(&self) -> u32 {
+        self.elf_section_type
     }
 }
 
@@ -101,6 +110,10 @@ where
         } else {
             Some(name)
         }
+    }
+
+    pub fn is_undefined(&self) -> bool {
+        matches!(self.elf_symbol.section(), object::read::SymbolSection::Undefined)
     }
 
     pub fn section_and_offset(&self) -> Result<(&Section, u64), ProgramFromElfError> {
@@ -227,8 +240,13 @@ where
             return Err(ProgramFromElfError::other("file doesn't use the System V nor GNU ABI"));
         }
 
-        if !matches!(elf.elf_header().e_type(LittleEndian), object::elf::ET_EXEC | object::elf::ET_REL) {
-            return Err(ProgramFromElfError::other("file is not a supported ELF file (ET_EXEC or ET_REL)"));
+        if !matches!(
+            elf.elf_header().e_type(LittleEndian),
+            object::elf::ET_EXEC | object::elf::ET_REL | object::elf::ET_DYN
+        ) {
+            return Err(ProgramFromElfError::other(
+                "file is not a supported ELF file (ET_EXEC or ET_REL or ET_DYN)",
+            ));
         }
 
         if elf.elf_header().e_machine(LittleEndian) != object::elf::EM_RISCV {
@@ -356,6 +374,7 @@ where
                 flags,
                 raw_section_index: Some(section.index()),
                 relocations: Vec::new(),
+                elf_section_type: section.elf_section_header().sh_type(LittleEndian),
             });
 
             section_index_by_name.entry(name.to_owned()).or_insert_with(Vec::new).push(index);
@@ -435,6 +454,7 @@ where
             flags: u64::from(object::elf::SHF_ALLOC),
             raw_section_index: None,
             relocations: Vec::new(),
+            elf_section_type: 0,
         });
 
         index
@@ -453,5 +473,23 @@ where
 
     pub fn is_64(&self) -> bool {
         self.is_64_bit
+    }
+
+    pub fn section_to_function_name(&self) -> BTreeMap<SectionTarget, &'data str> {
+        self.symbols()
+            .filter_map(|symbol| {
+                if symbol.kind() != object::elf::STT_FUNC {
+                    return None;
+                }
+
+                let name = symbol.name()?;
+                let (section, offset) = symbol.section_and_offset().ok()?;
+                let target = SectionTarget {
+                    section_index: section.index(),
+                    offset,
+                };
+                Some((target, name))
+            })
+            .collect()
     }
 }
