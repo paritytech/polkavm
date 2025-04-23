@@ -132,6 +132,7 @@ impl Default for AccumulateArgs {
             o_ptr: 0,
             o_len: 0,
             y: [0u8; 32],
+            g: 0,
             work_result_ptr: 0,
             work_result_len: 0,
         }
@@ -215,7 +216,8 @@ pub fn parse_accumulate_args(start_address: u64, length: u64, m: u64) -> Option<
 
         // 0.6.5 -- add gas limit
         let g_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 8) };
-        u64::from_le_bytes(g_slice[0..8].try_into().unwrap());
+        let global_g= u64::from_le_bytes(g_slice[0..8].try_into().unwrap());
+        args.g = global_g;
         current_address += 8;
         remaining_length = remaining_length.saturating_sub(8);
 

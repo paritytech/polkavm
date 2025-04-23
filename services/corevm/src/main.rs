@@ -16,7 +16,7 @@ use utils::functions::{initialize_pvm_registers, serialize_gas_and_registers, de
 use utils::functions::{parse_standard_program_initialization_args, standard_program_initialization_for_child};
 use utils::functions::{parse_accumulate_args, parse_refine_args};
 
-use utils::host_functions::{assign, bless, checkpoint, eject, forget, gas, info, lookup, new, oyield, query, read, solicit, upgrade, write};
+use utils::host_functions::{assign, bless, checkpoint, eject, forget, gas, info, lookup, new, oyield, query, read, solicit, upgrade, write, provide};
 use utils::host_functions::{export, expunge, fetch, historical_lookup, invoke, machine, poke, peek, zero, log};
 
 #[polkavm_derive::polkavm_export]
@@ -353,11 +353,11 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         write_result(assign_result, 6);
 
         let provide_jamhash_result = unsafe { provide(666, jam_hash_address, jam_length) };
-        call_log(log_level(provide_jamhash_result == WHO), None, &format!("provide hash(jam): expect WHO, got {:?} (recorded at key 2)", query_jamhash_result));
+        call_log(log_level(provide_jamhash_result == WHO), None, &format!("provide hash(jam): expect WHO, got {:?} (recorded at key 7)", query_jamhash_result));
         write_result(provide_jamhash_result, 7);
 
-        let provide_jamhash_result2 = unsafe { provide(0, jam_hash_address, jam_length) };
-        call_log(log_level(provide_jamhash_result == OK), None, &format!("provide hash(jam): expect OK, got {:?} (recorded at key 2)", provide_jamhash_result2));
+        let provide_jamhash_result2 = unsafe { provide(service_index as u64, jam_hash_address, jam_length) };
+        call_log(log_level(provide_jamhash_result2 == OK), None, &format!("provide hash(jam): expect OK, got {:?} (recorded at key 8)", provide_jamhash_result2));
         write_result(provide_jamhash_result, 8);        
     } else if n == 5 {
         let lookup_result = unsafe { lookup(service_index as u64, jam_hash_address, buffer_address, 0, jam_length) };
@@ -377,9 +377,13 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         call_log(log_level(bless_who_result == WHO), None, &format!("bless@n={:?}: expect WHO, got {:?} (recorded at key 6)", n, bless_who_result));
         write_result(bless_who_result, 6);
 
-        let provide_jamhash_result = unsafe { provide(0, jam_hash_address, jam_length) };
-        call_log(log_level(provide_jamhash_result == HUH), None, &format!("provide hash(jam): expect HUH, got {:?} (recorded at key 8)", provide_jamhash_result2));
-        write_result(provide_jamhash_result, 8);        
+        let provide_jamhash_result = unsafe { provide(service_index as u64, jam_hash_address, jam_length) };
+        call_log(log_level(provide_jamhash_result == OK), None, &format!("provide hash(jam): expect OK, got {:?} (recorded at key 7)", provide_jamhash_result));
+        write_result(provide_jamhash_result, 7);   
+
+        let provide_jamhash_result2 = unsafe { provide(service_index as u64, jam_hash_address, jam_length) };
+        call_log(log_level(provide_jamhash_result2 == HUH), None, &format!("provide hash(jam): expect HUH, got {:?} (recorded at key 8)", provide_jamhash_result2));
+        write_result(provide_jamhash_result2, 8);     
     } else if n == 6 {
         let solicit_result = unsafe { solicit(jam_hash_address, jam_length) };
         write_result(solicit_result, 1);

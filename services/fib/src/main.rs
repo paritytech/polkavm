@@ -40,7 +40,7 @@ extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
     return (buffer_addr, buffer_len);
 }
 
-#[unsafe(no_mangle)]
+#[no_mangle]
 static mut output_bytes_32: [u8; 32] = [0; 32];
 
 #[polkavm_derive::polkavm_export]
