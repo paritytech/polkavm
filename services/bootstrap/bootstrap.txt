@@ -1,6 +1,6 @@
 // RO data = 0/0 bytes
 // RW data = 0/32 bytes
-// Stack size = 8192 bytes
+// Stack size = 16773120 bytes
 // RO data = []
 // RW data = []
 // Instructions = 307

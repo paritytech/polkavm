@@ -31,10 +31,6 @@
 extern crate alloc;
 use alloc::format;
 
-use simplealloc::SimpleAlloc;
-#[global_allocator]
-static ALLOCATOR: SimpleAlloc<4096> = SimpleAlloc::new();
-
 use crate::constants::*;
 use crate::host_functions::*;
 

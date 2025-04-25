@@ -4,9 +4,16 @@
 
 extern crate alloc;
 use alloc::format;
+use alloc::vec;
 
+// allocate memory for stack
 use polkavm_derive::min_stack_size;
-min_stack_size!(40960); // depends on how many pages you need
+min_stack_size!(16773119); // 2^24 - 1 - 4096, should not greater than 2^24 - 1 (16777215)
+
+// allocate memory for heap
+use simplealloc::SimpleAlloc;
+#[global_allocator]
+static ALLOCATOR: SimpleAlloc<16773119> = SimpleAlloc::new(); // 2^24 - 1 - 4096, should not greater than 2^24 - 1 (16777215)
 
 use utils::constants::{FIRST_READABLE_ADDRESS, INPUT_ARGS_PAGE, PAGE_SIZE, SEGMENT_SIZE};
 use utils::constants::{NONE, CORE, OK, WHO, HUH, HALT, HOST, LOG};

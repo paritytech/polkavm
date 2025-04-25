@@ -239,6 +239,7 @@ name = "auth_copy"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
+ "simplealloc",
  "utils",
 ]
 
@@ -264,6 +265,7 @@ name = "balances"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
+ "simplealloc",
  "utils",
 ]
 
@@ -296,6 +298,7 @@ name = "blake2b"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
+ "simplealloc",
  "utils",
 ]
 
@@ -313,6 +316,7 @@ name = "bootstrap"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
+ "simplealloc",
  "utils",
 ]
 
@@ -361,6 +365,7 @@ name = "corevm_child"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
+ "simplealloc",
  "utils",
 ]
 
@@ -406,6 +411,7 @@ name = "delay"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
+ "simplealloc",
  "utils",
 ]
 
@@ -558,6 +564,7 @@ name = "fib"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
+ "simplealloc",
  "utils",
 ]
 
@@ -697,6 +704,7 @@ name = "megatron"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
+ "simplealloc",
  "utils",
 ]
 
@@ -705,6 +713,7 @@ name = "null_authorizer"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
+ "simplealloc",
  "utils",
 ]
 
@@ -1094,6 +1103,7 @@ dependencies = [
  "polkavm-derive",
  "revm",
  "revm-database",
+ "simplealloc",
  "utils",
 ]
 
@@ -1253,6 +1263,7 @@ name = "transfer"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
+ "simplealloc",
  "utils",
 ]
 
@@ -1261,6 +1272,7 @@ name = "tribonacci"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
+ "simplealloc",
  "utils",
 ]
 
@@ -1293,7 +1305,6 @@ name = "utils"
 version = "0.1.0"
 dependencies = [
  "polkavm-derive",
- "simplealloc",
 ]
 
 [[package]]

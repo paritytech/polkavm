@@ -7,4 +7,3 @@ edition = "2024"
 
 [dependencies]
 polkavm-derive = { path = "../../crates/polkavm-derive" }
-simplealloc = { path = "../../crates/simplealloc" }

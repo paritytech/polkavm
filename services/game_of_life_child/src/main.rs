@@ -1,14 +1,20 @@
 #![no_std]
 #![no_main]
-#![feature(asm_const)]
+#![feature(asm_const)] 
 
 extern crate alloc;
-use alloc::string::String;
 use alloc::format;
 use alloc::vec;
+use alloc::string::String;
 
+// allocate memory for stack
 use polkavm_derive::min_stack_size;
-min_stack_size!(409600);
+min_stack_size!(16773119); // 2^24 - 1 - 4096, should not greater than 2^24 - 1 (16777215)
+
+// allocate memory for heap
+use simplealloc::SimpleAlloc;
+#[global_allocator]
+static ALLOCATOR: SimpleAlloc<16773119> = SimpleAlloc::new(); // 2^24 - 1 - 4096, should not greater than 2^24 - 1 (16777215)
 
 use utils::functions::{call_log};
 use utils::hash_functions::blake2b_hash;

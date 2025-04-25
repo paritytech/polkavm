@@ -1,11 +1,23 @@
 #![no_std]
 #![no_main]
+#![feature(asm_const)] 
+
+extern crate alloc;
+use alloc::format;
+use alloc::vec;
+
+// allocate memory for stack
+use polkavm_derive::min_stack_size;
+min_stack_size!(16773119); // 2^24 - 1 - 4096, should not greater than 2^24 - 1 (16777215)
+
+// allocate memory for heap
+use simplealloc::SimpleAlloc;
+#[global_allocator]
+static ALLOCATOR: SimpleAlloc<16773119> = SimpleAlloc::new(); // 2^24 - 1 - 4096, should not greater than 2^24 - 1 (16777215)
 
 use utils::constants::{FIRST_READABLE_ADDRESS, NONE};
 use utils::functions::{parse_accumulate_args, parse_transfer_args, call_log, write_result};
 use utils::host_functions::{export, fetch, write, gas};
-extern crate alloc;
-use alloc::format;
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
