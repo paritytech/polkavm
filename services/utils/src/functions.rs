@@ -685,6 +685,6 @@ fn p_func(x: u64) -> u64 {
     Z_P * ceiling_divide(x, Z_P)
 }
 
-fn z_func(x: u64) -> u64 {
+pub fn z_func(x: u64) -> u64 {
     Z_Z * ceiling_divide(x, Z_Z)
 }

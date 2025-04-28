@@ -616,6 +616,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "game_of_life_manifest"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "simplealloc",
+ "utils",
+]
+
+[[package]]
 name = "game_of_life_parent_only"
 version = "0.1.0"
 dependencies = [

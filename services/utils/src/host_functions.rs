@@ -89,4 +89,7 @@ extern "C" {
 
     #[polkavm_import(index = 100)]
     pub fn log(level: u64, target: u64, target_len: u64, message: u64, message_len: u64) -> u64; //https://hackmd.io/@polkadot/jip1
+
+    #[polkavm_import(index = 64)]
+    pub fn manifest(n: u64, mode: u64, s: u64, z: u64, page_id: u64) -> u64;
 }

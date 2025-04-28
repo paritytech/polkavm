@@ -29,5 +29,6 @@ members = [
     "game_of_life_parent_only",
     "revm_test",
     "compress",
+    "game_of_life_manifest",
     "utils"
 ]

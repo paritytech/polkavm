@@ -59,3 +59,4 @@ pub const FETCH: u64 = 23;           // Fetch off-chain data
 pub const ZERO: u64 = 24;            // Zero out memory page
 pub const YIELD: u64 = 25;           // Return trie accumulation output
 pub const LOG: u64 = 100;            // https://hackmd.io/@polkadot/jip1
+pub const MANIFEST: u64 = 64;
