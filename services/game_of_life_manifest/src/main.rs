@@ -6,16 +6,16 @@ extern crate alloc;
 use alloc::format;
 use alloc::vec;
 
-const SIZE : usize = (1 << 24) - (1 << 12);
-
+const SIZE0 : usize = 0x100000;
 // allocate memory for stack
 use polkavm_derive::min_stack_size;
-min_stack_size!(SIZE);
+min_stack_size!(SIZE0);
 
+const SIZE1 : usize = 0x100000;
 // allocate memory for heap
 use simplealloc::SimpleAlloc;
 #[global_allocator]
-static ALLOCATOR: SimpleAlloc<SIZE> = SimpleAlloc::new();
+static ALLOCATOR: SimpleAlloc<SIZE1> = SimpleAlloc::new();
 
 use utils::constants::{FIRST_READABLE_ADDRESS, PAGE_SIZE, SEGMENT_SIZE};
 use utils::constants::{NONE, HOST, LOG, OK, Z_Z};

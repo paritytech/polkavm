@@ -7,14 +7,16 @@ use alloc::format;
 use alloc::vec;
 use alloc::string::String;
 
+const SIZE0 : usize = 0x100000;
 // allocate memory for stack
 use polkavm_derive::min_stack_size;
-min_stack_size!(16773119); // 2^24 - 1 - 4096, should not greater than 2^24 - 1 (16777215)
+min_stack_size!(SIZE0);
 
+const SIZE1 : usize = 0x100000;
 // allocate memory for heap
 use simplealloc::SimpleAlloc;
 #[global_allocator]
-static ALLOCATOR: SimpleAlloc<16773119> = SimpleAlloc::new(); // 2^24 - 1 - 4096, should not greater than 2^24 - 1 (16777215)
+static ALLOCATOR: SimpleAlloc<SIZE1> = SimpleAlloc::new();
 
 use utils::functions::{call_log};
 use utils::hash_functions::blake2b_hash;

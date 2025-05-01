@@ -210,12 +210,28 @@ pub fn parse_accumulate_args(start_address: u64, length: u64, m: u64) -> Option<
         current_address += 32;
         remaining_length = remaining_length.saturating_sub(32);
 
-        // 0.6.5 -- add gas limit
-        let g_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 8) };
-        let global_g= u64::from_le_bytes(g_slice[0..8].try_into().unwrap());
-        args.g = global_g;
-        current_address += 8;
-        remaining_length = remaining_length.saturating_sub(8);
+        // // 0.6.5 -- add gas limit
+        // let g_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 8) };
+        // let global_g= u64::from_le_bytes(g_slice[0..8].try_into().unwrap());
+        // args.g = global_g;
+        // current_address += 8;
+        // remaining_length = remaining_length.saturating_sub(8);
+
+
+        // 0.6.5 -- special case for g (should be removed in the future)
+        let g_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
+        let g_len = extract_discriminator(g_slice);
+        let g = if g_len > 0 {
+            decode_e(&g_slice[..g_len as usize])
+        } else {
+            0
+        };
+        args.g = g;
+
+        current_address += g_len as u64;
+        remaining_length = remaining_length.saturating_sub(g_len as u64);
+        // 0.6.5 -- special case for g (should be removed in the future)
+
 
         let accumulation_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
         if accumulation_slice.is_empty() {
