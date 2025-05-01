@@ -481,6 +481,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "doom"
+version = "0.1.0"
+dependencies = [
+ "polkavm",
+ "polkavm-derive",
+ "simplealloc",
+]
+
+[[package]]
 name = "ecdsa"
 version = "0.16.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -666,6 +675,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hello_world"
+version = "0.1.0"
+dependencies = [
+ "polkavm",
+ "polkavm-derive",
+ "simplealloc",
+ "utils",
+]
+
+[[package]]
 name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -718,6 +737,12 @@ name = "libm"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8355be11b20d696c8f18f6cc018c4e372165b1fa8126cef092399c9951984ffa"
+
+[[package]]
+name = "log"
+version = "0.4.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
 
 [[package]]
 name = "lzss"
@@ -833,8 +858,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
+name = "polkavm"
+version = "0.23.0"
+dependencies = [
+ "libc",
+ "log",
+ "polkavm-assembler",
+ "polkavm-common",
+ "polkavm-linux-raw",
+]
+
+[[package]]
+name = "polkavm-assembler"
+version = "0.23.0"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "polkavm-common"
 version = "0.23.0"
+dependencies = [
+ "log",
+ "polkavm-assembler",
+]
 
 [[package]]
 name = "polkavm-derive"
@@ -860,6 +907,10 @@ dependencies = [
  "polkavm-derive-impl",
  "syn",
 ]
+
+[[package]]
+name = "polkavm-linux-raw"
+version = "0.23.0"
 
 [[package]]
 name = "ppv-lite86"

@@ -30,5 +30,7 @@ members = [
     "revm_test",
     "compress",
     "game_of_life_manifest",
+    "doom",
+    "hello_world",
     "utils"
 ]
