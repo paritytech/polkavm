@@ -150,8 +150,9 @@ impl Vm {
         Ok((self.state.frame_width, self.state.frame_height, &self.state.frame))
     }
 
-    // pub fn on_keychange(&mut self, key: u8, is_pressed: bool) -> Result<(), CallError<Error>> {
-    //     self.instance
-    //         .call_typed(&mut self.state, "ext_on_keychange", (key as u32, is_pressed as u32))
-    // }
+    pub fn on_keychange(&mut self, key: u8, is_pressed: bool) -> Result<(), CallError> {
+        self.instance
+            .call_typed(&mut self.state, "ext_on_keychange", (key as u32, is_pressed as u32)).unwrap();
+        Ok(())
+    }
 }
