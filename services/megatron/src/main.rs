@@ -105,7 +105,7 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
     let omega_10: u64 = memo.as_ptr() as u64; // memo
     let amount0: u64 = m_n as u64;
     let amount1: u64 = (m_n * 2 + 1) as u64;
-    let gas_avail: u64 = 100;
+    let gas_avail: u64 = 40000;
     let mut num_transfers = 0;
 
     for i in 0..m_n {

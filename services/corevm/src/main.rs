@@ -416,20 +416,20 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         call_log(log_level(assign_ok_result == OK), None, &format!("assign@n={:?}: expect OK, got {:?} (recorded at key 5)", n, assign_ok_result));
         write_result(assign_ok_result, 5);
     } else if n == 7 {
-        let forget_result = unsafe { forget(jam_hash_address, jam_length) };
-        call_log(log_level(forget_result == OK), None, &format!("forget hash(jam)@n={:?}: expect OK, got {:?} (recorded at key 1)", n, forget_result));
-        write_result(forget_result, 1);
-
-        let query_jamhash_result = unsafe { query(jam_hash_address, jam_length) };
-        call_log(log_level(query_jamhash_result > 0), None, &format!("query hash(jam)@n={:?}: expect non-zero, got {:?} (recorded at key 1)", n, query_jamhash_result));
-        write_result(query_jamhash_result, 2);
-    } else if n == 8 {
         let lookup_result = unsafe { lookup(service_index as u64, jam_hash_address, buffer_address, 0, jam_length) };
         call_log(log_level(lookup_result == 3), None, &format!("lookup hash(jam)@n={:?}:: expect 3, got {:?} (recorded at key 1)", n, lookup_result));
         write_result(lookup_result, 1);
 
         let query_jamhash_result = unsafe { query(jam_hash_address, jam_length) };
         call_log(log_level(query_jamhash_result > 0), None, &format!("query hash(jam)@n={:?}: expect non-zero, got {:?} (recorded at key 2)", n, query_jamhash_result));
+        write_result(query_jamhash_result, 2);
+    } else if n == 8 {
+        let forget_result = unsafe { forget(jam_hash_address, jam_length) };
+        call_log(log_level(forget_result == OK), None, &format!("forget hash(jam)@n={:?}: expect OK, got {:?} (recorded at key 1)", n, forget_result));
+        write_result(forget_result, 1);
+
+        let query_jamhash_result = unsafe { query(jam_hash_address, jam_length) };
+        call_log(log_level(query_jamhash_result > 0), None, &format!("query hash(jam)@n={:?}: expect non-zero, got {:?} (recorded at key 1)", n, query_jamhash_result));
         write_result(query_jamhash_result, 2);
     } else if n == 9 {
         let g: u64 = 911;
