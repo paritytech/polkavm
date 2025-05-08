@@ -2862,6 +2862,39 @@ where
                                 }
                             }
                         }
+                    // This can happen when a function grabs its own address (to e.g. seed an RNG).
+                    } else if let Some(Inst::RegImm {
+                        kind,
+                        dst: add_dst,
+                        src: add_src,
+                        imm: value_lower,
+                    }) = next_inst
+                    {
+                        if base_upper == add_dst
+                            && base_upper == add_src
+                            && ((elf.is_64() && kind == RegImmKind::Add64) || (!elf.is_64() && kind == RegImmKind::Add32))
+                        {
+                            if let Some(dst) = cast_reg_non_zero(base_upper)? {
+                                let offset = value_upper.wrapping_add(cast(value_lower).to_unsigned());
+                                let offset = cast(offset).to_signed();
+                                let offset = cast(offset).to_i64_sign_extend();
+                                let offset = current_location.offset.wrapping_add_signed(offset);
+                                if offset < section.size() {
+                                    output.push((
+                                        source,
+                                        InstExt::Basic(BasicInst::LoadAddress {
+                                            dst,
+                                            target: SectionTarget {
+                                                section_index: section.index(),
+                                                offset,
+                                            },
+                                        }),
+                                    ));
+                                    relative_offset += inst_size as usize;
+                                    continue;
+                                }
+                            }
+                        }
                     }
                 }
             }

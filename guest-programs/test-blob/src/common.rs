@@ -413,3 +413,14 @@ extern "C" fn export_return_tuple_usize() -> (usize, usize) {
 extern "C" fn get_heap_base() -> u32 {
     polkavm_derive::heap_base() as u32
 }
+
+#[inline(never)]
+fn get_self_address_impl() -> usize {
+    unsafe { GLOBAL += 1; }
+    get_self_address_impl as usize
+}
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn get_self_address() -> u32 {
+    get_self_address_impl() as u32
+}
