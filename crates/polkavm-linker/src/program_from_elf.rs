@@ -2295,9 +2295,10 @@ where
             Ok(())
         }
         Inst::AddUpperImmediateToPc { .. } => Err(ProgramFromElfError::other(format!(
-            "found an unrelocated auipc instruction at offset {} in section '{}'; is the program compiled with relocations?",
-            current_location.offset,
-            section.name()
+            "found an unrelocated auipc instruction in {} ('{}') at address 0x{:x}; is the program compiled with relocations?",
+            current_location,
+            section.name(),
+            section.original_address() + current_location.offset
         ))),
         Inst::Ecall => Err(ProgramFromElfError::other(
             "found a bare ecall instruction; those are not supported",
