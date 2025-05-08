@@ -357,6 +357,7 @@ pub enum Inst {
     Ecall,
     Unimplemented,
     Fence {
+        kind: u8,
         predecessor: FenceFlags,
         successor: FenceFlags,
     },
@@ -1254,8 +1255,9 @@ impl Inst {
             0b0001111 => {
                 if op == 0x0000100f {
                     Some(Inst::FenceI)
-                } else if (op & !(0xff << 20)) == 0x0000000f {
+                } else if (op & !(0xfff << 20)) == 0x0000000f {
                     Some(Inst::Fence {
+                        kind: (op >> 28) as u8,
                         predecessor: FenceFlags {
                             input: ((op >> 27) & 1) != 0,
                             output: ((op >> 26) & 1) != 0,
