@@ -2857,7 +2857,7 @@ where
                                         }),
                                     ));
 
-                                    relative_offset += inst_size as usize;
+                                    relative_offset += next_inst_size as usize;
                                     continue;
                                 }
                             }
@@ -2890,7 +2890,7 @@ where
                                             },
                                         }),
                                     ));
-                                    relative_offset += inst_size as usize;
+                                    relative_offset += next_inst_size as usize;
                                     continue;
                                 }
                             }
