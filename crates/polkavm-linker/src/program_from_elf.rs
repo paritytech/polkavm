@@ -160,7 +160,6 @@ pub enum ProgramFromElfErrorKind {
     FailedToParseDwarf(gimli::Error),
     FailedToParseProgram(program::ProgramParseError),
     UnsupportedSection(String),
-    UnsupportedInstruction { section: String, offset: u64, instruction: u32 },
     UnsupportedRegister { reg: RReg },
 
     Other(Cow<'static, str>),
@@ -208,16 +207,6 @@ impl core::fmt::Display for ProgramFromElfError {
             ProgramFromElfErrorKind::FailedToParseDwarf(error) => write!(fmt, "failed to parse DWARF: {}", error),
             ProgramFromElfErrorKind::FailedToParseProgram(error) => write!(fmt, "{}", error),
             ProgramFromElfErrorKind::UnsupportedSection(section) => write!(fmt, "unsupported section: {}", section),
-            ProgramFromElfErrorKind::UnsupportedInstruction {
-                section,
-                offset,
-                instruction,
-            } => {
-                write!(
-                    fmt,
-                    "unsupported instruction in section '{section}' at offset 0x{offset:x}: 0x{instruction:08x}"
-                )
-            }
             ProgramFromElfErrorKind::UnsupportedRegister { reg } => write!(fmt, "unsupported register: {reg}"),
             ProgramFromElfErrorKind::Other(message) => fmt.write_str(message),
         }
@@ -2821,11 +2810,16 @@ where
         relative_offset += inst_size as usize;
 
         let Some(original_inst) = Inst::decode(decoder_config, raw_inst) else {
-            return Err(ProgramFromElfErrorKind::UnsupportedInstruction {
-                section: section.name().into(),
-                offset: current_location.offset,
-                instruction: raw_inst,
-            }
+            return Err(ProgramFromElfErrorKind::Other(
+                format!(
+                    "unsupported instruction in {} ('{}') at address 0x{:x}: 0x{:08x}",
+                    current_location,
+                    section.name(),
+                    section.original_address() + current_location.offset,
+                    raw_inst,
+                )
+                .into(),
+            )
             .into());
         };
 
