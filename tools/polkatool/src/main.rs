@@ -44,6 +44,10 @@ enum Args {
         #[clap(long)]
         min_stack_size: Option<u32>,
 
+        /// Exports to use to build a dispatch table, separated by a comma.
+        #[clap(long)]
+        dispatch_table: Option<String>,
+
         /// The input file.
         input: PathBuf,
     },
@@ -108,7 +112,16 @@ fn main() {
             disable_optimizations,
             run_only_if_newer,
             min_stack_size,
-        } => main_link(input, output, strip, disable_optimizations, run_only_if_newer, min_stack_size),
+            dispatch_table,
+        } => main_link(
+            input,
+            output,
+            strip,
+            disable_optimizations,
+            run_only_if_newer,
+            min_stack_size,
+            dispatch_table,
+        ),
         Args::Disassemble {
             output,
             format,
@@ -141,6 +154,7 @@ fn main_link(
     disable_optimizations: bool,
     run_only_if_newer: bool,
     min_stack_size: Option<u32>,
+    dispatch_table: Option<String>,
 ) -> Result<(), String> {
     if run_only_if_newer {
         if let Ok(output_mtime) = std::fs::metadata(&output).and_then(|m| m.modified()) {
@@ -157,6 +171,13 @@ fn main_link(
     config.set_optimize(!disable_optimizations);
     if let Some(min_stack_size) = min_stack_size {
         config.set_min_stack_size(min_stack_size);
+    }
+    if let Some(dispatch_table) = dispatch_table {
+        let mut table = Vec::new();
+        for name in dispatch_table.split(',') {
+            table.push(name.trim().as_bytes().to_owned());
+        }
+        config.set_dispatch_table(table);
     }
 
     let data = match std::fs::read(&input) {
