@@ -1256,7 +1256,7 @@ where
                                 };
                                 list.insert(target_position, entry);
                             } else {
-                                log::warn!("No matching DWARF subprogram found for line at {:?}", line_entry.location);
+                                log::debug!("No matching DWARF subprogram found for line at {:?}", line_entry.location);
                                 fallback = true;
 
                                 let (namespace, function_name) = match list.last() {
