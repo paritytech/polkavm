@@ -9765,8 +9765,8 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
         );
     }
 
-    for symbol in config.dispatch_table {
-        builder.add_dispatch_table_entry(symbol);
+    for symbol in &config.dispatch_table {
+        builder.add_dispatch_table_entry(symbol.clone());
     }
 
     builder.set_code(&raw_code, &jump_table);
@@ -9776,6 +9776,7 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
         let blob = ProgramBlob::parse(builder.to_vec().map_err(ProgramFromElfError::other)?.into())?;
         offsets = blob
             .instructions(bitness)
+            .skip(config.dispatch_table.len())
             .map(|instruction| (instruction.offset, instruction.next_offset))
             .collect();
         assert_eq!(offsets.len(), locations_for_instruction.len());
