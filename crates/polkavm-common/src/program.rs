@@ -3625,7 +3625,7 @@ fn test_is_jump_target_valid() {
         }
     }
 
-    macro_rules! gen {
+    macro_rules! g {
         ($code_length:expr, $bits:expr) => {{
             let mut bitmask = [0; ($code_length + 7) / 8];
             for bit in $bits {
@@ -3641,23 +3641,23 @@ fn test_is_jump_target_valid() {
     }
 
     // Make sure the helper macro works correctly.
-    assert_eq!(gen!(1, [0]).1, [0b00000001]);
-    assert_eq!(gen!(2, [1]).1, [0b00000010]);
-    assert_eq!(gen!(8, [7]).1, [0b10000000]);
-    assert_eq!(gen!(9, [8]).1, [0b00000000, 0b00000001]);
-    assert_eq!(gen!(10, [9]).1, [0b00000000, 0b00000010]);
-    assert_eq!(gen!(10, [2, 9]).1, [0b00000100, 0b00000010]);
+    assert_eq!(g!(1, [0]).1, [0b00000001]);
+    assert_eq!(g!(2, [1]).1, [0b00000010]);
+    assert_eq!(g!(8, [7]).1, [0b10000000]);
+    assert_eq!(g!(9, [8]).1, [0b00000000, 0b00000001]);
+    assert_eq!(g!(10, [9]).1, [0b00000000, 0b00000010]);
+    assert_eq!(g!(10, [2, 9]).1, [0b00000100, 0b00000010]);
 
     macro_rules! assert_valid {
         ($code_length:expr, $bits:expr, $offset:expr) => {{
-            let (code, bitmask) = gen!($code_length, $bits);
+            let (code, bitmask) = g!($code_length, $bits);
             assert!(is_jump_target_valid(DefaultInstructionSet::default(), &code, &bitmask, $offset));
         }};
     }
 
     macro_rules! assert_invalid {
         ($code_length:expr, $bits:expr, $offset:expr) => {{
-            let (code, bitmask) = gen!($code_length, $bits);
+            let (code, bitmask) = g!($code_length, $bits);
             assert!(!is_jump_target_valid(DefaultInstructionSet::default(), &code, &bitmask, $offset));
         }};
     }
