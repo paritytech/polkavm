@@ -1,5 +1,6 @@
 use crate::program::{self, Instruction, ProgramCounter, ProgramSymbol, BLOB_LEN_OFFSET, BLOB_LEN_SIZE};
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -153,7 +154,7 @@ impl ProgramBlobBuilder {
         self.jump_table = jump_table.to_vec();
     }
 
-    fn serialize_code(&self) -> SerializedCode {
+    fn serialize_code(&self) -> Result<SerializedCode, String> {
         fn mutate<T>(slot: &mut T, value: T) -> bool
         where
             T: PartialEq,
@@ -172,8 +173,10 @@ impl ProgramBlobBuilder {
         let mut instructions = Vec::with_capacity(self.dispatch_table.len() + self.code.len());
         for (nth, symbol) in self.dispatch_table.iter().enumerate() {
             let Some(&(target_basic_block, _)) = self.exports.iter().find(|(_, export_symbol)| symbol == export_symbol.as_bytes()) else {
-                // TODO: Return an error.
-                panic!("failed to build a dispatch table: symbol not found: {}", ProgramSymbol::new(symbol));
+                return Err(alloc::format!(
+                    "failed to build a dispatch table: symbol not found: {}",
+                    ProgramSymbol::new(symbol)
+                ));
             };
 
             let minimum_size = if nth + 1 == self.dispatch_table.len() {
@@ -395,19 +398,19 @@ impl ProgramBlobBuilder {
             }
         }
 
-        output
+        Ok(output)
     }
 
     pub fn add_custom_section(&mut self, section: u8, contents: Vec<u8>) {
         self.custom.push((section, contents));
     }
 
-    pub fn into_vec(self) -> Vec<u8> {
+    pub fn into_vec(self) -> Result<Vec<u8>, String> {
         self.to_vec()
     }
 
-    pub fn to_vec(&self) -> Vec<u8> {
-        let code = self.serialize_code();
+    pub fn to_vec(&self) -> Result<Vec<u8>, String> {
+        let code = self.serialize_code()?;
         let mut output = Vec::new();
         let mut writer = Writer::new(&mut output);
 
@@ -472,7 +475,7 @@ impl ProgramBlobBuilder {
         let blob_len = (writer.len() as u64).to_le_bytes();
         output[BLOB_LEN_OFFSET..BLOB_LEN_OFFSET + BLOB_LEN_SIZE].copy_from_slice(&blob_len);
 
-        output
+        Ok(output)
     }
 }
 

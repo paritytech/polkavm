@@ -5728,7 +5728,7 @@ mod test {
             builder.set_code(&raw_code, &jump_table);
             builder.set_rw_data_size(1);
 
-            let blob = ProgramBlob::parse(builder.to_vec().into()).unwrap();
+            let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
             let mut disassembler = polkavm_disassembler::Disassembler::new(&blob, polkavm_disassembler::DisassemblyFormat::Guest).unwrap();
             disassembler.emit_header(false);
             disassembler.show_offsets(false);
@@ -9773,7 +9773,7 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
 
     let mut offsets = Vec::new();
     if !config.strip {
-        let blob = ProgramBlob::parse(builder.to_vec().into())?;
+        let blob = ProgramBlob::parse(builder.to_vec().map_err(ProgramFromElfError::other)?.into())?;
         offsets = blob
             .instructions(bitness)
             .map(|instruction| (instruction.offset, instruction.next_offset))
@@ -9783,7 +9783,7 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
         emit_debug_info(&mut builder, &locations_for_instruction, &offsets);
     }
 
-    let raw_blob = builder.to_vec();
+    let raw_blob = builder.to_vec().map_err(ProgramFromElfError::other)?;
 
     log::debug!("Built a program of {} bytes", raw_blob.len());
     let blob = ProgramBlob::parse(raw_blob[..].into())?;

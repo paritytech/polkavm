@@ -934,7 +934,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
         builder.add_export_by_basic_block(target_index, label.as_bytes());
     }
 
-    Ok(builder.to_vec())
+    builder.to_vec()
 }
 
 #[cfg(test)]

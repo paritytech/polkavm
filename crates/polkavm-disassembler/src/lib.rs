@@ -530,7 +530,7 @@ mod tests {
             ],
             &[],
         );
-        let blob = ProgramBlob::parse(builder.into_vec().into()).unwrap();
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
 
         test_all_formats(&blob);
 
