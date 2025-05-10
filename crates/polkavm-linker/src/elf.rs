@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, HashMap};
 use crate::program_from_elf::{ProgramFromElfError, SectionTarget};
 
 type ElfFile<'a, H> = object::read::elf::ElfFile<'a, H, &'a [u8]>;
-type ElfSymbol<'data, 'file, H> = object::read::elf::ElfSymbol<'data, 'file, H, &'data [u8]>;
 type ElfSectionIndex = object::read::SectionIndex;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
@@ -26,6 +25,14 @@ impl core::fmt::Display for SectionIndex {
     fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
         write!(fmt, "section #{}", self.0)
     }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum SymbolSection {
+    None,
+    Undefined,
+    Absolute,
+    Section(SectionTarget),
 }
 
 pub struct Section<'a> {
@@ -87,72 +94,48 @@ impl<'a> Section<'a> {
     }
 }
 
-pub struct Symbol<'data, 'file, H>
-where
-    H: object::read::elf::FileHeader,
-{
-    elf: &'file Elf<'data, H>,
-    elf_symbol: ElfSymbol<'data, 'file, H>,
+#[derive(Clone)]
+pub struct Symbol {
+    name: Option<String>,
+    address: u64,
+    size: u64,
+    kind: u8,
+    section: SymbolSection,
 }
 
-impl<'data, 'file, H> Symbol<'data, 'file, H>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
-    fn new(elf: &'file Elf<'data, H>, elf_symbol: ElfSymbol<'data, 'file, H>) -> Self {
-        Symbol { elf, elf_symbol }
-    }
-
-    pub fn name(&self) -> Option<&'data str> {
-        let name = self.elf_symbol.name().ok()?;
-        if name.is_empty() {
-            None
-        } else {
-            Some(name)
-        }
+impl Symbol {
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
     }
 
     pub fn is_undefined(&self) -> bool {
-        matches!(self.elf_symbol.section(), object::read::SymbolSection::Undefined)
+        matches!(self.section, SymbolSection::Undefined)
     }
 
-    pub fn section_and_offset(&self) -> Result<(&Section, u64), ProgramFromElfError> {
-        let elf_section_index = match self.elf_symbol.section() {
-            object::read::SymbolSection::Section(section_index) => section_index,
-            object::read::SymbolSection::Undefined => {
-                return Err(ProgramFromElfError::other(format!(
-                    "found undefined symbol: '{}'",
-                    self.name().unwrap_or("")
-                )));
-            }
-            section => {
-                return Err(ProgramFromElfError::other(format!(
-                    "found symbol in an unhandled section: {:?}",
-                    section
-                )));
-            }
-        };
+    pub fn section_target(&self) -> Result<SectionTarget, ProgramFromElfError> {
+        match self.section {
+            SymbolSection::Section(section_target) => Ok(section_target),
+            SymbolSection::Undefined => Err(ProgramFromElfError::other(format!(
+                "found undefined symbol: '{}'",
+                self.name().unwrap_or("")
+            ))),
+            section => Err(ProgramFromElfError::other(format!(
+                "found symbol in an unhandled section: {:?}",
+                section
+            ))),
+        }
+    }
 
-        let section_index = self
-            .elf
-            .section_index_map
-            .get(&elf_section_index)
-            .copied()
-            .expect("unable to map section index");
-        let section = self.elf.section_by_index(section_index);
-        let Some(offset) = self.elf_symbol.address().checked_sub(section.original_address()) else {
-            return Err(ProgramFromElfError::other("relative symbol address underflow"));
-        };
-
-        Ok((section, offset))
+    pub fn original_address(&self) -> u64 {
+        self.address
     }
 
     pub fn size(&self) -> u64 {
-        self.elf_symbol.size()
+        self.size
     }
 
     pub fn kind(&self) -> u8 {
-        self.elf_symbol.elf_symbol().st_type()
+        self.kind
     }
 }
 
@@ -197,39 +180,30 @@ impl Relocation {
     }
 }
 
-pub struct Elf<'data, H>
-where
-    H: object::read::elf::FileHeader,
-{
+pub struct Elf<'data> {
     sections: Vec<Section<'data>>,
     section_index_by_name: HashMap<String, Vec<SectionIndex>>,
-    section_index_map: HashMap<ElfSectionIndex, SectionIndex>,
-    // TODO: Always have a dummy ELF file for testing?
-    raw_elf: Option<ElfFile<'data, H>>,
+    symbols: Vec<Symbol>,
     is_64_bit: bool,
 }
 
 #[cfg(test)]
-impl<'data, H> Default for Elf<'data, H>
-where
-    H: object::read::elf::FileHeader,
-{
+impl<'data> Default for Elf<'data> {
     fn default() -> Self {
         Elf {
             sections: Default::default(),
             section_index_by_name: Default::default(),
-            section_index_map: Default::default(),
-            raw_elf: Default::default(),
+            symbols: Default::default(),
             is_64_bit: false,
         }
     }
 }
 
-impl<'data, H> Elf<'data, H>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
-    pub fn parse(data: &'data [u8]) -> Result<Self, ProgramFromElfError> {
+impl<'data> Elf<'data> {
+    pub fn parse<H>(data: &'data [u8]) -> Result<Self, ProgramFromElfError>
+    where
+        H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
+    {
         let elf: ElfFile<H> = ElfFile::parse(data)?;
         if elf.elf_header().e_ident().data != object::elf::ELFDATA2LSB {
             return Err(ProgramFromElfError::other("file is not a little endian ELF file"));
@@ -394,21 +368,115 @@ where
             }
         }
 
+        assert_eq!(sections.len(), elf.sections().count());
+
+        let mut fake_empty_sections = HashMap::new();
+        let mut symbols = Vec::new();
+        for symbol in elf.symbols() {
+            let mut name = symbol.name().ok();
+            if name == Some("") {
+                name = None;
+            }
+            let size = symbol.size();
+            let address = symbol.address();
+            let address_end = address.wrapping_add(size);
+            let kind = symbol.elf_symbol().st_type();
+
+            let symbol_section = match symbol.section() {
+                object::read::SymbolSection::Undefined => SymbolSection::Undefined,
+                object::read::SymbolSection::None => SymbolSection::None,
+                object::read::SymbolSection::Absolute => SymbolSection::Absolute,
+                object::read::SymbolSection::Section(elf_section_index) => {
+                    let mut section_index = section_index_map
+                        .get(&elf_section_index)
+                        .copied()
+                        .expect("unable to map section index");
+
+                    let section = &sections[section_index.0];
+                    let section_size = section.size();
+                    let mut section_address = section.original_address();
+                    let section_address_end = section_address + section_size;
+
+                    if address < section_address || address_end < section_address || address_end > section_address_end {
+                        let name_s = name.map(|name| format!("'{name}'")).unwrap_or_else(|| "''".to_owned());
+                        let section_name = section.name();
+                        let error = format!("symbol {name_s} with address 0x{address:x}..0x{address_end:x} in {section_index} ('{section_name}') which is at 0x{section_address:x}..0x{section_address_end:x}");
+
+                        if size > 0 {
+                            // We could support these, but I haven't seen any in the wild yet so let's just return an error.
+                            return Err(ProgramFromElfError::other(error));
+                        }
+
+                        // The compiler sometimes emits these zero-sized symbols which get assigned to the wrong section.
+                        // As far as I can see this happens because the original section to which these symbols belong ends
+                        // up being empty, so the section gets deleted, and then the compiler/linker instead of correctly marking
+                        // those symbols as not belonging to any section it just picks the next section that still exists.
+                        log::warn!("Broken symbol: {error}");
+
+                        match fake_empty_sections.entry(address) {
+                            std::collections::hash_map::Entry::Vacant(entry) => {
+                                section_index = SectionIndex(sections.len());
+                                sections.push(Section {
+                                    index: section_index,
+                                    name: ".data.fake".to_owned(),
+                                    original_address: address,
+                                    align: 1,
+                                    size,
+                                    data: Cow::Borrowed(b""),
+                                    flags: u64::from(object::elf::SHF_ALLOC | object::elf::SHF_WRITE),
+                                    raw_section_index: None,
+                                    relocations: Vec::new(),
+                                    elf_section_type: object::elf::SHT_PROGBITS,
+                                });
+                                entry.insert(section_index);
+                            }
+                            std::collections::hash_map::Entry::Occupied(entry) => {
+                                section_index = *entry.get();
+                            }
+                        }
+
+                        section_address = sections[section_index.0].original_address;
+                    }
+
+                    let target = SectionTarget {
+                        section_index,
+                        offset: address - section_address,
+                    };
+
+                    SymbolSection::Section(target)
+                }
+                section => {
+                    return Err(ProgramFromElfError::other(format!(
+                        "failed to parse ELF file: found symbol in an unhandled section: {:?}",
+                        section
+                    )));
+                }
+            };
+
+            let symbol = Symbol {
+                name: name.map(|name| name.to_owned()),
+                address,
+                size,
+                kind,
+                section: symbol_section,
+            };
+            symbols.push(symbol);
+        }
+
+        assert_eq!(symbols.len(), elf.symbols().count());
+
         Ok(Elf {
             sections,
             section_index_by_name,
-            section_index_map,
-            raw_elf: Some(elf),
+            symbols,
             is_64_bit,
         })
     }
 
-    pub fn symbol_by_index(&self, symbol_index: object::SymbolIndex) -> Result<Symbol<H>, object::Error> {
-        self.raw_elf
-            .as_ref()
-            .unwrap()
-            .symbol_by_index(symbol_index)
-            .map(|elf_symbol| Symbol::new(self, elf_symbol))
+    pub fn symbol_by_index(&self, symbol_index: object::SymbolIndex) -> Result<&Symbol, ProgramFromElfError> {
+        self.symbols
+            .get(symbol_index.0 - 1)
+            .ok_or_else(|| ProgramFromElfError::other("symbol not found"))
     }
 
     pub fn section_by_name(&self, name: &str) -> impl ExactSizeIterator<Item = &Section> {
@@ -429,12 +497,8 @@ where
         self.sections.iter()
     }
 
-    pub fn symbols<'r>(&'r self) -> impl Iterator<Item = Symbol<'data, 'r, H>> + 'r {
-        self.raw_elf
-            .as_ref()
-            .unwrap()
-            .symbols()
-            .map(|elf_symbol| Symbol::new(self, elf_symbol))
+    pub fn symbols(&self) -> impl ExactSizeIterator<Item = &'_ Symbol> {
+        self.symbols.iter()
     }
 
     pub fn add_empty_data_section(&mut self, name: &str) -> SectionIndex {
@@ -475,19 +539,15 @@ where
         self.is_64_bit
     }
 
-    pub fn section_to_function_name(&self) -> BTreeMap<SectionTarget, &'data str> {
+    pub fn section_to_function_name(&self) -> BTreeMap<SectionTarget, String> {
         self.symbols()
             .filter_map(|symbol| {
                 if symbol.kind() != object::elf::STT_FUNC {
                     return None;
                 }
 
-                let name = symbol.name()?;
-                let (section, offset) = symbol.section_and_offset().ok()?;
-                let target = SectionTarget {
-                    section_index: section.index(),
-                    offset,
-                };
+                let name = symbol.name()?.to_owned();
+                let target = symbol.section_target().ok()?;
                 Some((target, name))
             })
             .collect()

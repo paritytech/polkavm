@@ -315,7 +315,7 @@ impl SourceStack {
         self.0.extend(stack.0.iter().copied());
     }
 
-    fn display(&self, section_to_function_name: &BTreeMap<SectionTarget, &str>) -> String {
+    fn display(&self, section_to_function_name: &BTreeMap<SectionTarget, String>) -> String {
         use core::fmt::Write;
 
         let mut out = String::new();
@@ -438,17 +438,11 @@ fn test_extract_delimited() {
 }
 
 impl SectionTarget {
-    fn fmt_human_readable<H>(&self, elf: &Elf<H>) -> String
-    where
-        H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-    {
+    fn fmt_human_readable(&self, elf: &Elf) -> String {
         Self::make_human_readable_in_debug_string(elf, &self.to_string())
     }
 
-    fn make_human_readable_in_debug_string<H>(elf: &Elf<H>, mut str: &str) -> String
-    where
-        H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-    {
+    fn make_human_readable_in_debug_string(elf: &Elf, mut str: &str) -> String {
         // A hack-ish way to make nested `Debug` error messages more readable by replacing
         // raw section indexes and offsets with a more human readable string.
 
@@ -463,12 +457,12 @@ impl SectionTarget {
                         use core::fmt::Write;
 
                         let symbol = elf.symbols().find(|symbol| {
-                            let Ok((symbol_section, symbol_offset)) = symbol.section_and_offset() else {
+                            let Ok(target) = symbol.section_target() else {
                                 return false;
                             };
-                            symbol_section.index().raw() == section_index
-                                && offset >= symbol_offset
-                                && offset < (symbol_offset + symbol.size())
+                            section_index == target.section_index.raw()
+                                && offset >= target.offset
+                                && offset < (target.offset + symbol.size())
                         });
 
                         let section_name = section.name();
@@ -479,7 +473,7 @@ impl SectionTarget {
                                     &mut output,
                                     ": '{}'+{}",
                                     symbol_name,
-                                    offset - symbol.section_and_offset().unwrap().1
+                                    offset - symbol.section_target().unwrap().offset
                                 )
                                 .unwrap();
                             }
@@ -1155,16 +1149,13 @@ fn get_padding(memory_end: u64, align: u64) -> Option<u64> {
     }
 }
 
-fn process_sections<H>(
-    elf: &Elf<H>,
+fn process_sections(
+    elf: &Elf,
     current_address: &mut u64,
     chunks: &mut Vec<DataRef>,
     base_address_for_section: &mut HashMap<SectionIndex, u64>,
     sections: impl IntoIterator<Item = SectionIndex>,
-) -> u64
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+) -> u64 {
     for section_index in sections {
         let section = elf.section_by_index(section_index);
         assert!(section.size() >= section.data().len() as u64);
@@ -1216,18 +1207,15 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn extract_memory_config<H>(
-    elf: &Elf<H>,
+fn extract_memory_config(
+    elf: &Elf,
     sections_ro_data: &[SectionIndex],
     sections_rw_data: &[SectionIndex],
     sections_bss: &[SectionIndex],
     sections_min_stack_size: &[SectionIndex],
     base_address_for_section: &mut HashMap<SectionIndex, u64>,
     mut min_stack_size: u32,
-) -> Result<MemoryConfig, ProgramFromElfError>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+) -> Result<MemoryConfig, ProgramFromElfError> {
     let mut current_address = u64::from(VM_MAX_PAGE_SIZE);
 
     let mut ro_data = Vec::new();
@@ -1320,14 +1308,11 @@ struct Export {
     metadata: ExternMetadata,
 }
 
-fn extract_exports<H>(
-    elf: &Elf<H>,
+fn extract_exports(
+    elf: &Elf,
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     section: &Section,
-) -> Result<Vec<Export>, ProgramFromElfError>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+) -> Result<Vec<Export>, ProgramFromElfError> {
     let mut b = polkavm_common::elf::Reader::from(section.data());
     let mut exports = Vec::new();
     loop {
@@ -1464,14 +1449,11 @@ impl Import {
     }
 }
 
-fn parse_extern_metadata_impl<H>(
-    elf: &Elf<H>,
+fn parse_extern_metadata_impl(
+    elf: &Elf,
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     target: SectionTarget,
-) -> Result<ExternMetadata, String>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+) -> Result<ExternMetadata, String> {
     let section = elf.section_by_index(target.section_index);
     let mut b = polkavm_common::elf::Reader::from(section.data());
 
@@ -1553,14 +1535,11 @@ where
     })
 }
 
-fn parse_extern_metadata<H>(
-    elf: &Elf<H>,
+fn parse_extern_metadata(
+    elf: &Elf,
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     target: SectionTarget,
-) -> Result<ExternMetadata, ProgramFromElfError>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+) -> Result<ExternMetadata, ProgramFromElfError> {
     parse_extern_metadata_impl(elf, relocations, target)
         .map_err(|error| ProgramFromElfError::other(format!("failed to parse extern metadata: {}", error)))
 }
@@ -1644,10 +1623,7 @@ fn check_imports_and_assign_indexes(imports: &mut Vec<Import>, used_imports: &Ha
     Ok(())
 }
 
-fn get_relocation_target<H>(elf: &Elf<H>, relocation: &crate::elf::Relocation) -> Result<Option<SectionTarget>, ProgramFromElfError>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+fn get_relocation_target(elf: &Elf, relocation: &crate::elf::Relocation) -> Result<Option<SectionTarget>, ProgramFromElfError> {
     match relocation.target() {
         object::RelocationTarget::Absolute => {
             if let object::RelocationFlags::Elf { r_type } = relocation.flags() {
@@ -1673,12 +1649,14 @@ where
                 .symbol_by_index(target_symbol_index)
                 .map_err(|error| ProgramFromElfError::other(format!("failed to fetch relocation target: {}", error)))?;
 
-            let (section, offset) = target_symbol.section_and_offset()?;
+            let SectionTarget { section_index, offset } = target_symbol.section_target()?;
+            let section = elf.section_by_index(section_index);
             log::trace!(
-                "Fetched relocation target: target section = \"{}\", target symbol = \"{}\" ({}), symbol offset = 0x{:x} + 0x{:x}",
+                "Fetched relocation target: target section = \"{}\", target symbol = \"{}\" (#{}, 0x{:x}), symbol offset = 0x{:x} + 0x{:x}",
                 section.name(),
                 target_symbol.name().unwrap_or(""),
                 target_symbol_index.0,
+                target_symbol.original_address(),
                 offset,
                 relocation.addend(),
             );
@@ -1918,18 +1896,15 @@ fn emit_or_combine_byte(
     }
 }
 
-fn convert_instruction<H>(
-    elf: &Elf<H>,
+fn convert_instruction(
+    elf: &Elf,
     section: &Section,
     current_location: SectionTarget,
     instruction: Inst,
     instruction_size: u64,
     rv64: bool,
     mut emit: impl FnMut(InstExt<SectionTarget, SectionTarget>),
-) -> Result<(), ProgramFromElfError>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+) -> Result<(), ProgramFromElfError> {
     match instruction {
         Inst::LoadUpperImmediate { dst, value } => {
             let Some(dst) = cast_reg_non_zero(dst)? else {
@@ -2656,8 +2631,8 @@ const FUNC3_MEMSET: u32 = 0b010;
 const FUNC3_HEAP_BASE: u32 = 0b011;
 
 #[allow(clippy::too_many_arguments)]
-fn parse_code_section<H>(
-    elf: &Elf<H>,
+fn parse_code_section(
+    elf: &Elf,
     section: &Section,
     decoder_config: &DecoderConfig,
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
@@ -2665,10 +2640,7 @@ fn parse_code_section<H>(
     metadata_to_nth_import: &mut HashMap<ExternMetadata, usize>,
     instruction_overrides: &mut HashMap<SectionTarget, InstExt<SectionTarget, SectionTarget>>,
     output: &mut Vec<(Source, InstExt<SectionTarget, SectionTarget>)>,
-) -> Result<(), ProgramFromElfError>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+) -> Result<(), ProgramFromElfError> {
     let section_index = section.index();
     let section_name = section.name();
     let text = &section.data();
@@ -2916,15 +2888,12 @@ where
     Ok(())
 }
 
-fn split_code_into_basic_blocks<H>(
-    elf: &Elf<H>,
-    #[allow(unused_variables)] section_to_function_name: &BTreeMap<SectionTarget, &str>,
+fn split_code_into_basic_blocks(
+    elf: &Elf,
+    #[allow(unused_variables)] section_to_function_name: &BTreeMap<SectionTarget, String>,
     jump_targets: &HashSet<SectionTarget>,
     instructions: Vec<(Source, InstExt<SectionTarget, SectionTarget>)>,
-) -> Result<Vec<BasicBlock<SectionTarget, SectionTarget>>, ProgramFromElfError>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+) -> Result<Vec<BasicBlock<SectionTarget, SectionTarget>>, ProgramFromElfError> {
     #[cfg(test)]
     let _ = elf;
 
@@ -4330,10 +4299,7 @@ impl OperationKind {
         }
     }
 
-    fn apply<H>(self, elf: &Elf<H>, lhs: RegValue, rhs: RegValue) -> Option<RegValue>
-    where
-        H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-    {
+    fn apply(self, elf: &Elf, lhs: RegValue, rhs: RegValue) -> Option<RegValue> {
         use OperationKind as O;
         use RegValue::Constant as C;
 
@@ -4598,14 +4564,11 @@ impl BlockRegs {
         self.regs[reg.to_usize()] = value;
     }
 
-    fn simplify_control_instruction<H>(
+    fn simplify_control_instruction(
         &self,
-        elf: &Elf<H>,
+        elf: &Elf,
         instruction: ControlInst<BlockTarget>,
-    ) -> Option<(Option<BasicInst<AnyTarget>>, ControlInst<BlockTarget>)>
-    where
-        H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-    {
+    ) -> Option<(Option<BasicInst<AnyTarget>>, ControlInst<BlockTarget>)> {
         match instruction {
             ControlInst::JumpIndirect { base, offset: 0 } => {
                 if let RegValue::CodeAddress(target) = self.get_reg(base) {
@@ -4692,10 +4655,7 @@ impl BlockRegs {
         None
     }
 
-    fn simplify_instruction<H>(&self, elf: &Elf<H>, instruction: BasicInst<AnyTarget>) -> Option<BasicInst<AnyTarget>>
-    where
-        H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-    {
+    fn simplify_instruction(&self, elf: &Elf, instruction: BasicInst<AnyTarget>) -> Option<BasicInst<AnyTarget>> {
         let is_rv64 = self.bitness == Bitness::B64;
 
         match instruction {
@@ -5034,9 +4994,9 @@ impl BlockRegs {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn perform_constant_propagation<H>(
+fn perform_constant_propagation(
     imports: &[Import],
-    elf: &Elf<H>,
+    elf: &Elf,
     all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>],
     input_regs_for_block: &mut [BlockRegs],
     output_regs_for_block: &mut [BlockRegs],
@@ -5044,10 +5004,7 @@ fn perform_constant_propagation<H>(
     reachability_graph: &mut ReachabilityGraph,
     mut optimize_queue: Option<&mut VecSet<BlockTarget>>,
     current: BlockTarget,
-) -> bool
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+) -> bool {
     let is_rv64 = elf.is_64();
 
     let Some(reachability) = reachability_graph.for_code.get(&current) else {
@@ -5303,16 +5260,14 @@ fn perform_load_address_and_jump_fusion(all_blocks: &mut [BasicBlock<AnyTarget, 
 }
 
 #[deny(clippy::as_conversions)]
-fn optimize_program<H>(
+fn optimize_program(
     config: &Config,
-    elf: &Elf<H>,
+    elf: &Elf,
     imports: &[Import],
     all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>],
     reachability_graph: &mut ReachabilityGraph,
     exports: &mut [Export],
-) where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+) {
     let bitness = if elf.is_64() { Bitness::B64 } else { Bitness::B32 };
 
     let mut optimize_queue = VecSet::new();
@@ -5689,7 +5644,7 @@ mod test {
         }
 
         fn build(&self, config: Config) -> TestProgram {
-            let elf: Elf<object::elf::FileHeader32<object::endian::LittleEndian>> = Elf::default();
+            let elf = Elf::default();
             let data_sections_set: HashSet<_> = core::iter::once(self.data_section).collect();
             let code_sections_set: HashSet<_> = self.next_offset_for_section.keys().copied().collect();
             let relocations = BTreeMap::default();
@@ -6639,17 +6594,14 @@ fn replace_immediates_with_registers(
     }
 }
 
-fn harvest_all_jump_targets<H>(
-    elf: &Elf<H>,
+fn harvest_all_jump_targets(
+    elf: &Elf,
     data_sections_set: &HashSet<SectionIndex>,
     code_sections_set: &HashSet<SectionIndex>,
     instructions: &[(Source, InstExt<SectionTarget, SectionTarget>)],
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     exports: &[Export],
-) -> Result<HashSet<SectionTarget>, ProgramFromElfError>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+) -> Result<HashSet<SectionTarget>, ProgramFromElfError> {
     let mut all_jump_targets = HashSet::new();
     for (_, instruction) in instructions {
         match instruction {
@@ -7241,7 +7193,7 @@ fn calculate_whether_can_fallthrough(
 
 #[allow(clippy::too_many_arguments)]
 fn emit_code(
-    section_to_function_name: &BTreeMap<SectionTarget, &str>,
+    section_to_function_name: &BTreeMap<SectionTarget, String>,
     imports: &[Import],
     base_address_for_section: &HashMap<SectionIndex, u64>,
     section_got: SectionIndex,
@@ -7925,15 +7877,12 @@ impl RelocationKind {
     }
 }
 
-fn harvest_data_relocations<H>(
-    elf: &Elf<H>,
+fn harvest_data_relocations(
+    elf: &Elf,
     code_sections_set: &HashSet<SectionIndex>,
     section: &Section,
     relocations: &mut BTreeMap<SectionTarget, RelocationKind>,
-) -> Result<(), ProgramFromElfError>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+) -> Result<(), ProgramFromElfError> {
     #[derive(Debug)]
     enum MutOp {
         Add,
@@ -8255,16 +8204,13 @@ fn write_u16(data: &mut [u8], relative_address: u64, value: u16) -> Result<(), P
     Ok(())
 }
 
-fn harvest_code_relocations<H>(
-    elf: &Elf<H>,
+fn harvest_code_relocations(
+    elf: &Elf,
     section: &Section,
     decoder_config: &DecoderConfig,
     instruction_overrides: &mut HashMap<SectionTarget, InstExt<SectionTarget, SectionTarget>>,
     data_relocations: &mut BTreeMap<SectionTarget, RelocationKind>,
-) -> Result<(), ProgramFromElfError>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+) -> Result<(), ProgramFromElfError> {
     fn jump_or_call<T>(ra: RReg, target: T, target_return: T) -> Result<ControlInst<T>, ProgramFromElfError> {
         if let Some(ra) = cast_reg_non_zero(ra)? {
             Ok(ControlInst::Call { ra, target, target_return })
@@ -8891,10 +8837,7 @@ where
     Ok(())
 }
 
-fn parse_function_symbols<H>(elf: &Elf<H>) -> Result<Vec<(Source, String)>, ProgramFromElfError>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+fn parse_function_symbols(elf: &Elf) -> Result<Vec<(Source, String)>, ProgramFromElfError> {
     let mut functions = Vec::new();
     for sym in elf.symbols() {
         match sym.kind() {
@@ -8903,7 +8846,7 @@ where
                     continue;
                 }
 
-                let (section, offset) = sym.section_and_offset()?;
+                let target = sym.section_target()?;
                 let Some(name) = sym.name() else { continue };
 
                 if name.is_empty() {
@@ -8911,8 +8854,8 @@ where
                 }
 
                 let source = Source {
-                    section_index: section.index(),
-                    offset_range: (offset..offset + sym.size()).into(),
+                    section_index: target.section_index,
+                    offset_range: (target.offset..target.offset + sym.size()).into(),
                 };
 
                 functions.push((source, name.to_owned()));
@@ -8995,20 +8938,17 @@ impl Config {
 }
 
 pub fn program_from_elf(config: Config, data: &[u8]) -> Result<Vec<u8>, ProgramFromElfError> {
-    match Elf::<object::elf::FileHeader32<object::endian::LittleEndian>>::parse(data) {
+    match Elf::parse::<object::elf::FileHeader32<object::endian::LittleEndian>>(data) {
         Ok(elf) => program_from_elf_internal(config, elf),
         Err(ProgramFromElfError(ProgramFromElfErrorKind::FailedToParseElf(e))) if e.to_string() == "Unsupported ELF header" => {
-            let elf = Elf::<object::elf::FileHeader64<object::endian::LittleEndian>>::parse(data)?;
+            let elf = Elf::parse::<object::elf::FileHeader64<object::endian::LittleEndian>>(data)?;
             program_from_elf_internal(config, elf)
         }
         Err(e) => Err(e),
     }
 }
 
-fn program_from_elf_internal<H>(config: Config, mut elf: Elf<H>) -> Result<Vec<u8>, ProgramFromElfError>
-where
-    H: object::read::elf::FileHeader<Endian = object::LittleEndian>,
-{
+fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, ProgramFromElfError> {
     let is_rv64 = elf.is_64();
     let bitness = if is_rv64 { Bitness::B64 } else { Bitness::B32 };
 
