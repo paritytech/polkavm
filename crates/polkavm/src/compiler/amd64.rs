@@ -201,8 +201,8 @@ where
     }
 }
 
-const GAS_METERING_TRAP_OFFSET: u64 = 9;
-const GAS_COST_OFFSET: usize = 3;
+const GAS_METERING_TRAP_OFFSET: u64 = 3;
+const GAS_COST_OFFSET: usize = 4;
 const REP_STOSB_MACHINE_CODE: &[u8] = &[0xf3, 0xaa];
 
 #[derive(Copy, Clone)]
@@ -825,23 +825,21 @@ where
     pub(crate) fn emit_gas_metering_stub(&mut self, kind: GasMeteringKind) {
         let origin = self.asm.len();
 
+        // 49 81 6f 60 ff ff ff 7f   sub qword [r15+0x60], 0x7fffffff
         self.push(sub((Self::vmctx_field(S::offset_table().gas), imm64(i32::MAX))));
         debug_assert_eq!(GAS_COST_OFFSET, self.asm.len() - origin - 4); // Offset to bring us from the start of the stub to the gas cost.
 
         if matches!(kind, GasMeteringKind::Sync) {
-            // 49833F00             cmp qword [r15],0
-            self.push(cmp((Self::vmctx_field(S::offset_table().gas), imm64(0))));
-
-            // This will jump two bytes backwards to "3f00", and 3f corresponds to the AAS instruction
+            // This will jump five bytes backwards to 0x60 which is the PUSHA instruction
             // which is invalid in 64-bit, so it will trap with an SIGILL.
             //
             // Note that this is technically a forward-compatibility hazard as this opcode could arguably
             // be reused for something in the future.
-            assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r15 + 0)); // Sanity check.
-            debug_assert!(self.asm.code_mut().ends_with(&[0x49, 0x83, 0x3F, 0x00]));
+            assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r15 + 0x60)); // Sanity check.
+            debug_assert!(self.asm.code_mut().ends_with(&[0x49, 0x81, 0x6f, 0x60, 0xff, 0xff, 0xff, 0x7f]));
             // Offset to bring us from where the trap will trigger to the beginning of the stub.
-            debug_assert_eq!(GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 2) as u64);
-            self.asm.push_raw(&[0x78, 0xfc]);
+            debug_assert_eq!(GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 5) as u64);
+            self.asm.push_raw(&[0x78, 0xf9]);
         }
     }
 

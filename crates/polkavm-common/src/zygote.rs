@@ -228,19 +228,20 @@ pub struct VmCtx {
     // NOTE: The order of fields here can matter for performance!
     _align_1: CacheAligned<()>,
 
-    /// The current gas counter.
-    pub gas: AtomicI64,
-
-    _align_2: CacheAligned<()>,
-
     /// The futex used to synchronize the sandbox with the host process.
     pub futex: AtomicU32,
+
+    /// The address of the instruction currently being executed.
+    pub program_counter: AtomicU32,
 
     /// Address to which to jump to.
     pub jump_into: AtomicU64,
 
-    /// The address of the instruction currently being executed.
-    pub program_counter: AtomicU32,
+    /// The address of the native code to call inside of the VM process, if non-zero.
+    pub next_native_program_counter: AtomicU64,
+
+    pub tmp_reg: AtomicU64,
+    pub rip: AtomicU64,
 
     /// The address of the next instruction to be executed.
     pub next_program_counter: AtomicU32,
@@ -250,21 +251,23 @@ pub struct VmCtx {
     ///   - the sbrk argument,
     ///   - the sbrk return value,
     pub arg: AtomicU32,
+    pub arg2: AtomicU32,
+    pub arg3: AtomicU32,
+
+    _align_2: CacheAligned<()>,
+
+    pub _align_dummy: [u64; 4],
+
+    /// The current gas counter.
+    pub gas: AtomicI64,
+
+    _align_3: CacheAligned<()>,
 
     /// A dump of all of the registers of the VM.
     pub regs: [AtomicU64; REG_COUNT],
 
-    /// The address of the native code to call inside of the VM process, if non-zero.
-    pub next_native_program_counter: AtomicU64,
-
     /// The state of the program's heap.
     pub heap_info: VmCtxHeapInfo,
-
-    pub arg2: AtomicU32,
-    pub arg3: AtomicU32,
-
-    pub tmp_reg: AtomicU64,
-    pub rip: AtomicU64,
 
     /// Offset in shared memory to this sandbox's memory map.
     pub shm_memory_map_offset: AtomicU64,
@@ -309,6 +312,14 @@ pub struct VmCtx {
     pub message_buffer: UnsafeCell<[u8; MESSAGE_BUFFER_SIZE]>,
 }
 
+#[test]
+fn test_gas_offset() {
+    // NOTE: The codegen depends on the gas field being at this *exact* offset.
+    #[allow(unsafe_code)]
+    let vmctx: VmCtx = unsafe { core::mem::zeroed() };
+    assert_eq!(core::ptr::addr_of!(vmctx.gas) as usize - core::ptr::addr_of!(vmctx) as usize, 0x60);
+}
+
 // Make sure it fits within a single page on amd64.
 static_assert!(core::mem::size_of::<VmCtx>() <= 4096);
 
@@ -346,6 +357,8 @@ impl VmCtx {
         VmCtx {
             _align_1: CacheAligned(()),
             _align_2: CacheAligned(()),
+            _align_3: CacheAligned(()),
+            _align_dummy: [0; 4],
 
             gas: AtomicI64::new(0),
             program_counter: AtomicU32::new(0),
