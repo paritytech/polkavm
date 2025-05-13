@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 env_logger = { workspace = true }
 log.workspace = true
-polkakernel = { git = "https://github.com/paritytech/polkaports", rev = "56e103cdbef318f075c18bd79442257cfb63a18c", features = ["std"] }
+polkakernel = { git = "https://github.com/paritytech/polkaports", rev = "64a47223ad6f7c9f8dd8e4ed3f08679d66210b74", features = ["std"] }
 polkavm = { path = "../../crates/polkavm" }
 sdl2 = { workspace = true }
 

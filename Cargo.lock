@@ -589,7 +589,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 [[package]]
 name = "polkakernel"
 version = "0.1.0"
-source = "git+https://github.com/paritytech/polkaports?rev=56e103cdbef318f075c18bd79442257cfb63a18c#56e103cdbef318f075c18bd79442257cfb63a18c"
+source = "git+https://github.com/paritytech/polkaports?rev=64a47223ad6f7c9f8dd8e4ed3f08679d66210b74#64a47223ad6f7c9f8dd8e4ed3f08679d66210b74"
 dependencies = [
  "log",
 ]

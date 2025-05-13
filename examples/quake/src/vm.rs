@@ -5,6 +5,7 @@ use core::mem::MaybeUninit;
 use polkakernel::FileSystem;
 use polkakernel::InMemoryFileSystem;
 use polkakernel::Kernel;
+use polkakernel::Machine;
 use polkakernel::StdEnv;
 use polkakernel::SyscallOutcome;
 use polkavm::{Config, Engine, GasMeteringKind, InterruptKind, Module, ModuleConfig, ProgramBlob, ProgramCounter, RawInstance, Reg};
@@ -160,15 +161,12 @@ impl Vm {
         I: IntoIterator<Item = &'a CStr>,
         <I as IntoIterator>::IntoIter: ExactSizeIterator,
     {
-        if let Err(e) = self.kernel.init(
-            self.instance().module().default_sp(),
-            polkavm::RETURN_TO_HOST,
-            self.start.0.into(),
-            argv,
-            [],
-        ) {
+        let default_sp = self.instance().module().default_sp();
+        if let Err(e) = self.kernel.machine_mut().init(default_sp, polkavm::RETURN_TO_HOST, argv, []) {
             return Err(e.to_string());
         }
+        let start = self.start;
+        self.instance_mut().set_next_program_counter(start);
         Ok(())
     }
 
@@ -269,10 +267,12 @@ impl Vm {
                 InterruptKind::Ecalli(hostcall) if Some(hostcall) == self.import_syscall => {
                     match self.kernel.handle_syscall().expect("Failed to handle syscall") {
                         SyscallOutcome::Continue => {}
-                        SyscallOutcome::Exit(code) => return if code == 0 {
-                            Ok(Interruption::Exit)
-                        } else {
-                            Err(format!("Exited with code {code}"))
+                        SyscallOutcome::Exit(code) => {
+                            return if code == 0 {
+                                Ok(Interruption::Exit)
+                            } else {
+                                Err(format!("Exited with code {code}"))
+                            }
                         }
                     }
                 }
