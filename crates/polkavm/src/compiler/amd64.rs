@@ -825,6 +825,11 @@ where
     pub(crate) fn emit_gas_metering_stub(&mut self, kind: GasMeteringKind) {
         let origin = self.asm.len();
 
+        if matches!(S::KIND, SandboxKind::Generic) {
+            // The generic sandbox doesn't support gas metering.
+            return;
+        }
+
         // 49 81 6f 60 ff ff ff 7f   sub qword [r15+0x60], 0x7fffffff
         self.push(sub((Self::vmctx_field(S::offset_table().gas), imm64(i32::MAX))));
         debug_assert_eq!(GAS_COST_OFFSET, self.asm.len() - origin - 4); // Offset to bring us from the start of the stub to the gas cost.
@@ -844,6 +849,11 @@ where
     }
 
     pub(crate) fn emit_weight(&mut self, offset: usize, cost: u32) {
+        if matches!(S::KIND, SandboxKind::Generic) {
+            // The generic sandbox doesn't support gas metering.
+            return;
+        }
+
         let length = sub((Self::vmctx_field(S::offset_table().gas), imm64(i32::MAX))).len();
         let xs = cost.to_le_bytes();
         self.asm.code_mut()[offset + length - 4..offset + length].copy_from_slice(&xs);

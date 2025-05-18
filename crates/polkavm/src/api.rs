@@ -63,6 +63,16 @@ if_compiler_is_supported! {
             self.map_err(|error| Error::from(error).context(message))
         }
     }
+
+    #[cfg(feature = "generic-sandbox")]
+    use crate::sandbox::generic;
+
+    #[cfg(feature = "generic-sandbox")]
+    impl<T> IntoResult<T> for Result<T, generic::Error> {
+        fn into_result(self, message: &str) -> Result<T, Error> {
+            self.map_err(|error| Error::from(error).context(message))
+        }
+    }
 }
 
 impl<T> IntoResult<T> for T {

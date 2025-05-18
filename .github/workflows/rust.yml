@@ -81,6 +81,8 @@ jobs:
       run: rustup component add clippy
     - name: Install clippy (zygote toolchain)
       run: cd crates/polkavm-zygote && rustup component add clippy
+    - name: Install clippy (guest-programs toolchain)
+      run: cd guest-programs && rustup component add clippy
     - name: Run clippy
       run: ./ci/jobs/clippy.sh
   rustfmt:
@@ -91,6 +93,8 @@ jobs:
       run: rustup component add rustfmt
     - name: Install rustfmt (zygote toolchain)
       run: cd crates/polkavm-zygote && rustup component add rustfmt
+    - name: Install rustfmt (guest-programs toolchain)
+      run: cd guest-programs && rustup component add rustfmt
     - name: Run rustfmt
       run: ./ci/jobs/rustfmt.sh
   pallet-revive-tests:

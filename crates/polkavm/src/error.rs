@@ -56,6 +56,17 @@ if_compiler_is_supported! {
             Self(ErrorKind::Owned(error.to_string()))
         }
     }
+
+    #[cfg(feature = "generic-sandbox")]
+    use crate::sandbox::generic;
+
+    #[cfg(feature = "generic-sandbox")]
+    impl From<generic::Error> for Error {
+        #[cold]
+        fn from(error: generic::Error) -> Self {
+            Self(ErrorKind::Owned(error.to_string()))
+        }
+    }
 }
 
 impl Error {

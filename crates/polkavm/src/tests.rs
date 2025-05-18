@@ -668,6 +668,30 @@ fn dynamic_jump_to_null(engine_config: Config) {
     }
 }
 
+fn simple_test(engine_config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_imm(A0, 0x1234), asm::add_imm_32(A1, A1, 100), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+    let offsets: Vec<_> = module
+        .blob()
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.offset)
+        .collect();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_reg(Reg::A1, 0);
+    instance.set_next_program_counter(offsets[0]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x1234);
+    assert_eq!(instance.reg(Reg::A1), 100);
+}
+
 fn jump_into_middle_of_basic_block_from_outside(engine_config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
@@ -3710,6 +3734,7 @@ macro_rules! riscv_test {
 include!("tests_riscv.rs");
 
 run_tests! {
+    simple_test
     basic_test
     fallback_hostcall_handler_works
     step_tracing_basic
