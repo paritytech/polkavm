@@ -4567,7 +4567,7 @@ impl ProgramBlob {
         }
     }
 
-    /// Visits every instrution in the program.
+    /// Visits every instruction in the program.
     #[cfg_attr(not(debug_assertions), inline(always))]
     pub fn visit<T>(&self, dispatch_table: T, visitor: &mut T::State)
     where
