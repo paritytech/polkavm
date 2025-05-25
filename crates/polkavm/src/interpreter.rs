@@ -411,6 +411,7 @@ pub(crate) struct InterpretedInstance {
     compiled_offset: u32,
     interrupt: InterruptKind,
     step_tracing: bool,
+    unresolved_program_counter: Option<ProgramCounter>,
 }
 
 impl InterpretedInstance {
@@ -433,6 +434,7 @@ impl InterpretedInstance {
             compiled_offset: 0,
             interrupt: InterruptKind::Finished,
             step_tracing,
+            unresolved_program_counter: None,
         };
 
         instance.initialize_module();
@@ -715,8 +717,14 @@ impl InterpretedInstance {
             };
 
             self.program_counter = program_counter;
-            self.compiled_offset = self.resolve_arbitrary_jump::<DEBUG>(program_counter).unwrap_or(TARGET_OUT_OF_RANGE);
             self.next_program_counter_changed = false;
+
+            if let Some(offset) = self.resolve_arbitrary_jump::<DEBUG>(program_counter) {
+                self.compiled_offset = offset;
+            } else {
+                self.compiled_offset = TARGET_OUT_OF_RANGE;
+                self.unresolved_program_counter = Some(program_counter);
+            }
 
             if DEBUG {
                 log::debug!("Starting execution at: {} [{}]", program_counter, self.compiled_offset);
@@ -1035,10 +1043,21 @@ impl<'a> Visitor<'a> {
     ) -> Option<Target> {
         let s1 = self.get64(s1);
         let s2 = self.get64(s2);
-        if callback(s1, s2) {
-            Some(target_true)
+        let (pc, branch_taken) = if callback(s1, s2) {
+            (ProgramCounter(target_true), true)
         } else {
-            Some(target_false)
+            (ProgramCounter(target_false), false)
+        };
+
+        if let Some(target) = self.inner.resolve_jump::<DEBUG>(pc) {
+            Some(target)
+        } else {
+            self.inner.unresolved_program_counter = Some(pc);
+            if branch_taken {
+                Some(TARGET_INVALID_BRANCH)
+            } else {
+                Some(TARGET_OUT_OF_RANGE)
+            }
         }
     }
 
@@ -1857,6 +1876,7 @@ fn trap_impl<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramC
     visitor.inner.program_counter_valid = true;
     visitor.inner.next_program_counter = None;
     visitor.inner.next_program_counter_changed = true;
+    visitor.inner.unresolved_program_counter = None;
     visitor.inner.interrupt = InterruptKind::Trap;
     None
 }
@@ -1891,10 +1911,8 @@ macro_rules! handle_unresolved_branch {
         }
 
         let offset = $visitor.inner.compiled_offset;
-        let target_false = $visitor.inner.resolve_jump::<DEBUG>($tf).unwrap_or(TARGET_OUT_OF_RANGE);
-        let target_true = $visitor.inner.resolve_jump::<DEBUG>($tt).unwrap_or(TARGET_INVALID_BRANCH);
         $visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG>);
-        $visitor.inner.compiled_args[cast(offset).to_usize()] = Args::$name($s1, $s2, target_true, target_false);
+        $visitor.inner.compiled_args[cast(offset).to_usize()] = Args::$name($s1, $s2, $tt.0, $tf.0);
         Some(offset)
     }};
 }
@@ -1929,7 +1947,8 @@ define_interpreter! {
             log::trace!("[{}]: trap (out of range)", visitor.inner.compiled_offset);
         }
 
-        let program_counter = visitor.inner.program_counter;
+        let program_counter = visitor.inner.unresolved_program_counter.unwrap_or(visitor.inner.program_counter);
+
         let new_gas = visitor.inner.gas - i64::from(gas);
         if new_gas < 0 {
             not_enough_gas_impl::<DEBUG>(visitor, program_counter, new_gas)
@@ -1960,8 +1979,11 @@ define_interpreter! {
             log::trace!("[{}]: step (out of range)", visitor.inner.compiled_offset);
         }
 
+        let program_counter = visitor.inner.unresolved_program_counter.unwrap_or(visitor.inner.program_counter);
+
+        visitor.inner.program_counter = program_counter;
         visitor.inner.program_counter_valid = true;
-        visitor.inner.next_program_counter = Some(visitor.inner.program_counter);
+        visitor.inner.next_program_counter = Some(program_counter);
         visitor.inner.next_program_counter_changed = false;
         visitor.inner.interrupt = InterruptKind::Step;
         visitor.inner.compiled_offset += 1;
@@ -3640,6 +3662,7 @@ define_interpreter! {
         } else {
             visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::jump::<DEBUG>);
             visitor.inner.compiled_args[cast(offset).to_usize()] = Args::jump(TARGET_OUT_OF_RANGE);
+            visitor.inner.unresolved_program_counter = Some(jump_to);
             Some(TARGET_OUT_OF_RANGE)
         }
     }
