@@ -411,6 +411,7 @@ pub(crate) struct InterpretedInstance {
     compiled_offset: u32,
     interrupt: InterruptKind,
     step_tracing: bool,
+    unresolved_program_counter: Option<ProgramCounter>,
 }
 
 impl InterpretedInstance {
@@ -433,6 +434,7 @@ impl InterpretedInstance {
             compiled_offset: 0,
             interrupt: InterruptKind::Finished,
             step_tracing,
+            unresolved_program_counter: None,
         };
 
         instance.initialize_module();
@@ -715,8 +717,14 @@ impl InterpretedInstance {
             };
 
             self.program_counter = program_counter;
-            self.compiled_offset = self.resolve_arbitrary_jump::<DEBUG>(program_counter).unwrap_or(TARGET_OUT_OF_RANGE);
             self.next_program_counter_changed = false;
+
+            if let Some(offset) = self.resolve_arbitrary_jump::<DEBUG>(program_counter) {
+                self.compiled_offset = offset;
+            } else {
+                self.compiled_offset = TARGET_OUT_OF_RANGE;
+                self.unresolved_program_counter = Some(program_counter);
+            }
 
             if DEBUG {
                 log::debug!("Starting execution at: {} [{}]", program_counter, self.compiled_offset);
@@ -1037,8 +1045,8 @@ impl<'a> Visitor<'a> {
         self.go_to_next_instruction()
     }
 
-    fn branch<const DEBUG: bool>(
-        &self,
+    fn branch<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(
+        &mut self,
         s1: impl IntoRegImm,
         s2: impl IntoRegImm,
         target_true: Target,
@@ -1047,11 +1055,25 @@ impl<'a> Visitor<'a> {
     ) -> Option<Target> {
         let s1 = self.get64::<DEBUG>(s1);
         let s2 = self.get64::<DEBUG>(s2);
-        if callback(s1, s2) {
-            Some(target_true)
+
+        #[allow(clippy::collapsible_else_if)]
+        let target = if callback(s1, s2) {
+            if IS_TARGET_TRUE_VALID {
+                target_true
+            } else {
+                self.inner.unresolved_program_counter = Some(ProgramCounter(target_true));
+                TARGET_INVALID_BRANCH
+            }
         } else {
-            Some(target_false)
-        }
+            if IS_TARGET_FALSE_VALID {
+                target_false
+            } else {
+                self.inner.unresolved_program_counter = Some(ProgramCounter(target_false));
+                TARGET_OUT_OF_RANGE
+            }
+        };
+
+        Some(target)
     }
 
     fn segfault_impl(&mut self, program_counter: ProgramCounter, page_address: u32) -> Option<Target> {
@@ -1842,13 +1864,13 @@ macro_rules! define_interpreter {
     };
 
     ($(
-        fn $handler_name:ident<const DEBUG: bool>($self:ident: &mut Visitor $($arg:tt)*) -> Option<Target> $body:block
+        fn $handler_name:ident<$(const $const:ident: $const_ty:ty),+>($self:ident: &mut Visitor $($arg:tt)*) -> Option<Target> $body:block
     )+) => {
         mod raw_handlers {
             use super::*;
             $(
                 #[allow(clippy::needless_lifetimes)]
-                pub fn $handler_name<'a, 'b, const DEBUG: bool>($self: &'a mut Visitor<'b>) -> Option<Target> {
+                pub fn $handler_name<'a, 'b, $(const $const: $const_ty),+>($self: &'a mut Visitor<'b>) -> Option<Target> {
                     define_interpreter!(@define $handler_name $body $self $($arg)*)
                 }
             )+
@@ -1869,6 +1891,7 @@ fn trap_impl<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramC
     visitor.inner.program_counter_valid = true;
     visitor.inner.next_program_counter = None;
     visitor.inner.next_program_counter_changed = true;
+    visitor.inner.unresolved_program_counter = None;
     visitor.inner.interrupt = InterruptKind::Trap;
     None
 }
@@ -1903,9 +1926,29 @@ macro_rules! handle_unresolved_branch {
         }
 
         let offset = $visitor.inner.compiled_offset;
-        let target_false = $visitor.inner.resolve_jump::<DEBUG>($tf).unwrap_or(TARGET_OUT_OF_RANGE);
-        let target_true = $visitor.inner.resolve_jump::<DEBUG>($tt).unwrap_or(TARGET_INVALID_BRANCH);
-        $visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG>);
+
+        let (target_true, is_tt_valid) = if let Some(target_true) = $visitor.inner.resolve_jump::<DEBUG>($tt) {
+            (target_true, true)
+        } else {
+            ($tt.0, false)
+        };
+
+        let (target_false, is_tf_valid) = if let Some(target_false) = $visitor.inner.resolve_jump::<DEBUG>($tf) {
+            (target_false, true)
+        } else {
+            ($tf.0, false)
+        };
+
+        if is_tt_valid && is_tf_valid {
+            $visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG, true, true>);
+        } else if is_tt_valid {
+            $visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG, true, false>);
+        } else if is_tf_valid {
+            $visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG, false, true>);
+        } else {
+            $visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG, false, false>);
+        }
+
         $visitor.inner.compiled_args[cast(offset).to_usize()] = Args::$name($s1, $s2, target_true, target_false);
         Some(offset)
     }};
@@ -1941,7 +1984,8 @@ define_interpreter! {
             log::trace!("[{}]: trap (out of range)", visitor.inner.compiled_offset);
         }
 
-        let program_counter = visitor.inner.program_counter;
+        let program_counter = visitor.inner.unresolved_program_counter.unwrap_or(visitor.inner.program_counter);
+
         let new_gas = visitor.inner.gas - i64::from(gas);
         if new_gas < 0 {
             not_enough_gas_impl::<DEBUG>(visitor, program_counter, new_gas)
@@ -1972,8 +2016,11 @@ define_interpreter! {
             log::trace!("[{}]: step (out of range)", visitor.inner.compiled_offset);
         }
 
+        let program_counter = visitor.inner.unresolved_program_counter.unwrap_or(visitor.inner.program_counter);
+
+        visitor.inner.program_counter = program_counter;
         visitor.inner.program_counter_valid = true;
-        visitor.inner.next_program_counter = Some(visitor.inner.program_counter);
+        visitor.inner.next_program_counter = Some(program_counter);
         visitor.inner.next_program_counter_changed = false;
         visitor.inner.interrupt = InterruptKind::Step;
         visitor.inner.compiled_offset += 1;
@@ -3378,132 +3425,132 @@ define_interpreter! {
         visitor.load::<u64, DEBUG, true>(program_counter, dst, Some(base), offset)
     }
 
-    fn branch_less_unsigned<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_less_unsigned<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} <u {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 < s2)
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 < s2)
     }
 
-    fn branch_less_unsigned_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_less_unsigned_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} <u {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 < s2)
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 < s2)
     }
 
-    fn branch_less_signed<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_less_signed<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} <s {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() < cast(s2).to_signed())
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() < cast(s2).to_signed())
     }
 
-    fn branch_less_signed_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_less_signed_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} <s {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() < cast(s2).to_signed())
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() < cast(s2).to_signed())
     }
 
-    fn branch_eq<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_eq<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} == {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 == s2)
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 == s2)
     }
 
-    fn branch_eq_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_eq_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} == {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 == s2)
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 == s2)
     }
 
-    fn branch_not_eq<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_not_eq<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} != {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 != s2)
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 != s2)
     }
 
-    fn branch_not_eq_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_not_eq_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} != {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 != s2)
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 != s2)
     }
 
-    fn branch_greater_or_equal_unsigned<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_greater_or_equal_unsigned<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} >=u {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 >= s2)
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 >= s2)
     }
 
-    fn branch_greater_or_equal_unsigned_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_greater_or_equal_unsigned_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} >=u {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 >= s2)
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 >= s2)
     }
 
-    fn branch_greater_or_equal_signed<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_greater_or_equal_signed<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} >=s {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() >= cast(s2).to_signed())
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() >= cast(s2).to_signed())
     }
 
-    fn branch_greater_or_equal_signed_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_greater_or_equal_signed_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} >=s {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() >= cast(s2).to_signed())
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() >= cast(s2).to_signed())
     }
 
-    fn branch_less_or_equal_unsigned_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_less_or_equal_unsigned_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} <=u {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 <= s2)
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 <= s2)
     }
 
-    fn branch_less_or_equal_signed_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_less_or_equal_signed_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} <=s {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() <= cast(s2).to_signed())
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() <= cast(s2).to_signed())
     }
 
-    fn branch_greater_unsigned_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_greater_unsigned_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} >u {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 > s2)
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 > s2)
     }
 
-    fn branch_greater_signed_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_greater_signed_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
             log::trace!("[{}]: jump ~{tt} if {s1} >s {s2}", visitor.inner.compiled_offset);
         }
 
-        visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() > cast(s2).to_signed())
+        visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() > cast(s2).to_signed())
     }
 
     fn jump<const DEBUG: bool>(visitor: &mut Visitor, target: Target) -> Option<Target> {
@@ -3652,6 +3699,7 @@ define_interpreter! {
         } else {
             visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::jump::<DEBUG>);
             visitor.inner.compiled_args[cast(offset).to_usize()] = Args::jump(TARGET_OUT_OF_RANGE);
+            visitor.inner.unresolved_program_counter = Some(jump_to);
             Some(TARGET_OUT_OF_RANGE)
         }
     }

@@ -692,6 +692,28 @@ fn simple_test(engine_config: Config) {
     assert_eq!(instance.reg(Reg::A1), 100);
 }
 
+fn out_of_range_execution(engine_config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_imm(A0, 1), asm::load_imm(A0, 2), asm::branch_eq_imm(RA, 0, 0)], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+    let next_offsets: Vec<_> = module
+        .blob()
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.next_offset)
+        .collect();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.program_counter(), Some(next_offsets[2]));
+}
+
 fn jump_into_middle_of_basic_block_from_outside(engine_config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
@@ -3865,6 +3887,8 @@ run_tests! {
 
     trapping_preserves_all_registers_normal_trap
     trapping_preserves_all_registers_segfault
+
+    out_of_range_execution
 
     memset_basic
     memset_with_dynamic_paging
