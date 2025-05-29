@@ -39,9 +39,6 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     return (wi_payload_start_address, wi_payload_length);
 }
 
-#[no_mangle]
-static mut OUTPUT_BUFFER: [u8; 32] = [0; 32];
-
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
     // parse accumulate args
@@ -92,3 +89,7 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
 extern "C" fn on_transfer(_start_address: u64, _length: u64) -> (u64, u64) {
     return (FIRST_READABLE_ADDRESS as u64, 0);
 }
+
+#[no_mangle]
+static mut OUTPUT_BUFFER: [u8; 32] = [0; 32];
+

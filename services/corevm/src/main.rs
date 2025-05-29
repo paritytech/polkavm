@@ -193,7 +193,6 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     call_log(4, None, &format!("gas_result={:?}", gas_result));
 
     // peek child VM, process output and export segments
-    let mut output_bytes: [u8; 12] = [0;12];
     let output_bytes_address = output_bytes.as_ptr() as u64;
     let output_bytes_length = output_bytes.len() as u64;
     let child_id = new_machine_idx as u32;
@@ -236,6 +235,7 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
 
 #[no_mangle]
 static mut output_bytes_32: [u8; 32] = [0; 32];
+static mut output_bytes: [u8; 12] = [0;12];
 
 fn log_level(cond: bool) -> u64 {
     if cond {

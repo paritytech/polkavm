@@ -40,6 +40,11 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
 
 #[no_mangle]
 static mut output_bytes_32: [u8; 32] = [0; 32];
+static mut buffer0: [u8; 12] = [0u8; 12];
+static mut buffer1: [u8; 12] = [0u8; 12];
+static mut key : [u8; 1] = [0u8; 1];
+static mut buffer : [u8; 12] = [0u8; 12];
+static mut memo : [u8; 128] = [0u8; 128];
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
@@ -55,12 +60,12 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
     let service0_bytes_start_addr: u64 = work_result_address; // 4 bytes service index
     let service1_bytes_start_addr: u64 = work_result_address + work_result_length - 4; // 4 bytes service index
 
-    let buffer0 = [0u8; 12];
-    let buffer1 = [0u8; 12];
-    let key = [0u8; 1];
-    let key_address = key.as_ptr() as u64;
-    let key_length = key.len() as u64;
-    let mut buffer = [0u8; 12];
+    let key_address = unsafe {
+    key.as_ptr() as u64
+    };
+    let key_length = unsafe {
+    key.len() as u64
+    };
 
     let service0: u64 = unsafe { (*(service0_bytes_start_addr as *const u32)).into() };
     let service1: u64 = unsafe { (*(service1_bytes_start_addr as *const u32)).into() };
@@ -85,12 +90,22 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         );
     };
 
-    let s0_n = u32::from_le_bytes(buffer0[0..4].try_into().unwrap());
-    let s0_vn = u32::from_le_bytes(buffer0[4..8].try_into().unwrap());
-    let s0_vnminus1 = u32::from_le_bytes(buffer0[8..12].try_into().unwrap());
+    let s0_n = unsafe {
+    u32::from_le_bytes(buffer0[0..4].try_into().unwrap())
+    };
+    let s0_vn = unsafe {
+    u32::from_le_bytes(buffer0[4..8].try_into().unwrap())
+    };
+    let s0_vnminus1 = unsafe {
+      u32::from_le_bytes(buffer0[8..12].try_into().unwrap())
+      };
 
-    let s1_vn = u32::from_le_bytes(buffer1[4..8].try_into().unwrap());
-    let s1_vnminus1 = u32::from_le_bytes(buffer1[8..12].try_into().unwrap());
+    let s1_vn = unsafe {
+      u32::from_le_bytes(buffer1[4..8].try_into().unwrap())
+      };
+    let s1_vnminus1 = unsafe {
+      u32::from_le_bytes(buffer1[8..12].try_into().unwrap())
+      };
 
     let m_n = s0_n;
 
@@ -99,10 +114,11 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
     call_log(2, None, &format!("meg {:?} read from service {:?} trib(n={:?})={:?}", m_n, service1, m_n, s1_vn));
     let m_vn = s0_vn + s1_vn;
     let m_vnminus1 = s0_vnminus1 + s1_vnminus1;
-    let memo = [0u8; 128];
     let send0 = (m_n % 3 == 0) || (m_n % 3 == 2);
     let send1 = (m_n % 3 == 1) || (m_n % 3 == 2);
-    let omega_10: u64 = memo.as_ptr() as u64; // memo
+    let omega_10: u64 = unsafe  {
+    memo.as_ptr() as u64
+    };
     let amount0: u64 = m_n as u64;
     let amount1: u64 = (m_n * 2 + 1) as u64;
     let gas_avail: u64 = 40000;
@@ -120,11 +136,12 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
             call_log(2, None, &format!("{:?} transfer(dest:{:?}, amount={:?}, gas_avail={:?}) Result: {:?}", i, service1, amount1, gas_avail, result1));
         }
     }
+unsafe {
 
     buffer[0..4].copy_from_slice(&m_n.to_le_bytes());
     buffer[4..8].copy_from_slice(&m_vn.to_le_bytes());
     buffer[8..12].copy_from_slice(&m_vnminus1.to_le_bytes());
-
+};
     call_log(2, None, &format!("meg({:?})={:?}", m_n, m_vn));
     unsafe { write(key.as_ptr() as u64, key.len() as u64, buffer.as_ptr() as u64, buffer.len() as u64); }
     call_log(2, None, &format!("meg {:?} write(n={:?}) num_transfers={:?}", m_n, m_vn, num_transfers));
