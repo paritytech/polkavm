@@ -193,8 +193,12 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     call_log(4, None, &format!("gas_result={:?}", gas_result));
 
     // peek child VM, process output and export segments
-    let output_bytes_address = output_bytes.as_ptr() as u64;
-    let output_bytes_length = output_bytes.len() as u64;
+    let output_bytes_address = unsafe {
+       output_bytes.as_ptr() as u64
+     };
+    let output_bytes_length = unsafe {
+       output_bytes.len() as u64
+       };
     let child_id = new_machine_idx as u32;
     for i in 0..segment_index+1 {
         let i_32 = i as u32;
@@ -211,6 +215,7 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
         segment_buf[4..8].copy_from_slice(&seg_index.to_le_bytes());
         call_log(4, None, &format!(" segment_buf[0..8]={:?}, child_id={:?}, seg_index={:?}", &segment_buf[0..8], child_id, seg_index));
 
+	unsafe {
         if i == segment_index {
             // output_bytes: n, f(n), f(n-1)
             output_bytes[0..4].copy_from_slice(&i_32.to_le_bytes());
@@ -218,13 +223,18 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
         } else if i == segment_index - 1 {
             output_bytes[8..12].copy_from_slice(&segment_buf[8..12]);
         }
+	}
 
         let export_result = unsafe { export(segment_buf.as_ptr() as u64, SEGMENT_SIZE) };
         gas_result = unsafe { gas() };
-        call_log(4, None, &format!("export i={:?}: expect ς+|e|={:?}, got {:?} gas={:?} output={:?}", i, i, export_result, gas_result, output_bytes[0]));
+        unsafe {
+	   call_log(4, None, &format!("export i={:?}: expect ς+|e|={:?}, got {:?} gas={:?} output={:?}", i, i, export_result, gas_result, output_bytes[0]));
+	};
     }
-    call_log(3, None, &format!("output_bytes={:?}|{:?}|{:?}", output_bytes[0], output_bytes[4], output_bytes[8]));
-
+    unsafe {
+       call_log(3, None, &format!("output_bytes={:?}|{:?}|{:?}", output_bytes[0], output_bytes[4], output_bytes[8]));
+    };
+    
     // expunge child VM
     let expunge_result = unsafe { expunge(new_machine_idx as u64) };
     gas_result = unsafe { gas() };

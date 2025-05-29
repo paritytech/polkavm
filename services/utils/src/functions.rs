@@ -144,19 +144,33 @@ pub fn parse_accumulate_args(start_address: u64, length: u64, m: u64) -> Option<
 
     let mut args = AccumulateArgs::default();
 
-    if remaining_length < 8 {
+    //    call_log(2, None, &format!("parse_accumulate_args start_address={} length={}", start_address, length));
+
+    // Create a slice of the available data to parse t
+    let t_full_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
+    let t_len = extract_discriminator(t_full_slice) as u64;
+    if t_len == 0 || remaining_length < t_len {
         return None;
     }
-    let t_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 4) };
-    let s_slice = unsafe { core::slice::from_raw_parts((current_address + 4) as *const u8, 4) };
-    let global_t = u32::from_le_bytes(t_slice[0..4].try_into().unwrap());
-    let global_s = u32::from_le_bytes(s_slice[0..4].try_into().unwrap());
 
-    args.t = global_t;
-    args.s = global_s;
+    // Decode t and update pointers
+    let t_slice = &t_full_slice[..t_len as usize];
+    args.t = decode_e(t_slice) as u32;
+    current_address += t_len;
+    remaining_length -= t_len;
 
-    current_address += 8;
-    remaining_length = remaining_length.saturating_sub(8);
+    // Create a new slice for the remaining data to parse s
+    let s_full_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
+    let s_len = extract_discriminator(s_full_slice) as u64;
+    if s_len == 0 || remaining_length < s_len {
+        return None;
+    }
+
+    // Decode s and update pointers
+    let s_slice = &s_full_slice[..s_len as usize];
+    args.s = decode_e(s_slice) as u32;
+    current_address += s_len;
+    remaining_length -= s_len;
 
     let full_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
     let discriminator_len = extract_discriminator(full_slice);
@@ -306,8 +320,11 @@ pub fn parse_transfer_args(start_address: u64, length: u64, m: u64) -> Option<Tr
     if remaining_length < 8 {
         return None;
     }
+    ///---
+    
     let t_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 4) };
     let s_slice = unsafe { core::slice::from_raw_parts((current_address + 4) as *const u8, 4) };
+    // TODO: use decode_e here to strip out global_t and global_s from current_address
     let global_t = u32::from_le_bytes(t_slice[0..4].try_into().unwrap());
     let global_s = u32::from_le_bytes(s_slice[0..4].try_into().unwrap());
 
@@ -316,7 +333,7 @@ pub fn parse_transfer_args(start_address: u64, length: u64, m: u64) -> Option<Tr
 
     current_address += 8;
     remaining_length = remaining_length.saturating_sub(8);
-
+    // ----- 
     let full_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
     let discriminator_len = extract_discriminator(full_slice);
     if discriminator_len as usize > full_slice.len() {
