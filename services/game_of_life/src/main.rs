@@ -28,6 +28,7 @@ use utils::functions::{parse_accumulate_args, parse_refine_args};
 use utils::host_functions::{solicit};
 use utils::host_functions::{export, expunge, fetch, historical_lookup, invoke, machine, poke, peek, zero, log};
 
+static mut extrinsic : [u8; 36] = [0u8; 36];
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
@@ -44,10 +45,13 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
         };
 
     // fetch extrinsic
-    let mut extrinsic = [0u8; 36];
-    let extrinsic_address = extrinsic.as_mut_ptr() as u64;
+    let extrinsic_address = unsafe {
+      extrinsic.as_mut_ptr() as u64
+      };
     let code_hash_address = extrinsic_address;
-    let extrinsic_length = extrinsic.len() as u64;
+    let extrinsic_length = unsafe {
+      extrinsic.len() as u64
+      };
     unsafe {
         let _ = fetch(extrinsic_address, 0, extrinsic_length, 3, 0, 0);
     }

@@ -4,7 +4,7 @@
 
 extern crate alloc;
 use alloc::format;
-use alloc::vec;
+
 
 const SIZE0 : usize = 0x10000;
 // allocate memory for stack
@@ -23,25 +23,35 @@ use utils::host_functions::{export, fetch, write, gas};
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
-    let mut buffer = [0u8; 12];
     let offset: u64 = 0;
-    let maxlen: u64 = buffer.len() as u64;
+    let maxlen: u64 = unsafe {
+       buffer.len() as u64
+    };
     let result = unsafe { fetch(buffer.as_mut_ptr() as u64, offset, maxlen, 5, 0, 0) }; // fetch segment 0 from work item 0
 
     if result != NONE {
-        let n = u32::from_le_bytes(buffer[0..4].try_into().unwrap());
-        let fib_n = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
-        let fib_n_minus_1 = u32::from_le_bytes(buffer[8..12].try_into().unwrap());
+        let n = unsafe {
+	u32::from_le_bytes(buffer[0..4].try_into().unwrap())
+	};
+        let fib_n = unsafe {
+	u32::from_le_bytes(buffer[4..8].try_into().unwrap())
+	};
+        let fib_n_minus_1 = unsafe {
+	u32::from_le_bytes(buffer[8..12].try_into().unwrap())
+	};
 
         let new_fib_n = fib_n + fib_n_minus_1;
-
+	unsafe {
         buffer[0..4].copy_from_slice(&(n + 1).to_le_bytes());
         buffer[4..8].copy_from_slice(&new_fib_n.to_le_bytes());
         buffer[8..12].copy_from_slice(&fib_n.to_le_bytes());
+	}
     } else {
+        unsafe {
         buffer[0..4].copy_from_slice(&1_u32.to_le_bytes());
         buffer[4..8].copy_from_slice(&1_u32.to_le_bytes());
         buffer[8..12].copy_from_slice(&0_u32.to_le_bytes());
+	}
     }
 
     unsafe {
@@ -49,13 +59,19 @@ extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
     }
 
     // set the output address to register a0 and output length to register a1
-    let buffer_addr = buffer.as_ptr() as u64;
-    let buffer_len = buffer.len() as u64;
+   let buffer_addr = unsafe {
+      buffer.as_ptr() as u64
+      };
+    let buffer_len = unsafe {
+    buffer.len() as u64
+    };
     return (buffer_addr, buffer_len);
 }
 
 #[no_mangle]
 static mut output_bytes_32: [u8; 32] = [0; 32];
+#[no_mangle]
+static mut buffer: [u8; 12] = [0u8; 12];
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
