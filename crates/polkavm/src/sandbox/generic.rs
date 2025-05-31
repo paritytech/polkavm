@@ -305,7 +305,6 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
 
     let vmctx = THREAD_VMCTX.with(|thread_ctx| *thread_ctx.get());
     if !vmctx.is_null() {
-
         macro_rules! fetch_reg {
             ($reg:ident) => {{
                 #[cfg(target_os = "linux")]
@@ -739,6 +738,7 @@ pub struct Sandbox {
     next_program_counter_changed: bool,
 
     aux_data_address: u32,
+    aux_data_full_length: u32,
     aux_data_length: u32,
 }
 
@@ -848,10 +848,20 @@ impl Sandbox {
         Ok(())
     }
 
-    fn bound_check_access(&self, mut address: u32, mut length: u32, is_writeable: bool) -> Result<(), ()> {
+    fn bound_check_access(&self, mut address: u32, mut length: u32, is_writable: bool) -> Result<(), ()> {
         let Some(address_end) = address.checked_add(length) else {
             return Err(());
         };
+
+        if address >= self.aux_data_address && address_end < self.aux_data_address + self.aux_data_full_length {
+            if is_writable {
+                return Ok(());
+            }
+            if address_end > self.aux_data_address + self.aux_data_length {
+                return Err(());
+            }
+            return Ok(());
+        }
 
         for map in &self.vmctx().maps {
             if address < map.address {
@@ -861,7 +871,7 @@ impl Sandbox {
             let map_end = map.address + map.length;
             if address >= map_end {
                 continue;
-            } else if is_writeable && !map.is_writable {
+            } else if is_writable && !map.is_writable {
                 return Err(());
             } else if address_end <= map_end {
                 return Ok(());
@@ -901,7 +911,9 @@ impl Sandbox {
         };
 
         let Some(program_counter) = compiled_module.program_counter_by_native_code_offset(machine_code_offset, false) else {
-            return Err(Error::from("internal error: program counter not found for the given machine code address"));
+            return Err(Error::from(
+                "internal error: program counter not found for the given machine code address",
+            ));
         };
 
         self.vmctx().program_counter.store(program_counter.0, Ordering::Relaxed);
@@ -913,14 +925,15 @@ impl Sandbox {
                 return Err(Error::from("internal error: address underflow after a guest signal"));
             };
 
-            self.vmctx().next_native_program_counter.store(
-                compiled_module.native_code_origin + offset as u64,
-                Ordering::Relaxed,
-            );
+            self.vmctx()
+                .next_native_program_counter
+                .store(compiled_module.native_code_origin + offset as u64, Ordering::Relaxed);
 
             let offset = offset as usize + GAS_COST_GENERIC_SANDBOX_OFFSET;
             let Some(gas_cost) = &compiled_module.machine_code().get(offset..offset + 4) else {
-                return Err(Error::from("internal error: failed to read back the gas cost from the machine code"));
+                return Err(Error::from(
+                    "internal error: failed to read back the gas cost from the machine code",
+                ));
             };
 
             let gas_cost = u32::from_le_bytes([gas_cost[0], gas_cost[1], gas_cost[2], gas_cost[3]]);
@@ -932,8 +945,33 @@ impl Sandbox {
 
             Ok(InterruptKind::NotEnoughGas)
         } else {
+            self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
             Ok(InterruptKind::Trap)
         }
+    }
+
+    fn set_aux_data_permission_for_host(&mut self) -> Result<(), Error> {
+        if self.aux_data_full_length != 0 {
+            let offset = self.guest_memory_offset + self.aux_data_address as usize;
+            let full_length = self.aux_data_full_length as usize;
+
+            self.memory.mprotect(offset, full_length, PROT_READ | PROT_WRITE)?;
+        }
+
+        Ok(())
+    }
+
+    fn set_aux_data_permission_for_guest(&mut self) -> Result<(), Error> {
+        if self.aux_data_full_length != 0 {
+            let offset = self.guest_memory_offset + self.aux_data_address as usize;
+            let length = self.aux_data_length as usize;
+            let full_length = self.aux_data_full_length as usize;
+
+            self.memory.mprotect(offset, full_length, 0)?;
+            self.memory.mprotect(offset, length, PROT_READ)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -1110,7 +1148,7 @@ impl super::Sandbox for Sandbox {
             memory_map.push(ProgramMap {
                 address: cfg.aux_data_address(),
                 length: cfg.aux_data_size(),
-                is_writable: false,
+                is_writable: true,
                 kind: MapKind::Transient,
             });
         }
@@ -1158,6 +1196,7 @@ impl super::Sandbox for Sandbox {
             next_program_counter: None,
             next_program_counter_changed: true,
             aux_data_address: 0,
+            aux_data_full_length: 0,
             aux_data_length: 0,
         })
     }
@@ -1233,7 +1272,8 @@ impl super::Sandbox for Sandbox {
         self.gas_metering = module.gas_metering();
         self.module = Some(module.clone());
         self.aux_data_address = module.memory_map().aux_data_address();
-        self.aux_data_length = module.memory_map().aux_data_size();
+        self.aux_data_full_length = module.memory_map().aux_data_size();
+        self.aux_data_length = self.aux_data_full_length;
 
         Ok(())
     }
@@ -1264,9 +1304,17 @@ impl super::Sandbox for Sandbox {
             let Some(address) = compiled_module.lookup_native_code_address(pc) else {
                 log::debug!("Tried to call into {pc} which doesn't have any native code associated with it");
                 self.is_program_counter_valid = true;
-                self.vmctx_mut().program_counter.store(pc.0, Ordering::Relaxed);
-                self.vmctx_mut().next_native_program_counter.store(0, Ordering::Relaxed);
-                return Ok(InterruptKind::Trap);
+                self.vmctx().program_counter.store(pc.0, Ordering::Relaxed);
+                if self.module.as_ref().unwrap().is_step_tracing() {
+                    self.vmctx().next_program_counter.store(pc.0, Ordering::Relaxed);
+                    self.vmctx()
+                        .next_native_program_counter
+                        .store(compiled_module.invalid_code_offset_address, Ordering::Relaxed);
+                    return Ok(InterruptKind::Step);
+                } else {
+                    self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
+                    return Ok(InterruptKind::Trap);
+                }
             };
 
             log::trace!("Jumping into: {pc} (0x{address:x})");
@@ -1284,11 +1332,13 @@ impl super::Sandbox for Sandbox {
         self.vmctx_mut().exit_reason = ExitReason::None;
 
         self.poison = Poison::Executing;
+        self.is_program_counter_valid = true;
 
         let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
         let entry_point = compiled_module.sandbox_program.0.sysenter_address;
 
         log::trace!("Jumping into guest program: 0x{:x}", entry_point);
+        self.set_aux_data_permission_for_guest().map_err(Error::from)?;
 
         #[allow(clippy::undocumented_unsafe_blocks)]
         unsafe {
@@ -1345,6 +1395,7 @@ impl super::Sandbox for Sandbox {
         };
 
         log::trace!("Returned from guest program");
+        self.set_aux_data_permission_for_host().map_err(Error::from)?;
         self.poison = Poison::None;
 
         if self.module.as_ref().unwrap().gas_metering() == Some(GasMeteringKind::Async) && self.gas() < 0 {
@@ -1365,13 +1416,10 @@ impl super::Sandbox for Sandbox {
             }
             ExitReason::Signal => {
                 let address = self.vmctx().next_native_program_counter.load(Ordering::Relaxed) as u64;
-                self.handle_guest_signal(address)
-                    .map_err(Error::from)?
+                self.handle_guest_signal(address).map_err(Error::from)?
             }
             ExitReason::NotEnoughGas => InterruptKind::NotEnoughGas,
-            ExitReason::Trap => {
-                InterruptKind::Trap
-            }
+            ExitReason::Trap => InterruptKind::Trap,
             ExitReason::Step => InterruptKind::Step,
             ExitReason::Ecalli(num) => InterruptKind::Ecalli(num),
         })
@@ -1416,6 +1464,7 @@ impl super::Sandbox for Sandbox {
     }
 
     fn set_next_program_counter(&mut self, pc: ProgramCounter) {
+        self.is_program_counter_valid = false;
         self.next_program_counter = Some(pc);
         self.next_program_counter_changed = true;
     }
@@ -1432,7 +1481,14 @@ impl super::Sandbox for Sandbox {
         self.aux_data_length
     }
 
-    fn set_accessible_aux_size(&mut self, _size: u32) -> Result<(), Error> {
+    fn set_accessible_aux_size(&mut self, size: u32) -> Result<(), Error> {
+        if self.aux_data_address == 0 || self.aux_data_full_length == 0 {
+            return Err(Error::from("aux data address or length is zero"));
+        }
+        if size > self.aux_data_full_length {
+            return Err(Error::from("size exceeds the full length of aux data"));
+        }
+        self.aux_data_length = size;
         Ok(())
     }
 
