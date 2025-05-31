@@ -868,7 +868,10 @@ where
                 self.asm.push_raw(&[0x78, 0xf9]);
             } else {
                 assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r15 - 0xfa0)); // Sanity check.
-                debug_assert!(self.asm.code_mut().ends_with(&[0x49, 0x81, 0xaf, 0x60, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]));
+                debug_assert!(self
+                    .asm
+                    .code_mut()
+                    .ends_with(&[0x49, 0x81, 0xaf, 0x60, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]));
                 debug_assert_eq!(GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 8) as u64);
                 self.asm.push_raw(&[0x78, 0xf6]);
             }
