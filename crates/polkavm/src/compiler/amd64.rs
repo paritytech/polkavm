@@ -221,7 +221,7 @@ where
 }
 
 const GAS_METERING_TRAP_OFFSET: u64 = 3;
-const GAS_COST_OFFSET: usize = 4;
+const GAS_COST_LINUX_SANDBOX_OFFSET: usize = 4;
 const REP_STOSB_MACHINE_CODE: &[u8] = &[0xf3, 0xaa];
 
 #[derive(Copy, Clone)]
@@ -844,35 +844,38 @@ where
     pub(crate) fn emit_gas_metering_stub(&mut self, kind: GasMeteringKind) {
         let origin = self.asm.len();
 
-        if matches!(S::KIND, SandboxKind::Generic) {
-            // The generic sandbox doesn't support gas metering.
-            return;
-        }
+        assert_eq!(S::offset_table().gas, 0x60);
 
-        // 49 81 6f 60 ff ff ff 7f   sub qword [r15+0x60], 0x7fffffff
+        // For Linux sandbox this will be:
+        // 49 81 6f 60 ff ff ff 7f              sub qword [r15+0x60], 0x7fffffff
+        //
+        // For generic sandbox this will be:
+        // 49 81 af 60 f0 ff ff ff ff ff 7f     sub qword [r15-0xfa0],0x7fffffff
         self.push(sub((Self::vmctx_field(S::offset_table().gas), imm64(i32::MAX))));
-        debug_assert_eq!(GAS_COST_OFFSET, self.asm.len() - origin - 4); // Offset to bring us from the start of the stub to the gas cost.
-
         if matches!(kind, GasMeteringKind::Sync) {
-            // This will jump five bytes backwards to 0x60 which is the PUSHA instruction
+            // This will jump 5 bytes (or 8 bytes on generic sandbox) backwards to 0x60 which is the PUSHA instruction
             // which is invalid in 64-bit, so it will trap with an SIGILL.
             //
             // Note that this is technically a forward-compatibility hazard as this opcode could arguably
             // be reused for something in the future.
-            assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r15 + 0x60)); // Sanity check.
-            debug_assert!(self.asm.code_mut().ends_with(&[0x49, 0x81, 0x6f, 0x60, 0xff, 0xff, 0xff, 0x7f]));
-            // Offset to bring us from where the trap will trigger to the beginning of the stub.
-            debug_assert_eq!(GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 5) as u64);
-            self.asm.push_raw(&[0x78, 0xf9]);
+
+            if matches!(S::KIND, SandboxKind::Linux) {
+                debug_assert_eq!(GAS_COST_LINUX_SANDBOX_OFFSET, self.asm.len() - origin - 4); // Offset to bring us from the start of the stub to the gas cost.
+                assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r15 + 0x60)); // Sanity check.
+                debug_assert!(self.asm.code_mut().ends_with(&[0x49, 0x81, 0x6f, 0x60, 0xff, 0xff, 0xff, 0x7f]));
+                // Offset to bring us from where the trap will trigger to the beginning of the stub.
+                debug_assert_eq!(GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 5) as u64);
+                self.asm.push_raw(&[0x78, 0xf9]);
+            } else {
+                assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r15 - 0xfa0)); // Sanity check.
+                debug_assert!(self.asm.code_mut().ends_with(&[0x49, 0x81, 0xaf, 0x60, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]));
+                debug_assert_eq!(GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 8) as u64);
+                self.asm.push_raw(&[0x78, 0xf6]);
+            }
         }
     }
 
     pub(crate) fn emit_weight(&mut self, offset: usize, cost: u32) {
-        if matches!(S::KIND, SandboxKind::Generic) {
-            // The generic sandbox doesn't support gas metering.
-            return;
-        }
-
         let length = sub((Self::vmctx_field(S::offset_table().gas), imm64(i32::MAX))).len();
         let xs = cost.to_le_bytes();
         self.asm.code_mut()[offset + length - 4..offset + length].copy_from_slice(&xs);
@@ -1258,7 +1261,7 @@ where
                 let program_counter = set_program_counter_after_interruption(compiled_module, machine_code_offset, vmctx)?;
 
                 // The gas counter is now negative; refund the amount of gas consumed so that it's positive again.
-                let offset = offset as usize + GAS_COST_OFFSET;
+                let offset = offset as usize + GAS_COST_LINUX_SANDBOX_OFFSET;
                 let Some(gas_cost) = &compiled_module.machine_code().get(offset..offset + 4) else {
                     return Err("internal error: failed to read back the gas cost from the machine code");
                 };

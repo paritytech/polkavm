@@ -21,6 +21,7 @@ use super::{get_native_page_size, OffsetTable, SandboxInit, SandboxKind, WorkerC
 use crate::api::{CompiledModuleKind, MemoryAccessError, Module};
 use crate::compiler::CompiledModule;
 use crate::config::Config;
+use crate::config::GasMeteringKind;
 use crate::{Gas, InterruptKind, ProgramCounter, RegValue};
 
 #[inline(always)]
@@ -112,6 +113,9 @@ use core::ffi::c_void;
 use sys::{c_int, size_t, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
 
 pub(crate) const GUEST_MEMORY_TO_VMCTX_OFFSET: isize = -4096;
+
+const GAS_METERING_TRAP_OFFSET: u64 = 3;
+const GAS_COST_GENERIC_SANDBOX_OFFSET: usize = 7;
 
 fn get_guest_memory_offset() -> usize {
     get_native_page_size()
@@ -323,7 +327,7 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
 
         let vmctx = &mut *vmctx;
         if vmctx.program_range.contains(&rip) {
-            log::trace!("Trap triggered at 0x{rip:x}");
+            log::trace!("Signal received at 0x{rip:x}");
 
             use polkavm_common::regmap::NativeReg;
             for reg in polkavm_common::program::Reg::ALL {
@@ -348,7 +352,7 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
             }
 
             vmctx.next_native_program_counter.store(rip, Ordering::Relaxed);
-            trigger_exit(vmctx, ExitReason::Trap);
+            trigger_exit(vmctx, ExitReason::Signal);
         }
     }
 
@@ -452,6 +456,7 @@ unsafe fn sysreturn(vmctx: &mut VmCtx) -> ! {
 enum ExitReason {
     None,
     Error,
+    Signal,
     NotEnoughGas,
     Trap,
     Ecalli(u32),
@@ -478,7 +483,6 @@ struct VmCtx {
     return_stack_pointer: usize,
 
     arg: AtomicU32,
-    gas: AtomicI64,
 
     heap_info: HeapInfo,
     heap_base: u32,
@@ -487,6 +491,8 @@ struct VmCtx {
     heap_map_index: usize,
     page_size: u32,
     maps: Vec<ProgramMap>,
+
+    gas: AtomicI64,
 
     program_range: Range<u64>,
     exit_reason: ExitReason,
@@ -726,6 +732,8 @@ pub struct Sandbox {
     guest_memory_offset: usize,
     module: Option<Module>,
 
+    gas_metering: Option<GasMeteringKind>,
+
     is_program_counter_valid: bool,
     next_program_counter: Option<ProgramCounter>,
     next_program_counter_changed: bool,
@@ -883,6 +891,50 @@ impl Sandbox {
         let range = self.guest_memory_offset + address as usize..self.guest_memory_offset + address as usize + length as usize;
         Some(&mut self.memory.as_slice_mut()[range])
     }
+
+    fn handle_guest_signal(&mut self, machine_code_address: u64) -> Result<InterruptKind, Error> {
+        use crate::sandbox::Sandbox;
+
+        let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
+        let Some(machine_code_offset) = machine_code_address.checked_sub(compiled_module.native_code_origin) else {
+            return Err(Error::from("internal error: address underflow after a trap"));
+        };
+
+        let Some(program_counter) = compiled_module.program_counter_by_native_code_offset(machine_code_offset, false) else {
+            return Err(Error::from("internal error: program counter not found for the given machine code address"));
+        };
+
+        self.vmctx().program_counter.store(program_counter.0, Ordering::Relaxed);
+        self.vmctx().next_program_counter.store(program_counter.0, Ordering::Relaxed);
+        self.is_program_counter_valid = true;
+
+        if self.gas_metering.is_some() && self.gas() < 0 {
+            let Some(offset) = machine_code_offset.checked_sub(GAS_METERING_TRAP_OFFSET) else {
+                return Err(Error::from("internal error: address underflow after a guest signal"));
+            };
+
+            self.vmctx().next_native_program_counter.store(
+                compiled_module.native_code_origin + offset as u64,
+                Ordering::Relaxed,
+            );
+
+            let offset = offset as usize + GAS_COST_GENERIC_SANDBOX_OFFSET;
+            let Some(gas_cost) = &compiled_module.machine_code().get(offset..offset + 4) else {
+                return Err(Error::from("internal error: failed to read back the gas cost from the machine code"));
+            };
+
+            let gas_cost = u32::from_le_bytes([gas_cost[0], gas_cost[1], gas_cost[2], gas_cost[3]]);
+            let gas = self.vmctx().gas.fetch_add(i64::from(gas_cost), Ordering::Relaxed);
+            log::trace!(
+                "Out of gas; program counter = {program_counter}, reverting gas: {gas} -> {new_gas} (gas cost: {gas_cost})",
+                new_gas = gas + i64::from(gas_cost)
+            );
+
+            Ok(InterruptKind::NotEnoughGas)
+        } else {
+            Ok(InterruptKind::Trap)
+        }
+    }
 }
 
 impl super::SandboxAddressSpace for Mmap {
@@ -948,7 +1000,7 @@ impl super::Sandbox for Sandbox {
         let jump_table_offset = code_size as usize;
         let sysreturn_offset = jump_table_offset + (VM_ADDR_JUMP_TABLE_RETURN_TO_HOST - VM_ADDR_JUMP_TABLE) as usize;
 
-        map.modify_and_protect(0, code_size as usize, PROT_EXEC, |slice| {
+        map.modify_and_protect(0, code_size as usize, PROT_EXEC | PROT_READ, |slice| {
             slice[..init.code.len()].copy_from_slice(init.code);
         })?;
 
@@ -1101,6 +1153,7 @@ impl super::Sandbox for Sandbox {
             memory,
             guest_memory_offset,
             module: None,
+            gas_metering: None,
             is_program_counter_valid: false,
             next_program_counter: None,
             next_program_counter_changed: true,
@@ -1177,6 +1230,7 @@ impl super::Sandbox for Sandbox {
         );
 
         self.program = Some(SandboxProgram(Arc::clone(program)));
+        self.gas_metering = module.gas_metering();
         self.module = Some(module.clone());
         self.aux_data_address = module.memory_map().aux_data_address();
         self.aux_data_length = module.memory_map().aux_data_size();
@@ -1293,15 +1347,31 @@ impl super::Sandbox for Sandbox {
         log::trace!("Returned from guest program");
         self.poison = Poison::None;
 
-        Ok(match self.vmctx_mut().exit_reason {
-            ExitReason::None => InterruptKind::Finished,
+        if self.module.as_ref().unwrap().gas_metering() == Some(GasMeteringKind::Async) && self.gas() < 0 {
+            self.is_program_counter_valid = false;
+            self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
+            return Ok(InterruptKind::NotEnoughGas);
+        }
+
+        Ok(match self.vmctx().exit_reason {
+            ExitReason::None => {
+                self.is_program_counter_valid = false;
+                InterruptKind::Finished
+            }
             ExitReason::Error => {
                 self.poison = Poison::Poisoned;
                 log::error!("Sandbox poisoned");
                 InterruptKind::Trap
             }
+            ExitReason::Signal => {
+                let address = self.vmctx().next_native_program_counter.load(Ordering::Relaxed) as u64;
+                self.handle_guest_signal(address)
+                    .map_err(Error::from)?
+            }
             ExitReason::NotEnoughGas => InterruptKind::NotEnoughGas,
-            ExitReason::Trap => InterruptKind::Trap,
+            ExitReason::Trap => {
+                InterruptKind::Trap
+            }
             ExitReason::Step => InterruptKind::Step,
             ExitReason::Ecalli(num) => InterruptKind::Ecalli(num),
         })
@@ -1326,6 +1396,9 @@ impl super::Sandbox for Sandbox {
     }
 
     fn program_counter(&self) -> Option<ProgramCounter> {
+        if !self.is_program_counter_valid {
+            return None;
+        }
         let program_counter = self.vmctx().program_counter.load(Ordering::Relaxed);
         Some(ProgramCounter(program_counter))
     }
@@ -1335,11 +1408,11 @@ impl super::Sandbox for Sandbox {
             return self.next_program_counter;
         }
 
-        let next_program_counter = self.vmctx().next_program_counter.load(Ordering::Relaxed);
-        if next_program_counter == 0 {
-            return None;
+        if self.vmctx().next_native_program_counter.load(Ordering::Relaxed) == 0 {
+            None
+        } else {
+            Some(ProgramCounter(self.vmctx().next_program_counter.load(Ordering::Relaxed)))
         }
-        Some(ProgramCounter(next_program_counter))
     }
 
     fn set_next_program_counter(&mut self, pc: ProgramCounter) {
