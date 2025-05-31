@@ -301,23 +301,51 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
 
     let vmctx = THREAD_VMCTX.with(|thread_ctx| *thread_ctx.get());
     if !vmctx.is_null() {
-        let rip;
-        #[cfg(target_os = "linux")]
-        {
-            rip = context.uc_mcontext.rip;
+
+        macro_rules! fetch_reg {
+            ($reg:ident) => {{
+                #[cfg(target_os = "linux")]
+                {
+                    context.uc_mcontext.$reg as u64
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    (*context.uc_mcontext).__ss.$reg as u64
+                }
+                #[cfg(target_os = "freebsd")]
+                {
+                    context.uc_mcontext.mc_($reg) as u64
+                }
+            }};
         }
-        #[cfg(target_os = "macos")]
-        {
-            rip = (*context.uc_mcontext).__ss.__rip;
-        }
-        #[cfg(target_os = "freebsd")]
-        {
-            rip = context.uc_mcontext.mc_rip as u64;
-        }
+
+        let rip = fetch_reg!(rip);
 
         let vmctx = &mut *vmctx;
         if vmctx.program_range.contains(&rip) {
             log::trace!("Trap triggered at 0x{rip:x}");
+
+            use polkavm_common::regmap::NativeReg;
+            for reg in polkavm_common::program::Reg::ALL {
+                let value = match polkavm_common::regmap::to_native_reg(reg) {
+                    NativeReg::rax => fetch_reg!(rax),
+                    NativeReg::rcx => fetch_reg!(rcx),
+                    NativeReg::rdx => fetch_reg!(rdx),
+                    NativeReg::rbx => fetch_reg!(rbx),
+                    NativeReg::rbp => fetch_reg!(rbp),
+                    NativeReg::rsi => fetch_reg!(rsi),
+                    NativeReg::rdi => fetch_reg!(rdi),
+                    NativeReg::r8 => fetch_reg!(r8),
+                    NativeReg::r9 => fetch_reg!(r9),
+                    NativeReg::r10 => fetch_reg!(r10),
+                    NativeReg::r11 => fetch_reg!(r11),
+                    NativeReg::r12 => fetch_reg!(r12),
+                    NativeReg::r13 => fetch_reg!(r13),
+                    NativeReg::r14 => fetch_reg!(r14),
+                    NativeReg::r15 => fetch_reg!(r15),
+                };
+                vmctx.regs[reg as usize] = value;
+            }
 
             vmctx.next_native_program_counter.store(rip, Ordering::Relaxed);
             trigger_exit(vmctx, ExitReason::Trap);
