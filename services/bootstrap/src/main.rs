@@ -49,7 +49,6 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
             return (FIRST_READABLE_ADDRESS as u64, 0);
         };
 
-    // call_log(2, None, &format!("BOOTSTRAP INIT t={} s={}", _timeslot, _service_index));
 
     let code_length_address: u64 = work_result_address + work_result_length - 4;
     let code_length: u64 = unsafe { (*(code_length_address as *const u32)).into() };

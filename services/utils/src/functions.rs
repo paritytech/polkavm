@@ -56,16 +56,22 @@ impl Default for RefineArgs {
 }
 
 pub fn parse_refine_args(mut start_address: u64, mut remaining_length: u64) -> Option<RefineArgs> {
+    let mut args = RefineArgs::default();
     if remaining_length < 4 {
         return None;
     }
-    let wi_service_index = unsafe { (*(start_address as *const u32)).into() };
-    start_address += 4;
-    remaining_length = remaining_length.saturating_sub(4);
-
-    if remaining_length == 0 {
+    let t_full_slice = unsafe { core::slice::from_raw_parts(start_address as *const u8, remaining_length as usize) };
+    let t_len = extract_discriminator(t_full_slice) as u64;
+    if t_len == 0 || remaining_length < t_len {
         return None;
     }
+
+    // Decode t and update pointers
+    let t_slice = &t_full_slice[..t_len as usize];
+    args.wi_service_index = decode_e(t_slice) as u32;
+    start_address += t_len;
+    remaining_length -= t_len;
+
     let payload_slice = unsafe { core::slice::from_raw_parts(start_address as *const u8, remaining_length as usize) };
     let discriminator_len = extract_discriminator(payload_slice);
     let payload_len = if discriminator_len > 0 {
@@ -80,24 +86,18 @@ pub fn parse_refine_args(mut start_address: u64, mut remaining_length: u64) -> O
     if remaining_length < payload_len {
         return None;
     }
-    let wi_payload_start_address = start_address;
-    let wi_payload_length = payload_len;
+    args.wi_payload_start_address = start_address;
+    args.wi_payload_length = payload_len;
     start_address += payload_len;
     remaining_length = remaining_length.saturating_sub(payload_len);
 
     if remaining_length < 32 {
         return None;
     }
-    let mut wphash = [0u8; 32];
     let hash_slice = unsafe { core::slice::from_raw_parts(start_address as *const u8, 32) };
-    wphash.copy_from_slice(hash_slice);
+    args.wphash.copy_from_slice(hash_slice);
 
-    Some(RefineArgs {
-        wi_service_index,
-        wi_payload_start_address,
-        wi_payload_length,
-        wphash,
-    })
+    return Some(args);
 }
 
 // Parse accumulate args
