@@ -513,7 +513,7 @@ fn build_program_blob(data: Vec<OperationKind>) -> ProgramBlob {
     let mut builder = ProgramBlobBuilder::new_64bit();
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&code, &[]);
-    ProgramBlob::parse(builder.into_vec().into()).unwrap()
+    ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap()
 }
 
 fn interpreter_fuzzer_harness(data: Vec<OperationKind>) {
@@ -605,7 +605,7 @@ fn correctness_fuzzer_harness(data: Vec<OperationKind>) {
         //
 
         match interrupt_interpreter.clone() {
-            InterruptKind::NotEnoughGas | InterruptKind::Trap => {
+            InterruptKind::Finished | InterruptKind::NotEnoughGas | InterruptKind::Trap => {
                 break;
             }
             polkavm::InterruptKind::Ecalli(_) => {
