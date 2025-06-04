@@ -21,18 +21,20 @@ use utils::constants::FIRST_READABLE_ADDRESS;
 use utils::functions::parse_accumulate_args;
 use utils::host_functions::assign;
 use utils::hash_functions::blake2b_hash;
+use utils::functions::{call_log};
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     let auth_output_address = start_address + length - 32;
-    let output_len = 32;
     let input = unsafe {
-        core::slice::from_raw_parts(auth_output_address as *const u8, output_len as usize)
+        core::slice::from_raw_parts(auth_output_address as *const u8, 32)
     };
+    call_log(2, None, &format!("auth_copy start_address={:x?} load={:x?}", auth_output_address, input));
    let output = blake2b_hash(input);
-
+    call_log(2, None, &format!("auth_copy output={:x?}", output));
     let output_address = output.as_ptr() as u64;
     let output_length = output.len() as u64;
-    (output_address, output_length)
+    call_log(2, None, &format!("auth_copy output_address={:x?} output_length={}", output_address, output_length));
+    return (output_address, output_length);
 }
 
 #[no_mangle]
