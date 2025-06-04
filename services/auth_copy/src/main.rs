@@ -5,7 +5,7 @@
 extern crate alloc;
 use alloc::format;
 use alloc::vec;
-
+use alloc::vec::Vec;
 const SIZE0 : usize = 0x10000;
 // allocate memory for stack
 use polkavm_derive::min_stack_size;
@@ -21,13 +21,47 @@ use utils::constants::FIRST_READABLE_ADDRESS;
 use utils::functions::parse_accumulate_args;
 use utils::host_functions::assign;
 use utils::hash_functions::blake2b_hash;
+use utils::functions::{parse_refine_args};
 use utils::functions::{call_log};
+
+fn build_combined_input(input: &[u8], wi_payload_address: u64, wi_payload_length: usize) -> Vec<u8> {
+    let wi_payload = unsafe {
+        core::slice::from_raw_parts(wi_payload_address as *const u8, wi_payload_length)
+    };
+
+    let mut buffer = Vec::with_capacity(input.len() + wi_payload.len());
+    buffer.extend_from_slice(input);
+    buffer.extend_from_slice(wi_payload);
+    buffer
+}
+
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     let auth_output_address = start_address + length - 32;
     let input = unsafe {
         core::slice::from_raw_parts(auth_output_address as *const u8, 32)
     };
+
+    let (_wi_service_index, wi_payload_start_address, _wi_payload_length, _wphash) =
+    if let Some(args) = parse_refine_args(start_address, length) {
+        (
+            args.wi_service_index,
+            args.wi_payload_start_address,
+            args.wi_payload_length,
+            args.wphash,
+        )
+    } else {
+        return (FIRST_READABLE_ADDRESS as u64, 0);
+    };
+
+    if _wi_payload_length > 0 {
+        let combined_input = build_combined_input(input, wi_payload_start_address, _wi_payload_length as usize);
+        let input: &[u8] = &combined_input;
+        call_log(2, None, &format!("auth_copy input={:x?}", input));
+    }else{
+        call_log(2, None, &format!("auth_copy input={:x?}", input));
+    }
+
     call_log(2, None, &format!("auth_copy start_address={:x?} load={:x?}", auth_output_address, input));
    let output = blake2b_hash(input);
     call_log(2, None, &format!("auth_copy output={:x?}", output));
