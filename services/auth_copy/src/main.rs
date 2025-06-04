@@ -20,11 +20,19 @@ static ALLOCATOR: SimpleAlloc<SIZE1> = SimpleAlloc::new();
 use utils::constants::FIRST_READABLE_ADDRESS;
 use utils::functions::parse_accumulate_args;
 use utils::host_functions::assign;
+use utils::hash_functions::blake2b_hash;
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     let auth_output_address = start_address + length - 32;
     let output_len = 32;
-    return (auth_output_address, output_len);
+    let input = unsafe {
+        core::slice::from_raw_parts(auth_output_address as *const u8, output_len as usize)
+    };
+   let output = blake2b_hash(input);
+
+    let output_address = output.as_ptr() as u64;
+    let output_length = output.len() as u64;
+    (output_address, output_length)
 }
 
 #[no_mangle]
