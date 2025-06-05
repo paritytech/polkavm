@@ -1,0 +1,13 @@
+// RO data = 0/0 bytes
+// RW data = 0/0 bytes
+// Stack size = 0 bytes
+// RO data = []
+// RW data = []
+// Instructions = 4
+// Code size = 11 bytes
+
+      :                          @0
+     0: 33 07 01                 a0 = 0x1
+     3: 33 08 02                 a1 = 0x2
+     6: c8 98 0a                 a3 = a1 + a2
+     9: 32 00                    ret
