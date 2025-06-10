@@ -320,7 +320,6 @@ pub fn parse_transfer_args(start_address: u64, length: u64, m: u64) -> Option<Tr
     if remaining_length < 8 {
         return None;
     }
-    ///---
     
     let t_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 4) };
     let s_slice = unsafe { core::slice::from_raw_parts((current_address + 4) as *const u8, 4) };

@@ -17,14 +17,39 @@ use simplealloc::SimpleAlloc;
 static ALLOCATOR: SimpleAlloc<SIZE1> = SimpleAlloc::new();
 
 use utils::constants::{FIRST_READABLE_ADDRESS, NONE};
-use utils::functions::{call_log, parse_accumulate_args, parse_transfer_args, write_result};
+use utils::functions::{call_log, parse_refine_args, parse_accumulate_args, parse_transfer_args, write_result};
 use utils::host_functions::{export, fetch, gas, write};
 
 #[polkavm_derive::polkavm_export]
-extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
+extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
+    let mut num_segments: u32 = 1;
+    let (_wi_service_index, wi_payload_start_address, _wi_payload_length, _wphash) =
+    if let Some(args) = parse_refine_args(start_address, length) {
+        (
+            args.wi_service_index,
+            args.wi_payload_start_address,
+            args.wi_payload_length,
+            args.wphash,
+        )
+    } else {
+        return (FIRST_READABLE_ADDRESS as u64, 0);
+    };
+
+    if _wi_payload_length >= 4 {
+        // ead the first 4 bytes from args.wi_payload_start_address and parse it as a u32 put into N
+        let ptr = wi_payload_start_address as *const u8;
+        unsafe {
+            let slice = core::slice::from_raw_parts(ptr, 4);
+            EXPORT_BUFFER[0..4].copy_from_slice(slice);
+            num_segments = u32::from_le_bytes(EXPORT_BUFFER[0..4].try_into().unwrap());
+            call_log(2, None, &format!("fibN num_segments={:?}", num_segments));
+        }
+    }
+
     let offset: u64 = 0;
     let maxlen: u64 = unsafe { buffer.len() as u64 };
-    let result = unsafe { fetch(buffer.as_mut_ptr() as u64, offset, maxlen, 5, 0, 0) }; // fetch segment 0 from work item 0
+/*
+let result = unsafe { fetch(buffer.as_mut_ptr() as u64, offset, maxlen, 5, 0, 0) }; // fetch segment 0 from work item 0
 
     if result != NONE {
         let n = unsafe { u32::from_le_bytes(buffer[0..4].try_into().unwrap()) };
@@ -38,17 +63,28 @@ extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
             buffer[8..12].copy_from_slice(&fib_n.to_le_bytes());
         }
     } else {
-        /*
+
         unsafe {
             buffer[0..4].copy_from_slice(&1_u32.to_le_bytes());
             buffer[4..8].copy_from_slice(&1_u32.to_le_bytes());
             buffer[8..12].copy_from_slice(&0_u32.to_le_bytes());
         }
-	*/
     }
-
+*/
     unsafe {
         export(buffer.as_ptr() as u64, buffer.len() as u64);
+    }
+    // in addition to the above segment, we also export num_segments segments
+    for i in 1..num_segments {
+        for j in 0..4104 {
+            unsafe {
+                EXPORT_BUFFER[j] = (((buffer[j] as u32) + (i + 1)) % 256) as u8;
+
+            }
+        }
+        unsafe {
+            export(EXPORT_BUFFER.as_ptr() as u64, EXPORT_BUFFER.len() as u64);
+        }
     }
 
     // set the output address to register a0 and output length to register a1
@@ -59,6 +95,7 @@ extern "C" fn refine(_start_address: u64, _length: u64) -> (u64, u64) {
 
 #[no_mangle]
 static mut output_bytes_32: [u8; 32] = [0; 32];
+static mut EXPORT_BUFFER: [u8; 4104] = [0; 4104];
 #[no_mangle]
 static mut buffer: [u8; 4104] = [
     0xeb, 0x39, 0x0c, 0x02, 0xe7, 0x01, 0xe9, 0xc3, 0x58, 0x4b, 0xfc, 0x5c,
