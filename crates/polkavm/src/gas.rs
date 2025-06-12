@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use polkavm_common::program::{InstructionSet, InstructionVisitor, Instructions, RawReg};
+use polkavm_common::program::{InstructionSet, InstructionVisitor, Instructions, Opcode, RawReg};
 
 #[derive(Clone)]
 pub struct CostModelRef {
@@ -66,14 +66,16 @@ macro_rules! define_cost_model_struct {
         version: $version:expr,
         $($field:ident,)+
     ) => {
-        const COST_MODEL_FIELDS: usize = define_cost_model_struct!(@count $($field)+);
+        const COST_MODEL_FIELDS: usize = define_cost_model_struct!(@count $($field)+) + 1;
 
         #[allow(clippy::exhaustive_structs)]
         #[derive(Hash)]
         pub struct CostModel {
             $(
-                pub $field: Cost
-            ),+
+                pub $field: Cost,
+            )+
+
+            pub invalid: u32,
         }
 
         impl CostModel {
@@ -81,26 +83,29 @@ macro_rules! define_cost_model_struct {
             pub const fn naive() -> Self {
                 CostModel {
                     $(
-                        $field: 1
-                    ),+
+                        $field: 1,
+                    )+
+
+                    invalid: 1,
                 }
             }
 
             /// Serializes the cost model into a byte blob.
             pub fn serialize(&self) -> Vec<u8> {
-                let mut output = Vec::with_capacity((COST_MODEL_FIELDS + 1) * 4);
+                let mut output = Vec::with_capacity((COST_MODEL_FIELDS + 2) * 4);
                 let version: u32 = $version;
                 output.extend_from_slice(&version.to_le_bytes());
 
                 $(
                     output.extend_from_slice(&self.$field.to_le_bytes());
                 )+
+                output.extend_from_slice(&self.invalid.to_le_bytes());
                 output
             }
 
             /// Deserializes the cost model from a byte blob.
             pub fn deserialize(blob: &[u8]) -> Option<CostModel> {
-                if (blob.len() % 4) != 0 || blob.len() / 4 != (COST_MODEL_FIELDS + 1) {
+                if (blob.len() % 4) != 0 || blob.len() / 4 != (COST_MODEL_FIELDS + 2) {
                     return None;
                 }
 
@@ -115,8 +120,19 @@ macro_rules! define_cost_model_struct {
                     position += 4;
                 )+
 
-                assert_eq!(position, (COST_MODEL_FIELDS + 1) * 4);
+                model.invalid = u32::from_le_bytes([blob[position], blob[position + 1], blob[position + 2], blob[position + 3]]);
+
+                assert_eq!(position, (COST_MODEL_FIELDS + 2) * 4);
                 Some(model)
+            }
+
+            /// Gets the cost of a given opcode.
+            pub fn cost_for_opcode(&self, opcode: Opcode) -> u32 {
+                match opcode {
+                    $(
+                        Opcode::$field => self.$field,
+                    )+
+                }
             }
         }
     }
@@ -164,7 +180,6 @@ define_cost_model_struct! {
     div_unsigned_64,
     ecalli,
     fallthrough,
-    invalid,
     jump,
     jump_indirect,
     load_i16,
