@@ -1,7 +1,7 @@
 #[allow(unused_imports)]
 use crate::error::bail;
 use crate::error::Error;
-use crate::gas::{CostModel, CostModelRef};
+use crate::gas::CostModelRef;
 use alloc::sync::Arc;
 use polkavm_assembler::Assembler;
 
@@ -110,6 +110,7 @@ pub struct Config {
     pub(crate) cache_enabled: bool,
     pub(crate) lru_cache_size: u32,
     pub(crate) sandboxing_enabled: bool,
+    pub(crate) default_cost_model: Option<CostModelRef>,
 }
 
 impl Default for Config {
@@ -163,6 +164,7 @@ impl Config {
             cache_enabled: cfg!(feature = "module-cache"),
             lru_cache_size: 0,
             sandboxing_enabled: true,
+            default_cost_model: None,
         }
     }
 
@@ -203,6 +205,27 @@ impl Config {
 
             if let Some(value) = env_bool("POLKAVM_SANDBOXING_ENABLED")? {
                 config.sandboxing_enabled = value;
+            }
+
+            use crate::gas::CostModel;
+
+            if let Some(value) = std::env::var_os("POLKAVM_DEFAULT_COST_MODEL") {
+                if value == "naive" {
+                    config.default_cost_model = Some(CostModel::naive_ref());
+                } else {
+                    let blob = match std::fs::read(&value) {
+                        Ok(blob) => blob,
+                        Err(error) => {
+                            bail!("failed to read gas cost model from {:?}: {}", value, error);
+                        }
+                    };
+
+                    let Some(cost_model) = CostModel::deserialize(&blob) else {
+                        bail!("failed to read gas cost model from {:?}: the cost model blob is invalid", value);
+                    };
+
+                    config.default_cost_model = Some(CostModelRef::from(Arc::new(cost_model)));
+                }
             }
         }
 
@@ -367,6 +390,21 @@ impl Config {
     pub fn sandboxing_enabled(&self) -> bool {
         self.sandboxing_enabled
     }
+
+    /// Sets the default cost model.
+    ///
+    /// Default: `None`
+    ///
+    /// Corresponding environment variable: `POLKAVM_DEFAULT_COST_MODEL`
+    pub fn set_default_cost_model(&mut self, cost_model: Option<CostModelRef>) -> &mut Self {
+        self.default_cost_model = cost_model;
+        self
+    }
+
+    /// Returns the default cost model.
+    pub fn default_cost_model(&self) -> Option<CostModelRef> {
+        self.default_cost_model.clone()
+    }
 }
 
 /// The type of gas metering.
@@ -403,7 +441,7 @@ pub struct ModuleConfig {
     pub(crate) allow_sbrk: bool,
     cache_by_hash: bool,
     pub(crate) custom_codegen: Option<Arc<dyn CustomCodegen>>,
-    pub(crate) cost_model: CostModelRef,
+    pub(crate) cost_model: Option<CostModelRef>,
 }
 
 impl Default for ModuleConfig {
@@ -425,7 +463,7 @@ impl ModuleConfig {
             allow_sbrk: true,
             cache_by_hash: false,
             custom_codegen: None,
-            cost_model: CostModel::naive_ref(),
+            cost_model: None,
         }
     }
 
@@ -533,18 +571,18 @@ impl ModuleConfig {
     }
 
     /// Gets the currently set gas cost model.
-    pub fn cost_model(&self) -> &CostModelRef {
-        &self.cost_model
+    pub fn cost_model(&self) -> Option<&CostModelRef> {
+        self.cost_model.as_ref()
     }
 
     /// Sets a custom gas cost model.
-    pub fn set_cost_model(&mut self, cost_model: CostModelRef) -> &mut Self {
+    pub fn set_cost_model(&mut self, cost_model: Option<CostModelRef>) -> &mut Self {
         self.cost_model = cost_model;
         self
     }
 
     #[cfg(feature = "module-cache")]
-    pub(crate) fn hash(&self) -> Option<polkavm_common::hasher::Hash> {
+    pub(crate) fn hash(&self, cost_model: &CostModelRef) -> Option<polkavm_common::hasher::Hash> {
         if self.custom_codegen.is_some() {
             return None;
         }
@@ -557,8 +595,8 @@ impl ModuleConfig {
             step_tracing,
             dynamic_paging,
             allow_sbrk,
-            ref cost_model,
             // Deliberately ignored.
+            cost_model: _,
             cache_by_hash: _,
             custom_codegen: _,
         } = self;

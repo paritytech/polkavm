@@ -73,12 +73,17 @@ impl ModuleCache {
         }
     }
 
-    pub fn get(&self, config: &ModuleConfig, blob: &ProgramBlob) -> (Option<ModuleKey>, Option<Module>) {
+    pub fn get(
+        &self,
+        config: &ModuleConfig,
+        blob: &ProgramBlob,
+        cost_model: &crate::gas::CostModelRef,
+    ) -> (Option<ModuleKey>, Option<Module>) {
         if !self.enabled {
             return (None, None);
         }
 
-        let Some(config_hash) = config.hash() else {
+        let Some(config_hash) = config.hash(cost_model) else {
             return (None, None);
         };
 

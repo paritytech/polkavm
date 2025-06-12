@@ -18,7 +18,7 @@ if_compiler_is_supported! {
 
 use crate::config::{BackendKind, Config, GasMeteringKind, ModuleConfig, SandboxKind};
 use crate::error::{bail, bail_static, Error};
-use crate::gas::CostModelRef;
+use crate::gas::{CostModel, CostModelRef};
 use crate::interpreter::{InterpretedInstance, InterpretedModule};
 use crate::utils::{GuestInit, InterruptKind};
 use crate::{Gas, ProgramCounter};
@@ -112,6 +112,7 @@ pub struct Engine {
     state: Arc<EngineState>,
     allow_dynamic_paging: bool,
     allow_experimental: bool,
+    default_cost_model: CostModelRef,
 }
 
 impl Engine {
@@ -136,6 +137,10 @@ impl Engine {
             } else {
                 log::warn!("SECURITY SANDBOXING IS DISABLED; THIS IS UNSUPPORTED; YOU HAVE BEEN WARNED");
             }
+        }
+
+        if config.default_cost_model.is_some() && !config.allow_experimental {
+            bail!("cannot override the default gas cost model: `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` is not enabled");
         }
 
         let crosscheck = config.crosscheck;
@@ -223,6 +228,7 @@ impl Engine {
             state,
             allow_dynamic_paging: config.allow_dynamic_paging(),
             allow_experimental: config.allow_experimental,
+            default_cost_model: config.default_cost_model.clone().unwrap_or(CostModel::naive_ref()),
         })
     }
 
@@ -421,9 +427,11 @@ impl Module {
             if blob.is_64_bit() { 64 } else { 32 }
         );
 
+        let cost_model = config.cost_model.clone().unwrap_or_else(|| engine.default_cost_model.clone());
+
         #[cfg(feature = "module-cache")]
         let module_key = {
-            let (module_key, module) = engine.state.module_cache.get(config, &blob);
+            let (module_key, module) = engine.state.module_cache.get(config, &blob, &cost_model);
             if let Some(module) = module {
                 return Ok(module);
             }
@@ -517,7 +525,7 @@ impl Module {
                     config.step_tracing || engine.crosscheck,
                     cast(blob.code().len()).assert_always_fits_in_u32(),
                     init,
-                    config.cost_model.clone(),
+                    cost_model.clone(),
                 )?;
 
                 if config.allow_sbrk {
@@ -650,7 +658,7 @@ impl Module {
             crosscheck: engine.crosscheck,
             page_size_mask,
             page_shift,
-            cost_model: config.cost_model().clone(),
+            cost_model,
 
             #[cfg(feature = "module-cache")]
             module_key,
@@ -674,7 +682,8 @@ impl Module {
     pub fn from_cache(engine: &Engine, config: &ModuleConfig, blob: &ProgramBlob) -> Option<Self> {
         #[cfg(feature = "module-cache")]
         {
-            let (_, module) = engine.state.module_cache.get(config, blob);
+            let cost_model = config.cost_model.clone().unwrap_or_else(|| engine.default_cost_model.clone());
+            let (_, module) = engine.state.module_cache.get(config, blob, &cost_model);
             module
         }
 
