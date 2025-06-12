@@ -80,6 +80,7 @@ let_unit_value = "allow"
 unit_arg = "allow"
 type_complexity = "allow"
 too_many_arguments = "allow"
+needless_late_init = "allow"
 
 # These are are 'allow' by default.
 alloc_instead_of_core = "warn"
