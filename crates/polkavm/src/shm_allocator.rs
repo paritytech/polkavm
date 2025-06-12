@@ -121,12 +121,12 @@ impl ShmAllocator {
         let page_shift = page_size.ilog2();
 
         let fd = linux_raw::sys_memfd_create(cstr!("global"), linux_raw::MFD_CLOEXEC | linux_raw::MFD_ALLOW_SEALING)?;
-        linux_raw::sys_ftruncate(fd.borrow(), linux_raw::c_ulong::from(u32::MAX))?;
+        linux_raw::sys_ftruncate(fd.borrow(), linux_raw::c_ulong::from(u32::MAX) + 1)?;
 
         let mmap = unsafe {
             linux_raw::Mmap::map(
                 core::ptr::null_mut(),
-                cast(u32::MAX).to_usize(),
+                cast(u32::MAX).to_usize() + 1,
                 linux_raw::PROT_READ | linux_raw::PROT_WRITE,
                 linux_raw::MAP_SHARED,
                 Some(fd.borrow()),
