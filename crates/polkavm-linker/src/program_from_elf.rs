@@ -198,6 +198,12 @@ impl ProgramFromElfError {
     }
 }
 
+impl From<ProgramFromElfError> for String {
+    fn from(error: ProgramFromElfError) -> String {
+        error.to_string()
+    }
+}
+
 impl std::error::Error for ProgramFromElfError {}
 
 impl core::fmt::Display for ProgramFromElfError {
