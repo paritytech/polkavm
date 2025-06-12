@@ -799,7 +799,7 @@ macro_rules! define_opcodes {
 
     (@impl_shared $([$($tag:tt),+] $name:ident = $value:expr,)+) => {
         #[allow(non_camel_case_types)]
-        #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+        #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
         #[repr(u8)]
         pub enum Opcode {
             $(
