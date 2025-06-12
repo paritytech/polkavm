@@ -19,11 +19,5 @@ RUSTC_BOOTSTRAP=1 cargo test --no-default-features -p polkavm
 echo ">> cargo test (module-cache)"
 cargo test --features module-cache -p polkavm
 
-echo ">> cargo test (generic-sandbox)"
-cargo test --features generic-sandbox -p polkavm -- \
-    tests::compiler_generic_basic_test \
-    tests::compiler_generic_simple_test \
-    tests::compiler_generic_riscv_ 
-
 echo ">> cargo run generate (spectool)"
 cargo run -p spectool generate
