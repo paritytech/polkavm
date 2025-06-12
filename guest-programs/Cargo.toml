@@ -21,6 +21,9 @@ members = [
     "bench-pinky",
     "bench-prime-sieve",
 
+    # Utilities
+    "simplealloc",
+
     # Tests
     "test-blob",
 ]

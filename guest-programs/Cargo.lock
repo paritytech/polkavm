@@ -7,14 +7,15 @@ name = "bench-memset"
 version = "0.1.0"
 dependencies = [
  "compiler_builtins",
+ "picoalloc",
  "polkavm-derive",
- "simplealloc",
 ]
 
 [[package]]
 name = "bench-minimal"
 version = "0.1.0"
 dependencies = [
+ "picoalloc",
  "polkavm-derive",
  "simplealloc",
 ]
@@ -24,6 +25,7 @@ name = "bench-pinky"
 version = "0.1.0"
 dependencies = [
  "nes",
+ "picoalloc",
  "polkavm-derive",
  "simplealloc",
 ]
@@ -33,6 +35,7 @@ name = "bench-prime-sieve"
 version = "0.1.0"
 dependencies = [
  "helper-macros",
+ "picoalloc",
  "polkavm-derive",
  "simplealloc",
  "softfloat",
@@ -95,6 +98,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "picoalloc"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca1b3eed9329a21fdc21f6167f7609e1e0387c4633fde753d079c05e0317b9c8"
+
+[[package]]
 name = "polkavm-common"
 version = "0.25.0"
 
@@ -143,7 +152,7 @@ dependencies = [
 
 [[package]]
 name = "simplealloc"
-version = "0.25.0"
+version = "0.0.1"
 
 [[package]]
 name = "softfloat"

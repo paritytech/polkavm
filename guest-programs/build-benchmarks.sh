@@ -135,4 +135,9 @@ function build_benchmark() {
 build_benchmark "bench-minimal"
 build_benchmark "bench-pinky"
 build_benchmark "bench-prime-sieve"
+
+if [ "${SOLANA_PLATFORM_TOOLS_DIR:-}" != "" ]; then
+    unset SOLANA_PLATFORM_TOOLS_DIR
+fi
+
 build_benchmark "bench-memset"

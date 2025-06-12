@@ -11,8 +11,6 @@ members = [
     "crates/polkavm-linux-raw",
     "crates/polkavm",
 
-    "crates/simplealloc",
-
     "tools/polkatool",
     "tools/polkavm-linux-raw-generate",
     "tools/spectool",

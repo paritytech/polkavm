@@ -65,7 +65,14 @@ macro_rules! define_benchmark {
         state = $state:expr,
     ) => {
         #[global_allocator]
-        static mut GLOBAL_ALLOC: simplealloc::SimpleAlloc<{ $heap_size }> = simplealloc::SimpleAlloc::new();
+        static mut GLOBAL_ALLOC: picoalloc::Mutex<picoalloc::Allocator<picoalloc::ArrayPointer<{ $heap_size }>>> = {
+            static mut ARRAY: picoalloc::Array<{ $heap_size }> = picoalloc::Array([0; $heap_size]);
+
+            picoalloc::Mutex::new(picoalloc::Allocator::new(
+                picoalloc::ArrayPointer(&raw mut ARRAY),
+                picoalloc::Size::from_bytes_usize($heap_size).unwrap()
+            ))
+        };
         static mut STATE: State = $state;
     };
 }

@@ -16,7 +16,6 @@ do
     cargo test --profile $PROFILE -p polkavm-disassembler
     cargo test --profile $PROFILE -p polkavm-linker
     cargo test --profile $PROFILE -p polkavm-linux-raw
-    cargo test --profile $PROFILE -p simplealloc
 
     echo ">> cargo test (examples, $PROFILE)"
     cargo test --profile $PROFILE -p hello-world-host

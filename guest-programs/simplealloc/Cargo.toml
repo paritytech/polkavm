@@ -1,0 +1,11 @@
+[package]
+name = "simplealloc"
+version = "0.0.1"
+edition = "2021"
+publish = false
+
+[dependencies]
+
+[features]
+default = ["thread-safe"]
+thread-safe = []

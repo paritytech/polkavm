@@ -14,8 +14,8 @@ name = "bench-memset"
 path = "src/main.rs"
 
 [dependencies]
-simplealloc = { path = "../../crates/simplealloc" }
 compiler_builtins_crate = { package = "compiler_builtins", version = "=0.1.139", default-features = false }
+picoalloc = { version = "2.1.0", features = ["alloc"] }
 
 [target.'cfg(target_env = "polkavm")'.dependencies]
 polkavm-derive = { path = "../../crates/polkavm-derive" }
