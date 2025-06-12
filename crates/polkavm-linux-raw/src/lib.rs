@@ -1285,6 +1285,7 @@ impl Error {
     // Avoid pulling in core::fmt machinery to keep the code size low.
     #[cold]
     fn fmt_to_string_impl(&self, write_str: &mut dyn FnMut(&str)) {
+        #[allow(clippy::needless_borrow)]
         write_str(&self.message);
 
         if self.errno == 0 {

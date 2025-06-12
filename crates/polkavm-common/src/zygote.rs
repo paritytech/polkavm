@@ -30,6 +30,8 @@ macro_rules! define_address_table {
         }
 
         impl $name_table {
+            #[allow(clippy::fn_to_numeric_cast_any)]
+            #[allow(clippy::fn_to_numeric_cast)]
             #[inline]
             pub fn from_raw(table: $name_raw) -> Self {
                 Self {

@@ -123,7 +123,7 @@ impl<'a> From<&'a [u8]> for ArcBytes {
 }
 
 #[cfg(not(feature = "alloc"))]
-impl<'a> From<&'static [u8]> for ArcBytes {
+impl From<&'static [u8]> for ArcBytes {
     fn from(data: &'static [u8]) -> Self {
         ArcBytes::from_static(data)
     }

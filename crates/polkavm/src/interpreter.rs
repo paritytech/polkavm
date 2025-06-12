@@ -967,7 +967,7 @@ impl<'a> Visitor<'a> {
     }
 
     #[inline(always)]
-    fn go_to_next_instruction(&mut self) -> Option<Target> {
+    fn go_to_next_instruction(&self) -> Option<Target> {
         Some(self.inner.compiled_offset + 1)
     }
 
@@ -1026,7 +1026,7 @@ impl<'a> Visitor<'a> {
     }
 
     fn branch<const DEBUG: bool>(
-        &mut self,
+        &self,
         s1: impl IntoRegImm,
         s2: impl IntoRegImm,
         target_true: Target,

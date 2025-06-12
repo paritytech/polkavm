@@ -1129,6 +1129,7 @@ where
     }
 
     #[allow(clippy::unused_self)]
+    #[allow(clippy::needless_pass_by_ref_mut)]
     #[inline(always)]
     pub fn fallthrough(&mut self) {}
 

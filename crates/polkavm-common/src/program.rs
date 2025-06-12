@@ -791,7 +791,7 @@ macro_rules! define_opcodes {
                 #[allow(unsafe_code)]
                 // SAFETY: We already checked that this opcode is valid, so this is safe.
                 unsafe {
-                    Some(core::mem::transmute(byte))
+                    Some(core::mem::transmute::<u8, Opcode>(byte))
                 }
             }
         }

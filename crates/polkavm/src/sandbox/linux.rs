@@ -360,6 +360,7 @@ impl core::fmt::Display for ChildStatus {
 }
 
 impl ChildProcess {
+    #[allow(clippy::needless_pass_by_ref_mut)]
     fn waitid(&mut self, flags: u32) -> Result<linux_raw::siginfo_t, Error> {
         let mut siginfo: linux_raw::siginfo_t = unsafe { core::mem::zeroed() };
         let mut result;

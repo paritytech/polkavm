@@ -226,7 +226,7 @@ where
 
     /// Finds the first set bit, starting at `min_index`.
     #[inline]
-    pub fn find_first(&mut self, min_index: BitIndex<Primary, Secondary>) -> Option<BitIndex<Primary, Secondary>> {
+    pub fn find_first(&self, min_index: BitIndex<Primary, Secondary>) -> Option<BitIndex<Primary, Secondary>> {
         let mut primary = min_index.primary;
         let mut secondary = u32::MAX;
 
