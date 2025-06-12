@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use polkavm_assembler::{Assembler, Label};
 use polkavm_common::abi::VM_CODE_ADDRESS_ALIGNMENT;
-use polkavm_common::program::{
-    is_jump_target_valid, InstructionVisitor, Instructions, JumpTable, ParsedInstruction, ProgramCounter, ProgramExport, RawReg,
-};
+use polkavm_common::program::{is_jump_target_valid, InstructionVisitor, JumpTable, ProgramCounter, ProgramExport, RawReg};
 use polkavm_common::zygote::VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH;
 
 use crate::error::Error;
@@ -491,26 +489,12 @@ where
 
     #[cold]
     fn current_instruction(&self, program_counter: u32) -> impl core::fmt::Display {
-        struct MaybeInstruction<B>(Option<ParsedInstruction>, PhantomData<B>);
-        impl<B> core::fmt::Display for MaybeInstruction<B>
-        where
-            B: CompilerBitness,
-        {
-            fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
-                if let Some(instruction) = self.0 {
-                    let mut format = polkavm_common::program::InstructionFormat::default();
-                    format.is_64_bit = matches!(B::BITNESS, Bitness::B64);
-                    instruction.display(&format).fmt(fmt)?;
-                    Ok(())
-                } else {
-                    write!(fmt, "<NONE>")
-                }
-            }
-        }
-
-        MaybeInstruction::<B>(
-            Instructions::new_bounded(self.instruction_set, self.code, self.bitmask, program_counter).next(),
-            PhantomData,
+        crate::api::Module::display_instruction_at_impl(
+            self.instruction_set,
+            self.code,
+            self.bitmask,
+            matches!(B::BITNESS, Bitness::B64),
+            ProgramCounter(program_counter),
         )
     }
 

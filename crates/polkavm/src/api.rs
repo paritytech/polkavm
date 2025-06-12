@@ -831,14 +831,54 @@ impl Module {
         Some(i64::from(gas.0))
     }
 
+    #[cold]
+    fn display_instruction_at(&self, program_counter: ProgramCounter) -> impl core::fmt::Display {
+        let state = self.state();
+        Self::display_instruction_at_impl(
+            state.instruction_set,
+            state.blob.code(),
+            state.blob.bitmask(),
+            state.blob.is_64_bit(),
+            program_counter,
+        )
+    }
+
+    #[cold]
+    pub(crate) fn display_instruction_at_impl(
+        instruction_set: RuntimeInstructionSet,
+        code: &[u8],
+        bitmask: &[u8],
+        is_64_bit: bool,
+        program_counter: ProgramCounter,
+    ) -> impl core::fmt::Display {
+        struct MaybeInstruction(Option<polkavm_common::program::ParsedInstruction>, bool);
+        impl core::fmt::Display for MaybeInstruction {
+            fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+                if let Some(instruction) = self.0 {
+                    let mut format = polkavm_common::program::InstructionFormat::default();
+                    format.is_64_bit = self.1;
+                    instruction.display(&format).fmt(fmt)?;
+                    Ok(())
+                } else {
+                    write!(fmt, "<NONE>")
+                }
+            }
+        }
+
+        MaybeInstruction(
+            Instructions::new_bounded(instruction_set, code, bitmask, program_counter.0).next(),
+            is_64_bit,
+        )
+    }
+
     pub(crate) fn debug_print_location(&self, log_level: log::Level, pc: ProgramCounter) {
-        log::log!(log_level, "  At #{pc}:");
+        log::log!(log_level, "  Location: #{pc}: {}", self.display_instruction_at(pc));
 
         let Ok(Some(mut line_program)) = self.state().blob.get_debug_line_program_at(pc) else {
-            log::log!(log_level, "    (no location available)");
             return;
         };
 
+        log::log!(log_level, "  Source location:");
         for _ in 0..128 {
             // Have an upper bound on the number of iterations, just in case.
             let Ok(Some(region_info)) = line_program.run() else { break };
