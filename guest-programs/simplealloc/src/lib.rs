@@ -13,6 +13,12 @@ pub struct SimpleAlloc<const N: usize> {
     capacity_used: core::cell::Cell<usize>,
 }
 
+impl<const N: usize> Default for SimpleAlloc<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> SimpleAlloc<N> {
     #[inline]
     pub const fn new() -> Self {
