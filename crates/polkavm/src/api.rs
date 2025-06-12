@@ -390,8 +390,9 @@ impl Module {
         self.round_to_page_size_down(value) + (u32::from((value & self.state().page_size_mask) != 0) << self.state().page_shift)
     }
 
-    pub(crate) fn cost_model(&self) -> CostModelRef {
-        self.state().cost_model.clone()
+    /// Returns the cost model associated with this module.
+    pub fn cost_model(&self) -> &CostModelRef {
+        &self.state().cost_model
     }
 
     if_compiler_is_supported! {
