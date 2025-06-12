@@ -60,7 +60,7 @@ regalloc2 = "0.9.3"
 rustc-demangle = "0.1.23"
 ruzstd = { version = "0.5.0", default-features = false }
 schnellru = { version = "0.2.3" }
-sdl2 = { git = "https://github.com/Rust-SDL2/rust-sdl2.git", rev = "c242701c1ebc40aa78608c51bc44a6ce30e8023d" }
+sdl2 = { git = "https://github.com/koute/rust-sdl2.git", rev = "9934aeb632add963a77f22c3cb60a9bb55dbbf6e" }
 serde = { version = "1.0.203", features = ["derive"] }
 serde_json = { version = "1.0.117" }
 syn = "2.0.25"
