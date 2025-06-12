@@ -766,6 +766,11 @@ pub enum CallError<UserError = core::convert::Infallible> {
 
     /// The execution failed with a custom user error.
     User(UserError),
+
+    /// The execution stepped through one instruction.
+    ///
+    /// Requires execution step-tracing to be enabled with [`ModuleConfig::set_step_tracing`](crate::ModuleConfig::set_step_tracing), otherwise is never emitted.
+    Step,
 }
 
 impl<UserData, UserError> InstancePre<UserData, UserError> {
@@ -817,13 +822,18 @@ impl<UserData, UserError> Instance<UserData, UserError> {
         let entry_point = entry_point
             .get(&self.pre.0.exports)
             .map_err(|error| CallError::Error(Error::from_display(error)))?;
-        self.instance.prepare_call_typed(entry_point, args);
 
+        self.instance.prepare_call_typed(entry_point, args);
+        self.continue_execution(user_data)
+    }
+
+    /// Continues execution.
+    pub fn continue_execution(&mut self, user_data: &mut UserData) -> Result<(), CallError<UserError>> {
         loop {
             let interrupt = self.instance.run().map_err(CallError::Error)?;
             match interrupt {
-                InterruptKind::Finished => break,
-                InterruptKind::Trap => return Err(CallError::Trap),
+                InterruptKind::Finished => break Ok(()),
+                InterruptKind::Trap => break Err(CallError::Trap),
                 InterruptKind::Ecalli(hostcall) => {
                     if let Some(host_fn) = self.pre.0.imports.get(hostcall as usize).and_then(|host_fn| host_fn.as_ref()) {
                         host_fn.0.call(user_data, &mut self.instance).map_err(CallError::User)?;
@@ -836,7 +846,7 @@ impl<UserData, UserError> Instance<UserData, UserError> {
                         fallback_handler(caller, hostcall).map_err(CallError::User)?;
                     } else {
                         log::debug!("Called a missing host function with ID = {}", hostcall);
-                        return Err(CallError::Trap);
+                        break Err(CallError::Trap);
                     };
                 }
                 InterruptKind::NotEnoughGas => return Err(CallError::NotEnoughGas),
@@ -894,13 +904,11 @@ impl<UserData, UserError> Instance<UserData, UserError> {
                     handle!(rw_data_range, rw_data);
 
                     log::debug!("Unexpected segfault: 0x{:x}", segfault.page_address);
-                    return Err(CallError::Trap);
+                    break Err(CallError::Trap);
                 }
-                InterruptKind::Step => {}
+                InterruptKind::Step => break Err(CallError::Step),
             }
         }
-
-        Ok(())
     }
 
     /// A conveniance function to call [`Instance::call_typed`] and [`RawInstance::get_result_typed`] in a single function call.
