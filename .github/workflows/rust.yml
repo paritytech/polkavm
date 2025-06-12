@@ -46,6 +46,10 @@ jobs:
     - uses: actions/checkout@v4
     - name: Install clippy (base toolchain)
       run: rustup component add clippy
+    - name: Install clippy (benchtool toolchain)
+      run: cd tools/benchtool && rustup component add clippy
+    - name: Install clippy (guest-programs toolchain)
+      run: cd guest-programs && rustup component add clippy
     - name: Run clippy
       run: ./ci/jobs/clippy.sh
   build-and-test-windows:
@@ -81,6 +85,8 @@ jobs:
       run: rustup component add clippy
     - name: Install clippy (zygote toolchain)
       run: cd crates/polkavm-zygote && rustup component add clippy
+    - name: Install clippy (benchtool toolchain)
+      run: cd tools/benchtool && rustup component add clippy
     - name: Install clippy (guest-programs toolchain)
       run: cd guest-programs && rustup component add clippy
     - name: Run clippy
