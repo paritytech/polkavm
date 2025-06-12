@@ -1,0 +1,29 @@
+[package]
+name = "gastool"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A tool for gas cost model benchmarking"
+publish = false
+
+[dependencies]
+clap.workspace = true
+env_logger.workspace = true
+libc.workspace = true
+log.workspace = true
+memoffset = "0.9.1"
+oorandom = "11.1.5"
+plotters = { version = "0.3.7", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "image", "errorbar", "ttf", "fontconfig-dlopen"] }
+polkavm-assembler.workspace = true
+polkavm-common.workspace = true
+polkavm-linker.workspace = true
+polkavm-linux-raw.workspace = true
+polkavm.workspace = true
+raw-cpuid = "11.5.0"
+ruzstd.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
