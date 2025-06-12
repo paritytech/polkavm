@@ -854,6 +854,68 @@ fn jump_after_invalid_instruction_from_within(engine_config: Config) {
     assert_eq!(instance.gas(), 998);
 }
 
+fn jump_indirect_simple(engine_config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new_64bit();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::jump_indirect(A0, 0),
+            asm::load_imm(A1, 100),
+            asm::ret(),
+            asm::load_imm(A1, 200),
+            asm::ret(),
+        ],
+        &[1, 2],
+    );
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let module = Module::from_blob(&engine, &Default::default(), blob.clone()).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_reg(Reg::A0, 2);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A1), 100);
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_reg(Reg::A0, 4);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A1), 200);
+
+    for pointer in [0, 1, 3, 5, 6, 7, 1024 * 1024 - 1, 1024 * 1024, 0xffffffffffffffff] {
+        log::info!("Trying pointer: {pointer}");
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(Reg::A0, pointer);
+        instance.set_next_program_counter(ProgramCounter(0));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    }
+}
+
+fn jump_indirect_big_table(engine_config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new_64bit();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[asm::jump_indirect(A0, 1024 * 1024), asm::trap(), asm::ret()],
+        &vec![2; 1024 * 1024],
+    );
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let module = Module::from_blob(&engine, &Default::default(), blob.clone()).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+}
+
 fn dynamic_paging_basic(mut engine_config: Config) {
     engine_config.set_allow_dynamic_paging(true);
 
@@ -3745,6 +3807,8 @@ run_tests! {
     jump_into_middle_of_basic_block_from_outside
     jump_into_middle_of_basic_block_from_within
     jump_after_invalid_instruction_from_within
+    jump_indirect_simple
+    jump_indirect_big_table
     dynamic_paging_basic
     dynamic_paging_freeing_pages
     dynamic_paging_protect_memory

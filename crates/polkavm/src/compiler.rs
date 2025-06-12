@@ -318,13 +318,19 @@ where
         let label_sysenter = ArchVisitor(&mut self).emit_sysenter();
         let label_sysreturn = ArchVisitor(&mut self).emit_sysreturn();
         let native_code_origin = self.asm.origin();
+        let native_page_size = crate::sandbox::get_native_page_size();
+        let vm_code_address_alignment = VM_CODE_ADDRESS_ALIGNMENT as usize;
 
-        let jump_table_length = (self.jump_table.len() as usize + 1) * VM_CODE_ADDRESS_ALIGNMENT as usize;
+        let jump_table_length = (self.jump_table.len() as usize + 1) * vm_code_address_alignment;
         let mut native_jump_table = S::allocate_jump_table(global, jump_table_length).map_err(Error::from_display)?;
+        assert_eq!(core::mem::size_of_val(native_jump_table.as_ref()) % native_page_size, 0);
         {
             let native_jump_table = native_jump_table.as_mut();
-            native_jump_table[..VM_CODE_ADDRESS_ALIGNMENT as usize].fill(JUMP_TABLE_INVALID_ADDRESS); // First entry is always invalid.
+            native_jump_table[..vm_code_address_alignment].fill(JUMP_TABLE_INVALID_ADDRESS); // First entry is always invalid.
             native_jump_table[jump_table_length..].fill(JUMP_TABLE_INVALID_ADDRESS); // Fill in the padding, since the size is page-aligned.
+
+            let native_jump_table = &mut native_jump_table[vm_code_address_alignment..jump_table_length];
+            assert_eq!(native_jump_table.len(), self.jump_table.len() as usize * vm_code_address_alignment);
 
             for (jump_table_index, code_offset) in self.jump_table.iter().enumerate() {
                 let mut address = JUMP_TABLE_INVALID_ADDRESS;
@@ -334,7 +340,9 @@ where
                     }
                 }
 
-                native_jump_table[(jump_table_index + 1) * VM_CODE_ADDRESS_ALIGNMENT as usize] = address;
+                let offset = jump_table_index * vm_code_address_alignment;
+                native_jump_table[offset] = address;
+                native_jump_table[offset + 1..offset + vm_code_address_alignment].fill(JUMP_TABLE_INVALID_ADDRESS);
             }
         }
 

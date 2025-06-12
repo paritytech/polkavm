@@ -892,6 +892,9 @@ where
                         reg_indirect(RegSize::R32, conv_reg(base) + offset as i32),
                     ));
                     (asm, TMP_REG)
+                } else if B::BITNESS == Bitness::B64 {
+                    let asm = asm.push(mov(RegSize::R32, TMP_REG, conv_reg(base)));
+                    (asm, TMP_REG)
                 } else {
                     (asm.push_none(), conv_reg(base))
                 };
