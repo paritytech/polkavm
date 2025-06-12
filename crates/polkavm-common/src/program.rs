@@ -3053,6 +3053,14 @@ impl core::fmt::Display for ProgramParseError {
     }
 }
 
+#[cfg(feature = "alloc")]
+impl From<ProgramParseError> for alloc::string::String {
+    fn from(error: ProgramParseError) -> alloc::string::String {
+        use alloc::string::ToString;
+        error.to_string()
+    }
+}
+
 #[cfg(feature = "std")]
 impl std::error::Error for ProgramParseError {}
 
