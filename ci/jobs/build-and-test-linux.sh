@@ -9,6 +9,9 @@ cd crates/polkavm-zygote
 cargo build --release
 cd ../..
 
+echo ">> cargo test (gastool)"
+cd tools/gastool && cargo test && cd ../..
+
 echo ">> cargo run (examples, interpreter, i686-unknown-linux-musl)"
 POLKAVM_TRACE_EXECUTION=1 POLKAVM_ALLOW_INSECURE=1 POLKAVM_BACKEND=interpreter cargo run --target=i686-unknown-linux-musl -p hello-world-host
 
