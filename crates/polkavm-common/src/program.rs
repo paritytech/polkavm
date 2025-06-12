@@ -814,6 +814,32 @@ macro_rules! define_opcodes {
                     _ => None
                 }
             }
+
+            pub fn name(self) -> &'static str {
+                match self {
+                    $(
+                        Opcode::$name => stringify!($name),
+                    )+
+                }
+            }
+        }
+
+        impl core::fmt::Display for Opcode {
+            fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+                fmt.write_str(self.name())
+            }
+        }
+
+        impl core::str::FromStr for Opcode {
+            type Err = &'static str;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                Ok(match s {
+                    $(
+                        stringify!($name) => Opcode::$name,
+                    )+
+                    _ => return Err("unknown opcode")
+                })
+            }
         }
 
         define_opcodes!(@impl_instruction_set ISA32_V1         [I_32, I_SBRK]  $([$($tag),+] $name = $value,)+);
