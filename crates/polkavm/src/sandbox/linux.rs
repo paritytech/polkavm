@@ -2393,7 +2393,7 @@ impl Sandbox {
             }
 
             self.count_futex_wait += 1;
-            match linux_raw::sys_futex_wait(&self.vmctx().futex, VMCTX_FUTEX_BUSY, Some(Duration::from_millis(100))) {
+            match linux_raw::sys_futex_wait(&self.vmctx().futex, VMCTX_FUTEX_BUSY, Some(Duration::from_millis(1000))) {
                 Ok(()) => continue,
                 Err(error) if error.errno() == linux_raw::EAGAIN || error.errno() == linux_raw::EINTR => continue,
                 Err(error) if error.errno() == linux_raw::ETIMEDOUT => {
