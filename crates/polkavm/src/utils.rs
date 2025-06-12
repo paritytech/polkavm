@@ -1,25 +1,4 @@
 use alloc::vec::Vec;
-use polkavm_common::program::RawReg;
-
-#[derive(Copy, Clone)]
-pub enum RegImm {
-    Reg(RawReg),
-    Imm(u32),
-}
-
-impl From<RawReg> for RegImm {
-    #[inline]
-    fn from(reg: RawReg) -> Self {
-        RegImm::Reg(reg)
-    }
-}
-
-impl From<u32> for RegImm {
-    #[inline]
-    fn from(value: u32) -> Self {
-        RegImm::Imm(value)
-    }
-}
 
 #[derive(Copy, Clone, Default)]
 pub struct GuestInit<'a> {

@@ -24,6 +24,7 @@ impl<T> Mutex<T> {
         }
     }
 
+    #[allow(dead_code)]
     #[inline]
     pub fn lock(&self) -> MutexGuard<T> {
         while self

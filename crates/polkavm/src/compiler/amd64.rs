@@ -15,7 +15,6 @@ use polkavm_common::zygote::{VmCtx, VM_ADDR_VMCTX};
 use crate::compiler::{ArchVisitor, Bitness, CompilerBitness, SandboxKind};
 use crate::config::GasMeteringKind;
 use crate::sandbox::Sandbox;
-use crate::utils::RegImm;
 
 /// The register used for the embedded sandbox to hold the base address of the guest's linear memory.
 const GENERIC_SANDBOX_MEMORY_REG: NativeReg = AUX_TMP_REG;
@@ -28,6 +27,26 @@ use polkavm_common::regmap::{AUX_TMP_REG, TMP_REG};
 
 polkavm_common::static_assert!(polkavm_common::regmap::to_guest_reg(TMP_REG).is_none());
 polkavm_common::static_assert!(polkavm_common::regmap::to_guest_reg(AUX_TMP_REG).is_none());
+
+#[derive(Copy, Clone)]
+pub enum RegImm {
+    Reg(RawReg),
+    Imm(u32),
+}
+
+impl From<RawReg> for RegImm {
+    #[inline]
+    fn from(reg: RawReg) -> Self {
+        RegImm::Reg(reg)
+    }
+}
+
+impl From<u32> for RegImm {
+    #[inline]
+    fn from(value: u32) -> Self {
+        RegImm::Imm(value)
+    }
+}
 
 static REG_MAP: [NativeReg; 16] = {
     let mut output = [conv_reg_const(Reg::T2); 16];
