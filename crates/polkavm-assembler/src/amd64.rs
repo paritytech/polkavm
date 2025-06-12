@@ -1288,6 +1288,12 @@ pub mod inst {
             None,
             (fmt.write_str("nop word [cs:rax+rax]")),
 
+        // https://www.felixcloutier.com/x86/clflushopt
+        clflushopt(MemOp) =>
+            Inst::new(0xae).override_op_size().op_alt().modrm_opext(0b111).mem(self.0).encode(),
+            None,
+            (fmt.write_fmt(core::format_args!("clflushopt {}", self.0))),
+
         // https://www.felixcloutier.com/x86/ret
         ret() =>
             InstBuf::from_array([0xc3]),
@@ -2388,6 +2394,7 @@ mod tests {
         call_rel32,
         call,
         cdq,
+        clflushopt,
         cmov,
         cmp,
         cpuid,
