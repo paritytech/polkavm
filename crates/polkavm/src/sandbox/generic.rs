@@ -22,7 +22,8 @@ use crate::api::{CompiledModuleKind, MemoryAccessError, Module};
 use crate::compiler::CompiledModule;
 use crate::config::Config;
 use crate::config::GasMeteringKind;
-use crate::{Gas, InterruptKind, ProgramCounter, RegValue};
+use crate::page_set::PageSet;
+use crate::{Gas, InterruptKind, ProgramCounter, RegValue, Segfault};
 
 #[inline(always)]
 pub(crate) fn as_bytes(slice: &[usize]) -> &[u8] {
@@ -74,6 +75,8 @@ mod sys {
     pub const MAP_FAILED: *mut c_void = !0 as *mut c_void;
     pub const SA_SIGINFO: c_int = polkavm_linux_raw::SA_SIGINFO as c_int;
     pub const SA_NODEFER: c_int = polkavm_linux_raw::SA_NODEFER as c_int;
+    pub const MADV_DONTNEED: c_int = polkavm_linux_raw::MADV_DONTNEED as c_int;
+    pub const MADV_FREE: c_int = polkavm_linux_raw::MADV_FREE as c_int;
 
     pub type sighandler_t = size_t;
 
@@ -100,6 +103,8 @@ mod sys {
 
         pub fn mprotect(addr: *mut c_void, len: size_t, prot: c_int) -> c_int;
 
+        pub fn madvise(addr: *mut c_void, len: size_t, advice: c_int) -> c_int;
+
         pub fn sigaction(signum: c_int, act: *const sigaction, oldact: *mut sigaction) -> c_int;
 
         pub fn sigemptyset(set: *mut sigset_t) -> c_int;
@@ -110,7 +115,7 @@ mod sys {
 use libc as sys;
 
 use core::ffi::c_void;
-use sys::{c_int, size_t, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
+use sys::{c_int, size_t, MADV_DONTNEED, MADV_FREE, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
 
 pub(crate) const GUEST_MEMORY_TO_VMCTX_OFFSET: isize = -4096;
 
@@ -208,6 +213,21 @@ impl Mmap {
     pub fn reserve_address_space(length: size_t) -> Result<Self, Error> {
         // SAFETY: `MAP_FIXED` is not specified, so this is always safe.
         unsafe { Mmap::raw_mmap(core::ptr::null_mut(), length, 0, MAP_ANONYMOUS | MAP_PRIVATE) }
+    }
+
+    pub fn madvise(&mut self, offset: usize, length: usize, advice: c_int) -> Result<(), Error> {
+        if !offset.checked_add(length).map_or(false, |end| end <= self.length) {
+            return Err("out of bounds madvise".into());
+        }
+
+        // SAFETY: The bounds are always within the range of this map.
+        unsafe {
+            if sys::madvise(self.pointer.add(offset), length, advice) < 0 {
+                return Err(Error(std::io::Error::last_os_error()));
+            }
+        }
+
+        Ok(())
     }
 
     pub fn mprotect(&mut self, offset: usize, length: usize, protection: c_int) -> Result<(), Error> {
@@ -322,12 +342,25 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
             }};
         }
 
-        let rip = fetch_reg!(rip);
+        const X86_TRAP_PF: u64 = 14;
+        let is_page_fault = signal == sys::SIGSEGV && {
+            #[cfg(target_os = "linux")]
+            {
+                context.uc_mcontext.trapno == X86_TRAP_PF
+            }
+            // #[cfg(target_os = "macos")]
+            // {
+            //     (*context.uc_mcontext).__ss.trapno == X86_TRAP_PF
+            // }
+            // #[cfg(target_os = "freebsd")]
+            // {
+            //     context.uc_mcontext.mc_trapno == X86_TRAP_PF
+            // }
+        };
 
+        let rip = fetch_reg!(rip);
         let vmctx = &mut *vmctx;
         if vmctx.program_range.contains(&rip) {
-            log::trace!("Signal received at 0x{rip:x}");
-
             use polkavm_common::regmap::NativeReg;
             for reg in polkavm_common::program::Reg::ALL {
                 let value = match polkavm_common::regmap::to_native_reg(reg) {
@@ -351,7 +384,29 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
             }
 
             vmctx.next_native_program_counter.store(rip, Ordering::Relaxed);
-            trigger_exit(vmctx, ExitReason::Signal);
+
+            if is_page_fault {
+                let fault_address = {
+                    #[cfg(target_os = "linux")]
+                    {
+                        info.__bindgen_anon_1.__bindgen_anon_1._sifields._sigfault._addr as u64
+                    }
+                    // #[cfg(target_os = "macos")]
+                    // {
+                    //     info.si_addr as u64
+                    // }
+                    // #[cfg(target_os = "freebsd")]
+                    // {
+                    //     info.si_addr as u64
+                    // }
+                };
+
+                log::trace!("Page fault at 0x{fault_address:x} (rip: 0x{rip:x})");
+                trigger_exit(vmctx, ExitReason::Segfault(fault_address));
+            } else {
+                log::trace!("Signal received at 0x{rip:x}");
+                trigger_exit(vmctx, ExitReason::Signal);
+            }
         }
     }
 
@@ -459,6 +514,7 @@ enum ExitReason {
     NotEnoughGas,
     Trap,
     Ecalli(u32),
+    Segfault(u64),
     Step,
 }
 
@@ -538,10 +594,7 @@ polkavm_common::static_assert!(core::mem::size_of::<VmCtx>() <= 4096);
 pub struct GlobalState {}
 
 impl GlobalState {
-    pub fn new(config: &Config) -> Result<Self, Error> {
-        if config.allow_dynamic_paging {
-            return Err(Error::from("dynamic paging is currently not supported by the generic sandbox"));
-        }
+    pub fn new(_config: &Config) -> Result<Self, Error> {
         Ok(GlobalState {})
     }
 }
@@ -737,6 +790,9 @@ pub struct Sandbox {
     next_program_counter: Option<ProgramCounter>,
     next_program_counter_changed: bool,
 
+    page_set: PageSet,
+    dynamic_paging_enabled: bool,
+
     aux_data_address: u32,
     aux_data_full_length: u32,
     aux_data_length: u32,
@@ -849,6 +905,17 @@ impl Sandbox {
     }
 
     fn bound_check_access(&self, mut address: u32, mut length: u32, is_writable: bool) -> Result<(), ()> {
+        if self.dynamic_paging_enabled {
+            let module = self.module.as_ref().unwrap();
+            let page_start = module.address_to_page(module.round_to_page_size_down(address));
+            let page_end = module.address_to_page(module.round_to_page_size_down(address + length - 1));
+            if self.page_set.contains((page_start, page_end)) {
+                return Ok(());
+            } else {
+                return Err(());
+            }
+        }
+
         let Some(address_end) = address.checked_add(length) else {
             return Err(());
         };
@@ -902,8 +969,10 @@ impl Sandbox {
         Some(&mut self.memory.as_slice_mut()[range])
     }
 
-    fn handle_guest_signal(&mut self, machine_code_address: u64) -> Result<InterruptKind, Error> {
+    fn handle_guest_signal(&mut self) -> Result<InterruptKind, Error> {
         use crate::sandbox::Sandbox;
+
+        let machine_code_address = self.vmctx().next_native_program_counter.load(Ordering::Relaxed);
 
         let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
         let Some(machine_code_offset) = machine_code_address.checked_sub(compiled_module.native_code_origin) else {
@@ -947,6 +1016,49 @@ impl Sandbox {
         } else {
             self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
             Ok(InterruptKind::Trap)
+        }
+    }
+
+    fn handle_guest_pagefault(&mut self, fault_address: u64) -> Result<InterruptKind, Error> {
+        use crate::sandbox::Sandbox;
+
+        let machine_code_address = self.vmctx().next_native_program_counter.load(Ordering::Relaxed);
+
+        let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
+        let Some(machine_code_offset) = machine_code_address.checked_sub(compiled_module.native_code_origin) else {
+            return Err(Error::from("internal error: address underflow after a trap"));
+        };
+
+        let Some(program_counter) = compiled_module.program_counter_by_native_code_offset(machine_code_offset, false) else {
+            return Err(Error::from(
+                "internal error: program counter not found for the given machine code address",
+            ));
+        };
+
+        self.vmctx().program_counter.store(program_counter.0, Ordering::Relaxed);
+        self.vmctx().next_program_counter.store(program_counter.0, Ordering::Relaxed);
+        self.is_program_counter_valid = true;
+
+        let page_size = get_native_page_size() as u32;
+        let page_address = fault_address.wrapping_sub(self.memory.as_ptr() as u64 + self.guest_memory_offset as u64) as u32;
+        let page_address = page_address & !(page_size - 1);
+
+        let is_trap = if self.dynamic_paging_enabled && page_address >= 0x10000 {
+            let module = self.module.as_ref().unwrap();
+            let page_start = module.address_to_page(module.round_to_page_size_down(page_address));
+            self.page_set.contains((page_start, page_start))
+        } else {
+            true
+        };
+
+        if is_trap {
+            self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
+            Ok(InterruptKind::Trap)
+        } else {
+            self.vmctx()
+                .next_native_program_counter
+                .store(machine_code_address, Ordering::Relaxed);
+            Ok(InterruptKind::Segfault(Segfault { page_address, page_size }))
         }
     }
 
@@ -1195,6 +1307,8 @@ impl super::Sandbox for Sandbox {
             is_program_counter_valid: false,
             next_program_counter: None,
             next_program_counter_changed: true,
+            page_set: PageSet::new(),
+            dynamic_paging_enabled: false,
             aux_data_address: 0,
             aux_data_full_length: 0,
             aux_data_length: 0,
@@ -1206,48 +1320,56 @@ impl super::Sandbox for Sandbox {
             return Err(Error::from("module already loaded"));
         }
 
+        if module.is_dynamic_paging() && get_native_page_size() != module.memory_map().page_size() as usize {
+            return Err(Error::from(
+                "dynamic paging is currently unsupported if the module's page size doesn't match the native page size",
+            ));
+        }
+
         let compiled_module = <Self as crate::sandbox::Sandbox>::downcast_module(module);
         let program = &compiled_module.sandbox_program.0;
 
-        log::trace!("Reconfiguring sandbox...");
+        log::trace!("Loading module into sandbox... (dynamic_paging={})", module.is_dynamic_paging());
         self.clear_program()?;
 
-        for map in &program.memory_map {
-            if map.length > 0 {
-                let mut protection = PROT_READ;
-                if map.is_writable {
-                    protection |= PROT_WRITE;
+        if !module.is_dynamic_paging() {
+            for map in &program.memory_map {
+                if map.length > 0 {
+                    let mut protection = PROT_READ;
+                    if map.is_writable {
+                        protection |= PROT_WRITE;
+                    }
+
+                    let offset = self.guest_memory_offset + to_usize(map.address);
+                    let length = to_usize(map.length).get();
+                    self.memory.modify_and_protect(offset, length, protection, |slice| match map.kind {
+                        MapKind::Initialized(ref initialize_with) => {
+                            slice.copy_from_slice(initialize_with);
+                        }
+                        MapKind::Zeroed | MapKind::Transient => {
+                            slice.fill(0);
+                        }
+                    })?;
+
+                    let memory_address = self.memory.as_ptr() as usize + offset;
+                    log::trace!(
+                        "  New accessible range: 0x{:x}-0x{:x} (0x{:x}-0x{:x}) (0x{:x}){}{}",
+                        memory_address,
+                        memory_address + length,
+                        to_usize(map.address).get(),
+                        to_usize(map.address).get() + length,
+                        length,
+                        if !map.is_writable { " [RO]" } else { "" },
+                        if matches!(map.kind, MapKind::Initialized(..)) {
+                            " [INIT]"
+                        } else {
+                            ""
+                        },
+                    );
                 }
 
-                let offset = self.guest_memory_offset + to_usize(map.address);
-                let length = to_usize(map.length).get();
-                self.memory.modify_and_protect(offset, length, protection, |slice| match map.kind {
-                    MapKind::Initialized(ref initialize_with) => {
-                        slice.copy_from_slice(initialize_with);
-                    }
-                    MapKind::Zeroed | MapKind::Transient => {
-                        slice.fill(0);
-                    }
-                })?;
-
-                let memory_address = self.memory.as_ptr() as usize + offset;
-                log::trace!(
-                    "  New accessible range: 0x{:x}-0x{:x} (0x{:x}-0x{:x}) (0x{:x}){}{}",
-                    memory_address,
-                    memory_address + length,
-                    to_usize(map.address).get(),
-                    to_usize(map.address).get() + length,
-                    length,
-                    if !map.is_writable { " [RO]" } else { "" },
-                    if matches!(map.kind, MapKind::Initialized(..)) {
-                        " [INIT]"
-                    } else {
-                        ""
-                    },
-                );
+                self.vmctx_mut().maps.push(map.clone());
             }
-
-            self.vmctx_mut().maps.push(map.clone());
         }
 
         self.vmctx_mut().heap_info.heap_top = u64::from(module.memory_map().heap_base());
@@ -1274,14 +1396,19 @@ impl super::Sandbox for Sandbox {
         self.aux_data_address = module.memory_map().aux_data_address();
         self.aux_data_full_length = module.memory_map().aux_data_size();
         self.aux_data_length = self.aux_data_full_length;
+        self.dynamic_paging_enabled = module.is_dynamic_paging();
 
         Ok(())
     }
 
     fn recycle(&mut self, _global: &Self::GlobalState) -> Result<(), Self::Error> {
         log::trace!("Recycling sandbox");
+        if self.dynamic_paging_enabled {
+            self.free_pages(0x10000, 0xffff0000)?;
+        }
 
         self.module = None;
+        self.page_set.clear();
 
         Ok(())
     }
@@ -1414,14 +1541,12 @@ impl super::Sandbox for Sandbox {
                 log::error!("Sandbox poisoned");
                 InterruptKind::Trap
             }
-            ExitReason::Signal => {
-                let address = self.vmctx().next_native_program_counter.load(Ordering::Relaxed) as u64;
-                self.handle_guest_signal(address).map_err(Error::from)?
-            }
+            ExitReason::Signal => self.handle_guest_signal().map_err(Error::from)?,
             ExitReason::NotEnoughGas => InterruptKind::NotEnoughGas,
             ExitReason::Trap => InterruptKind::Trap,
             ExitReason::Step => InterruptKind::Step,
             ExitReason::Ecalli(num) => InterruptKind::Ecalli(num),
+            ExitReason::Segfault(address) => self.handle_guest_pagefault(address).map_err(Error::from)?,
         })
     }
 
@@ -1478,10 +1603,13 @@ impl super::Sandbox for Sandbox {
     }
 
     fn accessible_aux_size(&self) -> u32 {
+        assert!(!self.dynamic_paging_enabled);
         self.aux_data_length
     }
 
     fn set_accessible_aux_size(&mut self, size: u32) -> Result<(), Error> {
+        assert!(!self.dynamic_paging_enabled);
+
         if self.aux_data_address == 0 || self.aux_data_full_length == 0 {
             return Err(Error::from("aux data address or length is zero"));
         }
@@ -1493,6 +1621,7 @@ impl super::Sandbox for Sandbox {
     }
 
     fn is_memory_accessible(&self, address: u32, size: u32, is_writable: bool) -> bool {
+        assert!(self.dynamic_paging_enabled);
         self.bound_check_access(address, size, is_writable).is_ok()
     }
 
@@ -1501,7 +1630,11 @@ impl super::Sandbox for Sandbox {
             return Err(Error::from("no module loaded into the sandbox"));
         };
 
-        self.force_reset_memory()
+        if !self.dynamic_paging_enabled {
+            self.force_reset_memory()
+        } else {
+            self.free_pages(0x10000, 0xffff0000)
+        }
     }
 
     fn read_memory_into<'slice>(&self, address: u32, slice: &'slice mut [MaybeUninit<u8>]) -> Result<&'slice mut [u8], MemoryAccessError> {
@@ -1514,6 +1647,15 @@ impl super::Sandbox for Sandbox {
 
         if matches!(self.poison, Poison::Poisoned) {
             return Err(MemoryAccessError::Error("read failed: sandbox has been poisoned".into()));
+        }
+
+        if self.dynamic_paging_enabled {
+            let module = self.module.as_ref().unwrap();
+            let page_start = module.address_to_page(module.round_to_page_size_down(address));
+            let page_end = module.address_to_page(module.round_to_page_size_down(address + slice.len() as u32 - 1));
+            if !self.page_set.contains((page_start, page_end)) {
+                return Err(MemoryAccessError::Error("incomplete read".into()));
+            }
         }
 
         let Some(memory_slice) = self.get_memory_slice(address, slice.len() as u32) else {
@@ -1542,6 +1684,26 @@ impl super::Sandbox for Sandbox {
             return Err(MemoryAccessError::Error("write failed: sandbox has been poisoned".into()));
         }
 
+        if self.dynamic_paging_enabled {
+            let module = self.module.as_ref().unwrap();
+            let page_start = module.address_to_page(module.round_to_page_size_down(address));
+            let page_end = module.address_to_page(module.round_to_page_size_down(address + data.len() as u32 - 1));
+            let page_size = get_native_page_size() as u32;
+            let page_count = page_end - page_start + 1;
+
+            if !self.page_set.contains((page_start, page_end)) {
+                self.memory
+                    .mprotect(
+                        self.guest_memory_offset + (page_start * page_size) as usize,
+                        (page_count * page_size) as usize,
+                        PROT_READ | PROT_WRITE,
+                    )
+                    .map_err(|e| MemoryAccessError::Error(e.into()))?;
+            }
+
+            self.page_set.insert((page_start, page_end));
+        }
+
         let Some(slice) = self.get_memory_slice_mut(address, data.len() as u32) else {
             return Err(MemoryAccessError::OutOfRangeAccess {
                 address,
@@ -1564,6 +1726,26 @@ impl super::Sandbox for Sandbox {
             return Err(MemoryAccessError::Error("zero failed: sandbox has been poisoned".into()));
         }
 
+        if self.dynamic_paging_enabled {
+            let module = self.module.as_ref().unwrap();
+            let page_start = module.address_to_page(module.round_to_page_size_down(address));
+            let page_end = module.address_to_page(module.round_to_page_size_down(address + length - 1));
+            let page_size = get_native_page_size() as u32;
+            let page_count = page_end - page_start + 1;
+
+            if !self.page_set.contains((page_start, page_end)) {
+                self.memory
+                    .mprotect(
+                        self.guest_memory_offset + (page_start * page_size) as usize,
+                        (page_count * page_size) as usize,
+                        PROT_READ | PROT_WRITE,
+                    )
+                    .map_err(|e| MemoryAccessError::Error(e.into()))?;
+            }
+
+            self.page_set.insert((page_start, page_end));
+        }
+
         let Some(slice) = self.get_memory_slice_mut(address, length as u32) else {
             return Err(MemoryAccessError::OutOfRangeAccess {
                 address,
@@ -1575,12 +1757,55 @@ impl super::Sandbox for Sandbox {
         Ok(())
     }
 
-    fn protect_memory(&mut self, _address: u32, _length: u32) -> Result<(), MemoryAccessError> {
-        todo!()
+    fn protect_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
+        assert!(self.dynamic_paging_enabled);
+
+        log::trace!(
+            "Protecting memory: 0x{:x}-0x{:x} ({} bytes)",
+            address,
+            address as usize + length as usize,
+            length
+        );
+
+        self.memory
+            .mprotect(self.guest_memory_offset + address as usize, length as usize, PROT_READ)
+            .map_err(|e| MemoryAccessError::Error(e.into()))?;
+
+        let module = self.module.as_ref().unwrap();
+        let page_start = module.address_to_page(module.round_to_page_size_down(address));
+        let page_end = module.address_to_page(module.round_to_page_size_down(address + length - 1));
+        self.page_set.insert((page_start, page_end));
+
+        Ok(())
     }
 
-    fn free_pages(&mut self, _address: u32, _length: u32) -> Result<(), Error> {
-        todo!()
+    fn free_pages(&mut self, address: u32, length: u32) -> Result<(), Error> {
+        assert!(self.dynamic_paging_enabled);
+
+        self.memory
+            .madvise(self.guest_memory_offset + address as usize, length as usize, MADV_DONTNEED)?;
+
+        self.memory
+            .madvise(self.guest_memory_offset + address as usize, length as usize, MADV_FREE)?;
+
+        if address <= 0x10000 && length >= 0xffff0000 {
+            self.page_set.clear();
+            self.memory.mprotect(self.guest_memory_offset, 0x100000000 as usize, 0)?;
+        } else {
+            let module = self.module.as_ref().unwrap();
+            let page_start = module.address_to_page(module.round_to_page_size_down(address));
+            let page_end = module.address_to_page(module.round_to_page_size_down(address + length - 1));
+            let page_size = get_native_page_size() as u32;
+            let page_count = page_end - page_start;
+            self.page_set.remove((page_start, page_end));
+            self.memory.mprotect(
+                self.guest_memory_offset + (page_start * page_size) as usize,
+                (page_count * page_size) as usize,
+                0,
+            )?;
+        }
+
+        Ok(())
     }
 
     fn heap_size(&self) -> u32 {
