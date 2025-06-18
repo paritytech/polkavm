@@ -163,8 +163,6 @@
 //     hasher.finalize()
 // }
 
-
-
 const IV: [u64; 8] = [
     0x6A09_E667_F3BC_C908,
     0xBB67_AE85_84CA_A73B,
@@ -213,10 +211,22 @@ fn compress(h: &mut [u64; 8], block: &[u8], t0: u64, t1: u64, is_final: bool) {
     let m: [u64; 16] = unsafe { core::ptr::read_unaligned(block.as_ptr() as *const [u64; 16]) };
 
     let mut v = [
-        h[0], h[1], h[2], h[3],
-        h[4], h[5], h[6], h[7],
-        IV[0], IV[1], IV[2], IV[3],
-        IV[4] ^ t0, IV[5] ^ t1, IV[6], IV[7],
+        h[0],
+        h[1],
+        h[2],
+        h[3],
+        h[4],
+        h[5],
+        h[6],
+        h[7],
+        IV[0],
+        IV[1],
+        IV[2],
+        IV[3],
+        IV[4] ^ t0,
+        IV[5] ^ t1,
+        IV[6],
+        IV[7],
     ];
     if is_final {
         v[14] = !v[14];
@@ -256,16 +266,7 @@ impl Blake2b {
     fn new() -> Self {
         let digest_length = Self::DIGEST_LENGTH;
         let param = (digest_length as u32) | (1 << 16) | (1 << 24);
-        let h = [
-            IV[0] ^ (param as u64),
-            IV[1],
-            IV[2],
-            IV[3],
-            IV[4],
-            IV[5],
-            IV[6],
-            IV[7],
-        ];
+        let h = [IV[0] ^ (param as u64), IV[1], IV[2], IV[3], IV[4], IV[5], IV[6], IV[7]];
         Blake2b {
             h,
             t0: 0,
@@ -292,8 +293,7 @@ impl Blake2b {
                 self.buflen = 0;
             }
             let n = core::cmp::min(128 - self.buflen, data.len() - offset);
-            self.buf[self.buflen..self.buflen + n]
-                .copy_from_slice(&data[offset..offset + n]);
+            self.buf[self.buflen..self.buflen + n].copy_from_slice(&data[offset..offset + n]);
             self.buflen += n;
             offset += n;
         }

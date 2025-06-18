@@ -21,7 +21,7 @@ extern "C" {
 
     #[polkavm_import(index = 6)]
     pub fn historical_lookup(s: u64, h: u64, o: u64, f: u64, l: u64) -> u64;
-    
+
     #[polkavm_import(index = 7)]
     pub fn export(p: u64, z: u64) -> u64;
 
@@ -87,7 +87,7 @@ extern "C" {
 
     #[polkavm_import(index = 63)]
     pub fn zero(n: u64, p: u64, c: u64) -> u64;
-    
+
     #[polkavm_import(index = 64)]
     pub fn manifest(n: u64, mode: u64, s: u64, z: u64, page_id: u64) -> u64;
 }

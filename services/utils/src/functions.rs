@@ -38,6 +38,7 @@ use crate::host_functions::*;
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct RefineArgs {
+    pub wi_index: u32, // NEW
     pub wi_service_index: u32,
     pub wi_payload_start_address: u64,
     pub wi_payload_length: u64,
@@ -47,6 +48,7 @@ pub struct RefineArgs {
 impl Default for RefineArgs {
     fn default() -> Self {
         Self {
+            wi_index: 0,
             wi_service_index: 0,
             wi_payload_start_address: 0,
             wi_payload_length: 0,
@@ -55,24 +57,35 @@ impl Default for RefineArgs {
     }
 }
 
-// TODO: add i, multiple w_y, ; remove p_x, p_u (check z)
 pub fn parse_refine_args(mut start_address: u64, mut remaining_length: u64) -> Option<RefineArgs> {
     let mut args = RefineArgs::default();
     if remaining_length < 4 {
         return None;
     }
+
+    // wi_index
+    let i_full_slice = unsafe { core::slice::from_raw_parts(start_address as *const u8, remaining_length as usize) };
+    let i_len = extract_discriminator(i_full_slice) as u64;
+    if i_len == 0 || remaining_length < i_len {
+        return None;
+    }
+    let i_slice = &i_full_slice[..i_len as usize];
+    args.wi_index = decode_e(i_slice) as u32;
+    start_address += i_len;
+    remaining_length -= i_len;
+
+    // wi_service_index
     let t_full_slice = unsafe { core::slice::from_raw_parts(start_address as *const u8, remaining_length as usize) };
     let t_len = extract_discriminator(t_full_slice) as u64;
     if t_len == 0 || remaining_length < t_len {
         return None;
     }
-
-    // Decode t and update pointers
     let t_slice = &t_full_slice[..t_len as usize];
     args.wi_service_index = decode_e(t_slice) as u32;
     start_address += t_len;
     remaining_length -= t_len;
 
+    // args.wi_payload_{start_address,length}
     let payload_slice = unsafe { core::slice::from_raw_parts(start_address as *const u8, remaining_length as usize) };
     let discriminator_len = extract_discriminator(payload_slice);
     let payload_len = if discriminator_len > 0 {
@@ -91,10 +104,11 @@ pub fn parse_refine_args(mut start_address: u64, mut remaining_length: u64) -> O
     args.wi_payload_length = payload_len;
     start_address += payload_len;
     remaining_length = remaining_length.saturating_sub(payload_len);
-
     if remaining_length < 32 {
         return None;
     }
+
+    // args.wphash
     let hash_slice = unsafe { core::slice::from_raw_parts(start_address as *const u8, 32) };
     args.wphash.copy_from_slice(hash_slice);
 
@@ -107,15 +121,7 @@ pub fn parse_refine_args(mut start_address: u64, mut remaining_length: u64) -> O
 pub struct AccumulateArgs {
     pub t: u32,
     pub s: u32,
-    pub h: [u8; 32],
-    pub e: [u8; 32],
-    pub a: [u8; 32],
-    pub o_ptr: u64,
-    pub o_len: u64,
-    pub y: [u8; 32],
-    pub g: u64,
-    pub work_result_ptr: u64,
-    pub work_result_len: u64,
+    pub number_of_operands: u32,
 }
 
 impl Default for AccumulateArgs {
@@ -123,20 +129,11 @@ impl Default for AccumulateArgs {
         Self {
             t: 0,
             s: 0,
-            h: [0u8; 32],
-            e: [0u8; 32],
-            a: [0u8; 32],
-            o_ptr: 0,
-            o_len: 0,
-            y: [0u8; 32],
-            g: 0,
-            work_result_ptr: 0,
-            work_result_len: 0,
+            number_of_operands: 0,
         }
     }
 }
 
-// TODO: get |o| rather than o (HOW?)
 pub fn parse_accumulate_args(start_address: u64, length: u64, m: u64) -> Option<AccumulateArgs> {
     if length == 0 {
         return None;
@@ -145,8 +142,6 @@ pub fn parse_accumulate_args(start_address: u64, length: u64, m: u64) -> Option<
     let mut remaining_length = length;
 
     let mut args = AccumulateArgs::default();
-
-    //    call_log(2, None, &format!("parse_accumulate_args start_address={} length={}", start_address, length));
 
     // Create a slice of the available data to parse t
     let t_full_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
@@ -179,107 +174,9 @@ pub fn parse_accumulate_args(start_address: u64, length: u64, m: u64) -> Option<
     if discriminator_len as usize > full_slice.len() {
         return None;
     }
-    let num_of_operands = decode_e(&full_slice[..discriminator_len as usize]);
+    args.number_of_operands = decode_e(&full_slice[..discriminator_len as usize]) as u32;
 
-    current_address += discriminator_len as u64;
-    remaining_length = remaining_length.saturating_sub(discriminator_len as u64);
-
-    if m >= num_of_operands {
-        return None;
-    }
-
-    for i in 0..num_of_operands {
-        if remaining_length < 96 {
-            return None;
-        }
-        let hash_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 96) };
-        args.h.copy_from_slice(&hash_slice[0..32]);
-        args.e.copy_from_slice(&hash_slice[32..64]);
-        args.a.copy_from_slice(&hash_slice[64..96]);
-        current_address += 96;
-        remaining_length = remaining_length.saturating_sub(96);
-
-        {
-            let accumulation_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
-            let auth_output_discriminator_len = extract_discriminator(accumulation_slice);
-            let auth_output_len = if auth_output_discriminator_len > 0 {
-                decode_e(&accumulation_slice[..auth_output_discriminator_len as usize])
-            } else {
-                0
-            };
-
-            current_address += auth_output_discriminator_len as u64;
-            remaining_length = remaining_length.saturating_sub(auth_output_discriminator_len as u64);
-
-            args.o_ptr = current_address;
-            args.o_len = remaining_length.min(auth_output_len);
-
-            current_address += auth_output_len;
-            remaining_length = remaining_length.saturating_sub(auth_output_len);
-        }
-
-        if remaining_length < 32 {
-            return None;
-        }
-        let y_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 32) };
-        args.y.copy_from_slice(y_slice);
-        current_address += 32;
-        remaining_length = remaining_length.saturating_sub(32);
-
-        // // 0.6.5 -- add gas limit
-        // let g_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 8) };
-        // let global_g= u64::from_le_bytes(g_slice[0..8].try_into().unwrap());
-        // args.g = global_g;
-        // current_address += 8;
-        // remaining_length = remaining_length.saturating_sub(8);
-
-
-        // 0.6.5 -- special case for g (should be removed in the future)
-        let g_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
-        let g_len = extract_discriminator(g_slice);
-        let g = if g_len > 0 {
-            decode_e(&g_slice[..g_len as usize])
-        } else {
-            0
-        };
-        args.g = g;
-
-        current_address += g_len as u64;
-        remaining_length = remaining_length.saturating_sub(g_len as u64);
-        // 0.6.5 -- special case for g (should be removed in the future)
-
-
-        let accumulation_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
-        if accumulation_slice.is_empty() {
-            return None;
-        }
-        let work_result_prefix = accumulation_slice[0];
-        current_address += 1;
-        remaining_length = remaining_length.saturating_sub(1);
-
-        if work_result_prefix == 0 {
-            let accumulation_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
-            let wr_discriminator_len = extract_discriminator(accumulation_slice);
-            let wr_len = if wr_discriminator_len > 0 {
-                decode_e(&accumulation_slice[..wr_discriminator_len as usize])
-            } else {
-                0
-            };
-
-            current_address += wr_discriminator_len as u64;
-            remaining_length = remaining_length.saturating_sub(wr_discriminator_len as u64);
-
-            args.work_result_ptr = current_address;
-            args.work_result_len = remaining_length.min(wr_len);
-
-            current_address += wr_len;
-            remaining_length = remaining_length.saturating_sub(wr_len);
-        }
-
-        if i == m {
-            return Some(args);
-        }
-    }
+    // call_log(2, None, &format!("parse_accumulate_args s={} t={} |o|={}", args.s, args.t, args.number_of_operands));
     None
 }
 
@@ -322,7 +219,7 @@ pub fn parse_transfer_args(start_address: u64, length: u64, m: u64) -> Option<Tr
     if remaining_length < 8 {
         return None;
     }
-    
+
     let t_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, 4) };
     let s_slice = unsafe { core::slice::from_raw_parts((current_address + 4) as *const u8, 4) };
     // TODO: use decode_e here to strip out global_t and global_s from current_address
@@ -334,7 +231,7 @@ pub fn parse_transfer_args(start_address: u64, length: u64, m: u64) -> Option<Tr
 
     current_address += 8;
     remaining_length = remaining_length.saturating_sub(8);
-    // ----- 
+    // -----
     let full_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
     let discriminator_len = extract_discriminator(full_slice);
     if discriminator_len as usize > full_slice.len() {
@@ -391,7 +288,7 @@ pub fn parse_transfer_args(start_address: u64, length: u64, m: u64) -> Option<Tr
 
         if i == m {
             return Some(args);
-        } 
+        }
     }
     None
 }
@@ -400,19 +297,19 @@ pub fn parse_transfer_args(start_address: u64, length: u64, m: u64) -> Option<Tr
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct StandardProgramInitializationArgs {
-    pub o_len_bytes : [u8; 3],
-    pub w_len_bytes : [u8; 3],
-    pub z_bytes : [u8; 2],
-    pub s_bytes : [u8; 3],
-    pub z : u64,
-    pub s : u64,
-    pub o_bytes_address : u64,
-    pub o_bytes_length : u64,
-    pub w_bytes_address : u64,
-    pub w_bytes_length : u64,
-    pub c_len_bytes : [u8; 4],
-    pub c_bytes_address : u64,
-    pub c_bytes_length : u64,
+    pub o_len_bytes: [u8; 3],
+    pub w_len_bytes: [u8; 3],
+    pub z_bytes: [u8; 2],
+    pub s_bytes: [u8; 3],
+    pub z: u64,
+    pub s: u64,
+    pub o_bytes_address: u64,
+    pub o_bytes_length: u64,
+    pub w_bytes_address: u64,
+    pub w_bytes_length: u64,
+    pub c_len_bytes: [u8; 4],
+    pub c_bytes_address: u64,
+    pub c_bytes_length: u64,
 }
 
 impl Default for StandardProgramInitializationArgs {
@@ -435,7 +332,7 @@ impl Default for StandardProgramInitializationArgs {
     }
 }
 
-pub fn parse_standard_program_initialization_args(start_address: u64, length: u64,) -> Option<StandardProgramInitializationArgs> {
+pub fn parse_standard_program_initialization_args(start_address: u64, length: u64) -> Option<StandardProgramInitializationArgs> {
     if length == 0 {
         return None;
     }
@@ -515,7 +412,15 @@ pub fn parse_standard_program_initialization_args(start_address: u64, length: u6
     Some(args)
 }
 
-pub fn standard_program_initialization_for_child(z: u64, s: u64, o_bytes_address: u64, o_bytes_length: u64, w_bytes_address: u64, w_bytes_length: u64, machine_index: u32) {
+pub fn standard_program_initialization_for_child(
+    z: u64,
+    s: u64,
+    o_bytes_address: u64,
+    o_bytes_length: u64,
+    w_bytes_address: u64,
+    w_bytes_length: u64,
+    machine_index: u32,
+) {
     let o_bytes_page_len = ceiling_divide(o_bytes_length, PAGE_SIZE);
     let w_bytes_page_len = ceiling_divide(w_bytes_length, PAGE_SIZE) + z;
     let stack_page_len = ceiling_divide(s, PAGE_SIZE);
@@ -528,7 +433,7 @@ pub fn standard_program_initialization_for_child(z: u64, s: u64, o_bytes_address
     }
 
     let w_start_address = 2 * Z_Z + z_func(o_bytes_length);
-    let w_start_page = w_start_address / PAGE_SIZE; 
+    let w_start_page = w_start_address / PAGE_SIZE;
     let zero_result = unsafe { zero(machine_index as u64, w_start_page, w_bytes_page_len) };
     if zero_result != OK {
         return call_log(2, None, "StandardProgramInitializationForChild: zero failed for w_bytes");
@@ -708,11 +613,7 @@ pub fn decode_e(encoded: &[u8]) -> u64 {
 }
 
 fn ceiling_divide(a: u64, b: u64) -> u64 {
-    if b == 0 {
-        0
-    } else {
-        (a + b - 1) / b
-    }
+    if b == 0 { 0 } else { (a + b - 1) / b }
 }
 
 fn p_func(x: u64) -> u64 {
