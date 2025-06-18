@@ -55,6 +55,7 @@ impl Default for RefineArgs {
     }
 }
 
+// TODO: add i, multiple w_y, ; remove p_x, p_u (check z)
 pub fn parse_refine_args(mut start_address: u64, mut remaining_length: u64) -> Option<RefineArgs> {
     let mut args = RefineArgs::default();
     if remaining_length < 4 {
@@ -135,6 +136,7 @@ impl Default for AccumulateArgs {
     }
 }
 
+// TODO: get |o| rather than o (HOW?)
 pub fn parse_accumulate_args(start_address: u64, length: u64, m: u64) -> Option<AccumulateArgs> {
     if length == 0 {
         return None;
