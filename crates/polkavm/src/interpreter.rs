@@ -947,17 +947,29 @@ struct Visitor<'a> {
 
 impl<'a> Visitor<'a> {
     #[inline(always)]
-    fn get32(&self, regimm: impl IntoRegImm) -> u32 {
+    fn get32<const DEBUG: bool>(&self, regimm: impl IntoRegImm) -> u32 {
         match regimm.into() {
-            RegImm::Reg(reg) => cast(self.inner.regs[reg.to_usize()]).truncate_to_u32(),
+            RegImm::Reg(reg) => {
+                let value = cast(self.inner.regs[reg.to_usize()]).truncate_to_u32();
+                if DEBUG {
+                    log::trace!("  get: {reg} = 0x{value:x}");
+                }
+                value
+            }
             RegImm::Imm(value) => value,
         }
     }
 
     #[inline(always)]
-    fn get64(&self, regimm: impl IntoRegImm) -> u64 {
+    fn get64<const DEBUG: bool>(&self, regimm: impl IntoRegImm) -> u64 {
         match regimm.into() {
-            RegImm::Reg(reg) => self.inner.regs[reg.to_usize()],
+            RegImm::Reg(reg) => {
+                let value = self.inner.regs[reg.to_usize()];
+                if DEBUG {
+                    log::trace!("  get: {reg} = 0x{value:x}");
+                }
+                value
+            }
             RegImm::Imm(value) => {
                 let value = cast(value).to_signed();
                 let value = cast(value).to_i64_sign_extend();
@@ -979,9 +991,9 @@ impl<'a> Visitor<'a> {
 
         if DEBUG {
             if self.inner.module.blob().is_64_bit() {
-                log::trace!("  {dst} = 0x{value:x}");
+                log::trace!("  set: {dst} = 0x{value:x}");
             } else {
-                log::trace!("  {dst} = 0x{:x}", cast(value).truncate_to_u32());
+                log::trace!("  set: {dst} = 0x{:x}", cast(value).truncate_to_u32());
             }
         }
 
@@ -991,7 +1003,7 @@ impl<'a> Visitor<'a> {
     #[inline(always)]
     fn set64<const DEBUG: bool>(&mut self, dst: Reg, value: u64) {
         if DEBUG {
-            log::trace!("  {dst} = 0x{value:x}");
+            log::trace!("  set: {dst} = 0x{value:x}");
         }
 
         self.inner.regs[dst.to_usize()] = value;
@@ -1005,8 +1017,8 @@ impl<'a> Visitor<'a> {
         s2: impl IntoRegImm,
         callback: impl Fn(u32, u32) -> u32,
     ) -> Option<Target> {
-        let s1 = self.get32(s1);
-        let s2 = self.get32(s2);
+        let s1 = self.get32::<DEBUG>(s1);
+        let s2 = self.get32::<DEBUG>(s2);
         self.set32::<DEBUG>(dst, callback(s1, s2));
         self.go_to_next_instruction()
     }
@@ -1019,8 +1031,8 @@ impl<'a> Visitor<'a> {
         s2: impl IntoRegImm,
         callback: impl Fn(u64, u64) -> u64,
     ) -> Option<Target> {
-        let s1 = self.get64(s1);
-        let s2 = self.get64(s2);
+        let s1 = self.get64::<DEBUG>(s1);
+        let s2 = self.get64::<DEBUG>(s2);
         self.set64::<DEBUG>(dst, callback(s1, s2));
         self.go_to_next_instruction()
     }
@@ -1033,8 +1045,8 @@ impl<'a> Visitor<'a> {
         target_false: Target,
         callback: impl Fn(u64, u64) -> bool,
     ) -> Option<Target> {
-        let s1 = self.get64(s1);
-        let s2 = self.get64(s2);
+        let s1 = self.get64::<DEBUG>(s1);
+        let s2 = self.get64::<DEBUG>(s2);
         if callback(s1, s2) {
             Some(target_true)
         } else {
@@ -1986,7 +1998,7 @@ define_interpreter! {
     }
 
     fn sbrk<const DEBUG: bool>(visitor: &mut Visitor, dst: Reg, size: Reg) -> Option<Target> {
-        let size = visitor.get64(size);
+        let size = visitor.get64::<DEBUG>(size);
         let result = size.try_into().ok().and_then(|size| visitor.inner.sbrk(size)).unwrap_or(0);
         visitor.set64::<DEBUG>(dst, u64::from(result));
         visitor.go_to_next_instruction()
@@ -2003,9 +2015,9 @@ define_interpreter! {
         let next_instruction = visitor.go_to_next_instruction();
         let mut result = next_instruction;
 
-        let value = visitor.get32(Reg::A1);
-        let mut dst = visitor.get32(Reg::A0);
-        let mut count = visitor.get64(Reg::A2);
+        let value = visitor.get32::<DEBUG>(Reg::A1);
+        let mut dst = visitor.get32::<DEBUG>(Reg::A0);
+        let mut count = visitor.get64::<DEBUG>(Reg::A2);
         while count > 0 {
             if gas_metering_enabled && visitor.inner.gas == 0 {
                 result = not_enough_gas_impl::<DEBUG>(visitor, program_counter, 0);
@@ -2651,7 +2663,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::move_reg(d, s));
         }
 
-        let imm = visitor.get64(s);
+        let imm = visitor.get64::<DEBUG>(s);
         visitor.set64::<DEBUG>(d, imm);
         visitor.go_to_next_instruction()
     }
@@ -2661,7 +2673,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_leading_zero_bits_32(d, s));
         }
 
-        visitor.set32::<DEBUG>(d, u32::leading_zeros(visitor.get32(s)));
+        visitor.set32::<DEBUG>(d, u32::leading_zeros(visitor.get32::<DEBUG>(s)));
         visitor.go_to_next_instruction()
     }
 
@@ -2670,7 +2682,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_leading_zero_bits_64(d, s));
         }
 
-        visitor.set64::<DEBUG>(d, cast(u64::leading_zeros(visitor.get64(s))).to_u64());
+        visitor.set64::<DEBUG>(d, cast(u64::leading_zeros(visitor.get64::<DEBUG>(s))).to_u64());
         visitor.go_to_next_instruction()
     }
 
@@ -2679,7 +2691,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_trailing_zero_bits_32(d, s));
         }
 
-        visitor.set32::<DEBUG>(d, u32::trailing_zeros(visitor.get32(s)));
+        visitor.set32::<DEBUG>(d, u32::trailing_zeros(visitor.get32::<DEBUG>(s)));
         visitor.go_to_next_instruction()
     }
 
@@ -2688,7 +2700,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_trailing_zero_bits_64(d, s));
         }
 
-        visitor.set64::<DEBUG>(d, cast(u64::trailing_zeros(visitor.get64(s))).to_u64());
+        visitor.set64::<DEBUG>(d, cast(u64::trailing_zeros(visitor.get64::<DEBUG>(s))).to_u64());
         visitor.go_to_next_instruction()
     }
 
@@ -2697,7 +2709,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_set_bits_32(d, s));
         }
 
-        visitor.set32::<DEBUG>(d, u32::count_ones(visitor.get32(s)));
+        visitor.set32::<DEBUG>(d, u32::count_ones(visitor.get32::<DEBUG>(s)));
         visitor.go_to_next_instruction()
     }
 
@@ -2706,7 +2718,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_set_bits_64(d, s));
         }
 
-        visitor.set64::<DEBUG>(d, cast(u64::count_ones(visitor.get64(s))).to_u64());
+        visitor.set64::<DEBUG>(d, cast(u64::count_ones(visitor.get64::<DEBUG>(s))).to_u64());
         visitor.go_to_next_instruction()
     }
 
@@ -2715,7 +2727,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_8(d, s));
         }
 
-        let byte = cast(cast(visitor.get32(s)).truncate_to_u8()).to_signed();
+        let byte = cast(cast(visitor.get32::<DEBUG>(s)).truncate_to_u8()).to_signed();
         visitor.set32::<DEBUG>(d, cast(cast(byte).to_i32_sign_extend()).to_unsigned());
         visitor.go_to_next_instruction()
     }
@@ -2725,7 +2737,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_8(d, s));
         }
 
-        let byte = cast(cast(visitor.get64(s)).truncate_to_u8()).to_signed();
+        let byte = cast(cast(visitor.get64::<DEBUG>(s)).truncate_to_u8()).to_signed();
         visitor.set64::<DEBUG>(d, cast(cast(byte).to_i64_sign_extend()).to_unsigned());
         visitor.go_to_next_instruction()
     }
@@ -2735,7 +2747,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_16(d, s));
         }
 
-        let hword = cast(cast(visitor.get32(s)).truncate_to_u16()).to_signed();
+        let hword = cast(cast(visitor.get32::<DEBUG>(s)).truncate_to_u16()).to_signed();
         visitor.set32::<DEBUG>(d, cast(cast(hword).to_i32_sign_extend()).to_unsigned());
         visitor.go_to_next_instruction()
     }
@@ -2745,7 +2757,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_16(d, s));
         }
 
-        let hword = cast(cast(visitor.get64(s)).truncate_to_u16()).to_signed();
+        let hword = cast(cast(visitor.get64::<DEBUG>(s)).truncate_to_u16()).to_signed();
         visitor.set64::<DEBUG>(d, cast(cast(hword).to_i64_sign_extend()).to_unsigned());
         visitor.go_to_next_instruction()
     }
@@ -2755,7 +2767,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::zero_extend_16(d, s));
         }
 
-        let hword = cast(visitor.get32(s)).truncate_to_u16();
+        let hword = cast(visitor.get32::<DEBUG>(s)).truncate_to_u16();
         visitor.set32::<DEBUG>(d, cast(hword).to_u32());
         visitor.go_to_next_instruction()
     }
@@ -2765,7 +2777,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::zero_extend_16(d, s));
         }
 
-        let hword = cast(visitor.get64(s)).truncate_to_u16();
+        let hword = cast(visitor.get64::<DEBUG>(s)).truncate_to_u16();
         visitor.set64::<DEBUG>(d, cast(hword).to_u64());
         visitor.go_to_next_instruction()
     }
@@ -2775,7 +2787,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::reverse_byte(d, s));
         }
 
-        visitor.set32::<DEBUG>(d, u32::swap_bytes(visitor.get32(s)));
+        visitor.set32::<DEBUG>(d, u32::swap_bytes(visitor.get32::<DEBUG>(s)));
         visitor.go_to_next_instruction()
     }
 
@@ -2784,7 +2796,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::reverse_byte(d, s));
         }
 
-        visitor.set64::<DEBUG>(d, u64::swap_bytes(visitor.get64(s)));
+        visitor.set64::<DEBUG>(d, u64::swap_bytes(visitor.get64::<DEBUG>(s)));
         visitor.go_to_next_instruction()
     }
 
@@ -2793,8 +2805,8 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::cmov_if_zero(d, s, c));
         }
 
-        if visitor.get64(c) == 0 {
-            let value = visitor.get64(s);
+        if visitor.get64::<DEBUG>(c) == 0 {
+            let value = visitor.get64::<DEBUG>(s);
             visitor.set64::<DEBUG>(d, value);
         }
 
@@ -2806,7 +2818,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::cmov_if_zero_imm(d, c, s));
         }
 
-        if visitor.get64(c) == 0 {
+        if visitor.get64::<DEBUG>(c) == 0 {
             visitor.set32::<DEBUG>(d, s);
         }
 
@@ -2818,8 +2830,8 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::cmov_if_not_zero(d, s, c));
         }
 
-        if visitor.get64(c) != 0 {
-            let value = visitor.get64(s);
+        if visitor.get64::<DEBUG>(c) != 0 {
+            let value = visitor.get64::<DEBUG>(s);
             visitor.set64::<DEBUG>(d, value);
         }
 
@@ -2831,7 +2843,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::cmov_if_not_zero_imm(d, c, s));
         }
 
-        if visitor.get64(c) != 0 {
+        if visitor.get64::<DEBUG>(c) != 0 {
             visitor.set32::<DEBUG>(d, s);
         }
 
@@ -3507,7 +3519,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::jump_indirect(base, offset));
         }
 
-        let dynamic_address = visitor.get32(base).wrapping_add(offset);
+        let dynamic_address = visitor.get32::<DEBUG>(base).wrapping_add(offset);
         visitor.jump_indirect_impl::<DEBUG>(program_counter, dynamic_address)
     }
 
@@ -3516,7 +3528,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_imm_and_jump_indirect(ra, base, value, offset));
         }
 
-        let dynamic_address = visitor.get32(base).wrapping_add(offset);
+        let dynamic_address = visitor.get32::<DEBUG>(base).wrapping_add(offset);
         visitor.set32::<DEBUG>(ra, value);
         visitor.jump_indirect_impl::<DEBUG>(program_counter, dynamic_address)
     }
