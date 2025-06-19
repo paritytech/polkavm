@@ -69,8 +69,7 @@ macro_rules! define_benchmark {
             static mut ARRAY: picoalloc::Array<{ $heap_size }> = picoalloc::Array([0; $heap_size]);
 
             picoalloc::Mutex::new(picoalloc::Allocator::new(
-                picoalloc::ArrayPointer(&raw mut ARRAY),
-                picoalloc::Size::from_bytes_usize($heap_size).unwrap()
+                unsafe { picoalloc::ArrayPointer::new(&raw mut ARRAY) }
             ))
         };
         static mut STATE: State = $state;

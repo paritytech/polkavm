@@ -99,9 +99,9 @@ dependencies = [
 
 [[package]]
 name = "picoalloc"
-version = "2.1.0"
+version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca1b3eed9329a21fdc21f6167f7609e1e0387c4633fde753d079c05e0317b9c8"
+checksum = "7e5daf3ef08b3ef4c9b9de02cd7a1638ee612359fd8da3646192bc8ee57e218c"
 
 [[package]]
 name = "polkavm-common"
