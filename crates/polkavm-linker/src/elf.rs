@@ -81,6 +81,14 @@ impl<'a> Section<'a> {
         self.flags & u64::from(object::elf::SHF_EXECINSTR) != 0
     }
 
+    pub fn is_progbits(&self) -> bool {
+        self.elf_section_type == object::elf::SHT_PROGBITS
+    }
+
+    pub fn is_nobits(&self) -> bool {
+        self.elf_section_type == object::elf::SHT_NOBITS
+    }
+
     pub fn data(&self) -> &[u8] {
         &self.data
     }

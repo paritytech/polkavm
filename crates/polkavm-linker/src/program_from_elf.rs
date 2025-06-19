@@ -9056,6 +9056,31 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
                     | object::elf::SHT_STRTAB
                     | object::elf::SHT_RELA
             ) {
+                log::trace!(" {}: '{name}': skipping", section.index());
+                continue;
+            }
+
+            if section.is_progbits() && !section.is_writable() && !section.is_executable() {
+                sections_ro_data.push(section.index());
+                log::trace!(" {}: '{name}': autodetected as RO data", section.index());
+                continue;
+            }
+
+            if section.is_progbits() && section.is_writable() && !section.is_executable() {
+                sections_rw_data.push(section.index());
+                log::trace!(" {}: '{name}': autodetected as RW data", section.index());
+                continue;
+            }
+
+            if section.is_nobits() && section.is_writable() && !section.is_executable() {
+                sections_bss.push(section.index());
+                log::trace!(" {}: '{name}': autodetected as BSS", section.index());
+                continue;
+            }
+
+            if section.is_progbits() && !section.is_writable() && section.is_executable() {
+                sections_code.push(section.index());
+                log::trace!(" {}: '{name}': autodetected as code", section.index());
                 continue;
             }
 
