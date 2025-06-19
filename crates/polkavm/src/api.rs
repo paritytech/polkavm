@@ -1036,6 +1036,75 @@ impl RawInstance {
         self.module.is_64_bit()
     }
 
+    #[cold]
+    fn on_trap(&self) {
+        use crate::program::Instruction;
+
+        if let Some(program_counter) = self.program_counter() {
+            self.module.debug_print_location(log::Level::Debug, program_counter);
+            if let Some(instruction) = self.module.instructions_bounded_at(program_counter).next() {
+                let (base, offset, length) = match instruction.kind {
+                    Instruction::load_indirect_u8(_, base, offset)
+                    | Instruction::load_indirect_i8(_, base, offset)
+                    | Instruction::store_indirect_u8(_, base, offset)
+                    | Instruction::store_imm_indirect_u8(base, offset, _) => (Some(base), offset, 1),
+                    Instruction::load_indirect_u16(_, base, offset)
+                    | Instruction::load_indirect_i16(_, base, offset)
+                    | Instruction::store_indirect_u16(_, base, offset)
+                    | Instruction::store_imm_indirect_u16(base, offset, _) => (Some(base), offset, 2),
+                    Instruction::load_indirect_u32(_, base, offset)
+                    | Instruction::load_indirect_i32(_, base, offset)
+                    | Instruction::store_indirect_u32(_, base, offset)
+                    | Instruction::store_imm_indirect_u32(base, offset, _) => (Some(base), offset, 4),
+                    Instruction::load_indirect_u64(_, base, offset)
+                    | Instruction::store_indirect_u64(_, base, offset)
+                    | Instruction::store_imm_indirect_u64(base, offset, _) => (Some(base), offset, 8),
+                    Instruction::load_u8(_, offset)
+                    | Instruction::load_i8(_, offset)
+                    | Instruction::store_u8(_, offset)
+                    | Instruction::store_imm_u8(offset, _) => (None, offset, 1),
+                    Instruction::load_u16(_, offset)
+                    | Instruction::load_i16(_, offset)
+                    | Instruction::store_u16(_, offset)
+                    | Instruction::store_imm_u16(offset, _) => (None, offset, 2),
+                    Instruction::load_u32(_, offset)
+                    | Instruction::load_i32(_, offset)
+                    | Instruction::store_u32(_, offset)
+                    | Instruction::store_imm_u32(offset, _) => (None, offset, 4),
+                    Instruction::load_u64(_, offset) | Instruction::store_u64(_, offset) | Instruction::store_imm_u64(offset, _) => {
+                        (None, offset, 8)
+                    }
+                    _ => return,
+                };
+
+                let mut offset = u64::from(offset);
+                if let Some(base) = base {
+                    offset = offset.wrapping_add(self.reg(base.get()));
+                }
+
+                offset &= 0xffffffff;
+                let offset_end = offset.wrapping_add(length) & 0xffffffff;
+
+                log::debug!("Trapped when trying to access address: 0x{offset:08x}-0x{offset_end:08x}");
+                if !self.module.is_dynamic_paging() {
+                    let aux_address = u64::from(self.module.memory_map().aux_data_address());
+                    let aux_size = u64::from(self.module.memory_map().aux_data_size());
+                    let stack_address_hi = u64::from(self.module.memory_map().stack_address_high());
+                    let stack_address_lo = u64::from(self.module.memory_map().stack_address_low());
+                    if offset >= aux_address {
+                        if aux_size > 0 {
+                            let aux_address_end = aux_address + aux_size;
+                            log::debug!("  Auxiliary data range: 0x{aux_address:08x}..0x{aux_address_end:08x}");
+                        }
+                    } else if offset < stack_address_hi && offset >= stack_address_lo.wrapping_sub(32 * 1024 * 1024) {
+                        log::debug!("  Current stack range: 0x{stack_address_lo:08x}-0x{stack_address_hi:08x}");
+                        log::debug!("  Hint: try increasing your stack size with: 'polkavm_derive::min_stack_size'");
+                    }
+                }
+            }
+        }
+    }
+
     /// Starts or resumes the execution.
     pub fn run(&mut self) -> Result<InterruptKind, Error> {
         if self.next_program_counter().is_none() {
@@ -1053,9 +1122,7 @@ impl RawInstance {
             log::trace!("Interrupted: {:?}", interruption);
 
             if matches!(interruption, InterruptKind::Trap) && log::log_enabled!(log::Level::Debug) {
-                if let Some(program_counter) = self.program_counter() {
-                    self.module.debug_print_location(log::Level::Debug, program_counter);
-                }
+                self.on_trap();
             }
 
             if let Some(ref mut crosscheck) = self.crosscheck_instance {
