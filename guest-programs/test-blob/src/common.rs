@@ -83,6 +83,18 @@ extern "C" fn atomic_fetch_swap(value: usize) -> usize {
 }
 
 #[polkavm_derive::polkavm_export]
+extern "C" fn atomic_fetch_swap_with_zero() -> usize {
+    unsafe {
+        let output;
+        core::arch::asm!(
+            "amoswap.w.rl a0, zero, (a0)",
+            inout("a0") &mut GLOBAL => output
+        );
+        output
+    }
+}
+
+#[polkavm_derive::polkavm_export]
 extern "C" fn atomic_fetch_max_signed(value: isize) -> isize {
     unsafe {
         let output;

@@ -2774,6 +2774,9 @@ fn test_blob_atomic_fetch_swap(args: TestBlobArgs) {
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (10,)).unwrap(), 0);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (100,)).unwrap(), 10);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (1000,)).unwrap(), 100);
+
+    assert_eq!(i.call::<(), u32>("atomic_fetch_swap_with_zero", ()).unwrap(), 1000);
+    assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (100,)).unwrap(), 0);
 }
 
 fn test_blob_atomic_fetch_minmax(args: TestBlobArgs) {

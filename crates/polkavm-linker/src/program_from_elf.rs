@@ -2457,8 +2457,9 @@ fn convert_instruction(
                         src1: RegImm::Reg(Reg::E3),
                         src2: RegImm::Imm(32),
                     }));
+
+                    operand = Some(Reg::E3);
                 }
-                operand = Some(Reg::E3);
             }
             let operand_regimm = operand.map_or(RegImm::Imm(0), RegImm::Reg);
             let (old_value, new_value, output) = match cast_reg_non_zero(old_value)? {
