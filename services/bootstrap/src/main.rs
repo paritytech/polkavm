@@ -43,7 +43,7 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
     // parse args
-    let (_timeslot, _service_index, number_of_operands) = if let Some(args) = parse_accumulate_args(start_address, length, 0) {
+    let (_timeslot, _service_index, number_of_operands) = if let Some(args) = parse_accumulate_args(start_address, length) {
         (args.t, args.s, args.number_of_operands)
     } else {
         return (FIRST_READABLE_ADDRESS as u64, 0);
@@ -57,7 +57,9 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         call_log(2, None, &format!("createService output_bytes_address {} {:?}", ptr, buffer));
         let omega_9: u64 = 100;
         let omega_10: u64 = 100;
-        let result = unsafe { new(ptr, 32, omega_9, omega_10) };
+        let omega_11: u64 = 1024; // gratis f
+
+        let result = unsafe { new(ptr, 32, omega_9, omega_10, omega_11) };
         let result_bytes = &result.to_le_bytes()[..4];
         // write result to storage
         let storage_key: [u8; 4] = [0; 4];

@@ -9,7 +9,7 @@ all: $(SERVICES)
 $(SERVICES):
 	clear
 	@echo "Building $@ service..."
-	cd ./services/$@ && cargo build --release --target-dir ./target
+	cd ./services/$@ && cargo build --release --verbose --target-dir ./target
 	cd ../../
 	@if [ "$@" = "null_authorizer" ]; then \
 		cargo run -p polkatool jam-service services/$@/target/$(TARGET_DIR)/$@ -o services/$@/$@.pvm -d services/$@/$@_blob.pvm -i; \

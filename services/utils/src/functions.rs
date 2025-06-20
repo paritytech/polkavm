@@ -134,7 +134,7 @@ impl Default for AccumulateArgs {
     }
 }
 
-pub fn parse_accumulate_args(start_address: u64, length: u64, m: u64) -> Option<AccumulateArgs> {
+pub fn parse_accumulate_args(start_address: u64, length: u64) -> Option<AccumulateArgs> {
     if length == 0 {
         return None;
     }
@@ -176,8 +176,7 @@ pub fn parse_accumulate_args(start_address: u64, length: u64, m: u64) -> Option<
     }
     args.number_of_operands = decode_e(&full_slice[..discriminator_len as usize]) as u32;
 
-    // call_log(2, None, &format!("parse_accumulate_args s={} t={} |o|={}", args.s, args.t, args.number_of_operands));
-    None
+    return Some(args);
 }
 
 // Parse transfer args

@@ -269,7 +269,7 @@ static mut buffer: [u8; 4104] = [
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
     // parse accumulate args
-    let (_timeslot, _service_index, number_of_operands) = if let Some(args) = parse_accumulate_args(start_address, length, 0) {
+    let (_timeslot, _service_index, number_of_operands) = if let Some(args) = parse_accumulate_args(start_address, length) {
         (args.t, args.s, args.number_of_operands)
     } else {
         return (FIRST_READABLE_ADDRESS as u64, 0);

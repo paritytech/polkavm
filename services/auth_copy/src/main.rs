@@ -7,6 +7,7 @@ use alloc::format;
 use alloc::vec;
 use alloc::vec::Vec;
 const SIZE0: usize = 0x10000;
+use alloc::boxed::Box;
 // allocate memory for stack
 use polkavm_derive::min_stack_size;
 min_stack_size!(SIZE0);
@@ -67,39 +68,37 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     return (output_address, output_length);
 }
 
-#[no_mangle]
-static mut authorization_hashes: [u8; 32 * N_Q] = [0u8; 32 * N_Q];
 const N_Q: usize = 80;
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
-    let (_timeslot, _service_index, _num) = if let Some(args) = parse_accumulate_args(start_address, length, 0) {
-        (args.t, args.s, args.number_of_operands)
-    } else {
-        return (FIRST_READABLE_ADDRESS as u64, 0);
+    let mut authorization_hashes: [u8; 32 * N_Q] = [0u8; 32 * N_Q];
+    let mut output_bytes_32: [u8; 32] = [0u8; 32];
+
+    let (_timeslot, _service_index, num_of_operands) = match parse_accumulate_args(start_address, length) {
+      Some(args) => (args.t, args.s, args.number_of_operands),
+      None => return (FIRST_READABLE_ADDRESS as u64, 0),
     };
 
+    unsafe {
+        call_log(2, None, &format!("auth_copy num_ops={}", num_of_operands));
+    }
     let ptr = unsafe { output_bytes_32.as_ptr() as u64 };
     let result0 = unsafe { fetch(0, ptr, 8, 14, 0, 0) };
     unsafe {
-        call_log(2, None, &format!("auth_copy {:?} result={}", output_bytes_32, result0));
-    }
-
-    unsafe {
         for i in 0..N_Q {
             let start = i * 32;
-            authorization_hashes[start..start + 32].copy_from_slice(&output_bytes_32);
+	    authorization_hashes[start..start + 32].copy_from_slice(&output_bytes_32);
         }
-
-        let authorization_hashes_address = authorization_hashes.as_ptr() as u64;
-        assign(0, authorization_hashes_address);
-        assign(1, authorization_hashes_address);
-
-        (ptr, 32)
     }
+    let authorization_hashes_address = authorization_hashes.as_ptr() as u64;
+    unsafe {
+        assign(0, authorization_hashes_address, 0);
+        assign(1, authorization_hashes_address, 0);
+    }
+    (ptr, 32)
 }
 
-static mut output_bytes_32: [u8; 32] = [0; 32];
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn on_transfer(_start_address: u64, _length: u64) -> (u64, u64) {

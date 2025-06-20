@@ -47,7 +47,7 @@ extern "C" {
     pub fn bless(m: u64, a: u64, v: u64, o: u64, n: u64) -> u64;
 
     #[polkavm_import(index = 15)]
-    pub fn assign(c: u64, o: u64) -> u64;
+    pub fn assign(c: u64, o: u64, a: u64) -> u64;
 
     #[polkavm_import(index = 16)]
     pub fn designate(o: u64) -> u64;
@@ -56,7 +56,7 @@ extern "C" {
     pub fn checkpoint() -> u64;
 
     #[polkavm_import(index = 18)]
-    pub fn new(o: u64, l: u64, g: u64, m: u64) -> u64;
+    pub fn new(o: u64, l: u64, g: u64, m: u64, f: u64) -> u64;
 
     #[polkavm_import(index = 19)]
     pub fn upgrade(o: u64, g: u64, m: u64) -> u64;
