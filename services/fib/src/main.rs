@@ -277,7 +277,8 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
 
     let ptr = unsafe { output_bytes_32.as_ptr() as u64 };
     for i in 0..number_of_operands {
-        let result0 = unsafe { fetch(0, ptr, 8, 14, i.into(), 0) };
+    let result0 = unsafe { fetch(ptr, 0, 32, 14, i.into(), 0) };
+
         unsafe {
             call_log(2, None, &format!("fib {:?} result={}", output_bytes_32, result0));
         }
