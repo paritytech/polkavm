@@ -40,6 +40,10 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     return (wi_payload_start_address, wi_payload_length);
 }
 
+#[no_mangle]
+static mut output_bytes_36: [u8; 36] = [0; 36];
+static mut operand: [u8; 4104] = [0; 4104];
+
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
     // parse args
@@ -49,20 +53,38 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         return (FIRST_READABLE_ADDRESS as u64, 0);
     };
 
-    let mut buffer = Box::new([0u8; 32]);
-    let ptr = buffer.as_ptr() as u64;
+    let operand_ptr = unsafe { operand.as_ptr() as u64 };
+    let ptr = unsafe { output_bytes_36.as_ptr() as u64 };
 
     for i in 0..number_of_operands {
-        let result0 = unsafe { fetch(0, ptr, 32, 14, i.into(), 0) };
-        call_log(2, None, &format!("createService output_bytes_address {} {:?}", ptr, buffer));
-        let omega_9: u64 = 100;
-        let omega_10: u64 = 100;
+        let operand_len = unsafe { fetch(operand_ptr, 0, 4104, 15, i.into(), 0) };
+        // copy the last 36 bytes of the operand to output_bytes_36
+        unsafe {
+            let src_base_ptr = operand_ptr as *const u8;
+            let src_ptr = src_base_ptr.add(operand_len as usize - 36);
+            let dst_ptr = output_bytes_36.as_mut_ptr();
+            core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, 36);
+        }
+        // len is the 32..36 of the output_bytes_36 which is output by refine result  
+        let len: u32 = unsafe {
+            u32::from_le_bytes(
+                    output_bytes_36[32..36]      
+                        .try_into()
+                        .expect("slice length is exactly 4"),
+            )
+        };
+       
+        unsafe {
+            call_log(2, None, &format!("createService output_bytes_address {} {:x?} len={}", ptr, output_bytes_36, len));
+        } 
+        let omega_9: u64 = 100;  // g
+        let omega_10: u64 = 100;  // m
         let omega_11: u64 = 1024; // gratis f
 
-        let result = unsafe { new(ptr, 32, omega_9, omega_10, omega_11) };
+        let result = unsafe { new(ptr, len as u64, omega_9, omega_10, omega_11) };
         let result_bytes = &result.to_le_bytes()[..4];
         // write result to storage
-        let storage_key: [u8; 4] = [0; 4];
+        let storage_key: [u8; 4] = (i as u32).to_le_bytes();
         unsafe {
             write(
                 storage_key.as_ptr() as u64,
@@ -71,14 +93,16 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
                 result_bytes.len() as u64,
             );
         }
-        call_log(2, None, &format!("SERVICEID{}", result));
+        call_log(2, None, &format!("SERVICEID={} storage_key={:x?}", result, storage_key));
         let memo = [0u8; 128];
         unsafe {
             transfer(result, 500000, 100, memo.as_ptr() as u64);
         }
         let start = (i * 4) as usize;
         let end = ((i + 1) * 4) as usize;
-        buffer[start..end].copy_from_slice(result_bytes);
+        unsafe {
+            output_bytes_36[start..end].copy_from_slice(result_bytes);
+        }
     }
     (ptr, 32)
 }
