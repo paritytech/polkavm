@@ -975,6 +975,8 @@ fn dynamic_paging_basic(mut engine_config: Config) {
 
     // Now handle it.
     instance.zero_memory(segfault.page_address, page_size).unwrap();
+    assert_eq!(instance.is_memory_accessible(0x10000, 0x4, false), true);
+    assert_eq!(instance.is_memory_accessible(0x10000 + page_size, 0x4, false), false);
 
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x10000 + page_size);
