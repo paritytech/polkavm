@@ -29,6 +29,12 @@ do
     cd tools/benchtool && cargo test --profile $PROFILE && cd ../..
 done
 
+echo ">> cargo test (generic-sandbox)"
+cargo test --features generic-sandbox -p polkavm -- \
+    tests::compiler_generic_basic_test \
+    tests::compiler_generic_simple_test \
+    tests::compiler_generic_riscv_ 
+
 echo ">> cargo run (examples)"
 POLKAVM_TRACE_EXECUTION=1 POLKAVM_ALLOW_INSECURE=1 cargo run -p hello-world-host
 
