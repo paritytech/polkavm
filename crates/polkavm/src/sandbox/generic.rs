@@ -661,20 +661,17 @@ unsafe extern "C" fn syscall_return() -> ! {
     sysreturn(vmctx);
 }
 
-unsafe extern "C" fn syscall_sbrk(_pending_heap_top: u64) -> u32 {
+unsafe extern "C" fn syscall_sbrk(pending_heap_top: u64) -> u32 {
     // SAFETY: We were called from the inside of the guest program, so vmctx must be valid.
     let vmctx = unsafe { conjure_vmctx() };
 
-    // match sbrk(vmctx, pending_heap_top) {
-    //     Ok(Some(new_heap_top)) => new_heap_top,
-    //     Ok(None) => 0,
-    //     Err(()) => {
-    //         trigger_error(vmctx);
-    //     }
-    // }
-
-    // sbrk is not supported yet
-    trigger_exit(vmctx, ExitReason::Error);
+    match sbrk(vmctx, pending_heap_top) {
+        Ok(Some(new_heap_top)) => new_heap_top,
+        Ok(None) => 0,
+        Err(()) => {
+            trigger_exit(vmctx, ExitReason::Error);
+        }
+    }
 }
 
 unsafe extern "C" fn syscall_not_enough_gas() -> ! {
@@ -1128,7 +1125,9 @@ impl super::Sandbox for Sandbox {
 
     fn allocate_jump_table(_global: &Self::GlobalState, count: usize) -> Result<Self::JumpTable, Self::Error> {
         // TODO: Cache this and don't unnecessarily double-initialize it.
-        Ok(vec![0; count])
+        let native_page_size = get_native_page_size();
+        let size = align_to_next_page_usize(native_page_size, count * core::mem::size_of::<usize>()).unwrap();
+        Ok(vec![0; size / core::mem::size_of::<usize>()])
     }
 
     fn reserve_address_space() -> Result<Self::AddressSpace, Self::Error> {
@@ -1796,7 +1795,7 @@ impl super::Sandbox for Sandbox {
             let page_start = module.address_to_page(module.round_to_page_size_down(address));
             let page_end = module.address_to_page(module.round_to_page_size_down(address + length - 1));
             let page_size = get_native_page_size() as u32;
-            let page_count = page_end - page_start;
+            let page_count = page_end - page_start + 1;
             self.page_set.remove((page_start, page_end));
             self.memory.mprotect(
                 self.guest_memory_offset + (page_start * page_size) as usize,
