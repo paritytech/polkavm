@@ -115,6 +115,7 @@ where
     memset_trampoline_start: usize,
     memset_trampoline_end: usize,
     custom_codegen: Option<Arc<dyn CustomCodegen>>,
+    asm_len_before: usize,
 
     _phantom: PhantomData<(S, B)>,
 }
@@ -260,6 +261,7 @@ where
             memset_trampoline_start: 0,
             memset_trampoline_end: 0,
             custom_codegen: config.custom_codegen.clone(),
+            asm_len_before: 0,
             _phantom: PhantomData,
         };
 
@@ -454,9 +456,12 @@ where
         }
     }
 
-    fn before_instruction(&self, program_counter: u32) {
+    fn before_instruction(&mut self, program_counter: u32) {
         if log::log_enabled!(log::Level::Trace) {
             self.trace_compiled_instruction(program_counter);
+        }
+        if cfg!(debug_assertions) && !self.step_tracing && self.custom_codegen.is_none() {
+            self.asm_len_before = self.asm.len();
         }
     }
 
@@ -464,8 +469,7 @@ where
         assert!(KIND == CONTINUE_BASIC_BLOCK || KIND == END_BASIC_BLOCK || KIND == END_BASIC_BLOCK_INVALID);
 
         if cfg!(debug_assertions) && !self.step_tracing && self.custom_codegen.is_none() {
-            let offset = self.program_counter_to_machine_code_offset_list.last().unwrap().1 as usize;
-            let instruction_length = self.asm.len() - offset;
+            let instruction_length = self.asm.len() - self.asm_len_before;
             if instruction_length > VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH as usize {
                 self.panic_on_too_long_instruction(program_counter, instruction_length)
             }
