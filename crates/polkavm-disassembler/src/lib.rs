@@ -58,6 +58,8 @@ impl AssemblyFormatter {
         code_origin: u64,
         mut code: &[u8],
         mut position: usize,
+        show_raw_bytes: bool,
+        show_offsets: bool,
         writer: &mut impl Write,
     ) -> Result<(), std::io::Error> {
         use iced_x86::Formatter;
@@ -83,18 +85,23 @@ impl AssemblyFormatter {
             if indent {
                 write!(writer, "                                       ")?;
             }
-            write!(writer, "{:8x}: ", position as u64 + code_origin)?;
+
+            if show_offsets {
+                write!(writer, "{:8x}: ", position as u64 + code_origin)?;
+            }
 
             let start_index = (instruction.ip() - code_origin) as usize;
             let instr_bytes = &code[start_index..start_index + instruction.len()];
-            let mut count = 0;
-            for b in instr_bytes.iter() {
-                write!(writer, "{:02x} ", b)?;
-                count += 3;
-            }
-            while count < 34 {
-                write!(writer, " ")?;
-                count += 1;
+            if show_raw_bytes {
+                let mut count = 0;
+                for b in instr_bytes.iter() {
+                    write!(writer, "{:02x} ", b)?;
+                    count += 3;
+                }
+                while count < 34 {
+                    write!(writer, " ")?;
+                    count += 1;
+                }
             }
 
             self.buffer.clear();
@@ -116,12 +123,14 @@ pub struct Disassembler<'a> {
     gas_cost_map: Option<HashMap<ProgramCounter, i64>>,
     native: Option<NativeCode>,
     show_raw_bytes: bool,
+    show_native_raw_bytes: bool,
     prefer_non_abi_reg_names: bool,
     prefer_unaliased: bool,
     prefer_offset_jump_targets: bool,
     emit_header: bool,
     emit_exports: bool,
     show_offsets: bool,
+    show_native_offsets: bool,
 }
 
 impl<'a> Disassembler<'a> {
@@ -138,17 +147,23 @@ impl<'a> Disassembler<'a> {
             gas_cost_map: None,
             native,
             show_raw_bytes: false,
+            show_native_raw_bytes: true,
             prefer_non_abi_reg_names: false,
             prefer_unaliased: false,
             prefer_offset_jump_targets: false,
             emit_header: true,
             emit_exports: true,
             show_offsets: true,
+            show_native_offsets: true,
         })
     }
 
     pub fn show_raw_bytes(&mut self, value: bool) {
         self.show_raw_bytes = value;
+    }
+
+    pub fn show_native_raw_bytes(&mut self, value: bool) {
+        self.show_native_raw_bytes = value;
     }
 
     pub fn prefer_non_abi_reg_names(&mut self, value: bool) {
@@ -173,6 +188,10 @@ impl<'a> Disassembler<'a> {
 
     pub fn show_offsets(&mut self, value: bool) {
         self.show_offsets = value;
+    }
+
+    pub fn show_native_offsets(&mut self, value: bool) {
+        self.show_native_offsets = value;
     }
 
     fn instructions(&self) -> Vec<ParsedInstruction> {
@@ -459,6 +478,8 @@ impl<'a> Disassembler<'a> {
                         native.machine_code_origin,
                         machine_code_chunk,
                         machine_code_position,
+                        self.show_native_raw_bytes,
+                        self.show_native_offsets,
                         &mut writer,
                     ) {
                         return Err(format!("failed to write to output: {error}").into());

@@ -70,6 +70,12 @@ enum Args {
         #[clap(long)]
         no_show_offsets: bool,
 
+        #[clap(long)]
+        no_show_native_raw_bytes: bool,
+
+        #[clap(long)]
+        no_show_native_offsets: bool,
+
         /// The input file.
         input: PathBuf,
     },
@@ -131,8 +137,19 @@ fn main() {
             display_gas,
             show_raw_bytes,
             no_show_offsets,
+            no_show_native_raw_bytes,
+            no_show_native_offsets,
             input,
-        } => main_disassemble(input, format, display_gas, show_raw_bytes, !no_show_offsets, output),
+        } => main_disassemble(
+            input,
+            format,
+            display_gas,
+            show_raw_bytes,
+            !no_show_offsets,
+            !no_show_native_raw_bytes,
+            !no_show_native_offsets,
+            output,
+        ),
         Args::Assemble { input, output } => main_assemble(input, output),
         Args::Stats { inputs } => main_stats(inputs),
         Args::GetTargetJsonPath { bitness } => {
@@ -254,19 +271,24 @@ fn main_stats(inputs: Vec<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::fn_params_excessive_bools)]
 fn main_disassemble(
     input: PathBuf,
     format: DisassemblyFormat,
     display_gas: bool,
     show_raw_bytes: bool,
     show_offsets: bool,
+    show_native_raw_bytes: bool,
+    show_native_offsets: bool,
     output: Option<PathBuf>,
 ) -> Result<(), String> {
     let blob = load_blob(&input)?;
 
     let mut disassembler = polkavm_disassembler::Disassembler::new(&blob, format).map_err(|error| error.to_string())?;
     disassembler.show_raw_bytes(show_raw_bytes);
+    disassembler.show_native_raw_bytes(show_native_raw_bytes);
     disassembler.show_offsets(show_offsets);
+    disassembler.show_native_offsets(show_native_offsets);
 
     if display_gas {
         disassembler.display_gas().map_err(|error| error.to_string())?;
