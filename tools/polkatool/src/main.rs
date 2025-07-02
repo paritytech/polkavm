@@ -67,6 +67,9 @@ enum Args {
         #[clap(long)]
         show_raw_bytes: bool,
 
+        #[clap(long)]
+        no_show_offsets: bool,
+
         /// The input file.
         input: PathBuf,
     },
@@ -127,8 +130,9 @@ fn main() {
             format,
             display_gas,
             show_raw_bytes,
+            no_show_offsets,
             input,
-        } => main_disassemble(input, format, display_gas, show_raw_bytes, output),
+        } => main_disassemble(input, format, display_gas, show_raw_bytes, !no_show_offsets, output),
         Args::Assemble { input, output } => main_assemble(input, output),
         Args::Stats { inputs } => main_stats(inputs),
         Args::GetTargetJsonPath { bitness } => {
@@ -255,12 +259,14 @@ fn main_disassemble(
     format: DisassemblyFormat,
     display_gas: bool,
     show_raw_bytes: bool,
+    show_offsets: bool,
     output: Option<PathBuf>,
 ) -> Result<(), String> {
     let blob = load_blob(&input)?;
 
     let mut disassembler = polkavm_disassembler::Disassembler::new(&blob, format).map_err(|error| error.to_string())?;
     disassembler.show_raw_bytes(show_raw_bytes);
+    disassembler.show_offsets(show_offsets);
 
     if display_gas {
         disassembler.display_gas().map_err(|error| error.to_string())?;
