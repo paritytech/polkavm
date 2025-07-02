@@ -99,7 +99,7 @@ impl AssemblyFormatter {
 
             self.buffer.clear();
             formatter.format(&instruction, &mut self.buffer);
-            write!(writer, "{}", self.buffer)?;
+            write!(writer, "{}", self.buffer.replace("byte [", "byte ptr ["))?;
             writeln!(writer)?;
 
             code = &code[instruction.len()..];
