@@ -2202,6 +2202,41 @@ fn main_benchmark_maximum_cache_misses(isolation_args: IsolationArgs) -> Result<
     Ok(())
 }
 
+fn main_benchmark_optimistic(isolation_args: IsolationArgs) -> Result<(), Error> {
+    use polkavm_common::program::asm::*;
+    use polkavm_common::program::Reg::*;
+
+    setup_signal_handler();
+    let ctx = Context::new(isolation_args)?;
+
+    let basic_block = {
+        ctx.benchmark("basic_block", |mut code| {
+            code.push(fallthrough());
+        })
+        .repeat_code(10000)
+        .gas_metering(true)
+        .run()
+    };
+
+    let branch_hit = {
+        let mut n = 0;
+        ctx.benchmark("branch_hit", |mut code| {
+            code.push(add_imm_64(A1, A1, 1));
+            code.push(branch_eq(A1, S1, n + 1));
+            n += 1;
+        })
+        .repeat_code(10000)
+        .setup_code(|mut code| {
+            code.push(load_imm(S1, 1));
+        })
+        .counters(vec![CounterKind::BranchesRetired, CounterKind::BranchesRetiredMisprediction])
+        .run()
+    };
+
+    log::info!("branch_hit: {}", branch_hit.cost_per_operation + basic_block.cost_per_operation);
+    Ok(())
+}
+
 fn main_generate_model(
     isolation_args: IsolationArgs,
     output_model_code: Option<PathBuf>,
@@ -3145,6 +3180,10 @@ enum Args {
         #[clap(flatten)]
         isolation_args: IsolationArgs,
     },
+    BenchmarkOptimistic {
+        #[clap(flatten)]
+        isolation_args: IsolationArgs,
+    },
     CacheMissBenchmark {
         #[clap(flatten)]
         isolation_args: IsolationArgs,
@@ -3187,6 +3226,7 @@ fn main() {
         Args::BenchmarkRandomCacheMisses { isolation_args } => {
             main_benchmark_random_cache_misses(isolation_args).map_err(|error| error.to_string())
         }
+        Args::BenchmarkOptimistic { isolation_args } => main_benchmark_optimistic(isolation_args).map_err(|error| error.to_string()),
         Args::GenerateModel {
             isolation_args,
             output_model_code,
