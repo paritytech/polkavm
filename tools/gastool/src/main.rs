@@ -13,6 +13,7 @@ use polkavm_assembler::amd64::Reg::rsp;
 use polkavm_assembler::amd64::RegIndex::*;
 use polkavm_assembler::amd64::{Condition, LoadKind, RegSize, Size};
 use polkavm_assembler::{Assembler, Label};
+use polkavm_common::program::InstructionFormat;
 use polkavm_common::writer::ProgramBlobBuilder;
 use polkavm_linux_raw as linux_raw;
 use std::collections::{BTreeMap, HashMap};
@@ -2937,8 +2938,21 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf) -
     let blob = std::fs::read(&doom_blob_path).map_err(|error| format!("failed to read {}: {}", doom_blob_path.display(), error))?;
     let blob = ProgramBlob::parse(blob.into())?;
 
+    let mut offset_to_opcode = HashMap::new();
+    let mut offset_to_basic_block_number = HashMap::new();
+    let mut basic_block_to_offset = Vec::new();
+    basic_block_to_offset.push(ProgramCounter(0));
+    for instruction in blob.instructions(polkavm::program::ISA64_V1) {
+        offset_to_opcode.insert(instruction.offset, instruction.opcode());
+        offset_to_basic_block_number.insert(instruction.offset, basic_block_to_offset.len() - 1);
+        if instruction.opcode().starts_new_basic_block() {
+            basic_block_to_offset.push(instruction.next_offset);
+        }
+    }
+
     let instruction_counts_path = cache_path.join("instruction_counts.json");
-    if !instruction_counts_path.exists() {
+    let pc_counts_path = cache_path.join("pc_counts.json");
+    if !instruction_counts_path.exists() || !pc_counts_path.exists() {
         if cfg!(debug_assertions) {
             log::error!("ERROR: missing instruction counts; rerun in release mode!");
             std::process::exit(1);
@@ -2950,18 +2964,13 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf) -
         let engine = polkavm::Engine::new(&config)?;
         let instance_pre = prepare_doom(&engine, &blob, true)?;
 
-        let mut offset_to_opcode = HashMap::new();
-        for instruction in blob.instructions(polkavm::program::ISA64_V1) {
-            offset_to_opcode.insert(instruction.offset, instruction.opcode());
-        }
-
         let mut instance = instance_pre.instantiate()?;
         let mut state = State { frames: 0 };
         let mut result = instance.call_typed(&mut state, "ext_initialize", ());
-        let mut pc_counts = HashMap::new();
+        let mut pc_counts: HashMap<u32, u64> = HashMap::new();
         loop {
             if let Some(pc) = instance.program_counter() {
-                *pc_counts.entry(pc).or_insert(0) += 1;
+                *pc_counts.entry(pc.0).or_insert(0) += 1;
             }
             match result {
                 Ok(()) => break,
@@ -2976,7 +2985,7 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf) -
             result = instance.call_typed(&mut state, "ext_tick", ());
             loop {
                 if let Some(pc) = instance.program_counter() {
-                    *pc_counts.entry(pc).or_insert(0) += 1;
+                    *pc_counts.entry(pc.0).or_insert(0) += 1;
                 }
                 match result {
                     Ok(()) => break,
@@ -2988,9 +2997,12 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf) -
             }
         }
 
+        let output = serde_json::to_string_pretty(&pc_counts).unwrap();
+        std::fs::write(&pc_counts_path, output).map_err(|error| format!("failed to write {}: {}", pc_counts_path.display(), error))?;
+
         let mut counts = BTreeMap::new();
         for (location, count) in pc_counts {
-            let opcode = *offset_to_opcode.get(&location).unwrap();
+            let opcode = *offset_to_opcode.get(&ProgramCounter(location)).unwrap();
             *counts.entry(opcode).or_insert(0) += count;
         }
 
@@ -3014,6 +3026,16 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf) -
             out.insert(opcode, count);
         }
         out
+    };
+
+    let pc_counts: BTreeMap<ProgramCounter, u64> = {
+        let pc_counts: String =
+            std::fs::read_to_string(&pc_counts_path).map_err(|error| format!("failed to read {}: {}", pc_counts_path.display(), error))?;
+
+        let pc_counts: BTreeMap<u32, u64> =
+            serde_json::from_str(&pc_counts).map_err(|error| format!("failed to parse {}: {}", pc_counts_path.display(), error))?;
+
+        pc_counts.into_iter().map(|(pc, count)| (ProgramCounter(pc), count)).collect()
     };
 
     restart_with_sudo_or_exit();
@@ -3107,6 +3129,28 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf) -
         .collect();
     category_counts.sort_by_key(|(_, cost, _)| core::cmp::Reverse(*cost));
 
+    let mut pc_costs: Vec<_> = pc_counts
+        .iter()
+        .map(|(&pc, &count)| {
+            let opcode = offset_to_opcode.get(&pc).unwrap();
+            let cost = count * u64::from(cost_model.cost_for_opcode(*opcode));
+            (pc, count, cost)
+        })
+        .collect();
+
+    pc_costs.sort_by_key(|(_, _, cost)| core::cmp::Reverse(*cost));
+
+    let mut basic_block_costs = vec![0; basic_block_to_offset.len()];
+    for (&pc, &count) in &pc_counts {
+        let basic_block_number = *offset_to_basic_block_number.get(&pc).unwrap();
+        let opcode = offset_to_opcode.get(&pc).unwrap();
+        let cost = count * u64::from(cost_model.cost_for_opcode(*opcode));
+        basic_block_costs[basic_block_number] += cost;
+    }
+    let mut basic_block_costs: Vec<_> = basic_block_costs.into_iter().enumerate().collect();
+    basic_block_costs.retain(|(_, cost)| *cost > 0);
+    basic_block_costs.sort_by_key(|(_, cost)| core::cmp::Reverse(*cost));
+
     log::info!("Top costly instruction categories:");
     for (category, cost, count) in category_counts {
         log::info!(
@@ -3121,13 +3165,58 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf) -
     log::info!("Top costly instructions:");
     for (opcode, cost, count) in instruction_counts {
         log::info!(
-            "  {:>36} {:>6} {:>18} ({:>12} * {:>9})",
+            "  {:>36} {:>6} {:>18} ({:>12} x {:>9})",
             opcode.to_string(),
             format!("{:.02}%", (cost as f64 / gas_consumed as f64) * 100.0),
             pretty_print(cost as i64),
             pretty_print(count as i64),
             pretty_print(u64::from(cost_model.cost_for_opcode(opcode)) as i64),
         );
+    }
+
+    let mut format = InstructionFormat::default();
+    format.is_64_bit = true;
+
+    log::info!("Top costly locations:");
+    for &(pc, count, cost) in pc_costs.iter().take(100) {
+        let opcode = offset_to_opcode.get(&pc).unwrap();
+        log::info!(
+            "  {:>6}: {:>15} ({:>11} x {:>6}): {}",
+            pc.0,
+            pretty_print(cost as i64),
+            pretty_print(count as i64),
+            pretty_print(u64::from(cost_model.cost_for_opcode(*opcode)) as i64),
+            blob.instructions_bounded_at(polkavm::program::ISA64_V1, pc)
+                .next()
+                .unwrap()
+                .display(&format),
+        );
+    }
+
+    let pc_costs: HashMap<_, _> = pc_costs.into_iter().map(|(pc, count, cost)| (pc, (count, cost))).collect();
+
+    log::info!("Top costly basic blocks:");
+    for (basic_block_number, cost) in basic_block_costs.into_iter().take(20) {
+        let pc = basic_block_to_offset[basic_block_number];
+        log::info!(
+            "  @{}: {:>15} ({:.02}%) = {} x {}",
+            basic_block_number,
+            pretty_print(cost as i64),
+            (cost as f64 / gas_consumed as f64) * 100.0,
+            instance_pre.module().calculate_gas_cost_for(pc).unwrap(),
+            pc_counts.get(&pc).unwrap(),
+        );
+        for instruction in blob.instructions_bounded_at(polkavm::program::ISA64_V1, pc) {
+            log::info!(
+                "    {:>6}: {:>15}: {}",
+                instruction.offset,
+                pretty_print(pc_costs.get(&instruction.offset).copied().unwrap().1 as i64),
+                instruction.display(&format)
+            );
+            if instruction.starts_new_basic_block() {
+                break;
+            }
+        }
     }
 
     Ok(())
