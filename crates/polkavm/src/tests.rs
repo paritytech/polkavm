@@ -3087,6 +3087,13 @@ fn test_blob_get_self_address(args: TestBlobArgs) {
     assert_ne!(addr, 0);
 }
 
+fn test_blob_get_self_address_naked(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let addr = i.call::<(), u32>("get_self_address_naked", ()).unwrap();
+    assert_ne!(addr, 0);
+}
+
 fn test_asm_reloc_add_sub(config: Config, optimize: bool) {
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_add_sub_64.elf");
 
@@ -3923,6 +3930,7 @@ run_test_blob_tests! {
     test_blob_return_tuple_from_export
     test_blob_get_heap_base
     test_blob_get_self_address
+    test_blob_get_self_address_naked
 }
 
 run_asm_tests! {

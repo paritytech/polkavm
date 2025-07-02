@@ -436,3 +436,22 @@ fn get_self_address_impl() -> usize {
 extern "C" fn get_self_address() -> u32 {
     get_self_address_impl() as u32
 }
+
+#[unsafe(naked)]
+extern "C" fn get_self_address_naked_impl() -> usize {
+    core::arch::naked_asm!(
+        ".option norvc",
+        "nop",
+        "auipc a4, 0x0",
+        "addi  a0, a4, -4",
+        "ret",
+        ".option rvc"
+    )
+}
+
+#[polkavm_derive::polkavm_export]
+fn get_self_address_naked() -> u32 {
+    let address = get_self_address_naked_impl();
+    assert_eq!(get_self_address_naked_impl as usize, address);
+    address as u32
+}

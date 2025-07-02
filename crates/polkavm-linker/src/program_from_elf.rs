@@ -2849,30 +2849,69 @@ fn parse_code_section(
                         imm: value_lower,
                     }) = next_inst
                     {
-                        if base_upper == add_dst
-                            && base_upper == add_src
+                        if base_upper == add_src
                             && ((elf.is_64() && kind == RegImmKind::Add64) || (!elf.is_64() && kind == RegImmKind::Add32))
                         {
-                            if let Some(dst) = cast_reg_non_zero(base_upper)? {
-                                let offset = value_upper.wrapping_add(cast(value_lower).to_unsigned());
-                                let offset = cast(offset).to_signed();
-                                let offset = cast(offset).to_i64_sign_extend();
-                                let offset = current_location.offset.wrapping_add_signed(offset);
-                                if offset < section.size() {
+                            let offset = value_upper.wrapping_add(cast(value_lower).to_unsigned());
+                            let offset = cast(offset).to_signed();
+                            let offset = cast(offset).to_i64_sign_extend();
+                            let offset = current_location.offset.wrapping_add_signed(offset);
+                            if offset >= section.size() {
+                                return Err(ProgramFromElfError::other(format!(
+                                    "found an unrelocated auipc instruction in {} ('{}') at address 0x{:x} with an oversized offset (offset = {}, section size = {})",
+                                    current_location,
+                                    section.name(),
+                                    section.original_address() + current_location.offset,
+                                    offset,
+                                    section.size(),
+                                )));
+                            }
+
+                            if let Some(dst) = cast_reg_non_zero(add_dst)? {
+                                output.push((
+                                    source,
+                                    InstExt::Basic(BasicInst::LoadAddress {
+                                        dst,
+                                        target: SectionTarget {
+                                            section_index: section.index(),
+                                            offset,
+                                        },
+                                    }),
+                                ));
+                            }
+
+                            if base_upper != add_dst {
+                                if let Some(base_upper) = cast_reg_non_zero(base_upper)? {
+                                    let Some(dst) = cast_reg_non_zero(add_dst)? else {
+                                        return Err(ProgramFromElfError::other(format!(
+                                            "found an unrelocated auipc instruction in {} ('{}') at address 0x{:x}: unimplemented: destination register is zero",
+                                            current_location,
+                                            section.name(),
+                                            section.original_address() + current_location.offset,
+                                        )));
+                                    };
+                                    let Ok(offset) = offset.try_into() else {
+                                        return Err(ProgramFromElfError::other(format!(
+                                            "found an unrelocated auipc instruction in {} ('{}') at address 0x{:x}: offset doesn't fit in 32-bits",
+                                            current_location,
+                                            section.name(),
+                                            section.original_address() + current_location.offset,
+                                        )));
+                                    };
                                     output.push((
                                         source,
-                                        InstExt::Basic(BasicInst::LoadAddress {
-                                            dst,
-                                            target: SectionTarget {
-                                                section_index: section.index(),
-                                                offset,
-                                            },
+                                        InstExt::Basic(BasicInst::AnyAny {
+                                            kind: if elf.is_64() { AnyAnyKind::Sub64 } else { AnyAnyKind::Sub32 },
+                                            dst: base_upper,
+                                            src1: RegImm::Reg(dst),
+                                            src2: RegImm::Imm(offset),
                                         }),
-                                    ));
-                                    relative_offset += next_inst_size as usize;
-                                    continue;
+                                    ))
                                 }
                             }
+
+                            relative_offset += next_inst_size as usize;
+                            continue;
                         }
                     }
                 }
