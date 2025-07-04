@@ -135,6 +135,7 @@ pub(crate) trait Sandbox: Sized {
     fn heap_size(&self) -> u32;
     fn sbrk(&mut self, size: u32) -> Result<Option<u32>, Self::Error>;
     fn pid(&self) -> Option<u32>;
+    fn reclaim_memory(&mut self);
 }
 
 #[derive(Copy, Clone, Default)]

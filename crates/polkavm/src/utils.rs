@@ -67,6 +67,11 @@ where
     pub fn clear(&mut self) {
         self.inner.clear();
     }
+
+    #[inline]
+    pub fn reset(&mut self) {
+        self.inner.iter_mut().for_each(|value| *value = None);
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
