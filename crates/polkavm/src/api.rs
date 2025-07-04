@@ -1707,4 +1707,15 @@ impl RawInstance {
     pub fn next_native_program_counter(&self) -> Option<usize> {
         access_backend!(self.backend, |backend| backend.next_native_program_counter())
     }
+
+    /// Reclaim memory that was previously allocated by the backend.
+    ///
+    /// If the backend doesn't support this then it will return success without doing anything.
+    /// If the backend does support this then it will reclaim all memory that was allocated by the backend.
+    ///
+    /// N.B. This is only supported for the interpreter backend.
+    ///
+    pub fn reclaim_memory(&mut self) {
+        access_backend!(self.backend, |mut backend| backend.reclaim_memory())
+    }
 }

@@ -1827,6 +1827,8 @@ impl super::Sandbox for Sandbox {
         None
     }
 
+    fn reclaim_memory(&mut self) {}
+
     fn address_table() -> AddressTable {
         AddressTable::from_raw(AddressTableRaw {
             syscall_hostcall,

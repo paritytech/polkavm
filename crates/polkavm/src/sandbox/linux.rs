@@ -2194,6 +2194,8 @@ impl super::Sandbox for Sandbox {
         Some(self.child.pid as u32)
     }
 
+    fn reclaim_memory(&mut self) {}
+
     fn address_table() -> AddressTable {
         ZYGOTE_TABLES.0
     }
