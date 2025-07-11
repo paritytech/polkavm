@@ -463,6 +463,14 @@ where
     fn after_instruction<const KIND: usize>(&mut self, program_counter: u32, args_length: u32) {
         assert!(KIND == CONTINUE_BASIC_BLOCK || KIND == END_BASIC_BLOCK || KIND == END_BASIC_BLOCK_INVALID);
 
+        if cfg!(debug_assertions) && !self.step_tracing && self.custom_codegen.is_none() {
+            let offset = self.program_counter_to_machine_code_offset_list.last().unwrap().1 as usize;
+            let instruction_length = self.asm.len() - offset;
+            if instruction_length > VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH as usize {
+                self.panic_on_too_long_instruction(program_counter, instruction_length)
+            }
+        }
+
         let next_program_counter = program_counter + args_length + 1;
         self.program_counter_to_machine_code_offset_list
             .push((ProgramCounter(next_program_counter), self.asm.len() as u32));
@@ -478,14 +486,6 @@ where
             self.force_start_new_basic_block(next_program_counter, can_jump_into_new_basic_block);
         } else if self.step_tracing {
             self.step(next_program_counter);
-        }
-
-        if cfg!(debug_assertions) && !self.step_tracing && self.custom_codegen.is_none() {
-            let offset = self.program_counter_to_machine_code_offset_list.last().unwrap().1 as usize;
-            let instruction_length = self.asm.len() - offset;
-            if instruction_length > VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH as usize {
-                self.panic_on_too_long_instruction(program_counter, instruction_length)
-            }
         }
     }
 
