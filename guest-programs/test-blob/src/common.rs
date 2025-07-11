@@ -428,9 +428,7 @@ extern "C" fn get_heap_base() -> u32 {
 
 #[inline(never)]
 fn get_self_address_impl() -> usize {
-    unsafe {
-        GLOBAL += 1;
-    }
+    unsafe { GLOBAL += 1; }
     get_self_address_impl as usize
 }
 
