@@ -605,7 +605,7 @@ fn correctness_fuzzer_harness(data: Vec<OperationKind>) {
         //
 
         match interrupt_interpreter.clone() {
-            InterruptKind::NotEnoughGas | InterruptKind::Trap => {
+            InterruptKind::Finished | InterruptKind::NotEnoughGas | InterruptKind::Trap => {
                 break;
             }
             polkavm::InterruptKind::Ecalli(_) => {

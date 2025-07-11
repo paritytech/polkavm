@@ -1923,10 +1923,11 @@ impl super::Sandbox for Sandbox {
 
     fn is_memory_accessible(&self, address: u32, size: u32, _is_writable: bool) -> bool {
         assert!(self.dynamic_paging_enabled);
+        debug_assert_ne!(size, 0);
 
         let module = self.module.as_ref().unwrap();
         let page_start = module.address_to_page(module.round_to_page_size_down(address));
-        let page_end = module.address_to_page(module.round_to_page_size_down(address + size));
+        let page_end = module.address_to_page(module.round_to_page_size_down(address + size - 1));
         self.page_set.contains((page_start, page_end))
     }
 
@@ -1944,6 +1945,8 @@ impl super::Sandbox for Sandbox {
     }
 
     fn read_memory_into<'slice>(&self, address: u32, slice: &'slice mut [MaybeUninit<u8>]) -> Result<&'slice mut [u8], MemoryAccessError> {
+        debug_assert_ne!(slice.len(), 0);
+
         log::trace!(
             "Reading memory: 0x{:x}-0x{:x} ({} bytes)",
             address,
@@ -1961,7 +1964,7 @@ impl super::Sandbox for Sandbox {
         } else {
             let module = self.module.as_ref().unwrap();
             let page_start = module.address_to_page(module.round_to_page_size_down(address));
-            let page_end = module.address_to_page(module.round_to_page_size_down(address + slice.len() as u32));
+            let page_end = module.address_to_page(module.round_to_page_size_down(address + slice.len() as u32 - 1));
             if !self.page_set.contains((page_start, page_end)) {
                 return Err(MemoryAccessError::Error("incomplete read".into()));
             } else {
@@ -2024,7 +2027,7 @@ impl super::Sandbox for Sandbox {
             }
         } else {
             let page_start = module.address_to_page(module.round_to_page_size_down(address));
-            let page_end = module.address_to_page(module.round_to_page_size_down(address + data.len() as u32));
+            let page_end = module.address_to_page(module.round_to_page_size_down(address + data.len() as u32 - 1));
             self.page_set.insert((page_start, page_end));
             self.memory_mmap.as_slice_mut()[address as usize..address as usize + data.len()].copy_from_slice(data);
             Ok(())
@@ -2032,12 +2035,18 @@ impl super::Sandbox for Sandbox {
     }
 
     fn zero_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
+        debug_assert_ne!(length, 0);
+
         log::trace!(
             "Zeroing memory: 0x{:x}-0x{:x} ({} bytes)",
             address,
             address as usize + length as usize,
             length
         );
+
+        if length == 0 {
+            return Ok(());
+        }
 
         let module = self.module.as_ref().unwrap();
         if !self.dynamic_paging_enabled {
@@ -2075,7 +2084,7 @@ impl super::Sandbox for Sandbox {
             }
         } else {
             let page_start = module.address_to_page(module.round_to_page_size_down(address));
-            let page_end = module.address_to_page(module.round_to_page_size_down(address + length));
+            let page_end = module.address_to_page(module.round_to_page_size_down(address + length - 1));
             if module.is_multiple_of_page_size(address)
                 && module.is_multiple_of_page_size(length)
                 && self.page_set.is_whole_region_empty((page_start, page_end))
@@ -2127,6 +2136,12 @@ impl super::Sandbox for Sandbox {
     }
 
     fn free_pages(&mut self, address: u32, length: u32) -> Result<(), Self::Error> {
+        debug_assert_ne!(length, 0);
+
+        if length == 0 {
+            return Ok(());
+        }
+
         if !self.dynamic_paging_enabled {
             todo!();
         } else {
@@ -2143,7 +2158,7 @@ impl super::Sandbox for Sandbox {
             } else {
                 let module = self.module.as_ref().unwrap();
                 let page_start = module.address_to_page(module.round_to_page_size_down(address));
-                let page_end = module.address_to_page(module.round_to_page_size_down(address + length));
+                let page_end = module.address_to_page(module.round_to_page_size_down(address + length - 1));
                 self.page_set.remove((page_start, page_end));
             }
 

@@ -692,6 +692,28 @@ fn simple_test(engine_config: Config) {
     assert_eq!(instance.reg(Reg::A1), 100);
 }
 
+fn out_of_range_execution(engine_config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_imm(A0, 1), asm::load_imm(A0, 2), asm::branch_eq_imm(RA, 0, 0)], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+    let next_offsets: Vec<_> = module
+        .blob()
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.next_offset)
+        .collect();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.program_counter(), Some(next_offsets[2]));
+}
+
 fn jump_into_middle_of_basic_block_from_outside(engine_config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
@@ -975,6 +997,8 @@ fn dynamic_paging_basic(mut engine_config: Config) {
 
     // Now handle it.
     instance.zero_memory(segfault.page_address, page_size).unwrap();
+    assert_eq!(instance.is_memory_accessible(0x10000, 0x4, false), true);
+    assert_eq!(instance.is_memory_accessible(0x10000 + page_size, 0x4, false), false);
 
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x10000 + page_size);
@@ -3063,6 +3087,13 @@ fn test_blob_get_self_address(args: TestBlobArgs) {
     assert_ne!(addr, 0);
 }
 
+fn test_blob_get_self_address_naked(args: TestBlobArgs) {
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
+    let addr = i.call::<(), u32>("get_self_address_naked", ()).unwrap();
+    assert_ne!(addr, 0);
+}
+
 fn test_blob_instruction_length(args: TestBlobArgs) {
     // Test that the instruction length is properly calculated when gas metering is enabled and a
     // long instruction appears at the start of the block (right after gas metering stub).
@@ -3881,6 +3912,8 @@ run_tests! {
     trapping_preserves_all_registers_normal_trap
     trapping_preserves_all_registers_segfault
 
+    out_of_range_execution
+
     memset_basic
     memset_with_dynamic_paging
 
@@ -3914,6 +3947,7 @@ run_test_blob_tests! {
     test_blob_return_tuple_from_export
     test_blob_get_heap_base
     test_blob_get_self_address
+    test_blob_get_self_address_naked
     test_blob_instruction_length
 }
 

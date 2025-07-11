@@ -780,6 +780,10 @@ impl<UserData, UserError> InstancePre<UserData, UserError> {
             pre: self.clone(),
         })
     }
+
+    pub fn module(&self) -> &Module {
+        &self.0.module
+    }
 }
 
 pub trait EntryPoint {
