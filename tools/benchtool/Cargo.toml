@@ -34,7 +34,6 @@ default = [
     "native",
     "pvf-executor",
     "solana_rbpf",
-    "wasm3",
     "wasmer",
     "wasmi",
     "wasmtime",
