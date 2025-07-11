@@ -1707,4 +1707,12 @@ impl RawInstance {
     pub fn next_native_program_counter(&self) -> Option<usize> {
         access_backend!(self.backend, |backend| backend.next_native_program_counter())
     }
+
+    /// Reset cache and therefore reclaim cache backed memory.
+    pub fn reset_interpreter_cache(&mut self) {
+        #[allow(irrefutable_let_patterns)]
+        if let InstanceBackend::Interpreted(ref mut backend) = self.backend {
+            backend.reset_interpreter_cache();
+        }
+    }
 }

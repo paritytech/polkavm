@@ -758,6 +758,19 @@ impl InterpretedInstance {
         }
     }
 
+    pub fn reset_interpreter_cache(&mut self) {
+        self.compiled_handlers.clear();
+        self.compiled_args.clear();
+
+        self.compiled_handlers.shrink_to_fit();
+        self.compiled_args.shrink_to_fit();
+
+        self.compiled_offset_for_block.reset();
+
+        self.compiled_offset = 0;
+        self.compile_out_of_range_stub();
+    }
+
     fn initialize_module(&mut self) {
         if self.module.gas_metering().is_some() {
             self.gas = 0;

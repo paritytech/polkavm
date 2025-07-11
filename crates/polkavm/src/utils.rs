@@ -24,6 +24,7 @@ impl<'a> GuestInit<'a> {
 
 pub(crate) struct FlatMap<T> {
     inner: Vec<Option<T>>,
+    min_max_key: Option<(u32, u32)>,
 }
 
 impl<T> FlatMap<T>
@@ -33,9 +34,10 @@ where
     #[inline]
     pub fn new(capacity: u32) -> Self {
         let mut inner = Vec::new();
+        inner.reserve_exact(capacity as usize);
         inner.resize_with(capacity as usize, || None);
 
-        Self { inner }
+        Self { inner, min_max_key: None }
     }
 
     #[inline]
@@ -43,6 +45,7 @@ where
     pub fn new_reusing_memory(mut memory: Self, capacity: u32) -> Self {
         memory.inner.clear();
         memory.inner.resize_with(capacity as usize, || None);
+        memory.min_max_key = None;
         memory
     }
 
@@ -60,12 +63,27 @@ where
     #[inline]
     pub fn insert(&mut self, key: u32, value: T) {
         self.inner[key as usize] = Some(value);
+
+        let (min_key, max_key) = self.min_max_key.unwrap_or((key, key));
+        self.min_max_key = Some((min_key.min(key), max_key.max(key)));
     }
 
     #[inline]
     #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.inner.clear();
+        self.min_max_key = None;
+    }
+
+    #[inline]
+    pub fn reset(&mut self) {
+        if let Some((min, max)) = self.min_max_key.take() {
+            self.inner[min as usize..=max as usize].iter_mut().for_each(|value| *value = None);
+        }
+        debug_assert!(
+            self.inner.iter().all(|value| value.is_none()),
+            "FlatMap reset did not clear all values"
+        );
     }
 }
 
