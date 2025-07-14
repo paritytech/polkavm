@@ -418,7 +418,7 @@ impl InterpretedInstance {
     pub fn new_from_module(module: Module, force_step_tracing: bool) -> Self {
         let step_tracing = module.is_step_tracing() || force_step_tracing;
         let mut instance = Self {
-            compiled_offset_for_block: FlatMap::new(module.code_len() + 1), // + 1 for one implicit out-of-bounds trap.
+            compiled_offset_for_block: FlatMap::new(module.code_len() + 1, true), // + 1 for one implicit out-of-bounds trap.
             compiled_handlers: Default::default(),
             compiled_args: Default::default(),
             module,

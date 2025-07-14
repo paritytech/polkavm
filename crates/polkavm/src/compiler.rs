@@ -199,7 +199,7 @@ where
             export_to_label = per_compilation_cache.export_to_label;
         } else {
             asm = Assembler::new();
-            program_counter_to_label = FlatMap::new(code_length + 2);
+            program_counter_to_label = FlatMap::new(code_length + 2, false);
             gas_metering_stub_offsets = Vec::new();
             gas_cost_for_basic_block = Vec::new();
             export_to_label = HashMap::new();

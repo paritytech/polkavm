@@ -24,7 +24,8 @@ impl<'a> GuestInit<'a> {
 
 pub(crate) struct FlatMap<T> {
     inner: Vec<Option<T>>,
-    min_max_key: Option<(u32, u32)>,
+    capacity: u32,
+    is_allocated: bool,
 }
 
 impl<T> FlatMap<T>
@@ -32,12 +33,19 @@ where
     T: Copy,
 {
     #[inline]
-    pub fn new(capacity: u32) -> Self {
+    pub fn new(capacity: u32, lazy_allocation: bool) -> Self {
         let mut inner = Vec::new();
-        inner.reserve_exact(capacity as usize);
-        inner.resize_with(capacity as usize, || None);
 
-        Self { inner, min_max_key: None }
+        if !lazy_allocation {
+            inner.reserve_exact(capacity as usize);
+            inner.resize_with(capacity as usize, || None);
+        }
+
+        Self {
+            inner,
+            capacity,
+            is_allocated: !lazy_allocation,
+        }
     }
 
     #[inline]
@@ -45,12 +53,16 @@ where
     pub fn new_reusing_memory(mut memory: Self, capacity: u32) -> Self {
         memory.inner.clear();
         memory.inner.resize_with(capacity as usize, || None);
-        memory.min_max_key = None;
+        memory.capacity = capacity;
+        memory.is_allocated = true;
         memory
     }
 
     #[inline]
     pub fn get(&self, key: u32) -> Option<T> {
+        if !self.is_allocated {
+            return None;
+        }
         self.inner.get(key as usize).and_then(|value| *value)
     }
 
@@ -62,28 +74,26 @@ where
 
     #[inline]
     pub fn insert(&mut self, key: u32, value: T) {
-        self.inner[key as usize] = Some(value);
+        if !self.is_allocated {
+            self.inner.reserve_exact(self.capacity as usize);
+            self.inner.resize_with(self.capacity as usize, || None);
+            self.is_allocated = true;
+        }
 
-        let (min_key, max_key) = self.min_max_key.unwrap_or((key, key));
-        self.min_max_key = Some((min_key.min(key), max_key.max(key)));
+        self.inner[key as usize] = Some(value);
     }
 
     #[inline]
     #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.inner.clear();
-        self.min_max_key = None;
     }
 
     #[inline]
     pub fn reset(&mut self) {
-        if let Some((min, max)) = self.min_max_key.take() {
-            self.inner[min as usize..=max as usize].iter_mut().for_each(|value| *value = None);
-        }
-        debug_assert!(
-            self.inner.iter().all(|value| value.is_none()),
-            "FlatMap reset did not clear all values"
-        );
+        self.inner.clear();
+        self.inner.shrink_to_fit();
+        self.is_allocated = false;
     }
 }
 
