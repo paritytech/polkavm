@@ -1,6 +1,6 @@
 use crate::mutex::Mutex;
 use crate::{
-    BackendKind, CallError, Caller, Config, Engine, GasMeteringKind, InterruptKind, Linker, MemoryAccessError, Module, ModuleConfig,
+    BackendKind, CallError, Caller, Config, Engine, Gas, GasMeteringKind, InterruptKind, Linker, MemoryAccessError, Module, ModuleConfig,
     ProgramBlob, ProgramCounter, Reg, Segfault,
 };
 use alloc::collections::BTreeMap;
@@ -2716,12 +2716,12 @@ struct TestInstance {
 }
 
 impl TestInstance {
-    fn new(config: &Config, elf: &'static [u8], optimize: bool) -> Self {
+    fn new(config: &Config, module_config: &ModuleConfig, elf: &'static [u8], optimize: bool) -> Self {
         let _ = env_logger::try_init();
         let blob = get_blob_impl(optimize, false, elf);
 
         let engine = Engine::new(config).unwrap();
-        let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
+        let module = Module::from_blob(&engine, module_config, blob).unwrap();
         let mut linker = Linker::new();
         linker
             .define_typed("multiply_by_2", |_caller: Caller<()>, value: u32| -> u32 { value * 2 })
@@ -2818,7 +2818,7 @@ impl TestBlobArgs {
 
 fn test_blob_basic_test(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     assert_eq!(i.call::<(), u32>("push_one_to_global_vec", ()).unwrap(), 1);
     assert_eq!(i.call::<(), u32>("push_one_to_global_vec", ()).unwrap(), 2);
     assert_eq!(i.call::<(), u32>("push_one_to_global_vec", ()).unwrap(), 3);
@@ -2826,7 +2826,7 @@ fn test_blob_basic_test(args: TestBlobArgs) {
 
 fn test_blob_atomic_fetch_add(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_add", (1,)).unwrap(), 0);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_add", (1,)).unwrap(), 1);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_add", (1,)).unwrap(), 2);
@@ -2838,7 +2838,7 @@ fn test_blob_atomic_fetch_add(args: TestBlobArgs) {
 
 fn test_blob_atomic_fetch_swap(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (10,)).unwrap(), 0);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (100,)).unwrap(), 10);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (1000,)).unwrap(), 100);
@@ -2867,7 +2867,7 @@ fn test_blob_atomic_fetch_minmax(args: TestBlobArgs) {
     ];
 
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     for (name, cb) in list {
         for a in [-10, 0, 10] {
             for b in [-10, 0, 10] {
@@ -2882,19 +2882,19 @@ fn test_blob_atomic_fetch_minmax(args: TestBlobArgs) {
 
 fn test_blob_hostcall(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     assert_eq!(i.call::<(u32,), u32>("test_multiply_by_6", (10,)).unwrap(), 60);
 }
 
 fn test_blob_define_abi(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     assert!(i.call::<(), ()>("test_define_abi", ()).is_ok());
 }
 
 fn test_blob_input_registers(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     assert!(i.call::<(), ()>("test_input_registers", ()).is_ok());
 }
 
@@ -2912,7 +2912,7 @@ fn test_blob_call_sbrk_from_host_function(args: TestBlobArgs) {
 
 fn test_blob_program_memory_can_be_reused_and_cleared(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     let address = i.call::<(), u32>("get_global_address", ()).unwrap();
 
     assert_eq!(i.instance.read_memory(address, 4).unwrap(), [0x00, 0x00, 0x00, 0x00]);
@@ -2932,7 +2932,7 @@ fn test_blob_program_memory_can_be_reused_and_cleared(args: TestBlobArgs) {
 
 fn test_blob_out_of_bounds_memory_access_generates_a_trap(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     let address = i.call::<(), u32>("get_global_address", ()).unwrap();
     assert_eq!(i.call::<(u32,), u32>("read_u32", (address,)).unwrap(), 0);
     i.call::<(), ()>("increment_global", ()).unwrap();
@@ -2946,7 +2946,7 @@ fn test_blob_out_of_bounds_memory_access_generates_a_trap(args: TestBlobArgs) {
 
 fn test_blob_call_sbrk_impl(args: TestBlobArgs, mut call_sbrk: impl FnMut(&mut TestInstance, u32) -> u32) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     let memory_map = i.module.memory_map().clone();
     let heap_base = memory_map.heap_base();
     let page_size = memory_map.page_size();
@@ -3002,7 +3002,7 @@ fn test_blob_call_sbrk_impl(args: TestBlobArgs, mut call_sbrk: impl FnMut(&mut T
 
 fn test_blob_add_u32(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     assert_eq!(i.call::<(u32, u32), u32>("add_u32", (1, 2,)).unwrap(), 3);
     assert_eq!(i.instance.reg(Reg::A0), 3);
 
@@ -3020,7 +3020,7 @@ fn test_blob_add_u32(args: TestBlobArgs) {
 
 fn test_blob_add_u64(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     assert_eq!(i.call::<(u64, u64), u64>("add_u64", (1, 2,)).unwrap(), 3);
     assert_eq!(i.instance.reg(Reg::A0), 3);
     assert_eq!(
@@ -3031,7 +3031,7 @@ fn test_blob_add_u64(args: TestBlobArgs) {
 
 fn test_blob_xor_imm_u32(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     for value in [0, 0xaaaaaaaa, 0x55555555, 0x12345678, 0xffffffff] {
         assert_eq!(i.call::<(u32,), u32>("xor_imm_u32", (value,)).unwrap(), value ^ 0xfb8f5c1e);
     }
@@ -3039,13 +3039,13 @@ fn test_blob_xor_imm_u32(args: TestBlobArgs) {
 
 fn test_blob_branch_less_than_zero(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     i.call::<(), ()>("test_branch_less_than_zero", ()).unwrap();
 }
 
 fn test_blob_fetch_add_atomic_u64(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     assert_eq!(i.call::<(u64,), u64>("fetch_add_atomic_u64", (1,)).unwrap(), 0);
     assert_eq!(i.call::<(u64,), u64>("fetch_add_atomic_u64", (0,)).unwrap(), 1);
     assert_eq!(i.call::<(u64,), u64>("fetch_add_atomic_u64", (0,)).unwrap(), 1);
@@ -3055,25 +3055,25 @@ fn test_blob_fetch_add_atomic_u64(args: TestBlobArgs) {
 
 fn test_blob_cmov_if_zero_with_zero_reg(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     i.call::<(), ()>("cmov_if_zero_with_zero_reg", ()).unwrap();
 }
 
 fn test_blob_cmov_if_not_zero_with_zero_reg(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     i.call::<(), ()>("cmov_if_not_zero_with_zero_reg", ()).unwrap();
 }
 
 fn test_blob_min_stack_size(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let i = TestInstance::new(&args.config, elf, args.optimize);
+    let i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     assert_eq!(i.instance.module().memory_map().stack_size(), 65536);
 }
 
 fn test_blob_negate_and_add(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     if !args.is_64_bit {
         assert_eq!(i.call::<(u32, u32), u32>("negate_and_add", (123, 1,)).unwrap(), 15);
     } else {
@@ -3083,13 +3083,13 @@ fn test_blob_negate_and_add(args: TestBlobArgs) {
 
 fn test_blob_return_tuple_from_import(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     i.call::<(), ()>("test_return_tuple", ()).unwrap();
 }
 
 fn test_blob_return_tuple_from_export(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     if args.is_64_bit {
         let a0 = 0x123456789abcdefe_u64;
         let a1 = 0x1122334455667788_u64;
@@ -3119,30 +3119,47 @@ fn test_blob_return_tuple_from_export(args: TestBlobArgs) {
 
 fn test_blob_get_heap_base(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     let heap_base = i.call::<(), u32>("get_heap_base", ()).unwrap();
     assert_eq!(heap_base, i.instance.module().memory_map().heap_base());
 }
 
 fn test_blob_get_self_address(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     let addr = i.call::<(), u32>("get_self_address", ()).unwrap();
     assert_ne!(addr, 0);
 }
 
 fn test_blob_get_self_address_naked(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args.config, &Default::default(), elf, args.optimize);
     let addr = i.call::<(), u32>("get_self_address_naked", ()).unwrap();
     assert_ne!(addr, 0);
+}
+
+fn test_blob_instruction_length(args: TestBlobArgs) {
+    // Test that the instruction length is properly calculated when gas metering is enabled and a
+    // long instruction appears at the start of the block (right after gas metering stub).
+    let elf = args.get_test_program();
+    let mut module_config = ModuleConfig::default();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let mut i = TestInstance::new(&args.config, &module_config, elf, args.optimize);
+    i.instance.set_gas(Gas::MAX);
+    if args.is_64_bit {
+        assert_eq!(i.call::<(u64, u64), u64>("div_asm", (10, 2,)).unwrap(), 5);
+        assert_eq!(i.instance.reg(Reg::A0), 5);
+    } else {
+        assert_eq!(i.call::<(u32, u32), u32>("div_asm", (10, 2,)).unwrap(), 5);
+        assert_eq!(i.instance.reg(Reg::A0), 5);
+    }
 }
 
 fn test_asm_reloc_add_sub(config: Config, optimize: bool) {
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_add_sub_64.elf");
 
     let elf = BLOB_64;
-    let mut i = TestInstance::new(&config, elf, optimize);
+    let mut i = TestInstance::new(&config, &Default::default(), elf, optimize);
 
     let address = i.call::<(u32,), u32>("get_string", (0,)).unwrap();
     assert_eq!(i.instance.read_u32(address).unwrap(), 0x01010101);
@@ -3158,7 +3175,7 @@ fn test_asm_reloc_hi_lo(config: Config, optimize: bool) {
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_hi_lo_64.elf");
 
     let elf = BLOB_64;
-    let mut i = TestInstance::new(&config, elf, optimize);
+    let mut i = TestInstance::new(&config, &Default::default(), elf, optimize);
 
     let address = i.call::<(u32,), u32>("get_string", (0,)).unwrap();
     assert_eq!(i.instance.read_u32(address).unwrap(), 0xA1010101);
@@ -3977,6 +3994,7 @@ run_test_blob_tests! {
     test_blob_get_heap_base
     test_blob_get_self_address
     test_blob_get_self_address_naked
+    test_blob_instruction_length
 }
 
 run_asm_tests! {

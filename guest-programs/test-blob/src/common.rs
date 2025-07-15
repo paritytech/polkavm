@@ -455,3 +455,17 @@ fn get_self_address_naked() -> u32 {
     assert_eq!(get_self_address_naked_impl as usize, address);
     address as u32
 }
+
+#[polkavm_derive::polkavm_export]
+extern "C" fn div_asm(a0: usize, a1: usize) -> usize {
+    unsafe {
+        let output;
+        core::arch::asm!(
+            "div a0, a0, a1",
+            in("a0") a0,
+            in("a1") a1,
+            lateout("a0") output,
+        );
+        output
+    }
+}
