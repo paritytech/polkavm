@@ -1715,4 +1715,12 @@ impl RawInstance {
             backend.reset_interpreter_cache();
         }
     }
+
+    /// Set a lose upper limit on the interpreter cache size.
+    pub fn set_interpreter_cache_size(&mut self, max_cache_size: Option<usize>) {
+        #[allow(irrefutable_let_patterns)]
+        if let InstanceBackend::Interpreted(ref mut backend) = self.backend {
+            backend.set_interpreter_cache_size(max_cache_size);
+        }
+    }
 }

@@ -412,6 +412,7 @@ pub(crate) struct InterpretedInstance {
     interrupt: InterruptKind,
     step_tracing: bool,
     unresolved_program_counter: Option<ProgramCounter>,
+    max_cache_size: Option<usize>,
 }
 
 impl InterpretedInstance {
@@ -435,6 +436,7 @@ impl InterpretedInstance {
             interrupt: InterruptKind::Finished,
             step_tracing,
             unresolved_program_counter: None,
+            max_cache_size: None,
         };
 
         instance.initialize_module();
@@ -467,6 +469,10 @@ impl InterpretedInstance {
 
     pub fn set_gas(&mut self, gas: Gas) {
         self.gas = gas;
+    }
+
+    pub fn set_interpreter_cache_size(&mut self, max_cache_size: Option<usize>) {
+        self.max_cache_size = max_cache_size;
     }
 
     pub fn program_counter(&self) -> Option<ProgramCounter> {
@@ -929,6 +935,23 @@ impl InterpretedInstance {
 
             if instruction.opcode().starts_new_basic_block() {
                 break;
+            }
+        }
+
+        if let Some(max_cache_size) = self.max_cache_size {
+            if self.compiled_handlers.len() > max_cache_size {
+                log::debug!(
+                    "Compiled handlers cache size exceeded at {}: {} > {}; will reset the cache",
+                    origin,
+                    self.compiled_handlers.len(),
+                    max_cache_size
+                );
+
+                self.compiled_handlers[cast(origin).to_usize()] = cast_handler!(raw_handlers::reset_cache::<DEBUG>);
+                self.compiled_args[cast(origin).to_usize()] = Args::reset_cache(program_counter);
+            } else if self.compiled_handlers.capacity() > max_cache_size {
+                self.compiled_handlers.shrink_to(max_cache_size);
+                self.compiled_args.shrink_to(max_cache_size);
             }
         }
 
@@ -2038,6 +2061,15 @@ define_interpreter! {
         visitor.inner.interrupt = InterruptKind::Step;
         visitor.inner.compiled_offset += 1;
         None
+    }
+
+    fn reset_cache<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: reset_cache", visitor.inner.compiled_offset);
+        }
+
+        visitor.inner.reset_interpreter_cache();
+        visitor.inner.resolve_fallthrough::<DEBUG>(program_counter)
     }
 
     fn fallthrough<const DEBUG: bool>(visitor: &mut Visitor) -> Option<Target> {
