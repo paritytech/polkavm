@@ -516,6 +516,47 @@ fn reclaim_cache_memory(config: Config) {
     assert_eq!(instance.reg(Reg::A2), 0x4567);
 }
 
+fn bounded_interpreter_cache(config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::load_imm(A0, 1),
+            asm::load_imm(A1, 2),
+            asm::load_imm(A2, 3),
+            asm::jump(1),
+            asm::load_imm(A3, 4),
+            asm::load_imm(A4, 5),
+            asm::jump(2),
+            asm::load_imm(A5, 6),
+            asm::ret(),
+        ],
+        &[],
+    );
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+    let list: Vec<_> = module.blob().instructions(DefaultInstructionSet::default()).collect();
+
+    let mut instance = module.instantiate().unwrap();
+
+    // 3 for first three instructions + 3 for extra subroutines interpreter emits
+    instance.set_interpreter_cache_size(Some(6));
+
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(list[0].offset);
+
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 1);
+    assert_eq!(instance.reg(Reg::A1), 2);
+    assert_eq!(instance.reg(Reg::A2), 3);
+    assert_eq!(instance.reg(Reg::A3), 4);
+    assert_eq!(instance.reg(Reg::A4), 5);
+    assert_eq!(instance.reg(Reg::A5), 6);
+}
+
 fn step_tracing_invalid_store(engine_config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
@@ -3942,6 +3983,7 @@ run_tests! {
     out_of_range_execution
 
     reclaim_cache_memory
+    bounded_interpreter_cache
 
     memset_basic
     memset_with_dynamic_paging
