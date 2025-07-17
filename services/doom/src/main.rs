@@ -39,7 +39,7 @@ mod vm;
 #[polkavm_derive::polkavm_import]
 extern "C" {
     // general
-    #[polkavm_import(index = 19)]
+    #[polkavm_import(index = 7)]
     pub fn export(p: u64, z: u64) -> u64;
 
 }
