@@ -15,3 +15,4 @@ crate-type = ["staticlib", "rlib"]
 polkavm-derive = { path = "../../crates/polkavm-derive" }
 simplealloc = { path = "../../crates/simplealloc" }
 utils = { path = "../utils" }
+hashbrown = "0.12"
