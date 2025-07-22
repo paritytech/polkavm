@@ -12,7 +12,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 use core::num::NonZeroU32;
-use polkavm_common::abi::VM_ADDR_RETURN_TO_HOST;
+use polkavm_common::abi::{INTERPRETER_CACHE_ENTRY_SIZE, VM_ADDR_RETURN_TO_HOST};
 use polkavm_common::cast::cast;
 use polkavm_common::operation::*;
 use polkavm_common::program::{asm, InstructionVisitor, RawReg, Reg};
@@ -471,8 +471,20 @@ impl InterpretedInstance {
         self.gas = gas;
     }
 
-    pub fn set_interpreter_cache_size(&mut self, max_cache_size: Option<usize>) {
-        self.max_cache_size = max_cache_size;
+    pub fn set_interpreter_cache_size(&mut self, max_cache_size_bytes: Option<usize>) {
+        if let Some(max_cache_size_bytes) = max_cache_size_bytes {
+            let program_info = match self.module.get_program_info(Some(max_cache_size_bytes)) {
+                Ok(info) => info,
+                Err(_) => {
+                    panic!("failed to get program info for max cache size: {max_cache_size_bytes}");
+                }
+            };
+
+            let max_cache_size = (max_cache_size_bytes / INTERPRETER_CACHE_ENTRY_SIZE as usize) - program_info.max_block_size as usize;
+            self.max_cache_size = Some(max_cache_size);
+        } else {
+            self.max_cache_size = None;
+        }
     }
 
     pub fn program_counter(&self) -> Option<ProgramCounter> {

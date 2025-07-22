@@ -38,6 +38,9 @@ pub const VM_MAXIMUM_IMPORT_COUNT: u32 = 1024;
 /// The minimum required alignment of runtime code pointers.
 pub const VM_CODE_ADDRESS_ALIGNMENT: u32 = 2;
 
+/// The size of the interpreter cache entry.
+pub const INTERPRETER_CACHE_ENTRY_SIZE: u32 = 24;
+
 #[derive(Clone)]
 pub struct MemoryMapBuilder {
     page_size: u32,

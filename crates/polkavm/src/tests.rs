@@ -542,8 +542,8 @@ fn bounded_interpreter_cache(config: Config) {
 
     let mut instance = module.instantiate().unwrap();
 
-    // 3 for first three instructions + 3 for extra subroutines interpreter emits
-    instance.set_interpreter_cache_size(Some(6));
+    // (4 + 10) * 24 (INTERPRETER_CACHE_ENTRY_SIZE)
+    instance.set_interpreter_cache_size(Some(336));
 
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(list[0].offset);
