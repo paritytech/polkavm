@@ -1,4 +1,5 @@
 use crate::abi::{VM_CODE_ADDRESS_ALIGNMENT, VM_MAXIMUM_CODE_SIZE, VM_MAXIMUM_IMPORT_COUNT, VM_MAXIMUM_JUMP_TABLE_ENTRIES};
+use crate::cast::cast;
 use crate::utils::ArcBytes;
 use crate::varint::{read_simple_varint, read_varint, write_simple_varint, MAX_VARINT_LENGTH};
 use core::fmt::Write;
@@ -7,6 +8,9 @@ use core::ops::Range;
 #[derive(Copy, Clone)]
 #[repr(transparent)]
 pub struct RawReg(u32);
+
+#[cfg(feature = "alloc")]
+use crate::abi::MemoryMapBuilder;
 
 impl Eq for RawReg {}
 impl PartialEq for RawReg {
@@ -444,6 +448,27 @@ impl LookupTable {
     }
 }
 
+pub const INTERPRETER_CACHE_ENTRY_SIZE: u32 = {
+    if cfg!(target_pointer_width = "32") {
+        20
+    } else if cfg!(target_pointer_width = "64") {
+        24
+    } else {
+        panic!("unsupported target pointer width")
+    }
+};
+
+pub const INTERPRETER_CACHE_RESERVED_ENTRIES: u32 = 10;
+pub const INTERPRETER_FLATMAP_ENTRY_SIZE: u32 = 4;
+
+pub fn interpreter_calculate_cache_size(count: usize) -> usize {
+    count * INTERPRETER_CACHE_ENTRY_SIZE as usize
+}
+
+pub fn interpreter_calculate_cache_num_entries(bytes: usize) -> usize {
+    bytes / INTERPRETER_CACHE_ENTRY_SIZE as usize
+}
+
 static TABLE_1: LookupTable = LookupTable::build(1);
 static TABLE_2: LookupTable = LookupTable::build(2);
 
@@ -736,6 +761,19 @@ mod kani {
         let reg1 = reg1.get() as u8;
         let reg2 = reg2.get() as u8;
         assert_eq!((reg1, reg2), simple_read_args_regs2(&code));
+    }
+
+    #[kani::proof]
+    fn verify_interpreter_cache_size() {
+        let x: usize = kani::any_where(|x| *x <= super::cast(u32::MAX).to_usize());
+        let bytes: usize = super::interpreter_calculate_cache_size(x);
+        let calculate_count = super::interpreter_calculate_cache_num_entries(bytes);
+        assert_eq!(calculate_count, x);
+
+        let count = super::interpreter_calculate_cache_num_entries(x);
+        let calculated_bytes = super::interpreter_calculate_cache_size(count);
+        assert!(calculated_bytes <= x);
+        assert!(x - calculated_bytes <= super::interpreter_calculate_cache_size(1));
     }
 }
 
@@ -1864,8 +1902,6 @@ impl<'a, 'b, 'c> InstructionFormatter<'a, 'b, 'c> {
 
         impl core::fmt::Display for Formatter {
             fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
-                use crate::cast::cast;
-
                 if self.imm == 0 {
                     write!(fmt, "{}", self.imm)
                 } else if !self.is_64_bit {
@@ -4165,6 +4201,28 @@ fn test_instructions_iterator_does_not_emit_unnecessary_invalid_instructions_if_
     assert_eq!(i.next(), None);
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum EstimateInterpreterMemoryUsageArgs {
+    UnboundedCache {
+        instruction_count: u32,
+        basic_block_count: u32,
+        page_size: u32,
+    },
+    BoundedCache {
+        instruction_count: u32,
+        basic_block_count: u32,
+        max_cache_size_bytes: u32,
+        max_block_size: u32,
+        page_size: u32,
+    },
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct ProgramMemoryInfo {
+    pub baseline_ram_consumption: u32,
+    pub purgeable_ram_consumption: u32,
+}
+
 #[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct ProgramParts {
@@ -4726,6 +4784,140 @@ impl ProgramBlob {
             mutation_depth: 0,
         }))
     }
+
+    #[cfg(feature = "alloc")]
+    pub(crate) fn calculate_blob_length(&self) -> u64 {
+        let ProgramBlob {
+            #[cfg(feature = "unique-id")]
+                unique_id: _,
+            is_64_bit: _,
+            ro_data_size: _,
+            rw_data_size: _,
+            stack_size: _,
+            ro_data,
+            rw_data,
+            code,
+            jump_table,
+            jump_table_entry_size: _,
+            bitmask,
+            import_offsets,
+            import_symbols,
+            exports,
+            debug_strings,
+            debug_line_program_ranges,
+            debug_line_programs,
+        } = self;
+
+        let mut ranges = [
+            ro_data.parent_address_range(),
+            rw_data.parent_address_range(),
+            code.parent_address_range(),
+            jump_table.parent_address_range(),
+            bitmask.parent_address_range(),
+            import_offsets.parent_address_range(),
+            import_symbols.parent_address_range(),
+            exports.parent_address_range(),
+            debug_strings.parent_address_range(),
+            debug_line_program_ranges.parent_address_range(),
+            debug_line_programs.parent_address_range(),
+        ];
+
+        ranges.sort_unstable_by_key(|r| r.start);
+
+        let mut blob_length = 0;
+        let mut last_range = 0..0;
+        for range in ranges {
+            if range == last_range {
+                continue;
+            }
+            blob_length += cast(range.len()).to_u64();
+            last_range = range;
+        }
+        blob_length
+    }
+
+    #[cfg(feature = "alloc")]
+    pub fn estimate_interpreter_memory_usage(&self, args: EstimateInterpreterMemoryUsageArgs) -> Result<ProgramMemoryInfo, &'static str> {
+        let (page_size, instruction_count, basic_block_count) = match args {
+            EstimateInterpreterMemoryUsageArgs::UnboundedCache {
+                page_size,
+                instruction_count,
+                basic_block_count,
+                ..
+            } => (page_size, instruction_count, basic_block_count),
+            EstimateInterpreterMemoryUsageArgs::BoundedCache {
+                page_size,
+                instruction_count,
+                basic_block_count,
+                ..
+            } => (page_size, instruction_count, basic_block_count),
+        };
+
+        let cache_entry_count_upper_bound = cast(instruction_count + basic_block_count + INTERPRETER_CACHE_RESERVED_ENTRIES).to_usize();
+        let cache_size_upper_bound = interpreter_calculate_cache_size(cache_entry_count_upper_bound);
+
+        let mut purgeable_ram_consumption = match args {
+            EstimateInterpreterMemoryUsageArgs::UnboundedCache { .. } => cache_size_upper_bound,
+            EstimateInterpreterMemoryUsageArgs::BoundedCache {
+                max_cache_size_bytes,
+                max_block_size,
+                ..
+            } => {
+                let max_cache_size_bytes = cast(max_cache_size_bytes).to_usize();
+                let cache_entry_count_hard_limit = cast(max_block_size + INTERPRETER_CACHE_RESERVED_ENTRIES).to_usize();
+                let cache_bytes_hard_limit = interpreter_calculate_cache_size(cache_entry_count_hard_limit);
+                if cache_bytes_hard_limit > max_cache_size_bytes {
+                    return Err("maximum cache size is too small for the given max block size");
+                }
+
+                max_cache_size_bytes.min(cache_size_upper_bound)
+            }
+        };
+
+        let code_length = self.code.len();
+        purgeable_ram_consumption = purgeable_ram_consumption.saturating_add((code_length + 1) * INTERPRETER_FLATMAP_ENTRY_SIZE as usize);
+
+        let Ok(purgeable_ram_consumption) = u32::try_from(purgeable_ram_consumption) else {
+            return Err("estimated interpreter cache size is too large");
+        };
+
+        let memory_map = MemoryMapBuilder::new(page_size)
+            .ro_data_size(self.ro_data_size)
+            .rw_data_size(self.rw_data_size)
+            .stack_size(self.stack_size)
+            .build()?;
+
+        let blob_length = self.calculate_blob_length();
+        let Ok(baseline_ram_consumption) = u32::try_from(
+            blob_length
+                .saturating_add(u64::from(memory_map.ro_data_size()))
+                .saturating_sub(self.ro_data.len() as u64)
+                .saturating_add(u64::from(memory_map.rw_data_size()))
+                .saturating_sub(self.rw_data.len() as u64)
+                .saturating_add(u64::from(memory_map.stack_size())),
+        ) else {
+            return Err("calculated baseline RAM consumption is too large");
+        };
+
+        Ok(ProgramMemoryInfo {
+            baseline_ram_consumption,
+            purgeable_ram_consumption,
+        })
+    }
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn test_calculate_blob_length() {
+    let big_blob = ArcBytes::from(vec![0; 1024]);
+    let shared_blob = ArcBytes::from(vec![0; 128]);
+    let parts = ProgramParts {
+        ro_data: big_blob.subslice(10..20),
+        rw_data: big_blob.subslice(24..28),
+        code_and_jump_table: shared_blob.clone(),
+        ..ProgramParts::default()
+    };
+    assert_eq!(parts.calculate_blob_length(), 1024 + 128);
 }
 
 /// The source location.

@@ -12,13 +12,8 @@ use alloc::{borrow::Cow, sync::Arc, vec::Vec};
 #[derive(Clone)]
 enum LifetimeObject {
     None,
-    Arc {
-        _obj: Arc<[u8]>,
-    },
-    #[allow(dyn_drop)]
-    Other {
-        _obj: Arc<dyn Drop>,
-    },
+    Arc { obj: Arc<[u8]> },
+    Other { obj: Arc<dyn AsRef<[u8]>> },
 }
 
 #[derive(Clone)]
@@ -89,6 +84,16 @@ impl ArcBytes {
             lifetime: self.lifetime.clone(),
         }
     }
+
+    #[cfg(feature = "alloc")]
+    pub(crate) fn parent_address_range(&self) -> Range<usize> {
+        let slice = match &self.lifetime {
+            LifetimeObject::None => return 0..0,
+            LifetimeObject::Arc { obj } => obj.as_ref(),
+            LifetimeObject::Other { obj } => obj.as_ref().as_ref(),
+        };
+        slice.as_ptr() as usize..(slice.as_ptr() as usize + slice.len())
+    }
 }
 
 impl Eq for ArcBytes {}
@@ -135,7 +140,7 @@ impl From<Vec<u8>> for ArcBytes {
         ArcBytes {
             pointer: core::ptr::NonNull::new(data.as_ptr().cast_mut()).unwrap(),
             length: data.len(),
-            lifetime: LifetimeObject::Other { _obj: Arc::new(data) },
+            lifetime: LifetimeObject::Other { obj: Arc::new(data) },
         }
     }
 }
@@ -146,7 +151,7 @@ impl From<Arc<[u8]>> for ArcBytes {
         ArcBytes {
             pointer: core::ptr::NonNull::new(data.deref().as_ptr().cast_mut()).unwrap(),
             length: data.len(),
-            lifetime: LifetimeObject::Arc { _obj: data },
+            lifetime: LifetimeObject::Arc { obj: data },
         }
     }
 }

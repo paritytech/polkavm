@@ -83,6 +83,13 @@ impl<T> IntoResult<T> for T {
 
 pub type RegValue = u64;
 
+#[allow(clippy::exhaustive_structs)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct SetCacheSizeLimitArgs {
+    pub max_block_size: u32,
+    pub max_cache_size_bytes: usize,
+}
+
 #[derive(Copy, Clone)]
 pub struct RuntimeInstructionSet {
     allow_sbrk: bool,
@@ -1716,11 +1723,12 @@ impl RawInstance {
         }
     }
 
-    /// Set a lose upper limit on the interpreter cache size.
-    pub fn set_interpreter_cache_size(&mut self, max_cache_size: Option<usize>) {
+    /// Set a tight upper limit on the interpreter cache size (in bytes).
+    pub fn set_interpreter_cache_size_limit(&mut self, cache_info: Option<SetCacheSizeLimitArgs>) -> Result<(), Error> {
         #[allow(irrefutable_let_patterns)]
         if let InstanceBackend::Interpreted(ref mut backend) = self.backend {
-            backend.set_interpreter_cache_size(max_cache_size);
+            backend.set_interpreter_cache_size_limit(cache_info)?
         }
+        Ok(())
     }
 }

@@ -1,7 +1,7 @@
 #![allow(unknown_lints)] // Because of `non_local_definitions` on older rustc versions.
 #![allow(non_local_definitions)]
 #![deny(clippy::as_conversions)]
-use crate::api::{MemoryAccessError, Module, RegValue};
+use crate::api::{MemoryAccessError, Module, RegValue, SetCacheSizeLimitArgs};
 use crate::error::Error;
 use crate::gas::GasVisitor;
 use crate::utils::{FlatMap, GuestInit, InterruptKind, Segfault};
@@ -15,7 +15,10 @@ use core::num::NonZeroU32;
 use polkavm_common::abi::VM_ADDR_RETURN_TO_HOST;
 use polkavm_common::cast::cast;
 use polkavm_common::operation::*;
-use polkavm_common::program::{asm, InstructionVisitor, RawReg, Reg};
+use polkavm_common::program::{
+    asm, interpreter_calculate_cache_num_entries, InstructionVisitor, RawReg, Reg, INTERPRETER_CACHE_ENTRY_SIZE,
+    INTERPRETER_CACHE_RESERVED_ENTRIES, INTERPRETER_FLATMAP_ENTRY_SIZE,
+};
 use polkavm_common::utils::{align_to_next_page_usize, byte_slice_init, slice_assume_init_mut};
 
 type Target = u32;
@@ -394,6 +397,14 @@ fn test_each_page() {
     ]);
 }
 
+use NonZeroU32 as CompiledOffset;
+
+polkavm_common::static_assert!(
+    core::mem::size_of::<Handler>() + core::mem::size_of::<Args>() == cast(INTERPRETER_CACHE_ENTRY_SIZE).to_usize()
+);
+
+polkavm_common::static_assert!(core::mem::size_of::<CompiledOffset>() == cast(INTERPRETER_FLATMAP_ENTRY_SIZE).to_usize());
+
 pub(crate) struct InterpretedInstance {
     module: Module,
     basic_memory: BasicMemory,
@@ -405,21 +416,22 @@ pub(crate) struct InterpretedInstance {
     next_program_counter_changed: bool,
     cycle_counter: u64,
     gas: i64,
-    compiled_offset_for_block: FlatMap<NonZeroU32>,
+    compiled_offset_for_block: FlatMap<CompiledOffset, true>,
     compiled_handlers: Vec<Handler>,
     compiled_args: Vec<Args>,
     compiled_offset: u32,
     interrupt: InterruptKind,
     step_tracing: bool,
     unresolved_program_counter: Option<ProgramCounter>,
-    max_cache_size: Option<usize>,
+    min_compiled_handlers: usize,
+    max_compiled_handlers: Option<usize>,
 }
 
 impl InterpretedInstance {
     pub fn new_from_module(module: Module, force_step_tracing: bool) -> Self {
         let step_tracing = module.is_step_tracing() || force_step_tracing;
         let mut instance = Self {
-            compiled_offset_for_block: FlatMap::new(module.code_len() + 1, true), // + 1 for one implicit out-of-bounds trap.
+            compiled_offset_for_block: FlatMap::new(module.code_len() + 1), // + 1 for one implicit out-of-bounds trap.
             compiled_handlers: Default::default(),
             compiled_args: Default::default(),
             module,
@@ -436,7 +448,8 @@ impl InterpretedInstance {
             interrupt: InterruptKind::Finished,
             step_tracing,
             unresolved_program_counter: None,
-            max_cache_size: None,
+            min_compiled_handlers: 0,
+            max_compiled_handlers: None,
         };
 
         instance.initialize_module();
@@ -471,8 +484,38 @@ impl InterpretedInstance {
         self.gas = gas;
     }
 
-    pub fn set_interpreter_cache_size(&mut self, max_cache_size: Option<usize>) {
-        self.max_cache_size = max_cache_size;
+    pub fn set_interpreter_cache_size_limit(&mut self, cache_info: Option<SetCacheSizeLimitArgs>) -> Result<(), Error> {
+        let Some(SetCacheSizeLimitArgs {
+            max_block_size,
+            max_cache_size_bytes,
+        }) = cache_info
+        else {
+            self.max_compiled_handlers = None;
+            return Ok(());
+        };
+
+        let compiled_handlers_hard_limit = interpreter_calculate_cache_num_entries(max_cache_size_bytes);
+
+        // Calculate the minimum number of compiled handlers required to guarantee a tight upper bound.
+        // We must be able to hold at least two basic blocks (including gas metering) and we should also account for precompiled stubs.
+        let minimum_compiled_handlers = cast((max_block_size + 1) * 2 + INTERPRETER_CACHE_RESERVED_ENTRIES).to_usize();
+
+        if compiled_handlers_hard_limit < minimum_compiled_handlers {
+            log::debug!(
+                "interpreter cache size is too small to gurantee a tight upper bound: {} < {}; max_block_size={}, max_cache_size_bytes={}",
+                compiled_handlers_hard_limit,
+                minimum_compiled_handlers,
+                max_block_size,
+                max_cache_size_bytes
+            );
+            return Err(Error::from(
+                "given maximum cache size is too small to guarantee a tight upper bound",
+            ));
+        }
+
+        let compiled_handlers_soft_limit = compiled_handlers_hard_limit - cast(max_block_size + 1).to_usize();
+        self.max_compiled_handlers = Some(compiled_handlers_soft_limit);
+        Ok(())
     }
 
     pub fn program_counter(&self) -> Option<ProgramCounter> {
@@ -789,6 +832,8 @@ impl InterpretedInstance {
         }
 
         self.compile_out_of_range_stub();
+        self.min_compiled_handlers = self.compiled_handlers.len();
+        debug_assert!(self.min_compiled_handlers <= cast(INTERPRETER_CACHE_RESERVED_ENTRIES).to_usize());
     }
 
     #[inline(always)]
@@ -938,20 +983,35 @@ impl InterpretedInstance {
             }
         }
 
-        if let Some(max_cache_size) = self.max_cache_size {
-            if self.compiled_handlers.len() > max_cache_size {
+        if let Some(max_compiled_handlers) = self.max_compiled_handlers {
+            let handlers_added = self.compiled_handlers.len() - cast(origin).to_usize();
+            if handlers_added + self.min_compiled_handlers > max_compiled_handlers {
+                let compiled_handlers_new_limit = handlers_added + self.min_compiled_handlers;
+
+                log::warn!(
+                    "interpreter: compiled handlers cache is too small: {} + {} > {}; setting new limit to {} and resetting the cache",
+                    handlers_added,
+                    self.min_compiled_handlers,
+                    max_compiled_handlers,
+                    compiled_handlers_new_limit
+                );
+
+                self.max_compiled_handlers = Some(compiled_handlers_new_limit);
+                self.compiled_handlers[cast(origin).to_usize()] = cast_handler!(raw_handlers::reset_cache::<DEBUG>);
+                self.compiled_args[cast(origin).to_usize()] = Args::reset_cache(program_counter);
+            } else if self.compiled_handlers.len() > max_compiled_handlers {
                 log::debug!(
-                    "Compiled handlers cache size exceeded at {}: {} > {}; will reset the cache",
+                    "interpreter: compiled handlers cache size exceeded at {}: {} > {}; will reset the cache",
                     origin,
                     self.compiled_handlers.len(),
-                    max_cache_size
+                    max_compiled_handlers
                 );
 
                 self.compiled_handlers[cast(origin).to_usize()] = cast_handler!(raw_handlers::reset_cache::<DEBUG>);
                 self.compiled_args[cast(origin).to_usize()] = Args::reset_cache(program_counter);
-            } else if self.compiled_handlers.capacity() > max_cache_size {
-                self.compiled_handlers.shrink_to(max_cache_size);
-                self.compiled_args.shrink_to(max_cache_size);
+            } else if self.compiled_handlers.capacity() > max_compiled_handlers {
+                self.compiled_handlers.shrink_to(max_compiled_handlers);
+                self.compiled_args.shrink_to(max_compiled_handlers);
             }
         }
 
@@ -2069,7 +2129,7 @@ define_interpreter! {
         }
 
         visitor.inner.reset_interpreter_cache();
-        visitor.inner.resolve_fallthrough::<DEBUG>(program_counter)
+        visitor.inner.compile_block::<DEBUG>(program_counter)
     }
 
     fn fallthrough<const DEBUG: bool>(visitor: &mut Visitor) -> Option<Target> {

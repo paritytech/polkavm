@@ -43,7 +43,7 @@ const END_BASIC_BLOCK_INVALID: usize = 2;
 
 struct CachePerCompilation {
     assembler: Assembler,
-    program_counter_to_label: FlatMap<Label>,
+    program_counter_to_label: FlatMap<Label, false>,
     gas_metering_stub_offsets: Vec<usize>,
     gas_cost_for_basic_block: Vec<u32>,
     export_to_label: HashMap<u32, Label>,
@@ -93,7 +93,7 @@ where
     code: &'a [u8],
     bitmask: &'a [u8],
     asm: Assembler,
-    program_counter_to_label: FlatMap<Label>,
+    program_counter_to_label: FlatMap<Label, false>,
     step_tracing: bool,
     ecall_label: Label,
     export_to_label: HashMap<u32, Label>,
@@ -199,7 +199,7 @@ where
             export_to_label = per_compilation_cache.export_to_label;
         } else {
             asm = Assembler::new();
-            program_counter_to_label = FlatMap::new(code_length + 2, false);
+            program_counter_to_label = FlatMap::new(code_length + 2);
             gas_metering_stub_offsets = Vec::new();
             gas_cost_for_basic_block = Vec::new();
             export_to_label = HashMap::new();

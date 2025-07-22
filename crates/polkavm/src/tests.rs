@@ -1,7 +1,7 @@
 use crate::mutex::Mutex;
 use crate::{
     BackendKind, CallError, Caller, Config, Engine, GasMeteringKind, InterruptKind, Linker, MemoryAccessError, Module, ModuleConfig,
-    ProgramBlob, ProgramCounter, Reg, Segfault,
+    ProgramBlob, ProgramCounter, Reg, Segfault, SetCacheSizeLimitArgs,
 };
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use polkavm_common::abi::MemoryMapBuilder;
 use polkavm_common::program::{asm, DefaultInstructionSet};
-use polkavm_common::program::{BlobLen, Reg::*};
+use polkavm_common::program::{BlobLen, Reg::*, INTERPRETER_CACHE_ENTRY_SIZE, INTERPRETER_CACHE_RESERVED_ENTRIES};
 use polkavm_common::utils::align_to_next_page_u32;
 use polkavm_common::writer::ProgramBlobBuilder;
 
@@ -517,20 +517,57 @@ fn reclaim_cache_memory(config: Config) {
 }
 
 fn bounded_interpreter_cache(config: Config) {
+    // this test is only relevant for the interpreter backend
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let mut builder = ProgramBlobBuilder::new();
-    builder.add_export_by_basic_block(0, b"main");
+    builder.add_export_by_basic_block(0, b"entry_0");
+    builder.add_export_by_basic_block(1, b"entry_1");
+    builder.add_export_by_basic_block(2, b"entry_2");
+    builder.add_export_by_basic_block(3, b"entry_3");
+    builder.add_export_by_basic_block(4, b"entry_4");
+    builder.add_export_by_basic_block(5, b"entry_5");
+
+    // 0 -> 4 -> 1 -> 3 -> 2 -> 5
     builder.set_code(
         &[
-            asm::load_imm(A0, 1),
-            asm::load_imm(A1, 2),
-            asm::load_imm(A2, 3),
-            asm::jump(1),
-            asm::load_imm(A3, 4),
-            asm::load_imm(A4, 5),
+            asm::add_imm_32(A0, A0, 0x1),
+            asm::jump(4),
+            asm::add_imm_32(A1, A1, 0x1),
+            asm::add_imm_32(A1, A1, 0x10),
+            asm::add_imm_32(A1, A1, 0x100),
+            asm::add_imm_32(A1, A1, 0x1),
+            asm::add_imm_32(A1, A1, 0x10),
+            asm::add_imm_32(A1, A1, 0x100),
+            asm::jump(3),
+            asm::add_imm_32(A2, A2, 0x1),
+            asm::add_imm_32(A2, A2, 0x10),
+            asm::add_imm_32(A2, A2, 0x100),
+            asm::add_imm_32(A2, A2, 0x1000),
+            asm::add_imm_32(A2, A2, 0x1),
+            asm::add_imm_32(A2, A2, 0x10),
+            asm::add_imm_32(A2, A2, 0x100),
+            asm::add_imm_32(A2, A2, 0x1000),
+            asm::add_imm_32(A2, A2, 0x1),
+            asm::add_imm_32(A2, A2, 0x10),
+            asm::add_imm_32(A2, A2, 0x100),
+            asm::add_imm_32(A2, A2, 0x1000),
+            asm::jump(5),
+            asm::add_imm_32(A3, A3, 0x1),
+            asm::add_imm_32(A3, A3, 0x10),
+            asm::add_imm_32(A3, A3, 0x100),
+            asm::add_imm_32(A3, A3, 0x1),
+            asm::add_imm_32(A3, A3, 0x10),
+            asm::add_imm_32(A3, A3, 0x100),
             asm::jump(2),
-            asm::load_imm(A5, 6),
+            asm::add_imm_32(A4, A4, 0x1),
+            asm::add_imm_32(A4, A4, 0x10),
+            asm::jump(1),
+            asm::load_imm(A5, 0x1),
             asm::ret(),
         ],
         &[],
@@ -538,23 +575,84 @@ fn bounded_interpreter_cache(config: Config) {
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
-    let list: Vec<_> = module.blob().instructions(DefaultInstructionSet::default()).collect();
+    let exports: Vec<_> = module.exports().map(|export| export.program_counter()).collect();
 
     let mut instance = module.instantiate().unwrap();
 
-    // 3 for first three instructions + 3 for extra subroutines interpreter emits
-    instance.set_interpreter_cache_size(Some(6));
+    assert_eq!(INTERPRETER_CACHE_ENTRY_SIZE, 24);
+    assert_eq!(INTERPRETER_CACHE_RESERVED_ENTRIES, 10);
 
-    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
-    instance.set_next_program_counter(list[0].offset);
+    let minimum_cache_size = 24 * (10 + 2);
 
-    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
-    assert_eq!(instance.reg(Reg::A0), 1);
-    assert_eq!(instance.reg(Reg::A1), 2);
-    assert_eq!(instance.reg(Reg::A2), 3);
-    assert_eq!(instance.reg(Reg::A3), 4);
-    assert_eq!(instance.reg(Reg::A4), 5);
-    assert_eq!(instance.reg(Reg::A5), 6);
+    for max_cache_size_bytes in 0..minimum_cache_size {
+        log::debug!("Testing with max_cache_size_bytes: {}", max_cache_size_bytes);
+        assert!(instance
+            .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+                max_block_size: 0,
+                max_cache_size_bytes,
+            }))
+            .is_err());
+    }
+
+    assert!(instance
+        .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+            max_block_size: 0,
+            max_cache_size_bytes: minimum_cache_size,
+        }))
+        .is_ok());
+
+    for (max_block_size, max_cache_size_bytes) in [(0, 24 * 12), (5, 24 * 22), (12, 1000000)] {
+        for start_block in 0..exports.len() {
+            log::debug!(
+                "Testing with max_block_size: {}, max_cache_size_bytes: {}, start_block: {}",
+                max_block_size,
+                max_cache_size_bytes,
+                start_block
+            );
+
+            instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+            instance.set_reg(Reg::A0, 0);
+            instance.set_reg(Reg::A1, 0);
+            instance.set_reg(Reg::A2, 0);
+            instance.set_reg(Reg::A3, 0);
+            instance.set_reg(Reg::A4, 0);
+            instance.set_reg(Reg::A5, 0);
+            instance.set_next_program_counter(exports[start_block]);
+
+            assert!(instance
+                .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+                    max_block_size,
+                    max_cache_size_bytes,
+                }))
+                .is_ok());
+
+            match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+
+            if start_block == 0 {
+                assert_eq!(instance.reg(Reg::A0), 0x1);
+            }
+
+            if matches!(start_block, 0 | 1 | 4) {
+                assert_eq!(instance.reg(Reg::A1), 0x222);
+            }
+
+            if matches!(start_block, 0 | 1 | 2 | 3 | 4) {
+                assert_eq!(instance.reg(Reg::A2), 0x3333);
+            }
+
+            if matches!(start_block, 0 | 1 | 3 | 4) {
+                assert_eq!(instance.reg(Reg::A3), 0x222);
+            }
+
+            if matches!(start_block, 0 | 4) {
+                assert_eq!(instance.reg(Reg::A4), 0x11);
+            }
+
+            if matches!(start_block, 0 | 1 | 2 | 3 | 4 | 5) {
+                assert_eq!(instance.reg(Reg::A5), 0x1);
+            }
+        }
+    }
 }
 
 fn step_tracing_invalid_store(engine_config: Config) {

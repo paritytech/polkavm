@@ -22,29 +22,27 @@ impl<'a> GuestInit<'a> {
     }
 }
 
-pub(crate) struct FlatMap<T> {
+pub(crate) struct FlatMap<T, const LAZY_ALLOCATION: bool> {
     inner: Vec<Option<T>>,
-    capacity: u32,
-    is_allocated: bool,
+    desired_capacity: u32,
 }
 
-impl<T> FlatMap<T>
+impl<T, const LAZY_ALLOCATION: bool> FlatMap<T, LAZY_ALLOCATION>
 where
     T: Copy,
 {
     #[inline]
-    pub fn new(capacity: u32, lazy_allocation: bool) -> Self {
+    pub fn new(capacity: u32) -> Self {
         let mut inner = Vec::new();
 
-        if !lazy_allocation {
+        if !LAZY_ALLOCATION {
             inner.reserve_exact(capacity as usize);
             inner.resize_with(capacity as usize, || None);
         }
 
         Self {
             inner,
-            capacity,
-            is_allocated: !lazy_allocation,
+            desired_capacity: capacity,
         }
     }
 
@@ -53,16 +51,12 @@ where
     pub fn new_reusing_memory(mut memory: Self, capacity: u32) -> Self {
         memory.inner.clear();
         memory.inner.resize_with(capacity as usize, || None);
-        memory.capacity = capacity;
-        memory.is_allocated = true;
+        memory.desired_capacity = capacity;
         memory
     }
 
     #[inline]
     pub fn get(&self, key: u32) -> Option<T> {
-        if !self.is_allocated {
-            return None;
-        }
         self.inner.get(key as usize).and_then(|value| *value)
     }
 
@@ -72,14 +66,18 @@ where
         self.inner.len() as u32
     }
 
+    #[cold]
+    fn allocate_capacity(&mut self) {
+        debug_assert!(self.inner.capacity() == 0, "FlatMap should not be allocated yet");
+        self.inner.reserve_exact(self.desired_capacity as usize);
+        self.inner.resize_with(self.desired_capacity as usize, || None);
+    }
+
     #[inline]
     pub fn insert(&mut self, key: u32, value: T) {
-        if !self.is_allocated {
-            self.inner.reserve_exact(self.capacity as usize);
-            self.inner.resize_with(self.capacity as usize, || None);
-            self.is_allocated = true;
+        if self.inner.capacity() == 0 {
+            self.allocate_capacity();
         }
-
         self.inner[key as usize] = Some(value);
     }
 
@@ -93,7 +91,6 @@ where
     pub fn reset(&mut self) {
         self.inner.clear();
         self.inner.shrink_to_fit();
-        self.is_allocated = false;
     }
 }
 

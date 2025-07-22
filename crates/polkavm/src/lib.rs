@@ -131,14 +131,15 @@ pub mod debug_info {
 /// Miscellaneous types related to program blobs.
 pub mod program {
     pub use polkavm_common::program::{
-        ISA32_V1_NoSbrk, Imports, ImportsIter, Instruction, InstructionSet, Instructions, JumpTable, JumpTableIter, Opcode,
-        ParsedInstruction, ProgramExport, ProgramParseError, ProgramSymbol, RawReg, ISA32_V1, ISA64_V1,
+        EstimateInterpreterMemoryUsageArgs, ISA32_V1_NoSbrk, Imports, ImportsIter, Instruction, InstructionSet, Instructions, JumpTable,
+        JumpTableIter, Opcode, ParsedInstruction, ProgramExport, ProgramMemoryInfo, ProgramParseError, ProgramSymbol, RawReg, ISA32_V1,
+        ISA64_V1,
     };
 }
 
 pub type Gas = i64;
 
-pub use crate::api::{Engine, MemoryAccessError, Module, RawInstance, RegValue};
+pub use crate::api::{Engine, MemoryAccessError, Module, RawInstance, RegValue, SetCacheSizeLimitArgs};
 pub use crate::config::{BackendKind, Config, CustomCodegen, GasMeteringKind, ModuleConfig, SandboxKind};
 pub use crate::error::Error;
 pub use crate::gas::{Cost, CostModel, CostModelRef};
