@@ -61,7 +61,7 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
             return (FIRST_READABLE_ADDRESS as u64, 0);
         };
 
-    let mut output = blake2b_hash(input_slice); 
+    let output = blake2b_hash(input_slice); 
     unsafe {
       output_bytes_36[0..32].copy_from_slice(&output[0..32]);
       output_bytes_36[32..36].copy_from_slice(&payload_4);
@@ -70,18 +70,6 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     let output_address = unsafe { output_bytes_36.as_ptr() as u64 };
     let output_length = unsafe { output_bytes_36.len() as u64 };
 
-    let mut x: [u8; 32] = unsafe {
-        (&output_bytes_36[..32])                     // &mut‑static → &[u8]
-            .try_into()                              // &[u8] → [u8;32]
-            .expect("output_bytes_36 must be ≥32 bytes")
-    };
-    for i in 0..1000 {
-        if i % 200 == 0 {
-	  call_log(2, None, &format!("auth_copy REFINE hash i={:?}", i));
-        }
-        x = blake2b_hash(&x);
-    }
-    
     unsafe {
         call_log(2, None, &format!("auth_copy ref input_slice={:x?}", input_slice));
         call_log(2, None, &format!("auth_copy ref output_bytes_36={:x?}", output_bytes_36));

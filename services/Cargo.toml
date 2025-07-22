@@ -18,7 +18,7 @@ members = [
     "megatron",
     "transfer",
     "balances",
-    "delay",
+    "algo",
     "null_authorizer",
     "auth_copy",
     "blake2b",
@@ -32,6 +32,5 @@ members = [
     "game_of_life_manifest",
     "doom",
     "hello_world",
-    "utils",
-    "hash_many"
+    "utils"
 ]

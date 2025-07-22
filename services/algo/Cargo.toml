@@ -1,13 +1,13 @@
 cargo-features = ["edition2024"]
 
 [package]
-name = "fib"
+name = "algo"
 version = "0.1.0"
 edition = "2024"
 publish = false
 
 [lib]
-name = "fib"
+name = "algo"
 path = "src/main.rs"
 crate-type = ["staticlib", "rlib"]
 
@@ -15,3 +15,4 @@ crate-type = ["staticlib", "rlib"]
 polkavm-derive = { path = "../../crates/polkavm-derive" }
 simplealloc = { path = "../../crates/simplealloc" }
 utils = { path = "../utils" }
+hashbrown = "0.12"

@@ -26,6 +26,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "algo"
+version = "0.1.0"
+dependencies = [
+ "hashbrown 0.12.3",
+ "polkavm-derive",
+ "simplealloc",
+ "utils",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -429,15 +439,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "delay"
-version = "0.1.0"
-dependencies = [
- "polkavm-derive",
- "simplealloc",
- "utils",
-]
-
-[[package]]
 name = "der"
 version = "0.7.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -594,7 +595,6 @@ dependencies = [
 name = "fib"
 version = "0.1.0"
 dependencies = [
- "hashbrown 0.12.3",
  "polkavm-derive",
  "simplealloc",
  "utils",
@@ -685,15 +685,6 @@ dependencies = [
  "ff",
  "rand_core 0.6.4",
  "subtle",
-]
-
-[[package]]
-name = "hash_many"
-version = "0.1.0"
-dependencies = [
- "polkavm-derive",
- "simplealloc",
- "utils",
 ]
 
 [[package]]
