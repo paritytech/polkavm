@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use polkavm_common::abi::{MemoryMap, MemoryMapBuilder, VM_ADDR_RETURN_TO_HOST};
 use polkavm_common::cast::cast;
 use polkavm_common::program::{
-    FrameKind, ISA32_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode, ProgramBlob, Reg, ISA32_V1, ISA64_V1,
+    FrameKind, ISA32_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode, ProgramBlob, ProgramInfo, Reg, ISA32_V1, ISA64_V1,
 };
 use polkavm_common::utils::{ArcBytes, AsUninitSliceMut};
 
@@ -350,6 +350,15 @@ impl Module {
 
     pub(crate) fn instructions_bounded_at(&self, offset: ProgramCounter) -> Instructions<RuntimeInstructionSet> {
         self.state().blob.instructions_bounded_at(self.state().instruction_set, offset)
+    }
+
+    pub(crate) fn get_program_info(
+        &self,
+        max_cache_size: Option<usize>,
+    ) -> Result<ProgramInfo, polkavm_common::program::ProgramParseError> {
+        self.state()
+            .blob
+            .validate(self.state().instruction_set, max_cache_size, |_instruction| true)
     }
 
     pub(crate) fn is_jump_target_valid(&self, offset: ProgramCounter) -> bool {
@@ -1713,6 +1722,14 @@ impl RawInstance {
         #[allow(irrefutable_let_patterns)]
         if let InstanceBackend::Interpreted(ref mut backend) = self.backend {
             backend.reset_interpreter_cache();
+        }
+    }
+
+    /// Set a lose upper limit on the interpreter cache size (in bytes).
+    pub fn set_interpreter_cache_size(&mut self, max_cache_size_bytes: Option<usize>) {
+        #[allow(irrefutable_let_patterns)]
+        if let InstanceBackend::Interpreted(ref mut backend) = self.backend {
+            backend.set_interpreter_cache_size(max_cache_size_bytes);
         }
     }
 }

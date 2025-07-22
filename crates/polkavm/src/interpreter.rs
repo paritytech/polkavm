@@ -12,7 +12,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 use core::num::NonZeroU32;
-use polkavm_common::abi::VM_ADDR_RETURN_TO_HOST;
+use polkavm_common::abi::{INTERPRETER_CACHE_ENTRY_SIZE, VM_ADDR_RETURN_TO_HOST};
 use polkavm_common::cast::cast;
 use polkavm_common::operation::*;
 use polkavm_common::program::{asm, InstructionVisitor, RawReg, Reg};
@@ -412,13 +412,14 @@ pub(crate) struct InterpretedInstance {
     interrupt: InterruptKind,
     step_tracing: bool,
     unresolved_program_counter: Option<ProgramCounter>,
+    max_cache_size: Option<usize>,
 }
 
 impl InterpretedInstance {
     pub fn new_from_module(module: Module, force_step_tracing: bool) -> Self {
         let step_tracing = module.is_step_tracing() || force_step_tracing;
         let mut instance = Self {
-            compiled_offset_for_block: FlatMap::new(module.code_len() + 1), // + 1 for one implicit out-of-bounds trap.
+            compiled_offset_for_block: FlatMap::new(module.code_len() + 1, true), // + 1 for one implicit out-of-bounds trap.
             compiled_handlers: Default::default(),
             compiled_args: Default::default(),
             module,
@@ -435,6 +436,7 @@ impl InterpretedInstance {
             interrupt: InterruptKind::Finished,
             step_tracing,
             unresolved_program_counter: None,
+            max_cache_size: None,
         };
 
         instance.initialize_module();
@@ -467,6 +469,22 @@ impl InterpretedInstance {
 
     pub fn set_gas(&mut self, gas: Gas) {
         self.gas = gas;
+    }
+
+    pub fn set_interpreter_cache_size(&mut self, max_cache_size_bytes: Option<usize>) {
+        if let Some(max_cache_size_bytes) = max_cache_size_bytes {
+            let program_info = match self.module.get_program_info(Some(max_cache_size_bytes)) {
+                Ok(info) => info,
+                Err(_) => {
+                    panic!("failed to get program info for max cache size: {max_cache_size_bytes}");
+                }
+            };
+
+            let max_cache_size = (max_cache_size_bytes / INTERPRETER_CACHE_ENTRY_SIZE as usize) - program_info.max_block_size as usize;
+            self.max_cache_size = Some(max_cache_size);
+        } else {
+            self.max_cache_size = None;
+        }
     }
 
     pub fn program_counter(&self) -> Option<ProgramCounter> {
@@ -929,6 +947,23 @@ impl InterpretedInstance {
 
             if instruction.opcode().starts_new_basic_block() {
                 break;
+            }
+        }
+
+        if let Some(max_cache_size) = self.max_cache_size {
+            if self.compiled_handlers.len() > max_cache_size {
+                log::debug!(
+                    "Compiled handlers cache size exceeded at {}: {} > {}; will reset the cache",
+                    origin,
+                    self.compiled_handlers.len(),
+                    max_cache_size
+                );
+
+                self.compiled_handlers[cast(origin).to_usize()] = cast_handler!(raw_handlers::reset_cache::<DEBUG>);
+                self.compiled_args[cast(origin).to_usize()] = Args::reset_cache(program_counter);
+            } else if self.compiled_handlers.capacity() > max_cache_size {
+                self.compiled_handlers.shrink_to(max_cache_size);
+                self.compiled_args.shrink_to(max_cache_size);
             }
         }
 
@@ -2038,6 +2073,15 @@ define_interpreter! {
         visitor.inner.interrupt = InterruptKind::Step;
         visitor.inner.compiled_offset += 1;
         None
+    }
+
+    fn reset_cache<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: reset_cache", visitor.inner.compiled_offset);
+        }
+
+        visitor.inner.reset_interpreter_cache();
+        visitor.inner.resolve_fallthrough::<DEBUG>(program_counter)
     }
 
     fn fallthrough<const DEBUG: bool>(visitor: &mut Visitor) -> Option<Target> {

@@ -1,4 +1,6 @@
-use crate::abi::{VM_CODE_ADDRESS_ALIGNMENT, VM_MAXIMUM_CODE_SIZE, VM_MAXIMUM_IMPORT_COUNT, VM_MAXIMUM_JUMP_TABLE_ENTRIES};
+use crate::abi::{
+    INTERPRETER_CACHE_ENTRY_SIZE, VM_CODE_ADDRESS_ALIGNMENT, VM_MAXIMUM_CODE_SIZE, VM_MAXIMUM_IMPORT_COUNT, VM_MAXIMUM_JUMP_TABLE_ENTRIES,
+};
 use crate::utils::ArcBytes;
 use crate::varint::{read_simple_varint, read_varint, write_simple_varint, MAX_VARINT_LENGTH};
 use core::fmt::Write;
@@ -4165,6 +4167,12 @@ fn test_instructions_iterator_does_not_emit_unnecessary_invalid_instructions_if_
     assert_eq!(i.next(), None);
 }
 
+pub struct ProgramInfo {
+    pub max_block_size: u32,
+    pub baseline_ram_consumption: u32,
+    pub purgeable_ram_consumption: u32,
+}
+
 #[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct ProgramParts {
@@ -4725,6 +4733,56 @@ impl ProgramBlob {
             stack_depth: 0,
             mutation_depth: 0,
         }))
+    }
+
+    pub fn validate<I: InstructionSet>(
+        &self,
+        instruction_set: I,
+        max_cache_size_bytes: Option<usize>,
+        mut verifier: impl FnMut(&<Instructions<'_, I> as Iterator>::Item) -> bool,
+    ) -> Result<ProgramInfo, ProgramParseError> {
+        const EXTRA_STUBS_INSTRUCTION_COUNT: u32 = 10;
+
+        let mut num_instructions: u32 = 0;
+        let mut max_block_size: u32 = 0;
+        let mut block_size: u32 = 0;
+        let mut instructions = self.instructions(instruction_set);
+        while let Some(instruction) = instructions.next() {
+            num_instructions += 1;
+            block_size += 1;
+
+            if instruction.kind.opcode().starts_new_basic_block() {
+                max_block_size = max_block_size.max(block_size);
+                block_size = 0;
+            }
+
+            if matches!(instruction.kind, Instruction::invalid) {
+                return Err(ProgramParseError(ProgramParseErrorKind::Other("invalid instruction encountered")));
+            }
+
+            if !verifier(&instruction) {
+                return Err(ProgramParseError(ProgramParseErrorKind::Other("program blob validation failed")));
+            }
+        }
+
+        let mut purgeable_ram_consumption = (num_instructions + EXTRA_STUBS_INSTRUCTION_COUNT) * INTERPRETER_CACHE_ENTRY_SIZE;
+        if let Some(max_cache_size_bytes) = max_cache_size_bytes {
+            let estimated_cache_size = ((max_block_size + EXTRA_STUBS_INSTRUCTION_COUNT) * INTERPRETER_CACHE_ENTRY_SIZE) as usize;
+            if estimated_cache_size > max_cache_size_bytes {
+                return Err(ProgramParseError(ProgramParseErrorKind::Other(
+                    "estimated interpreter cache size exceeds the maximum allowed size",
+                )));
+            }
+            purgeable_ram_consumption = max_cache_size_bytes as u32;
+        }
+
+        let baseline_ram_consumption = self.ro_data_size + self.rw_data_size + self.stack_size;
+
+        Ok(ProgramInfo {
+            max_block_size,
+            baseline_ram_consumption,
+            purgeable_ram_consumption,
+        })
     }
 }
 
