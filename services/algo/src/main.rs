@@ -20,7 +20,7 @@ const SIZE0: usize = 0x10000;
 use polkavm_derive::min_stack_size;
 min_stack_size!(SIZE0);
 
-const SIZE1: usize = 0x100000;
+const SIZE1: usize = 0x10000;
 // allocate memory for heap
 use simplealloc::SimpleAlloc;
 #[global_allocator]
