@@ -3,9 +3,9 @@
 #![feature(asm_const)]
 
 extern crate alloc;
-use alloc::boxed::Box;
+
 use alloc::format;
-use alloc::vec;
+
 const SIZE0: usize = 0x10000;
 // allocate memory for stack
 use polkavm_derive::min_stack_size;
@@ -18,7 +18,7 @@ use simplealloc::SimpleAlloc;
 static ALLOCATOR: SimpleAlloc<SIZE1> = SimpleAlloc::new();
 
 use utils::constants::FIRST_READABLE_ADDRESS;
-use utils::functions::{call_log, parse_accumulate_args, parse_refine_args};
+use utils::functions::{call_log, parse_accumulate_args, parse_accumulate_operand_args, parse_refine_args};
 use utils::host_functions::{fetch, new, transfer, write};
 
 #[polkavm_derive::polkavm_export]
@@ -58,19 +58,34 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
 
     for i in 0..number_of_operands {
         let operand_len = unsafe { fetch(operand_ptr, 0, 4104, 15, i.into(), 0) };
-        // copy the last 36 bytes of the operand to output_bytes_36
-        unsafe {
-            let src_base_ptr = operand_ptr as *const u8;
-            let src_ptr = src_base_ptr.add(operand_len as usize - 36);
-            let dst_ptr = output_bytes_36.as_mut_ptr();
-            core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, 36);
+
+        let (output_ptr, output_len) = match parse_accumulate_operand_args(operand_ptr, operand_len) {
+            Some(args) => (args.output_ptr, args.output_len),
+            None => return (FIRST_READABLE_ADDRESS as u64, 0),
+        };
+        if output_len < 36 {
+                call_log(
+                    2,
+                    None,
+                    &format!("output_len ACC output_len={} is less than 36 bytes, returning error", output_len),
+                );
+            return (FIRST_READABLE_ADDRESS as u64, 0);
         }
+
+        // Reconstruct a slice from the raw output_ptr and output_len
+        let output_slice = unsafe { core::slice::from_raw_parts(output_ptr as *const u8, output_len as usize) };
+
+        // Copy the first 36 bytes into output_bytes_36
+        unsafe {
+            output_bytes_36.copy_from_slice(&output_slice[..36]);
+        }
+
         // len is the 32..36 of the output_bytes_36 which is output by refine result  
         let len: u32 = unsafe {
             u32::from_le_bytes(
                     output_bytes_36[32..36]      
                         .try_into()
-                        .expect("slice length is exactly 4"),
+                    .expect("slice length is exactly 4"),
             )
         };
        
@@ -81,7 +96,7 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
         let omega_10: u64 = 100;  // m
         let omega_11: u64 = 1024; // gratis f
 
-        let result = unsafe { new(ptr, len as u64, omega_9, omega_10, omega_11) };
+        let result = unsafe { new(output_ptr, len as u64, omega_9, omega_10, omega_11) };
         let result_bytes = &result.to_le_bytes()[..4];
         // write result to storage
         let storage_key: [u8; 4] = (i as u32).to_le_bytes();
