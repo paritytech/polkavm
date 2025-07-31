@@ -4544,19 +4544,19 @@ fn run_program(idx: u8) -> u64 {
     match idx {
         0 => {
             let n = (get_random_number() % 30) as u32;
-            call_log(2, None, &format!("tribonacci({}) = {}", n, tribonacci(n)));
+            call_log(3, None, &format!("tribonacci({}) = {}", n, tribonacci(n)));
         }
 
         1 => {
             // Narayana Numbers
             let n = (get_random_number() % 20) + 1;
             let k = (get_random_number() % n) + 1;
-            call_log(2, None, &format!("narayana({}, {}) = {}", n, k, narayana(n, k)));
+            call_log(3, None, &format!("narayana({}, {}) = {}", n, k, narayana(n, k)));
         }
         2 => {
             // Motzkin Numbers
             let n = (get_random_number() % 20) as usize;
-            call_log(2, None, &format!("motzkin({}) = {}", n, motzkin(n)));
+            call_log(3, None, &format!("motzkin({}) = {}", n, motzkin(n)));
         }
 
         3 => {
@@ -4564,7 +4564,7 @@ fn run_program(idx: u8) -> u64 {
             let p = ((get_random_number() % 50) | 1) + 2;
             let a = get_random_number() % p;
             call_log(
-                2,
+                3,
                 None,
                 &format!("is_quadratic_residue({}, {}) = {}", a, p, is_quadratic_residue(a, p)),
             );
@@ -4573,22 +4573,22 @@ fn run_program(idx: u8) -> u64 {
         4 => {
             // Wilson's Theorem
             let p = ((get_random_number() % 50) | 1) + 2;
-            call_log(2, None, &format!("is_wilson_prime({}) = {}", p, is_wilson_prime(p)));
+            call_log(3, None, &format!("is_wilson_prime({}) = {}", p, is_wilson_prime(p)));
         }
         5 => {
             // Solovay Strassen Test
             let n = (get_random_number() % 1000) + 3 | 1;
-            call_log(2, None, &format!("solovay_strassen({}) = {}", n, solovay_strassen(n, 5)));
+            call_log(3, None, &format!("solovay_strassen({}) = {}", n, solovay_strassen(n, 5)));
         }
         6 => {
             // Fermat Factorization ;
             let n = ((get_random_number() % 500) + 4) * 2 + 1;
-            call_log(2, None, &format!("fermat_factor({}) = {:?}", n, fermat_factor(n)));
+            call_log(3, None, &format!("fermat_factor({}) = {:?}", n, fermat_factor(n)));
         }
 
         7 => {
             // Diffie-Hellman Shared Secret
-            call_log(2, None, &format!("diffie hellman {}", diffie_hellman()));
+            call_log(3, None, &format!("diffie hellman {}", diffie_hellman()));
         }
 
         8 => {
@@ -4600,7 +4600,7 @@ fn run_program(idx: u8) -> u64 {
                 let bit = (lfsr_next(&mut state) & 1) as u8;
                 byte |= bit << i;
             }
-            call_log(2, None, &format!("lfsr {:02X}", byte));
+            call_log(3, None, &format!("lfsr {:02X}", byte));
         }
         9 => {
             // Blum Blum Shub Output
@@ -4612,21 +4612,21 @@ fn run_program(idx: u8) -> u64 {
                 x = get_random_number() % n;
             }
             x = bbs_next(x, n);
-            call_log(2, None, &format!("bbs_next {}", x));
+            call_log(3, None, &format!("bbs_next {}", x));
         }
 
         10 => {
             // Bin Packing FFD
             let mut items = (0..10).map(|_| get_random_number() % 50 + 1).collect::<Vec<_>>();
             let bins = bin_packing_ffd(&mut items, 100);
-            call_log(2, None, &format!("bin_packing_ffd = {}", bins));
+            call_log(3, None, &format!("bin_packing_ffd = {}", bins));
         }
         11 => {
             // Burnside’s Necklace
             let n = (get_random_number() % 10 + 1) as usize;
             let k = get_random_number() % 5 + 2;
             call_log(
-                2,
+                3,
                 None,
                 &format!("burnside_necklace distinct colorings = {}", burnside_necklace(n, k)),
             );
@@ -4636,25 +4636,25 @@ fn run_program(idx: u8) -> u64 {
             // Young Tableaux
             let r = (get_random_number() % 4 + 1) as usize;
             let c = (get_random_number() % 4 + 1) as usize;
-            call_log(2, None, &format!("young_tableaux {}×{} → {}", r, c, young_tableaux((r, c))));
+            call_log(3, None, &format!("young_tableaux {}×{} → {}", r, c, young_tableaux((r, c))));
         }
         13 => {
             // Frobenius Coin
             let a = (get_random_number() % 20) + 2;
             let b = (get_random_number() % 20) + 2;
-            call_log(2, None, &format!("frobenius({}, {}) = {}", a, b, frobenius(a, b)));
+            call_log(3, None, &format!("frobenius({}, {}) = {}", a, b, frobenius(a, b)));
         }
         14 => {
             // Partition mod m
             let n = (get_random_number() % 50) as usize;
             let m = (get_random_number() % 100) + 1;
-            call_log(2, None, &format!("p({}) mod {} = {}", n, m, partition_mod(n, m)));
+            call_log(3, None, &format!("p({}) mod {} = {}", n, m, partition_mod(n, m)));
         }
         15 => {
             // q-Analog
             let n = get_random_number() % 20;
             let q = (get_random_number() % 5) + 1;
-            call_log(2, None, &format!("q_analog[{}]_{} = {}", n, q, q_analog(n, q)));
+            call_log(3, None, &format!("q_analog[{}]_{} = {}", n, q, q_analog(n, q)));
         }
 
         16 => {
@@ -4664,13 +4664,13 @@ fn run_program(idx: u8) -> u64 {
                 [(get_random_number() % 101) as i64 - 50, (get_random_number() % 101) as i64 - 50],
             ];
             let cond = condition_number_2x2(a);
-            call_log(2, None, &format!("condition_number_2x2 A={:?} ={}", a, cond));
+            call_log(3, None, &format!("condition_number_2x2 A={:?} ={}", a, cond));
         }
 
         17 => {
             // Pollard-Rho Brent
             let n = (get_random_number() % 1000) | 1;
-            call_log(2, None, &format!("pollard_rho_brent {:?}", pollard_rho_brent(n)));
+            call_log(3, None, &format!("pollard_rho_brent {:?}", pollard_rho_brent(n)));
         }
         18 => {
             // 1D Range Tree Query
@@ -4681,13 +4681,13 @@ fn run_program(idx: u8) -> u64 {
             let b = (get_random_number() % 100) as i64;
             let (l, r) = if a <= b { (a, b) } else { (b, a) };
             let cnt = tree.query(l, r);
-            call_log(2, None, &format!("OneDRangeTreeQuery [{},{}] → {}", l, r, cnt));
+            call_log(3, None, &format!("OneDRangeTreeQuery [{},{}] → {}", l, r, cnt));
         }
 
         19 => {
             // RSA KeyGen
             let (n, e, d) = rsa_keygen();
-            call_log(2, None, &format!("rsa_keygen n={}, e={}, d={}", n, e, d));
+            call_log(3, None, &format!("rsa_keygen n={}, e={}, d={}", n, e, d));
         }
 
         20 => {
@@ -4702,7 +4702,7 @@ fn run_program(idx: u8) -> u64 {
             let m = get_random_number() % q;
             let (r, s) = dsa_sign(m, p, q, g, x);
             let ok = dsa_verify(m, r, s, p, q, g, y);
-            call_log(2, None, &format!("m={}, r={}, s={}, ok={}", m, r, s, ok));
+            call_log(3, None, &format!("m={}, r={}, s={}, ok={}", m, r, s, ok));
         }
         21 => {
             //  GF Coeffs of 1/(1-x-x^2)
@@ -4710,14 +4710,14 @@ fn run_program(idx: u8) -> u64 {
             let Q = vec![1, -1, -1];
             let n = (get_random_number() % 20) as usize;
             let coeffs = gf_coeff(&P, &Q, n);
-            call_log(2, None, &format!("gf_coeff[{}] = {}", n, coeffs[n]));
+            call_log(3, None, &format!("gf_coeff[{}] = {}", n, coeffs[n]));
         }
         22 => {
             // Legendre Symbol
             let p = ((get_random_number() % 1000) | 1) + 2;
             let a = (get_random_number() % p) as i64;
             call_log(
-                2,
+                3,
                 None,
                 &format!("legendre_symbol ( {}/{}) = {}", a, p, legendre_symbol(a, p as i64)),
             );
@@ -4725,7 +4725,7 @@ fn run_program(idx: u8) -> u64 {
         23 => {
             // Lucas–Lehmer Test
             let p = (get_random_number() % 50) + 2;
-            call_log(2, None, &format!("lucas_lehmer M_{} is prime? {}", p, lucas_lehmer(p)));
+            call_log(3, None, &format!("lucas_lehmer M_{} is prime? {}", p, lucas_lehmer(p)));
         }
         24 => {
             // Lucas Sequence
@@ -4734,18 +4734,18 @@ fn run_program(idx: u8) -> u64 {
             let Q = 1;
             let m = (get_random_number() % 100) as i64 + 1;
             let (U, V) = lucas_sequence(n, P, Q, m);
-            call_log(2, None, &format!("lucas_sequence U_{},V_{} mod {} = ({},{})", n, n, m, U, V));
+            call_log(3, None, &format!("lucas_sequence U_{},V_{} mod {} = ({},{})", n, n, m, U, V));
         }
 
         25 => {
             // Baillie–PSW Primality Test
             let n = ((get_random_number() % 10_000) | 1) + 2;
-            call_log(2, None, &format!("baillie_psw {} is prime? {}", n, baillie_psw(n)));
+            call_log(3, None, &format!("baillie_psw {} is prime? {}", n, baillie_psw(n)));
         }
         26 => {
             // Newton Integer √
             let n = get_random_number() % 1_000_000;
-            call_log(2, None, &format!("newton_sqrt {} = {}", n, newton_sqrt(n)));
+            call_log(3, None, &format!("newton_sqrt {} = {}", n, newton_sqrt(n)));
         }
         27 => {
             // Bareiss 3×3 Determinant
@@ -4755,7 +4755,7 @@ fn run_program(idx: u8) -> u64 {
                     mat[i][j] = (get_random_number() % 101) as i64 - 50;
                 }
             }
-            call_log(2, None, &format!("det_bareiss_3x3 det = {}", det_bareiss_3x3(mat)));
+            call_log(3, None, &format!("det_bareiss_3x3 det = {}", det_bareiss_3x3(mat)));
         }
         28 => {
             // Smith Normal Form 2×2
@@ -4764,7 +4764,7 @@ fn run_program(idx: u8) -> u64 {
                 [(get_random_number() % 101) as i64 - 50, (get_random_number() % 101) as i64 - 50],
             ];
             let (d1, d2) = smith_normal_form_2x2(mat);
-            call_log(2, None, &format!("smith_normal_form_2x2 diag({}, {})", d1, d2));
+            call_log(3, None, &format!("smith_normal_form_2x2 diag({}, {})", d1, d2));
         }
         29 => {
             // Hermite Normal Form 2×2
@@ -4775,7 +4775,7 @@ fn run_program(idx: u8) -> u64 {
             ];
             let h = hermite_normal_form_2x2(mat);
             call_log(
-                2,
+                3,
                 None,
                 &format!("hermite_normal_form_2x2 H = [[{},{}],[{},{}]]", h[0][0], h[0][1], h[1][0], h[1][1]),
             );
@@ -4785,7 +4785,7 @@ fn run_program(idx: u8) -> u64 {
             let b1 = ((get_random_number() % 101) as i64 - 50, (get_random_number() % 101) as i64 - 50);
             let b2 = ((get_random_number() % 101) as i64 - 50, (get_random_number() % 101) as i64 - 50);
             let (r1, r2) = lll_reduce_2d(b1, b2);
-            call_log(2, None, &format!("lll_reduce_2d b1={:?}, b2={:?}", r1, r2));
+            call_log(3, None, &format!("lll_reduce_2d b1={:?}, b2={:?}", r1, r2));
         }
 
         31 => {
@@ -4794,7 +4794,7 @@ fn run_program(idx: u8) -> u64 {
             let exp = get_random_number() % 1_000;
             let m = (get_random_number() % 1_000) + 1;
             call_log(
-                2,
+                3,
                 None,
                 &format!("mod_exp_ladder({}, {}, {}) = {}", base, exp, m, mod_exp_ladder(base, exp, m)),
             );
@@ -4804,42 +4804,42 @@ fn run_program(idx: u8) -> u64 {
             // Stein’s Binary GCD
             let a = get_random_number() % 1_000_000;
             let b = get_random_number() % 1_000_000;
-            call_log(2, None, &format!("stein_gcd({}, {}) = {}", a, b, stein_gcd(a, b)));
+            call_log(3, None, &format!("stein_gcd({}, {}) = {}", a, b, stein_gcd(a, b)));
         }
         33 => {
             // Subtraction‑Only GCD
             let a = get_random_number() % 1_000_000;
             let b = get_random_number() % 1_000_000;
-            call_log(2, None, &format!("sub_gcd({}, {}) = {}", a, b, sub_gcd(a, b)));
+            call_log(3, None, &format!("sub_gcd({}, {}) = {}", a, b, sub_gcd(a, b)));
         }
 
         34 => {
             // Integer Log via Multiplication
             let n = (get_random_number() % 1_000_000) + 1;
             let b = (get_random_number() % 9) + 2;
-            call_log(2, None, &format!("integer_log_mul({}, {}) = {}", n, b, integer_log_mul(n, b)));
+            call_log(3, None, &format!("integer_log_mul({}, {}) = {}", n, b, integer_log_mul(n, b)));
         }
         35 => {
             // Integer Log via Division
             let n = (get_random_number() % 1_000_000) + 1;
             let b = (get_random_number() % 9) + 2;
-            call_log(2, None, &format!("integer_log_div({}, {}) = {}", n, b, integer_log_div(n, b)));
+            call_log(3, None, &format!("integer_log_div({}, {}) = {}", n, b, integer_log_div(n, b)));
         }
         36 => {
             // Perfect Square Test
             let n = get_random_number() % 1_000_000;
-            call_log(2, None, &format!("is_perfect_square({}) = {}", n, is_perfect_square(n)));
+            call_log(3, None, &format!("is_perfect_square({}) = {}", n, is_perfect_square(n)));
         }
 
         37 => {
             // Coin Change Count
             let n = (get_random_number() % 100) as usize;
-            call_log(2, None, &format!("coin_change_count({})={}", n, coin_change_count(n)));
+            call_log(3, None, &format!("coin_change_count({})={}", n, coin_change_count(n)));
         }
         38 => {
             // Coin Change Min
             let n = (get_random_number() % 100) as usize;
-            call_log(2, None, &format!("coin_change_min({})={}", n, coin_change_min(n)));
+            call_log(3, None, &format!("coin_change_min({})={}", n, coin_change_min(n)));
         }
 
         39 => {
@@ -4849,7 +4849,7 @@ fn run_program(idx: u8) -> u64 {
             let m = (get_random_number() % 999) + 1;
             let me = mod_exp(base, exp, m);
             let inv = mod_inv(base as i64, m as i64);
-            call_log(2, None, &format!("mod_exp({},{},{})={}, mod_inv={:?}", base, exp, m, me, inv));
+            call_log(3, None, &format!("mod_exp({},{},{})={}, mod_inv={:?}", base, exp, m, me, inv));
         }
         40 => {
             // CRT2, Garner & Nth‑Root
@@ -4858,7 +4858,7 @@ fn run_program(idx: u8) -> u64 {
             let a2 = (get_random_number() % 100) as i64;
             let n2 = ((get_random_number() % 98) + 2) as i64;
             if gcd(n1 as u64, n2 as u64) == 1 {
-                call_log(2, None, &format!("crt2 = {}", crt2(a1, n1, a2, n2)));
+                call_log(3, None, &format!("crt2 = {}", crt2(a1, n1, a2, n2)));
             }
             // Garner
             let mods = [2, 3, 5];
@@ -4867,12 +4867,12 @@ fn run_program(idx: u8) -> u64 {
                 (get_random_number() % 3) as i64,
                 (get_random_number() % 5) as i64,
             ];
-            call_log(2, None, &format!("garner = {}", garner(&rems, &mods)));
+            call_log(3, None, &format!("garner = {}", garner(&rems, &mods)));
             // Nth‑root
             let n = get_random_number() % 1_000_000;
             let k = (get_random_number() % 4) + 2;
             call_log(
-                2,
+                3,
                 None,
                 &format!("nth_root({},{}) = {}", n, k, integer_nth_root(n, k.try_into().unwrap())),
             );
@@ -4884,13 +4884,13 @@ fn run_program(idx: u8) -> u64 {
             for i in 0..NTT_N {
                 poly[i] = get_random_number() % MOD_NTT;
             }
-            call_log(2, None, &format!("ntt({:?}) = {:?}", poly, ntt(&poly)));
+            call_log(3, None, &format!("ntt({:?}) = {:?}", poly, ntt(&poly)));
         }
         42 => {
             // CORDIC Rotation
             let angle = (get_random_number() % 200_001) as i32 - 100_000;
             let (c, s) = cordic(angle);
-            call_log(2, None, &format!("angle={} → cos≈{}, sin≈{}", angle, c, s));
+            call_log(3, None, &format!("angle={} → cos≈{}, sin≈{}", angle, c, s));
         }
 
         43 => {
@@ -4900,18 +4900,18 @@ fn run_program(idx: u8) -> u64 {
                 a: 1664525,
                 c: 1013904223,
             };
-            call_log(2, None, &format!("lcg.next() = {}", lcg.next()));
-            call_log(2, None, &format!("xorshift64 = {}", xorshift64(get_random_number() as u64)));
+            call_log(3, None, &format!("lcg.next() = {}", lcg.next()));
+            call_log(3, None, &format!("xorshift64 = {}", xorshift64(get_random_number() as u64)));
             let mut pcg = Pcg {
                 state: get_random_number() as u64,
                 inc: get_random_number() as u64,
             };
-            call_log(2, None, &format!("pcg.next() = {}", pcg.next()));
+            call_log(3, None, &format!("pcg.next() = {}", pcg.next()));
             let mut mwc = Mwc {
                 state: get_random_number() as u64,
                 carry: get_random_number() as u64 & 0xFFFF_FFFF,
             };
-            call_log(2, None, &format!("mwc.next() = {}", mwc.next()));
+            call_log(3, None, &format!("mwc.next() = {}", mwc.next()));
         }
         44 => {
             // CRC32, Adler-32, FNV-1a, Murmur, Jenkins
@@ -4921,7 +4921,7 @@ fn run_program(idx: u8) -> u64 {
                 data.push(get_random_number() as u8);
             }
             call_log(
-                2,
+                3,
                 None,
                 &format!(
                     "crc32={:08x}, adler32={:08x}, fnv1a={:08x}, murmur3={:08x}, jenkins={:08x}",
@@ -4936,35 +4936,35 @@ fn run_program(idx: u8) -> u64 {
         45 => {
             // Euler’s Totient φ(n)
             let n = (get_random_number() % 100_000) + 1;
-            call_log(2, None, &format!("eulerTotient phi({}) = {}", n, phi(n)));
+            call_log(3, None, &format!("eulerTotient phi({}) = {}", n, phi(n)));
         }
 
         46 => {
             // Linear SieveMu
             let n = (get_random_number() % 1_000) as usize + 1;
             let mu = linear_mu(n);
-            call_log(2, None, &format!("linear_mu n={}, [n]={}", n, mu[n]));
+            call_log(3, None, &format!("linear_mu n={}, [n]={}", n, mu[n]));
         }
         47 => {
             // Sum of Divisors
             let n = (get_random_number() % 100_000) + 1;
-            call_log(2, None, &format!("SumOfDivisors sigma({}) = {}", n, sigma(n)));
+            call_log(3, None, &format!("SumOfDivisors sigma({}) = {}", n, sigma(n)));
         }
         48 => {
             // Divisor Count d(n)
             let n = (get_random_number() % 100_000) + 1;
-            call_log(2, None, &format!("divisor_count({}) = {}", n, divisor_count(n)));
+            call_log(3, None, &format!("divisor_count({}) = {}", n, divisor_count(n)));
         }
         49 => {
             // Mobius
             let n = (get_random_number() % 100_000) + 1;
-            call_log(2, None, &format!("mobius({}) = {}", n, mobius(n)));
+            call_log(3, None, &format!("mobius({}) = {}", n, mobius(n)));
         }
         50 => {
             // Dirichlet Convolution (1 * id)
             let n = (get_random_number() % 1_000) + 1;
             call_log(
-                2,
+                3,
                 None,
                 &format!("dirichlet_convolution (1 * id)({}) = {}", n, dirichlet_convolution(n, |_| 1, |d| d)),
             );
@@ -4989,8 +4989,8 @@ fn run_program(idx: u8) -> u64 {
             let p = ((get_random_number() % 1000) | 1) + 2;
             let n = get_random_number() % p;
             match cipolla(n, p) {
-                Some(r) => call_log(2, None, &format!("{}", r)),
-                None => call_log(2, None, &format!("none")),
+                Some(r) => call_log(3, None, &format!("{}", r)),
+                None => call_log(3, None, &format!("none")),
             }
         }
         53..=u8::MAX => {
@@ -5018,13 +5018,13 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
 
     // run each (program_id, count) pair
     let pairs = payload_len / 2;
-    call_log(2, None, &format!("PAYLOAD {} {}", payload_len, pairs));
+    call_log(2, None, &format!("algo refine PAYLOAD {} {}", payload_len, pairs));
     for i in 0..pairs {
         let program_id = payload[i * 2];
         let p_id = program_id % 170;
         let count = payload[i * 2 + 1] as u64;
         let iterations = count * count * count as u64;
-        call_log(2, None, &format!("PROGRAM_ID {} ITERATIONS {}", program_id, iterations));
+        call_log(2, None, &format!("algo refine PROGRAM_ID {} ITERATIONS {}", program_id, iterations));
         let mut gas_used = 0 as u64;
         for _ in 0..iterations {
             gas_used += run_program(p_id);
@@ -5073,8 +5073,20 @@ extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
 
     for j in 0..pairs {
         let x = (2 * j) as usize;
-        let program_id = payload[x] % 50;
-        let gas_used = unsafe { run_program(program_id) };
+        let program_id = payload[x] % 53 as u8;
+        let count = payload[x+1] as u64;
+        let iterations = count * count as u64; // accumulate is square, refine is cube
+        call_log(2, None, &format!("PROGRAM_ID {} ITERATIONS {}", program_id, iterations));
+        let mut gas_used = 0 as u64;
+        for _ in 0..iterations {
+            gas_used += run_program(program_id);
+        }
+        call_log(
+            2,
+            None,
+            &format!("algo run_accumulate {} ITERATIONS {} gas_used {}", program_id, iterations, gas_used),
+        );
+
         call_log(2, None, &format!("algo {} p_id={} gas_used={}", j, program_id, gas_used));
     }
 
@@ -5098,7 +5110,7 @@ extern "C" fn on_transfer(start_address: u64, length: u64) -> (u64, u64) {
             2,
             None,
             &format!(
-                "FIB on_transfer: timeslot={:?} service_index={:?} sender={:?} receiver={:?} amount={:?} memo={:?} gas_limit={:?}",
+                "ALGO on_transfer: timeslot={:?} service_index={:?} sender={:?} receiver={:?} amount={:?} memo={:?} gas_limit={:?}",
                 timeslot, service_index, sender, receiver, amount, memo, gas_limit
             ),
         );
@@ -5114,7 +5126,7 @@ extern "C" fn on_transfer(start_address: u64, length: u64) -> (u64, u64) {
 
         let gas_result = unsafe { gas() };
         write_result(gas_result, 4);
-        call_log(2, None, &format!("FIB on_transfer gas: got {:?} (recorded at key 4)", gas_result));
+        call_log(2, None, &format!("ALGO on_transfer gas: got {:?} (recorded at key 4)", gas_result));
 
         i += 1;
     }
