@@ -1,0 +1,32 @@
+{
+  "fc1": {
+    "weight_scale": 0.003957126755267382,
+    "weight_zero_point": 161,
+    "bias_scale": 0.0003837844415102154,
+    "bias_zero_point": 143,
+    "weight_shape": [
+      128,
+      784
+    ],
+    "bias_shape": [
+      128
+    ],
+    "weight_file": "fc1_weight.bin",
+    "bias_file": "fc1_bias.bin"
+  },
+  "fc2": {
+    "weight_scale": 0.003803275991231203,
+    "weight_zero_point": 161,
+    "bias_scale": 0.0005365432007238269,
+    "bias_zero_point": 190,
+    "weight_shape": [
+      10,
+      128
+    ],
+    "bias_shape": [
+      10
+    ],
+    "weight_file": "fc2_weight.bin",
+    "bias_file": "fc2_bias.bin"
+  }
+}

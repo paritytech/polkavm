@@ -795,6 +795,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mnist"
+version = "0.1.0"
+dependencies = [
+ "polkavm",
+ "polkavm-derive",
+ "simplealloc",
+ "utils",
+]
+
+[[package]]
 name = "null_authorizer"
 version = "0.1.0"
 dependencies = [

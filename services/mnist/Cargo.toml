@@ -1,0 +1,18 @@
+cargo-features = ["edition2024"]
+
+[package]
+name = "mnist"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "mnist"
+path = "src/main.rs"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+polkavm-derive = { path = "../../crates/polkavm-derive", default-features = false }
+simplealloc = { path = "../../crates/simplealloc" }
+polkavm = { path = "../../crates/polkavm", default-features = false }
+utils = { path = "../utils" }

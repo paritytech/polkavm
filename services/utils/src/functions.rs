@@ -134,6 +134,72 @@ impl Default for AccumulateArgs {
     }
 }
 
+// Parse accumulate args
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct AccumulateOperandArgs {
+    // TODO: H, E, A, Y 
+    pub gas: u64,
+    pub result_code: u32,
+    pub output_ptr: u64,
+    pub output_len: u64,
+}
+
+impl Default for AccumulateOperandArgs {
+    fn default() -> Self {
+        Self {
+            gas: 0,  
+            result_code: 0, 
+            output_ptr: 0,
+	    output_len: 0
+	    
+        }
+    }
+}
+pub fn parse_accumulate_operand_args(start_address: u64, length: u64) -> Option<AccumulateOperandArgs> {
+    if length == 0 {
+        return None;
+    }
+    let mut current_address = start_address;
+    let mut remaining_length = length;
+
+    let mut args = AccumulateOperandArgs::default();
+    
+    let mut current_address = start_address + 128; // skip over 4 hashes (H E A Y) of 128 bytes
+    let mut remaining_length = length - 128;
+
+    // Create a slice of the available data to parse gas
+    let g_full_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
+    let g_len = extract_discriminator(g_full_slice) as u64;
+    if g_len == 0 || remaining_length < g_len {
+        return None;
+    }
+    let g_slice = &g_full_slice[..g_len as usize];
+    args.gas = decode_e(g_slice) as u64;
+    current_address += g_len;
+    remaining_length -= g_len;
+
+    // TODO: args.result_code = current_address[0]
+    current_address += 1;
+    remaining_length -= 1;
+
+    if args.result_code == 0 {
+       let o_full_slice = unsafe { core::slice::from_raw_parts(current_address as *const u8, remaining_length as usize) };
+       let o_len = extract_discriminator(o_full_slice) as u64;
+       if o_len == 0 || remaining_length < o_len {
+          return None;
+       }
+       let o_slice = &o_full_slice[..o_len as usize];
+       current_address += o_len;
+       remaining_length -= o_len;
+       args.output_ptr = current_address;
+       args.output_len = decode_e(o_slice) as u64;
+       let output_slice = unsafe { core::slice::from_raw_parts(args.output_ptr as *const u8, args.output_len as usize) };
+    } 
+    // TODO: auth bytes
+    return Some(args);
+}
+
 pub fn parse_accumulate_args(start_address: u64, length: u64) -> Option<AccumulateArgs> {
     if length == 0 {
         return None;

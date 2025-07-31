@@ -29,7 +29,7 @@ static ALLOCATOR: SimpleAlloc<SIZE1> = SimpleAlloc::new();
 use core::slice;
 use core::sync::atomic::{AtomicU64, Ordering};
 use utils::constants::FIRST_READABLE_ADDRESS;
-use utils::functions::{call_log, parse_accumulate_args, parse_refine_args, parse_transfer_args, write_result};
+use utils::functions::{call_log, parse_accumulate_args, parse_refine_args, parse_transfer_args, parse_accumulate_operand_args, write_result};
 use utils::host_functions::{fetch, gas, write};
 
 /// A simple xorshift64* PRNG
@@ -4621,7 +4621,7 @@ fn run_program(idx: u8) -> u64 {
             let bins = bin_packing_ffd(&mut items, 100);
             call_log(2, None, &format!("bin_packing_ffd = {}", bins));
         }
-	11 => {
+        11 => {
             // Burnside’s Necklace
             let n = (get_random_number() % 10 + 1) as usize;
             let k = get_random_number() % 5 + 2;
@@ -5031,48 +5031,54 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
         }
         // after the last run, grab your sum_bytes
         // only store up to 32 slots
-        if i < 32 {
-            unsafe {
-                output_bytes_32[i] = program_id;
-            }
-            bytes_written += 1;
-        }
         call_log(
             2,
             None,
-            &format!("run_program {} ITERATIONS {} gas_used {}", program_id, iterations, gas_used),
+            &format!("algo run_refine {} ITERATIONS {} gas_used {}", program_id, iterations, gas_used),
         )
     }
 
-    return (out_ptr, bytes_written);
+    return (args.wi_payload_start_address, payload_len as u64);
 }
 
 #[no_mangle]
 static mut output_bytes_32: [u8; 32] = [0; 32];
+static mut operand: [u8; 512] = [0; 512];
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
-    // parse accumulate args
     let (_timeslot, _service_index, number_of_operands) = if let Some(args) = parse_accumulate_args(start_address, length) {
         (args.t, args.s, args.number_of_operands)
     } else {
         return (FIRST_READABLE_ADDRESS as u64, 0);
     };
+    // fetch 36 byte output which will be (32 byte p_u_hash + 4 byte "a" from payload y)
+    let operand_ptr = unsafe { operand.as_ptr() as u64 };
+    let operand_len = unsafe { fetch(operand_ptr, 0, 512, 15, 0, 0) };
+    let (payload_ptr, payload_len) = match parse_accumulate_operand_args(operand_ptr, operand_len) {
+        Some(args) => (args.output_ptr, args.output_len),
+        None => return (FIRST_READABLE_ADDRESS as u64, 0),
+    };
+    if payload_len < 2 {
+        call_log(2, None, &format!("payload_len too small: {}", payload_len));
+        return (FIRST_READABLE_ADDRESS as u64, 0);
+    }
+    let payload = unsafe { core::slice::from_raw_parts(payload_ptr as *const u8, payload_len as usize) };
+    let pairs = payload_len / 2;
+    call_log(
+        2,
+        None,
+        &format!("algo {:x?} # of programs: {}", &payload[..payload_len as usize], pairs),
+    );
 
-    let ptr = unsafe { output_bytes_32.as_ptr() as u64 };
-    for i in 0..number_of_operands {
-        let result0 = unsafe { fetch(ptr, 0, 32, 15, i.into(), 0) };
-
-        unsafe {
-            call_log(2, None, &format!("fib {:?} result={}", output_bytes_32, result0));
-        }
-        let key = [0u8; 1];
-        unsafe {
-            write(key.as_ptr() as u64, key.len() as u64, ptr, 8);
-        }
+    for j in 0..pairs {
+        let x = (2 * j) as usize;
+        let program_id = payload[x] % 50;
+        let gas_used = unsafe { run_program(program_id) };
+        call_log(2, None, &format!("algo {} p_id={} gas_used={}", j, program_id, gas_used));
     }
 
-    return (ptr, 32);
+    (payload_ptr as u64, payload_len)
 }
 
 #[polkavm_derive::polkavm_export]

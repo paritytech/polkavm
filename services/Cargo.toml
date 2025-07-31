@@ -32,5 +32,6 @@ members = [
     "game_of_life_manifest",
     "doom",
     "hello_world",
-    "utils"
+    "utils",
+    "mnist",
 ]
