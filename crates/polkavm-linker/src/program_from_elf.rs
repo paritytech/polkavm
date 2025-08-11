@@ -3821,7 +3821,7 @@ fn perform_dead_code_elimination(
     config: &Config,
     imports: &[Import],
     all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>],
-    registers_needed_for_block: &mut [RegMask],
+    info_for_block: &mut [BlockInfo],
     reachability_graph: &mut ReachabilityGraph,
     mut optimize_queue: Option<&mut VecSet<BlockTarget>>,
     block_target: BlockTarget,
@@ -3907,10 +3907,10 @@ fn perform_dead_code_elimination(
         // If it's going to trap then it's not going to need any of the register values.
         ControlInst::Unimplemented => RegMask::empty(),
         // If it's a jump then we'll need whatever registers the jump target needs.
-        ControlInst::Jump { target } => registers_needed_for_block[target.index()],
+        ControlInst::Jump { target } => info_for_block[target.index()].registers_needed,
         ControlInst::Branch {
             target_true, target_false, ..
-        } => registers_needed_for_block[target_true.index()] | registers_needed_for_block[target_false.index()],
+        } => info_for_block[target_true.index()].registers_needed | info_for_block[target_false.index()].registers_needed,
         // ...otherwise assume it'll need all of them.
         ControlInst::Call { .. } => unreachable!(),
         ControlInst::CallIndirect { .. } | ControlInst::JumpIndirect { .. } => RegMask::all(),
@@ -3928,8 +3928,8 @@ fn perform_dead_code_elimination(
         block_target,
     );
 
-    if registers_needed_for_block[block_target.index()] != registers_needed_for_this_block {
-        registers_needed_for_block[block_target.index()] = registers_needed_for_this_block;
+    if info_for_block[block_target.index()].registers_needed != registers_needed_for_this_block {
+        info_for_block[block_target.index()].registers_needed = registers_needed_for_this_block;
         if let Some(ref mut optimize_queue) = optimize_queue {
             for previous_block in previous_blocks {
                 add_to_optimize_queue(all_blocks, reachability_graph, optimize_queue, previous_block);
@@ -4640,6 +4640,12 @@ impl RegValue {
     }
 }
 
+struct BlockInfo {
+    input_regs: BlockRegs,
+    output_regs: BlockRegs,
+    registers_needed: RegMask,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct BlockRegs {
     bitness: Bitness,
@@ -5115,8 +5121,7 @@ fn perform_constant_propagation(
     imports: &[Import],
     elf: &Elf,
     all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>],
-    input_regs_for_block: &mut [BlockRegs],
-    output_regs_for_block: &mut [BlockRegs],
+    info_for_block: &mut [BlockInfo],
     unknown_counter: &mut u64,
     reachability_graph: &mut ReachabilityGraph,
     mut optimize_queue: Option<&mut VecSet<BlockTarget>>,
@@ -5141,7 +5146,7 @@ fn perform_constant_propagation(
         for reg in Reg::ALL {
             let mut common_value_opt = None;
             for &source in &reachability.reachable_from {
-                let value = output_regs_for_block[source.index()].get_reg(reg);
+                let value = info_for_block[source.index()].output_regs.get_reg(reg);
                 if let Some(common_value) = common_value_opt {
                     if common_value == value {
                         continue;
@@ -5155,16 +5160,16 @@ fn perform_constant_propagation(
             }
 
             if let Some(value) = common_value_opt {
-                let old_value = input_regs_for_block[current.index()].get_reg(reg);
+                let old_value = info_for_block[current.index()].input_regs.get_reg(reg);
                 if value != old_value {
-                    input_regs_for_block[current.index()].set_reg(reg, value);
+                    info_for_block[current.index()].input_regs.set_reg(reg, value);
                     modified = true;
                 }
             }
         }
     }
 
-    let mut regs = input_regs_for_block[current.index()].clone();
+    let mut regs = info_for_block[current.index()].input_regs.clone();
     let mut references = BTreeSet::new();
     let mut modified_this_block = false;
     for nth_instruction in 0..all_blocks[current.index()].ops.len() {
@@ -5298,9 +5303,9 @@ fn perform_constant_propagation(
         }
     }
 
-    let output_regs_modified = output_regs_for_block[current.index()] != regs;
+    let output_regs_modified = info_for_block[current.index()].output_regs != regs;
     if output_regs_modified {
-        output_regs_for_block[current.index()] = regs.clone();
+        info_for_block[current.index()].output_regs = regs.clone();
         modified = true;
     }
 
@@ -5431,16 +5436,13 @@ fn optimize_program(
     }
 
     let mut unknown_counter = 0;
-    let mut input_regs_for_block = Vec::with_capacity(all_blocks.len());
-    let mut output_regs_for_block = Vec::with_capacity(all_blocks.len());
+    let mut info_for_block = Vec::with_capacity(all_blocks.len());
     for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
-        input_regs_for_block.push(BlockRegs::new_input(bitness, current));
-        output_regs_for_block.push(BlockRegs::new_output(bitness, current));
-    }
-
-    let mut registers_needed_for_block = Vec::with_capacity(all_blocks.len());
-    for _ in 0..all_blocks.len() {
-        registers_needed_for_block.push(RegMask::all())
+        info_for_block.push(BlockInfo {
+            input_regs: BlockRegs::new_input(bitness, current),
+            output_regs: BlockRegs::new_output(bitness, current),
+            registers_needed: RegMask::all(),
+        });
     }
 
     let mut count_inline = 0;
@@ -5471,7 +5473,7 @@ fn optimize_program(
                     config,
                     imports,
                     all_blocks,
-                    &mut registers_needed_for_block,
+                    &mut info_for_block,
                     reachability_graph,
                     $optimize_queue,
                     $current,
@@ -5484,8 +5486,7 @@ fn optimize_program(
                     imports,
                     elf,
                     all_blocks,
-                    &mut input_regs_for_block,
-                    &mut output_regs_for_block,
+                    &mut info_for_block,
                     &mut unknown_counter,
                     reachability_graph,
                     $optimize_queue,
