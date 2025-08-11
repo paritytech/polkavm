@@ -14,7 +14,7 @@ use crate::config::{CustomCodegen, GasMeteringKind, ModuleConfig, SandboxKind};
 use crate::gas::{CostModelRef, GasVisitor};
 use crate::mutex::Mutex;
 use crate::sandbox::{Sandbox, SandboxInit, SandboxProgram};
-use crate::utils::{FlatMap, GuestInit};
+use crate::utils::{Bitness, BitnessT, FlatMap, GuestInit};
 
 #[cfg(target_arch = "x86_64")]
 mod amd64;
@@ -63,30 +63,10 @@ struct Cache {
 #[derive(Clone, Default)]
 pub(crate) struct CompilerCache(Arc<Mutex<Cache>>);
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub(crate) enum Bitness {
-    B32,
-    B64,
-}
-
-pub(crate) trait CompilerBitness {
-    const BITNESS: Bitness;
-}
-
-pub(crate) struct B64;
-pub(crate) struct B32;
-
-impl CompilerBitness for B32 {
-    const BITNESS: Bitness = Bitness::B32;
-}
-impl CompilerBitness for B64 {
-    const BITNESS: Bitness = Bitness::B64;
-}
-
 pub(crate) struct CompilerVisitor<'a, S, B>
 where
     S: Sandbox,
-    B: CompilerBitness,
+    B: BitnessT,
 {
     init: GuestInit<'a>,
     jump_table: JumpTable<'a>,
@@ -123,12 +103,12 @@ where
 pub(crate) struct ArchVisitor<'r, 'a, S, B>(pub &'r mut CompilerVisitor<'a, S, B>)
 where
     S: Sandbox,
-    B: CompilerBitness;
+    B: BitnessT;
 
 impl<'r, 'a, S, B> core::ops::Deref for ArchVisitor<'r, 'a, S, B>
 where
     S: Sandbox,
-    B: CompilerBitness,
+    B: BitnessT,
 {
     type Target = CompilerVisitor<'a, S, B>;
     fn deref(&self) -> &Self::Target {
@@ -139,7 +119,7 @@ where
 impl<'r, 'a, S, B> core::ops::DerefMut for ArchVisitor<'r, 'a, S, B>
 where
     S: Sandbox,
-    B: CompilerBitness,
+    B: BitnessT,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0
@@ -149,7 +129,7 @@ where
 impl<'a, S, B> CompilerVisitor<'a, S, B>
 where
     S: Sandbox,
-    B: CompilerBitness,
+    B: BitnessT,
 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -559,7 +539,7 @@ where
 impl<'a, S, B> polkavm_common::program::ParsingVisitor for CompilerVisitor<'a, S, B>
 where
     S: Sandbox,
-    B: CompilerBitness,
+    B: BitnessT,
 {
     type ReturnTy = ();
 

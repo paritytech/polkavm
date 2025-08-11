@@ -141,3 +141,26 @@ pub enum InterruptKind {
     /// Requires execution step-tracing to be enabled with [`ModuleConfig::set_step_tracing`](crate::ModuleConfig::set_step_tracing), otherwise is never emitted.
     Step,
 }
+
+if_compiler_is_supported! {
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+    pub enum Bitness {
+        B32,
+        B64,
+    }
+
+    pub trait BitnessT {
+        const BITNESS: Bitness;
+    }
+
+    pub struct B64;
+    pub struct B32;
+
+    impl BitnessT for B32 {
+        const BITNESS: Bitness = Bitness::B32;
+    }
+
+    impl BitnessT for B64 {
+        const BITNESS: Bitness = Bitness::B64;
+    }
+}

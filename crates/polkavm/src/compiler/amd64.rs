@@ -12,7 +12,7 @@ use polkavm_common::cast::cast;
 use polkavm_common::program::{ProgramCounter, RawReg, Reg};
 use polkavm_common::zygote::{VmCtx, VM_ADDR_VMCTX};
 
-use crate::compiler::{ArchVisitor, Bitness, CompilerBitness, SandboxKind};
+use crate::compiler::{ArchVisitor, Bitness, BitnessT, SandboxKind};
 use crate::config::GasMeteringKind;
 use crate::sandbox::Sandbox;
 
@@ -303,7 +303,7 @@ where
 impl<'r, 'a, S, B> ArchVisitor<'r, 'a, S, B>
 where
     S: Sandbox,
-    B: CompilerBitness,
+    B: BitnessT,
 {
     pub const PADDING_BYTE: u8 = 0x90; // NOP
 

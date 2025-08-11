@@ -29,7 +29,8 @@ use crate::module_cache::{ModuleCache, ModuleKey};
 if_compiler_is_supported! {
     {
         use crate::sandbox::{Sandbox, SandboxInstance};
-        use crate::compiler::{CompiledModule, CompilerCache, B32, B64};
+        use crate::compiler::{CompiledModule, CompilerCache};
+        use crate::utils::{B32, B64};
 
         #[cfg(target_os = "linux")]
         use crate::sandbox::linux::Sandbox as SandboxLinux;

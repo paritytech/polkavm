@@ -26,11 +26,12 @@ use std::time::Instant;
 
 use super::{get_native_page_size, OffsetTable, SandboxInit, SandboxKind, WorkerCache, WorkerCacheKind};
 use crate::api::{CompiledModuleKind, MemoryAccessError, Module};
-use crate::compiler::{Bitness, CompiledModule, B32, B64};
+use crate::compiler::CompiledModule;
 use crate::config::Config;
 use crate::config::GasMeteringKind;
 use crate::page_set::PageSet;
 use crate::shm_allocator::{ShmAllocation, ShmAllocator};
+use crate::utils::{Bitness, B32, B64};
 use crate::{Gas, InterruptKind, ProgramCounter, RegValue, Segfault};
 
 pub struct GlobalState {
