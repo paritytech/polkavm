@@ -561,7 +561,7 @@ impl From<i32> for RegImm {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 enum BasicInst<T> {
     LoadAbsolute {
         kind: LoadKind,
@@ -1024,7 +1024,7 @@ impl<T> ControlInst<T> {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 enum InstExt<BasicT, ControlT> {
     Basic(BasicInst<BasicT>),
     Control(ControlInst<ControlT>),
@@ -3186,7 +3186,7 @@ fn resolve_basic_block_references(
                 }
             };
 
-            let op = op.map_target(map)?;
+            let op = op.clone().map_target(map)?;
             ops.push((source.clone(), op));
         }
 
@@ -3612,7 +3612,7 @@ fn perform_inlining(
         let inner_code: Vec<_> = all_blocks[inner.index()]
             .ops
             .iter()
-            .map(|(inner_source, op)| (outer_source.overlay_on_top_of(inner_source), *op))
+            .map(|(inner_source, op)| (outer_source.overlay_on_top_of(inner_source), op.clone()))
             .collect();
 
         all_blocks[outer.index()].ops.extend(inner_code);
@@ -5168,12 +5168,12 @@ fn perform_constant_propagation(
     let mut references = BTreeSet::new();
     let mut modified_this_block = false;
     for nth_instruction in 0..all_blocks[current.index()].ops.len() {
-        let mut instruction = all_blocks[current.index()].ops[nth_instruction].1;
+        let mut instruction = all_blocks[current.index()].ops[nth_instruction].1.clone();
         if instruction.is_nop() {
             continue;
         }
 
-        while let Some(new_instruction) = regs.simplify_instruction(elf, instruction) {
+        while let Some(new_instruction) = regs.simplify_instruction(elf, instruction.clone()) {
             log::trace!("Simplifying instruction in {}", all_blocks[current.index()].ops[nth_instruction].0);
             for reg in instruction.src_mask(imports) {
                 log::trace!("  {reg:?} = {:?}", regs.get_reg(reg));
@@ -5187,11 +5187,11 @@ fn perform_constant_propagation(
                 modified = true;
             }
 
-            instruction = new_instruction;
+            instruction = new_instruction.clone();
             all_blocks[current.index()].ops[nth_instruction].1 = new_instruction;
         }
 
-        if let BasicInst::LoadAbsolute { kind, dst, target } = instruction {
+        if let &BasicInst::LoadAbsolute { kind, dst, target } = &instruction {
             let section = elf.section_by_index(target.section_index);
             if section.is_allocated() && !section.is_writable() {
                 let value = match kind {
@@ -5250,7 +5250,7 @@ fn perform_constant_propagation(
                         unreachable!("load immediate overflow in 32-bit");
                     }
 
-                    all_blocks[current.index()].ops[nth_instruction].1 = instruction;
+                    all_blocks[current.index()].ops[nth_instruction].1 = instruction.clone();
                 }
             }
         }
@@ -5274,7 +5274,7 @@ fn perform_constant_propagation(
         }
 
         if let Some(extra_instruction) = extra_instruction {
-            regs.set_reg_from_instruction(imports, unknown_counter, extra_instruction);
+            regs.set_reg_from_instruction(imports, unknown_counter, extra_instruction.clone());
 
             all_blocks[current.index()]
                 .ops
@@ -6165,6 +6165,7 @@ fn merge_consecutive_fallthrough_blocks(
             let references = gather_references(&all_blocks[dep.index()]);
             for (_, op) in &mut all_blocks[dep.index()].ops {
                 *op = op
+                    .clone()
                     .map_target(|target| {
                         Ok::<_, ()>(if target == AnyTarget::Code(current) {
                             AnyTarget::Code(next)
@@ -6326,7 +6327,7 @@ fn spill_fake_registers(
         let end_at = {
             let mut end_at = start_at + 1;
             for index in start_at..block.ops.len() {
-                let instruction = block.ops[index].1;
+                let instruction = &block.ops[index].1;
                 if !((instruction.src_mask(imports) | instruction.dst_mask(imports)) & fake_mask).is_empty() {
                     end_at = index + 1;
                 }
@@ -6558,6 +6559,7 @@ fn spill_fake_registers(
             let (source, instruction) = &block.ops[nth_instruction];
             let mut alloc_index = output.inst_alloc_offsets[nth_instruction - start_at + 1];
             let new_instruction = instruction
+                .clone()
                 .map_register(|reg, _| {
                     let alloc = &output.allocs[alloc_index as usize];
                     alloc_index += 1;
@@ -6573,7 +6575,7 @@ fn spill_fake_registers(
 
                     allocated_reg
                 })
-                .unwrap_or(*instruction);
+                .unwrap_or(instruction.clone());
 
             if *instruction == new_instruction {
                 log::trace!("Unmodified:\n     {instruction:?}");
