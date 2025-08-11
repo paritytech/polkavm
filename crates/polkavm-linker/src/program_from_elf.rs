@@ -19,7 +19,7 @@ use crate::riscv::DecoderConfig;
 use crate::riscv::Reg as RReg;
 use crate::riscv::{AtomicKind, BranchKind, CmovKind, Inst, LoadKind, RegImmKind, StoreKind};
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 #[repr(u8)]
 enum Reg {
     // The registers supported by the VM.
