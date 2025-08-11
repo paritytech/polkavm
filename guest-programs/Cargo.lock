@@ -105,18 +105,18 @@ checksum = "7e5daf3ef08b3ef4c9b9de02cd7a1638ee612359fd8da3646192bc8ee57e218c"
 
 [[package]]
 name = "polkavm-common"
-version = "0.26.0"
+version = "0.27.0"
 
 [[package]]
 name = "polkavm-derive"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "polkavm-derive-impl-macro",
 ]
 
 [[package]]
 name = "polkavm-derive-impl"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "polkavm-common",
  "proc-macro2",
@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-derive-impl-macro"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "polkavm-derive-impl",
  "syn 2.0.38",
