@@ -7185,6 +7185,22 @@ impl From<RegImm> for RegMask {
     }
 }
 
+impl<'a> From<&'a [Reg]> for RegMask {
+    fn from(slice: &'a [Reg]) -> RegMask {
+        let mut mask = RegMask::empty();
+        for &reg in slice {
+            mask.insert(reg);
+        }
+        mask
+    }
+}
+
+impl<'a> From<&'a Vec<Reg>> for RegMask {
+    fn from(slice: &'a Vec<Reg>) -> RegMask {
+        RegMask::from(slice.as_slice())
+    }
+}
+
 impl core::ops::Not for RegMask {
     type Output = Self;
     fn not(self) -> Self {
