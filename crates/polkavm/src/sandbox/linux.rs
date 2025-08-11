@@ -31,7 +31,7 @@ use crate::config::Config;
 use crate::config::GasMeteringKind;
 use crate::page_set::PageSet;
 use crate::shm_allocator::{ShmAllocation, ShmAllocator};
-use crate::utils::{Bitness, B32, B64};
+use crate::utils::Bitness;
 use crate::{Gas, InterruptKind, ProgramCounter, RegValue, Segfault};
 
 pub struct GlobalState {
@@ -2264,21 +2264,9 @@ impl Sandbox {
             return Err(Error::from_str("internal error: address underflow after a trap"));
         };
 
-        let is_out_of_gas = match compiled_module.bitness {
-            Bitness::B32 => crate::compiler::ArchVisitor::<Self, B32>::on_signal_trap(
-                compiled_module,
-                self.gas_metering.is_some(),
-                machine_code_offset,
-                self.vmctx(),
-            ),
-            Bitness::B64 => crate::compiler::ArchVisitor::<Self, B64>::on_signal_trap(
-                compiled_module,
-                self.gas_metering.is_some(),
-                machine_code_offset,
-                self.vmctx(),
-            ),
-        }
-        .map_err(Error::from_str)?;
+        let is_out_of_gas =
+            crate::compiler::on_signal_trap::<Self>(compiled_module, self.gas_metering.is_some(), machine_code_offset, self.vmctx())
+                .map_err(Error::from_str)?;
 
         self.is_program_counter_valid = true;
         if is_out_of_gas {
@@ -2360,22 +2348,13 @@ impl Sandbox {
                     return Err(Error::from_str("internal error: address underflow after a segfault"));
                 };
 
-                match compiled_module.bitness {
-                    Bitness::B32 => crate::compiler::ArchVisitor::<Self, B32>::on_page_fault(
-                        compiled_module,
-                        self.gas_metering.is_some(),
-                        machine_code_address,
-                        machine_code_offset,
-                        self.vmctx(),
-                    ),
-                    Bitness::B64 => crate::compiler::ArchVisitor::<Self, B64>::on_page_fault(
-                        compiled_module,
-                        self.gas_metering.is_some(),
-                        machine_code_address,
-                        machine_code_offset,
-                        self.vmctx(),
-                    ),
-                }
+                crate::compiler::on_page_fault::<Self>(
+                    compiled_module,
+                    self.gas_metering.is_some(),
+                    machine_code_address,
+                    machine_code_offset,
+                    self.vmctx(),
+                )
                 .map_err(Error::from_str)?;
 
                 self.is_program_counter_valid = true;

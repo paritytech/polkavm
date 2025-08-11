@@ -14,6 +14,7 @@ use polkavm_common::zygote::{VmCtx, VM_ADDR_VMCTX};
 
 use crate::compiler::{ArchVisitor, Bitness, BitnessT, SandboxKind};
 use crate::config::GasMeteringKind;
+use crate::gas::GasVisitorT;
 use crate::sandbox::Sandbox;
 
 /// The register used for the embedded sandbox to hold the base address of the guest's linear memory.
@@ -300,10 +301,11 @@ where
     Ok(())
 }
 
-impl<'r, 'a, S, B> ArchVisitor<'r, 'a, S, B>
+impl<'r, 'a, S, B, G> ArchVisitor<'r, 'a, S, B, G>
 where
     S: Sandbox,
     B: BitnessT,
+    G: GasVisitorT,
 {
     pub const PADDING_BYTE: u8 = 0x90; // NOP
 
@@ -1226,93 +1228,6 @@ where
                 self.asm.push(mov(reg_size, count, rcx));
             }
         }
-    }
-
-    pub fn on_signal_trap(
-        compiled_module: &crate::compiler::CompiledModule<S>,
-        is_gas_metering_enabled: bool,
-        machine_code_offset: u64,
-        vmctx: &VmCtx,
-    ) -> Result<bool, &'static str> {
-        enum TrapKind {
-            Memset { kind: MemsetKind },
-            NotEnoughGas,
-            Trap,
-        }
-
-        let trap_kind = if let Some(kind) = are_we_executing_memset(compiled_module, machine_code_offset) {
-            TrapKind::Memset { kind }
-        } else if is_gas_metering_enabled && vmctx.gas.load(Ordering::Relaxed) < 0 {
-            TrapKind::NotEnoughGas
-        } else {
-            TrapKind::Trap
-        };
-
-        match trap_kind {
-            TrapKind::NotEnoughGas => {
-                let Some(offset) = machine_code_offset.checked_sub(GAS_METERING_TRAP_OFFSET) else {
-                    return Err("internal error: address underflow after a trap");
-                };
-
-                // If we restart we want to check the gas again, so set the address to point there.
-                vmctx
-                    .next_native_program_counter
-                    .store(compiled_module.native_code_origin + offset, Ordering::Relaxed);
-
-                // Also set the logical program counter, in case the user wants to stash the location
-                // somewhere and continue some other time.
-                let program_counter = set_program_counter_after_interruption(compiled_module, machine_code_offset, vmctx)?;
-
-                // The gas counter is now negative; refund the amount of gas consumed so that it's positive again.
-                let offset = offset as usize + GAS_COST_LINUX_SANDBOX_OFFSET;
-                let Some(gas_cost) = &compiled_module.machine_code().get(offset..offset + 4) else {
-                    return Err("internal error: failed to read back the gas cost from the machine code");
-                };
-
-                let gas_cost = u32::from_le_bytes([gas_cost[0], gas_cost[1], gas_cost[2], gas_cost[3]]);
-                let gas = vmctx.gas.fetch_add(i64::from(gas_cost), Ordering::Relaxed);
-                log::trace!(
-                    "Out of gas; program counter = {program_counter}, reverting gas: {gas} -> {new_gas} (gas cost: {gas_cost})",
-                    new_gas = gas + i64::from(gas_cost)
-                );
-
-                Ok(true)
-            }
-            TrapKind::Trap => {
-                set_program_counter_after_interruption(compiled_module, machine_code_offset, vmctx)?;
-
-                // Traps are unrecoverable.
-                vmctx.next_native_program_counter.store(0, Ordering::Relaxed);
-
-                Ok(false)
-            }
-            // Did we prematurely trigger a page fault during a memset?
-            TrapKind::Memset { kind } => {
-                handle_interruption_during_memset(kind, compiled_module, is_gas_metering_enabled, machine_code_offset, vmctx)?;
-
-                // We can only be here if dynamic page faulting is disabled, so this situation is unrecoverable.
-                vmctx.next_native_program_counter.store(0, Ordering::Relaxed);
-
-                Ok(false)
-            }
-        }
-    }
-
-    pub fn on_page_fault(
-        compiled_module: &crate::compiler::CompiledModule<S>,
-        is_gas_metering_enabled: bool,
-        machine_code_address: u64,
-        machine_code_offset: u64,
-        vmctx: &VmCtx,
-    ) -> Result<(), &'static str> {
-        if let Some(kind) = are_we_executing_memset(compiled_module, machine_code_offset) {
-            handle_interruption_during_memset(kind, compiled_module, is_gas_metering_enabled, machine_code_offset, vmctx)?;
-        } else {
-            set_program_counter_after_interruption(compiled_module, machine_code_offset, vmctx)?;
-            vmctx.next_native_program_counter.store(machine_code_address, Ordering::Relaxed);
-        }
-
-        Ok(())
     }
 
     #[inline(always)]
@@ -2429,4 +2344,97 @@ where
     pub fn load_imm_and_jump_indirect(&mut self, ra: RawReg, base: RawReg, value: u32, offset: u32) {
         self.jump_indirect_impl(Some((ra, value)), base, offset)
     }
+}
+
+pub fn on_signal_trap<S>(
+    compiled_module: &crate::compiler::CompiledModule<S>,
+    is_gas_metering_enabled: bool,
+    machine_code_offset: u64,
+    vmctx: &VmCtx,
+) -> Result<bool, &'static str>
+where
+    S: Sandbox,
+{
+    enum TrapKind {
+        Memset { kind: MemsetKind },
+        NotEnoughGas,
+        Trap,
+    }
+
+    let trap_kind = if let Some(kind) = are_we_executing_memset(compiled_module, machine_code_offset) {
+        TrapKind::Memset { kind }
+    } else if is_gas_metering_enabled && vmctx.gas.load(Ordering::Relaxed) < 0 {
+        TrapKind::NotEnoughGas
+    } else {
+        TrapKind::Trap
+    };
+
+    match trap_kind {
+        TrapKind::NotEnoughGas => {
+            let Some(offset) = machine_code_offset.checked_sub(GAS_METERING_TRAP_OFFSET) else {
+                return Err("internal error: address underflow after a trap");
+            };
+
+            // If we restart we want to check the gas again, so set the address to point there.
+            vmctx
+                .next_native_program_counter
+                .store(compiled_module.native_code_origin + offset, Ordering::Relaxed);
+
+            // Also set the logical program counter, in case the user wants to stash the location
+            // somewhere and continue some other time.
+            let program_counter = set_program_counter_after_interruption(compiled_module, machine_code_offset, vmctx)?;
+
+            // The gas counter is now negative; refund the amount of gas consumed so that it's positive again.
+            let offset = offset as usize + GAS_COST_LINUX_SANDBOX_OFFSET;
+            let Some(gas_cost) = &compiled_module.machine_code().get(offset..offset + 4) else {
+                return Err("internal error: failed to read back the gas cost from the machine code");
+            };
+
+            let gas_cost = u32::from_le_bytes([gas_cost[0], gas_cost[1], gas_cost[2], gas_cost[3]]);
+            let gas = vmctx.gas.fetch_add(i64::from(gas_cost), Ordering::Relaxed);
+            log::trace!(
+                "Out of gas; program counter = {program_counter}, reverting gas: {gas} -> {new_gas} (gas cost: {gas_cost})",
+                new_gas = gas + i64::from(gas_cost)
+            );
+
+            Ok(true)
+        }
+        TrapKind::Trap => {
+            set_program_counter_after_interruption(compiled_module, machine_code_offset, vmctx)?;
+
+            // Traps are unrecoverable.
+            vmctx.next_native_program_counter.store(0, Ordering::Relaxed);
+
+            Ok(false)
+        }
+        // Did we prematurely trigger a page fault during a memset?
+        TrapKind::Memset { kind } => {
+            handle_interruption_during_memset(kind, compiled_module, is_gas_metering_enabled, machine_code_offset, vmctx)?;
+
+            // We can only be here if dynamic page faulting is disabled, so this situation is unrecoverable.
+            vmctx.next_native_program_counter.store(0, Ordering::Relaxed);
+
+            Ok(false)
+        }
+    }
+}
+
+pub fn on_page_fault<S>(
+    compiled_module: &crate::compiler::CompiledModule<S>,
+    is_gas_metering_enabled: bool,
+    machine_code_address: u64,
+    machine_code_offset: u64,
+    vmctx: &VmCtx,
+) -> Result<(), &'static str>
+where
+    S: Sandbox,
+{
+    if let Some(kind) = are_we_executing_memset(compiled_module, machine_code_offset) {
+        handle_interruption_during_memset(kind, compiled_module, is_gas_metering_enabled, machine_code_offset, vmctx)?;
+    } else {
+        set_program_counter_after_interruption(compiled_module, machine_code_offset, vmctx)?;
+        vmctx.next_native_program_counter.store(machine_code_address, Ordering::Relaxed);
+    }
+
+    Ok(())
 }

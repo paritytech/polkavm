@@ -2,6 +2,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use polkavm_common::program::{InstructionSet, InstructionVisitor, Instructions, Opcode, RawReg};
 
+pub trait GasVisitorT: InstructionVisitor {
+    fn take_block_cost(&mut self) -> Option<u32>;
+    fn is_at_start_of_basic_block(&self) -> bool;
+}
+
 #[derive(Clone)]
 pub struct CostModelRef {
     pointer: *const CostModel,
@@ -312,10 +317,16 @@ impl GasVisitor {
         self.last_block_cost = Some(self.cost);
         self.cost = 0;
     }
+}
 
+impl GasVisitorT for GasVisitor {
     #[inline]
-    pub fn take_block_cost(&mut self) -> Option<u32> {
+    fn take_block_cost(&mut self) -> Option<u32> {
         self.last_block_cost.take()
+    }
+
+    fn is_at_start_of_basic_block(&self) -> bool {
+        self.cost == 0
     }
 }
 
@@ -1050,30 +1061,34 @@ impl InstructionVisitor for GasVisitor {
     }
 }
 
-pub fn calculate_for_block<I>(cost_model: CostModelRef, mut instructions: Instructions<I>) -> (u32, bool)
+pub fn calculate_for_block<G, I>(mut visitor: G, mut instructions: Instructions<I>) -> (u32, bool)
 where
+    G: GasVisitorT,
     I: InstructionSet,
 {
-    let mut visitor = GasVisitor::new(cost_model);
+    debug_assert!(visitor.is_at_start_of_basic_block());
     while instructions.visit(&mut visitor).is_some() {
-        if let Some(cost) = visitor.last_block_cost {
+        if let Some(cost) = visitor.take_block_cost() {
             return (cost, false);
         }
     }
 
-    if let Some(cost) = visitor.last_block_cost {
+    if let Some(cost) = visitor.take_block_cost() {
         (cost, false)
     } else {
-        let started_out_of_bounds = visitor.cost == 0;
+        let started_out_of_bounds = visitor.is_at_start_of_basic_block();
 
         // We've ended out of bounds, so assume there's an implicit trap there.
         visitor.trap();
-        (visitor.last_block_cost.unwrap(), started_out_of_bounds)
+        (visitor.take_block_cost().unwrap(), started_out_of_bounds)
     }
 }
 
-pub fn trap_cost(cost_model: CostModelRef) -> u32 {
-    let mut gas_visitor = GasVisitor::new(cost_model);
+pub fn trap_cost<G>(mut gas_visitor: G) -> u32
+where
+    G: GasVisitorT,
+{
+    debug_assert!(gas_visitor.is_at_start_of_basic_block());
     gas_visitor.trap();
     gas_visitor.take_block_cost().unwrap()
 }

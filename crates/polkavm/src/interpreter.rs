@@ -3,7 +3,7 @@
 #![deny(clippy::as_conversions)]
 use crate::api::{MemoryAccessError, Module, RegValue, SetCacheSizeLimitArgs};
 use crate::error::Error;
-use crate::gas::GasVisitor;
+use crate::gas::{GasVisitor, GasVisitorT};
 use crate::utils::{FlatMap, GuestInit, InterruptKind, Segfault};
 use crate::{Gas, GasMeteringKind, ProgramCounter};
 use alloc::boxed::Box;
@@ -1036,7 +1036,7 @@ impl InterpretedInstance {
         }
 
         let gas_cost = if self.module.gas_metering().is_some() {
-            crate::gas::trap_cost(self.module.cost_model().clone())
+            crate::gas::trap_cost(GasVisitor::new(self.module.cost_model().clone()))
         } else {
             0
         };

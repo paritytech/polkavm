@@ -18,7 +18,7 @@ if_compiler_is_supported! {
 
 use crate::config::{BackendKind, Config, GasMeteringKind, ModuleConfig, SandboxKind};
 use crate::error::{bail, bail_static, Error};
-use crate::gas::{CostModel, CostModelRef};
+use crate::gas::{CostModel, CostModelRef, GasVisitor};
 use crate::interpreter::{InterpretedInstance, InterpretedModule};
 use crate::utils::{GuestInit, InterruptKind};
 use crate::{Gas, ProgramCounter};
@@ -521,9 +521,9 @@ impl Module {
 
         #[allow(unused_macros)]
         macro_rules! compile_module {
-            ($sandbox_kind:ident, $bitness_kind:ident, $isa:ident, $isa_no_sbrk:ident, $visitor_name:ident, $module_kind:ident) => {{
-                type VisitorTy<'a> = crate::compiler::CompilerVisitor<'a, $sandbox_kind, $bitness_kind>;
-                let (mut visitor, aux) = crate::compiler::CompilerVisitor::<$sandbox_kind, $bitness_kind>::new(
+            ($sandbox_kind:ident, $bitness_kind:ident, $isa:ident, $isa_no_sbrk:ident, $visitor_name:ident, $module_kind:ident, $gas_kind:ident) => {{
+                type VisitorTy<'a> = crate::compiler::CompilerVisitor<'a, $sandbox_kind, $bitness_kind, $gas_kind>;
+                let (mut visitor, aux) = crate::compiler::CompilerVisitor::<$sandbox_kind, $bitness_kind, $gas_kind>::new(
                     &engine.state.compiler_cache,
                     config,
                     instruction_set,
@@ -534,7 +534,7 @@ impl Module {
                     config.step_tracing || engine.crosscheck,
                     cast(blob.code().len()).assert_always_fits_in_u32(),
                     init,
-                    cost_model.clone(),
+                    GasVisitor::new(cost_model.clone()),
                 )?;
 
                 if config.allow_sbrk {
@@ -561,9 +561,9 @@ impl Module {
                                 #[cfg(target_os = "linux")]
                                 {
                                     if blob.is_64_bit() {
-                                        compile_module!(SandboxLinux, B64, ISA64_V1, ISA64_V1_NoSbrk, COMPILER_VISITOR_LINUX, Linux)
+                                        compile_module!(SandboxLinux, B64, ISA64_V1, ISA64_V1_NoSbrk, COMPILER_VISITOR_LINUX, Linux, GasVisitor)
                                     } else {
-                                        compile_module!(SandboxLinux, B32, ISA32_V1, ISA32_V1_NoSbrk, COMPILER_VISITOR_LINUX, Linux)
+                                        compile_module!(SandboxLinux, B32, ISA32_V1, ISA32_V1_NoSbrk, COMPILER_VISITOR_LINUX, Linux, GasVisitor)
                                     }
                                 }
 
@@ -577,9 +577,9 @@ impl Module {
                                 #[cfg(feature = "generic-sandbox")]
                                 {
                                     if blob.is_64_bit() {
-                                        compile_module!(SandboxGeneric, B64, ISA64_V1, ISA64_V1_NoSbrk, COMPILER_VISITOR_GENERIC, Generic)
+                                        compile_module!(SandboxGeneric, B64, ISA64_V1, ISA64_V1_NoSbrk, COMPILER_VISITOR_GENERIC, Generic, GasVisitor)
                                     } else {
-                                        compile_module!(SandboxGeneric, B32, ISA32_V1, ISA32_V1_NoSbrk, COMPILER_VISITOR_GENERIC, Generic)
+                                        compile_module!(SandboxGeneric, B32, ISA32_V1, ISA32_V1_NoSbrk, COMPILER_VISITOR_GENERIC, Generic, GasVisitor)
                                     }
                                 }
 
@@ -845,7 +845,8 @@ impl Module {
             return None;
         }
 
-        let gas = crate::gas::calculate_for_block(self.state().cost_model.clone(), self.instructions_bounded_at(code_offset));
+        let visitor = GasVisitor::new(self.state().cost_model.clone());
+        let gas = crate::gas::calculate_for_block(visitor, self.instructions_bounded_at(code_offset));
         Some(i64::from(gas.0))
     }
 

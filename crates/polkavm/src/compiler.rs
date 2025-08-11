@@ -4,20 +4,23 @@ use std::sync::Arc;
 
 use polkavm_assembler::{Assembler, Label};
 use polkavm_common::abi::VM_CODE_ADDRESS_ALIGNMENT;
-use polkavm_common::program::{is_jump_target_valid, InstructionVisitor, JumpTable, ProgramCounter, ProgramExport, RawReg};
+use polkavm_common::program::{is_jump_target_valid, JumpTable, ProgramCounter, ProgramExport, RawReg};
 use polkavm_common::zygote::VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH;
 
 use crate::error::Error;
 
 use crate::api::RuntimeInstructionSet;
 use crate::config::{CustomCodegen, GasMeteringKind, ModuleConfig, SandboxKind};
-use crate::gas::{CostModelRef, GasVisitor};
+use crate::gas::GasVisitorT;
 use crate::mutex::Mutex;
 use crate::sandbox::{Sandbox, SandboxInit, SandboxProgram};
 use crate::utils::{Bitness, BitnessT, FlatMap, GuestInit};
 
 #[cfg(target_arch = "x86_64")]
 mod amd64;
+
+#[cfg(target_arch = "x86_64")]
+pub use crate::compiler::amd64::{on_page_fault, on_signal_trap};
 
 /// The address to which to jump to for invalid dynamic jumps.
 ///
@@ -63,10 +66,11 @@ struct Cache {
 #[derive(Clone, Default)]
 pub(crate) struct CompilerCache(Arc<Mutex<Cache>>);
 
-pub(crate) struct CompilerVisitor<'a, S, B>
+pub(crate) struct CompilerVisitor<'a, S, B, G>
 where
     S: Sandbox,
     B: BitnessT,
+    G: GasVisitorT,
 {
     init: GuestInit<'a>,
     jump_table: JumpTable<'a>,
@@ -79,7 +83,7 @@ where
     export_to_label: HashMap<u32, Label>,
     exports: &'a [ProgramExport<&'a [u8]>],
     gas_metering: Option<GasMeteringKind>,
-    gas_visitor: GasVisitor,
+    gas_visitor: G,
     jump_table_label: Label,
     program_counter_to_machine_code_offset_list: Vec<(ProgramCounter, u32)>,
     program_counter_to_machine_code_offset_map: HashMap<ProgramCounter, u32>,
@@ -100,36 +104,40 @@ where
 }
 
 #[repr(transparent)]
-pub(crate) struct ArchVisitor<'r, 'a, S, B>(pub &'r mut CompilerVisitor<'a, S, B>)
-where
-    S: Sandbox,
-    B: BitnessT;
-
-impl<'r, 'a, S, B> core::ops::Deref for ArchVisitor<'r, 'a, S, B>
+pub(crate) struct ArchVisitor<'r, 'a, S, B, G>(pub &'r mut CompilerVisitor<'a, S, B, G>)
 where
     S: Sandbox,
     B: BitnessT,
+    G: GasVisitorT;
+
+impl<'r, 'a, S, B, G> core::ops::Deref for ArchVisitor<'r, 'a, S, B, G>
+where
+    S: Sandbox,
+    B: BitnessT,
+    G: GasVisitorT,
 {
-    type Target = CompilerVisitor<'a, S, B>;
+    type Target = CompilerVisitor<'a, S, B, G>;
     fn deref(&self) -> &Self::Target {
         self.0
     }
 }
 
-impl<'r, 'a, S, B> core::ops::DerefMut for ArchVisitor<'r, 'a, S, B>
+impl<'r, 'a, S, B, G> core::ops::DerefMut for ArchVisitor<'r, 'a, S, B, G>
 where
     S: Sandbox,
     B: BitnessT,
+    G: GasVisitorT,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.0
     }
 }
 
-impl<'a, S, B> CompilerVisitor<'a, S, B>
+impl<'a, S, B, G> CompilerVisitor<'a, S, B, G>
 where
     S: Sandbox,
     B: BitnessT,
+    G: GasVisitorT,
 {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -143,7 +151,7 @@ where
         step_tracing: bool,
         code_length: u32,
         init: GuestInit<'a>,
-        cost_model: CostModelRef,
+        gas_visitor: G,
     ) -> Result<(Self, S::AddressSpace), Error>
     where
         S: Sandbox,
@@ -213,7 +221,7 @@ where
         asm.set_origin(native_code_origin);
 
         let mut visitor = CompilerVisitor {
-            gas_visitor: GasVisitor::new(cost_model),
+            gas_visitor,
             asm,
             exports,
             program_counter_to_label,
@@ -360,7 +368,7 @@ where
             SandboxKind::Generic => {
                 let native_page_size = crate::sandbox::get_native_page_size();
                 let padded_length = polkavm_common::utils::align_to_next_page_usize(native_page_size, self.asm.len()).unwrap();
-                self.asm.resize(padded_length, ArchVisitor::<S, B>::PADDING_BYTE);
+                self.asm.resize(padded_length, ArchVisitor::<S, B, G>::PADDING_BYTE);
                 self.asm.define_label(self.jump_table_label);
             }
         }
@@ -536,10 +544,11 @@ where
     }
 }
 
-impl<'a, S, B> polkavm_common::program::ParsingVisitor for CompilerVisitor<'a, S, B>
+impl<'a, S, B, G> polkavm_common::program::ParsingVisitor for CompilerVisitor<'a, S, B, G>
 where
     S: Sandbox,
     B: BitnessT,
+    G: GasVisitorT,
 {
     type ReturnTy = ();
 
