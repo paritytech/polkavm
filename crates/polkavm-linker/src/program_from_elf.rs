@@ -2315,6 +2315,77 @@ fn convert_instruction(
 
             Ok(())
         }
+        Inst::MipsCmov {
+            dst,
+            src_true,
+            src_false,
+            cond,
+            ..
+        } => {
+            let Some(dst) = cast_reg_non_zero(dst)? else {
+                emit(InstExt::Basic(BasicInst::Nop));
+                return Ok(());
+            };
+
+            let src_true = cast_reg_non_zero(src_true)?;
+            let src_false = cast_reg_non_zero(src_false)?;
+
+            let Some(cond) = cast_reg_non_zero(cond)? else {
+                if let Some(src) = src_false {
+                    emit(InstExt::Basic(BasicInst::MoveReg { dst, src }));
+                } else {
+                    emit(InstExt::Basic(BasicInst::LoadImmediate { dst, imm: 0 }));
+                }
+                return Ok(());
+            };
+
+            if Some(dst) == src_true {
+                emit(InstExt::Basic(BasicInst::Cmov {
+                    kind: CmovKind::EqZero,
+                    dst,
+                    src: src_false.map(|reg| reg.into()).unwrap_or(RegImm::Imm(0)),
+                    cond,
+                }));
+            } else if Some(dst) == src_false {
+                emit(InstExt::Basic(BasicInst::Cmov {
+                    kind: CmovKind::NotEqZero,
+                    dst,
+                    src: src_true.map(|reg| reg.into()).unwrap_or(RegImm::Imm(0)),
+                    cond,
+                }));
+            } else if dst != cond {
+                // `dst` is neither `src_true` nor `src_false` nor `cond`, so it's safe to do this.
+                if let Some(src_false) = src_false {
+                    emit(InstExt::Basic(BasicInst::MoveReg { dst, src: src_false }));
+                } else {
+                    emit(InstExt::Basic(BasicInst::LoadImmediate { dst, imm: 0 }));
+                }
+
+                emit(InstExt::Basic(BasicInst::Cmov {
+                    kind: CmovKind::NotEqZero,
+                    dst,
+                    src: src_true.map(|reg| reg.into()).unwrap_or(RegImm::Imm(0)),
+                    cond,
+                }));
+            } else {
+                // TODO: This is suboptimal.
+                emit(InstExt::Basic(BasicInst::MoveReg { dst: Reg::E0, src: cond }));
+                emit(InstExt::Basic(BasicInst::Cmov {
+                    kind: CmovKind::NotEqZero,
+                    dst,
+                    src: src_true.map(|reg| reg.into()).unwrap_or(RegImm::Imm(0)),
+                    cond,
+                }));
+                emit(InstExt::Basic(BasicInst::Cmov {
+                    kind: CmovKind::EqZero,
+                    dst,
+                    src: src_false.map(|reg| reg.into()).unwrap_or(RegImm::Imm(0)),
+                    cond: Reg::E0,
+                }));
+            }
+
+            Ok(())
+        }
         Inst::LoadReserved32 { dst, src, .. } => {
             let Some(dst) = cast_reg_non_zero(dst)? else {
                 return Err(ProgramFromElfError::other(

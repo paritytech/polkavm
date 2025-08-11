@@ -402,6 +402,12 @@ pub enum Inst {
         src: Reg,
         cond: Reg,
     },
+    MipsCmov {
+        dst: Reg,
+        src_true: Reg,
+        src_false: Reg,
+        cond: Reg,
+    },
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
@@ -1350,7 +1356,23 @@ impl Inst {
                     }
                 }
             }
+            // https://github.com/llvm/llvm-project/blob/e30e644266fbc9ba638ee2c6aa23b5691397163f/llvm/lib/Target/RISCV/RISCVInstrInfoXMips.td#L150
+            // https://github.com/llvm/llvm-project/blob/e30e644266fbc9ba638ee2c6aa23b5691397163f/llvm/lib/Target/RISCV/RISCVInstrFormats.td#L388
+            0b0001011 if ((op >> 25) & 0b11) == 0b11 && ((op >> 12) & 0b111) == 0b011 => {
+                let dst = Reg::decode(op >> 7);
+                let src1 = Reg::decode(op >> 15);
+                let src2 = Reg::decode(op >> 20);
+                let src3 = Reg::decode(op >> 27);
+
+                Some(Inst::MipsCmov {
+                    dst,
+                    src_true: src1,
+                    src_false: src3,
+                    cond: src2,
+                })
+            }
             0b0001011 => {
+                // OPCODE_CUSTOM_0
                 let dst = Reg::decode(op >> 7);
                 let src1 = Reg::decode(op >> 15);
                 let src2 = Reg::decode(op >> 20);
