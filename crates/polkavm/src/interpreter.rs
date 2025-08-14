@@ -4,7 +4,7 @@
 use crate::api::{MemoryAccessError, Module, RegValue, SetCacheSizeLimitArgs};
 use crate::error::Error;
 use crate::gas::{GasVisitor, GasVisitorT};
-use crate::utils::{FlatMap, GuestInit, InterruptKind, Segfault};
+use crate::utils::{FlatMap, InterruptKind, Segfault};
 use crate::{Gas, GasMeteringKind, ProgramCounter};
 use alloc::boxed::Box;
 use alloc::collections::btree_map::Entry;
@@ -62,25 +62,8 @@ impl IntoRegImm for u32 {
     }
 }
 
-pub(crate) struct InterpretedModule {
-    ro_data: Vec<u8>,
-    rw_data: Vec<u8>,
-}
-
-impl InterpretedModule {
-    pub fn new(init: GuestInit) -> Result<Self, Error> {
-        let memory_map = init.memory_map().map_err(Error::from_static_str)?;
-        let mut ro_data: Vec<_> = init.ro_data.into();
-        ro_data.resize(cast(memory_map.ro_data_size()).to_usize(), 0);
-
-        Ok(InterpretedModule {
-            ro_data,
-            rw_data: init.rw_data.into(),
-        })
-    }
-}
-
 pub(crate) struct BasicMemory {
+    ro_data: Vec<u8>,
     rw_data: Vec<u8>,
     stack: Vec<u8>,
     aux: Vec<u8>,
@@ -92,6 +75,7 @@ pub(crate) struct BasicMemory {
 impl BasicMemory {
     fn new() -> Self {
         Self {
+            ro_data: Vec::new(),
             rw_data: Vec::new(),
             stack: Vec::new(),
             aux: Vec::new(),
@@ -116,6 +100,7 @@ impl BasicMemory {
     }
 
     fn force_reset(&mut self, module: &Module) {
+        self.ro_data.clear();
         self.rw_data.clear();
         self.stack.clear();
         self.aux.clear();
@@ -123,15 +108,18 @@ impl BasicMemory {
         self.is_memory_dirty = false;
         self.accessible_aux_size = 0;
 
-        if let Some(interpreted_module) = module.interpreted_module().as_ref() {
-            self.rw_data.extend_from_slice(&interpreted_module.rw_data);
-            self.rw_data.resize(cast(module.memory_map().rw_data_size()).to_usize(), 0);
-            self.stack.resize(cast(module.memory_map().stack_size()).to_usize(), 0);
+        let blob = module.blob();
+        self.rw_data.extend_from_slice(blob.rw_data());
+        self.rw_data.resize(cast(module.memory_map().rw_data_size()).to_usize(), 0);
 
-            // TODO: Do this lazily?
-            self.aux.resize(cast(module.memory_map().aux_data_size()).to_usize(), 0);
-            self.accessible_aux_size = cast(module.memory_map().aux_data_size()).to_usize();
-        }
+        self.ro_data.extend_from_slice(blob.ro_data());
+        self.ro_data.resize(cast(module.memory_map().ro_data_size()).to_usize(), 0);
+
+        self.stack.resize(cast(module.memory_map().stack_size()).to_usize(), 0);
+
+        // TODO: Do this lazily?
+        self.aux.resize(cast(module.memory_map().aux_data_size()).to_usize(), 0);
+        self.accessible_aux_size = cast(module.memory_map().aux_data_size()).to_usize();
     }
 
     fn accessible_aux_size(&self) -> u32 {
@@ -152,8 +140,7 @@ impl BasicMemory {
         } else if address >= memory_map.rw_data_address() {
             (memory_map.rw_data_address(), &self.rw_data[..])
         } else if address >= memory_map.ro_data_address() {
-            let module = module.interpreted_module().unwrap();
-            (memory_map.ro_data_address(), &module.ro_data[..])
+            (memory_map.ro_data_address(), &self.ro_data[..])
         } else {
             return None;
         };

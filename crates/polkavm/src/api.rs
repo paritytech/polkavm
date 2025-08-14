@@ -19,7 +19,7 @@ if_compiler_is_supported! {
 use crate::config::{BackendKind, Config, GasMeteringKind, ModuleConfig, SandboxKind};
 use crate::error::{bail, bail_static, Error};
 use crate::gas::{CostModel, CostModelRef, GasVisitor};
-use crate::interpreter::{InterpretedInstance, InterpretedModule};
+use crate::interpreter::InterpretedInstance;
 use crate::utils::{GuestInit, InterruptKind};
 use crate::{Gas, ProgramCounter};
 
@@ -286,7 +286,6 @@ pub(crate) struct ModulePrivate {
 
     blob: ProgramBlob,
     compiled_module: CompiledModuleKind,
-    interpreted_module: Option<InterpretedModule>,
     memory_map: MemoryMap,
     gas_metering: Option<GasMeteringKind>,
     is_strict: bool,
@@ -348,10 +347,6 @@ impl Module {
         pub(crate) fn compiled_module(&self) -> &CompiledModuleKind {
             &self.state().compiled_module
         }
-    }
-
-    pub(crate) fn interpreted_module(&self) -> Option<&InterpretedModule> {
-        self.state().interpreted_module.as_ref()
     }
 
     pub(crate) fn blob(&self) -> &ProgramBlob {
@@ -614,16 +609,10 @@ impl Module {
             }}
         };
 
-        let interpreted_module = if engine.interpreter_enabled {
-            Some(InterpretedModule::new(init)?)
-        } else {
-            None
-        };
-
         let compiled_module = compiled_module.unwrap_or(CompiledModuleKind::Unavailable);
         log::trace!("Processing finished!");
 
-        assert!(compiled_module.is_some() || interpreted_module.is_some());
+        assert!(compiled_module.is_some() || engine.interpreter_enabled);
         if compiled_module.is_some() {
             log::debug!("Backend used: 'compiled'");
         } else {
@@ -670,7 +659,6 @@ impl Module {
 
             blob,
             compiled_module,
-            interpreted_module,
             memory_map,
             gas_metering: config.gas_metering,
             is_strict: config.is_strict,
