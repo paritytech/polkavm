@@ -1829,6 +1829,25 @@ macro_rules! define_interpreter {
         $body
     }};
 
+    (@define $handler_name:ident $body:block $self:ident, $a0:ident: Reg, $a1:ident: u32, $a2:ident: Target) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<Reg>, a1: u32, a2: Target) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1,
+                    a2,
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let $a0 = transmute_reg(args.a0);
+        let $a1 = args.a1;
+        let $a2 = args.a2;
+        $body
+    }};
+
     (@define $handler_name:ident $body:block $self:ident, $a0:ident: Reg, $a1:ident: Reg, $a2:ident: Target) => {{
         impl Args {
             pub fn $handler_name(a0: impl Into<Reg>, a1: impl Into<Reg>, a2: Target) -> Args {
@@ -3685,6 +3704,15 @@ define_interpreter! {
         visitor.jump_indirect_impl::<DEBUG>(program_counter, dynamic_address)
     }
 
+    fn load_imm_and_jump<const DEBUG: bool>(visitor: &mut Visitor, ra: Reg, value: u32, target: Target) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_imm_and_jump(ra, value, target));
+        }
+
+        visitor.set32::<DEBUG>(ra, value);
+        Some(target)
+    }
+
     fn unresolved_branch_less_unsigned<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!("<u", visitor, s1, s2, tt, tf, branch_less_unsigned)
     }
@@ -3775,6 +3803,23 @@ define_interpreter! {
             if DEBUG {
                 log::trace!("  -> resolved to trap");
             }
+            trap_impl::<DEBUG>(visitor, program_counter)
+        }
+    }
+
+    fn unresolved_load_imm_and_jump<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, ra: Reg, value: u32, jump_to: u32) -> Option<Target> {
+        if DEBUG {
+            log::trace!("[{}]: unresolved load imm and jump {jump_to}", visitor.inner.compiled_offset);
+        }
+
+        visitor.set32::<DEBUG>(ra, value);
+        if let Some(target) = visitor.inner.resolve_jump::<DEBUG>(ProgramCounter(jump_to)) {
+            let offset = visitor.inner.compiled_offset;
+            visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::load_imm_and_jump::<DEBUG>);
+            visitor.inner.compiled_args[cast(offset).to_usize()] = Args::load_imm_and_jump(ra, value, target);
+
+            Some(target)
+        } else {
             trap_impl::<DEBUG>(visitor, program_counter)
         }
     }
@@ -4603,8 +4648,7 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
     }
 
     fn load_imm_and_jump(&mut self, dst: RawReg, imm: u32, target: u32) -> Self::ReturnTy {
-        emit!(self, load_imm(dst, imm));
-        emit!(self, unresolved_jump(self.program_counter, ProgramCounter(target)));
+        emit!(self, unresolved_load_imm_and_jump(self.program_counter, dst, imm, target));
     }
 
     fn load_imm_and_jump_indirect(&mut self, ra: RawReg, base: RawReg, value: u32, offset: u32) -> Self::ReturnTy {
