@@ -196,7 +196,7 @@ static mut output_pages: [u8; TOTAL_BYTES] = [0; TOTAL_BYTES];
 #[polkavm_derive::polkavm_export]
 extern "C" fn main(start_address: u64, length: u64, step_n: u64, num_of_gloders: u64, total_execution_steps: u64) -> (u64, u64) {
     let mut grid = Grid::new();
-
+    call_log(2, None, &format!("Child: start_address={:?} length={:?} step_n={:?} num_of_gloders={:?} total_execution_steps={:?}", start_address, length, step_n, num_of_gloders, total_execution_steps));
     if length > 0 {
         for i in 0..NUM_PAGES {
             // grid.pages[i] = unsafe {

@@ -1,4 +1,4 @@
-SERVICES = bootstrap tribonacci megatron transfer balances algo null_authorizer auth_copy blake2b fib corevm corevm_child game_of_life game_of_life_child game_of_life_parent_only revm_test compress game_of_life_manifest doom hello_world mnist
+SERVICES = bootstrap tribonacci megatron transfer balances algo null_authorizer auth_copy blake2b fib corevm corevm_child game_of_life game_of_life_child game_of_life_parent_only revm_test compress game_of_life_manifest doom hello_world mnist ascii ascii_loop wasm_exe
 
 TARGET_DIR = riscv64emac-unknown-none-polkavm/release
 

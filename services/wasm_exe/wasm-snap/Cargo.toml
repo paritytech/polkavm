@@ -1,0 +1,24 @@
+[package]
+name = "wasm-snap"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wasmi_core = { version = "0.35", default-features = false }
+heapless = "0.8"
+
+[features]
+default = []
+std = []
+
+[[example]]
+name = "step_by_step"
+path = "examples/step_by_step.rs"
+
+[[example]]
+name = "advanced"
+path = "examples/advanced.rs"
+
+[[example]]
+name = "snapshot"
+path = "examples/snapshot.rs"

@@ -1,0 +1,18 @@
+# Rust / Cargo
+/target/
+/debug/
+
+# Cargo lockfile (commit for apps, ignore for libraries)
+Cargo.lock
+
+# Rustfmt backups
+**/*.rs.bk
+
+# Windows/MSVC artifacts
+*.pdb
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/

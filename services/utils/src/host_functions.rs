@@ -35,7 +35,7 @@ extern "C" {
     pub fn poke(n: u64, s: u64, o: u64, z: u64) -> u64;
 
     #[polkavm_import(index = 11)]
-    pub fn pages(n: u64, p: u64, c: u64) -> u64;
+    pub fn pages(n: u64, p: u64, c: u64, r: u64) -> u64;
 
     #[polkavm_import(index = 12)]
     pub fn invoke(n: u64, o: u64) -> (u64, u64);

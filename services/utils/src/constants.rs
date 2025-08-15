@@ -52,6 +52,7 @@ pub const PEEK: u64 = 16; // Read from inner-PVM memory
 pub const QUERY: u64 = 17; // Query preimage status
 pub const SOLICIT: u64 = 18; // Request a preimage from network
 pub const TRANSFER: u64 = 19; // Transfer balance or resources
+pub const PAGES : u64 = 11; // Get number of memory pages
 pub const UPGRADE: u64 = 20; // Upgrade a service’s code
 pub const VOID: u64 = 21; // Clear inner-PVM memory
 pub const EXPUNGE: u64 = 22; // Destroy inner-PVM instance
