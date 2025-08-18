@@ -21,6 +21,8 @@ members = [
     "null_authorizer",
     "auth_copy",
     "blake2b",
+    "blake2b_parent",
+    "blake2b_child",
     "game_of_life",
     "game_of_life_child",
     "revm_test",

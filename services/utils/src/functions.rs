@@ -30,6 +30,8 @@
 
 extern crate alloc;
 use alloc::format;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::constants::*;
 use crate::host_functions::*;
@@ -609,6 +611,323 @@ pub fn standard_program_initialization_for_child(
     call_log(2, None, "StandardProgramInitializationForChild: success");
 }
 
+pub fn read_machine_page(
+    machine_index: u32,
+    start_page_id: u32,
+    pages_length: u64,
+    result_address: u64,
+) -> Result<(), &'static str> {
+    let length = pages_length * PAGE_SIZE;
+    if length == 0 {
+        return Err("read_machine_page: length is zero");
+    }
+    let page_address = start_page_id as u64 * PAGE_SIZE;
+
+    let peek_result =
+        unsafe { peek(machine_index as u64, result_address as u64, page_address, length) };
+    if peek_result != OK {
+        return Err("read_machine_page: peek failed");
+    }
+    Ok(())
+}
+
+pub fn write_machine_page(
+    machine_index: u32,
+    start_page_id: u32,
+    pages_length: u64,
+    data_address: u64,
+    data_length: u64,
+) -> Result<(), &'static str> {
+
+    let page_address = start_page_id as u64 * PAGE_SIZE;
+    let length = pages_length * PAGE_SIZE;
+    // page the machine
+    let page_result = unsafe { pages(machine_index as u64, start_page_id as u64, pages_length as u64, 2) };
+    if page_result != OK {
+        call_log(1, None, &format!("write_machine_page: pages failed, result={}", page_result));
+        return Err("write_machine_page: pages failed");
+    }
+    let poke_result = unsafe { poke(machine_index as u64, data_address, page_address, data_length) };
+    if poke_result != OK {
+        call_log(1, None, &format!("write_machine_page: poke failed, result={}", poke_result));
+        return Err("write_machine_page: poke failed");
+    }
+    Ok(())
+}
+pub struct ExtractedMemory {
+    pub o_pages_bytes: Vec<u8>,
+    pub w_pages_bytes: Vec<u8>,
+    pub stack_bytes: Vec<u8>,
+    pub o_start_page: u64,
+    pub w_start_page: u64,
+    pub s_start_page: u64,
+    pub o_bytes_page_len: u64,
+    pub w_bytes_page_len: u64,
+    pub stack_page_len: u64,
+    pub o_bytes_length: u64,
+    pub w_bytes_length: u64,
+    pub s: u64,
+}
+
+pub fn extract_memory_from_machine(
+    z: u64,
+    s: u64,
+    o_bytes_address: u64,
+    o_bytes_length: u64,
+    w_bytes_address: u64,
+    w_bytes_length: u64,
+    machine_index: u32,
+) -> Result<ExtractedMemory, &'static str> {
+    let o_bytes_page_len = ceiling_divide(o_bytes_length, PAGE_SIZE);
+    let w_bytes_page_len = ceiling_divide(w_bytes_length, PAGE_SIZE) + z;
+    let stack_page_len = ceiling_divide(s, PAGE_SIZE);
+    
+    let o_start_addreess = Z_Z;
+    let o_start_page = Z_Z / PAGE_SIZE;
+    let o_start_page_address = o_start_page * PAGE_SIZE;
+    let w_start_address = 2 * Z_Z + z_func(o_bytes_length);
+    let w_start_page = w_start_address / PAGE_SIZE;
+    let w_start_page_address = w_start_page * PAGE_SIZE;
+    let s_start_address = (1u64 << 32) - 2 * Z_Z - Z_I - p_func(s);
+    let s_start_page = s_start_address / PAGE_SIZE;
+    let s_start_page_address = s_start_page * PAGE_SIZE;
+    
+    call_log(
+        2,
+        None,
+        &format!(
+            "extract_memory_from_machine: o_start_page={}, o_bytes_page_len={}, w_start_page={}, w_bytes_page_len={}, s_start_page={}, stack_page_len={}",
+            o_start_page, o_bytes_page_len, w_start_page, w_bytes_page_len, s_start_page, stack_page_len
+        ),
+    );
+    
+    let mut o_pages_bytes = vec![0u8; (PAGE_SIZE * o_bytes_page_len) as usize];
+    let mut w_pages_bytes = vec![0u8; (PAGE_SIZE * w_bytes_page_len) as usize];
+    let mut stack_bytes = vec![0u8; (PAGE_SIZE * stack_page_len) as usize];
+    
+    if read_machine_page(
+        machine_index,
+        o_start_page as u32,
+        o_bytes_page_len,
+        o_pages_bytes.as_mut_ptr() as u64,
+    ).is_err() {
+        return Err("extract_memory_from_machine: read o_bytes failed");
+    }
+
+    if read_machine_page(
+        machine_index,
+        w_start_page as u32,
+        w_bytes_page_len,
+        w_pages_bytes.as_mut_ptr() as u64,
+    ).is_err() {
+        return Err("extract_memory_from_machine: read w_bytes failed");
+    }
+
+    if read_machine_page(
+        machine_index,
+        s_start_page as u32,
+        stack_page_len,
+        stack_bytes.as_mut_ptr() as u64,
+    ).is_err() {
+        return Err("extract_memory_from_machine: read stack failed");
+    }
+    
+    call_log(
+        2,
+        None,
+        &format!(
+            "extract_memory_from_machine: success, extracted o_bytes_length={}, w_bytes_length={}, s={}",
+            o_bytes_length, w_bytes_length, s
+        ),
+    );
+    
+    Ok(ExtractedMemory {
+        o_pages_bytes,
+        w_pages_bytes,
+        stack_bytes,
+        o_start_page,
+        w_start_page,
+        s_start_page,
+        o_bytes_page_len,
+        w_bytes_page_len,
+        stack_page_len,
+        o_bytes_length,
+        w_bytes_length,
+        s,
+    })
+}
+
+pub fn write_memory_to_machine(
+    extracted_memory: &ExtractedMemory,
+    target_machine_index: u32,
+) -> Result<(), &'static str> {
+    call_log(
+        2,
+        None,
+        &format!(
+            "write_memory_to_machine: writing to target machine {}, o_start_page={}, w_start_page={}, s_start_page={}",
+            target_machine_index, extracted_memory.o_start_page, extracted_memory.w_start_page, extracted_memory.s_start_page
+        ),
+    );
+    
+    if let Err(err) = write_machine_page(
+        target_machine_index,
+        extracted_memory.o_start_page as u32,
+        extracted_memory.o_bytes_page_len,
+        extracted_memory.o_pages_bytes.as_ptr() as u64,
+        extracted_memory.o_bytes_length,
+    ) {
+        return Err("write_memory_to_machine: write o_bytes failed");
+    }
+    
+    if let Err(err) = write_machine_page(
+        target_machine_index,
+        extracted_memory.w_start_page as u32,
+        extracted_memory.w_bytes_page_len,
+        extracted_memory.w_pages_bytes.as_ptr() as u64,
+        extracted_memory.w_bytes_length,
+    ) {
+        return Err("write_memory_to_machine: write w_bytes failed");
+    }
+    
+    if let Err(err) = write_machine_page(
+        target_machine_index,
+        extracted_memory.s_start_page as u32,
+        extracted_memory.stack_page_len,
+        extracted_memory.stack_bytes.as_ptr() as u64,
+        extracted_memory.s,
+    ) {
+        return Err("write_memory_to_machine: write stack failed");   
+    }
+    
+    call_log(
+        2,
+        None,
+        &format!(
+            "write_memory_to_machine: success, wrote o_bytes_length={}, w_bytes_length={}, s={}",
+            extracted_memory.o_bytes_length, extracted_memory.w_bytes_length, extracted_memory.s
+        ),
+    );
+    
+    Ok(())
+}
+
+
+pub fn copy_memory_to_another_machine(
+    z: u64,
+    s: u64,
+    o_bytes_address: u64,
+    o_bytes_length: u64,
+    w_bytes_address: u64,
+    w_bytes_length: u64,
+    machine_index: u32,
+    target_machine_index: u32,
+) -> Result<(), &'static str> {
+
+    let o_bytes_page_len = ceiling_divide(o_bytes_length, PAGE_SIZE);
+    let w_bytes_page_len = ceiling_divide(w_bytes_length, PAGE_SIZE) + z;
+    let stack_page_len = ceiling_divide(s, PAGE_SIZE);
+    let o_start_addreess = Z_Z;
+    let o_start_page = Z_Z / PAGE_SIZE;
+    let o_start_page_address = o_start_page * PAGE_SIZE;
+    let w_start_address = 2 * Z_Z + z_func(o_bytes_length);
+    let w_start_page = w_start_address / PAGE_SIZE;
+    let w_start_page_address = w_start_page * PAGE_SIZE;
+    let s_start_address = (1u64 << 32) - 2 * Z_Z - Z_I - p_func(s);
+    let s_start_page = s_start_address / PAGE_SIZE;
+    let s_start_page_address = s_start_page * PAGE_SIZE;
+    call_log(
+        2,
+        None,
+        &format!(
+            "copy_memory_to_another_machine: o_start_page={}, o_bytes_page_len={}, w_start_page={}, w_bytes_page_len={}, s_start_page={}, stack_page_len={}",
+            o_start_page, o_bytes_page_len, w_start_page, w_bytes_page_len, s_start_page, stack_page_len
+        ),
+    );
+    let mut o_pages_bytes = vec![0u8; (PAGE_SIZE * o_bytes_page_len) as usize];
+    let mut w_pages_bytes = vec![0u8; (PAGE_SIZE * w_bytes_page_len) as usize];
+    let mut stack_bytes = vec![0u8; (PAGE_SIZE * stack_page_len) as usize];
+    // get the address of the pages
+    if read_machine_page(
+        machine_index,
+        o_start_page as u32,
+        o_bytes_page_len,
+        o_pages_bytes.as_mut_ptr() as u64,
+    ).is_err() {
+        return Err("copy_memory_to_another_machine: read o_bytes failed");
+    }
+
+    if read_machine_page(
+        machine_index,
+        w_start_page as u32,
+        w_bytes_page_len,
+        w_pages_bytes.as_mut_ptr() as u64,
+    ).is_err() {
+        return Err("copy_memory_to_another_machine: read w_bytes failed");
+    }
+
+    if read_machine_page(
+        machine_index,
+        s_start_page as u32,
+        stack_page_len,
+        stack_bytes.as_mut_ptr() as u64,
+    ).is_err() {
+        return Err("copy_memory_to_another_machine: read stack failed");
+    }
+
+    // write the pages to the target machine
+    if write_machine_page(
+        target_machine_index,
+        o_start_page as u32,
+        o_bytes_page_len,
+        o_pages_bytes.as_ptr() as u64,
+        o_bytes_length,
+    ).is_err() {
+        return Err("copy_memory_to_another_machine: write o_bytes failed");
+    }
+    if write_machine_page(
+        target_machine_index,
+        w_start_page as u32,
+        w_bytes_page_len,
+        w_pages_bytes.as_ptr() as u64,
+        w_bytes_length,
+    ).is_err() {
+        return Err("copy_memory_to_another_machine: write w_bytes failed");
+    }
+    if write_machine_page(
+        target_machine_index,
+        s_start_page as u32,
+        stack_page_len,
+        stack_bytes.as_ptr() as u64,
+        s,
+    ).is_err() {
+        return Err("copy_memory_to_another_machine: write stack failed");   
+    }
+    call_log(
+        2,
+        None,
+        &format!(
+            "copy_memory_to_another_machine: success, o_bytes_length={}, w_bytes_length={}, s={}",
+            o_bytes_length, w_bytes_length, s
+        ),
+    );
+    Ok(())
+}
+
+pub fn copy_image_to_another_machine(
+    source_machine_index: u32,
+    target_machine_index: u32,
+    start_page_id: u32,
+    pages_length: u64,
+) -> Result<(), &'static str> {
+    if pages_length == 0 {
+        return Err("copy_image_to_another_machine: pages_length is zero");
+    }
+
+
+    
+    Ok(())
+}
 // Child VM related functions
 pub fn setup_page(segment: &[u8]) {
     if segment.len() < 8 {

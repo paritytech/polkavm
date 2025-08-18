@@ -342,6 +342,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "blake2b_child"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "simplealloc",
+ "utils",
+]
+
+[[package]]
+name = "blake2b_parent"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
+ "simplealloc",
+ "utils",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
