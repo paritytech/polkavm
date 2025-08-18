@@ -151,7 +151,7 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
         segment_index += 1;
     }
     // invoke child VM
-    let init_gas: u64 = 0xFFFFFFF;
+    let init_gas: u64 = 0x6FFF_FFFF_FFFF_FFFF;
     let mut child_vm_registers = initialize_pvm_registers();
 
     child_vm_registers[7] = first_page_address;
@@ -167,6 +167,7 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
 
     let mut invoke_result: u64;
     let mut omega_8: u64;
+    let mut gas_bytes = [0u8; 8];
     loop {
         (invoke_result, omega_8) = unsafe { invoke(new_machine_idx as u64, g_w_address) };
         call_log(2, None, &format!("Parent: invoke {:?} invoke_result={:?} omega_8={:?}", new_machine_idx, invoke_result, omega_8));
@@ -198,6 +199,7 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
             // print the gas usage 
             gas = init_gas - gas;
             call_log(2, None, &format!("Parent: gas used={:?} child_vm_registers={:?}", gas, child_vm_registers));
+            gas_bytes.copy_from_slice(&gas.to_le_bytes());
             break;
         }
     }
@@ -217,7 +219,10 @@ extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
     }
     unsafe { expunge(new_machine_idx as u64) };
     call_log(2, None, &format!("Parent: done with child VM, segment_index={:?}", segment_index));
-    return (FIRST_READABLE_ADDRESS as u64, 0);
+    // return the gas used as bytes
+    let gas_address = gas_bytes.as_ptr() as u64;
+    let gas_length = gas_bytes.len() as u64;
+    return (gas_address, gas_length);
 }
 
 
