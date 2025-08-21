@@ -4909,15 +4909,28 @@ impl ProgramBlob {
 #[cfg(feature = "alloc")]
 #[test]
 fn test_calculate_blob_length() {
-    let big_blob = ArcBytes::from(vec![0; 1024]);
-    let shared_blob = ArcBytes::from(vec![0; 128]);
+    let mut builder = crate::writer::ProgramBlobBuilder::new_64bit();
+    builder.set_code(&[Instruction::trap], &[]);
+    let blob = builder.into_vec().unwrap();
+    let parts = ProgramParts::from_bytes(blob.into()).unwrap();
+
+    let big_blob = ArcBytes::from(alloc::vec![0; 1024]);
+    let small_blob = ArcBytes::from(&parts.code_and_jump_table[..]);
     let parts = ProgramParts {
         ro_data: big_blob.subslice(10..20),
+        ro_data_size: 24,
         rw_data: big_blob.subslice(24..28),
-        code_and_jump_table: shared_blob.clone(),
+        rw_data_size: 4,
+        code_and_jump_table: small_blob.clone(),
+        debug_strings: small_blob.clone(),
         ..ProgramParts::default()
     };
-    assert_eq!(parts.calculate_blob_length(), 1024 + 128);
+
+    let blob = ProgramBlob::from_parts(parts).unwrap();
+    assert_eq!(
+        blob.calculate_blob_length(),
+        (big_blob.len() + small_blob.len()).try_into().unwrap()
+    );
 }
 
 /// The source location.
