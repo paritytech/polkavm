@@ -10,6 +10,7 @@ do
     cargo test --profile $PROFILE -p polkavm
     cargo test --profile $PROFILE -p polkavm-assembler
     cargo test --profile $PROFILE -p polkavm-common
+    cargo test --profile $PROFILE -p polkavm-common --all-features
     cargo test --profile $PROFILE -p polkavm-derive
     cargo test --profile $PROFILE -p polkavm-derive-impl
     cargo test --profile $PROFILE -p polkavm-derive-impl-macro
