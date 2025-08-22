@@ -3442,6 +3442,68 @@ fn basic_gas_metering_async(config: Config) {
     basic_gas_metering(config, GasMeteringKind::Async);
 }
 
+#[test]
+fn per_instruction_gas_metering() {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::add_imm_32(A0, A0, 1),
+            asm::add_imm_32(A0, A0, 2),
+            asm::add_imm_32(A0, A0, 4),
+            asm::add_imm_32(A0, A0, 8),
+            asm::add_imm_32(A0, A0, 16),
+            asm::ret(),
+        ],
+        &[],
+    );
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let offsets: Vec<_> = blob
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.offset)
+        .collect();
+
+    let mut config = Config::default();
+    config.set_backend(Some(crate::BackendKind::Interpreter));
+
+    let engine = Engine::new(&config).unwrap();
+    let mut module_config = ModuleConfig::default();
+    module_config.set_per_instruction_metering(true);
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let linker: Linker = Linker::new();
+    let instance_pre = linker.instantiate_pre(&module).unwrap();
+    let mut instance = instance_pre.instantiate().unwrap();
+
+    instance.set_gas(1);
+    let result = instance.call_typed(&mut (), "main", ());
+    assert!(matches!(result, Err(CallError::NotEnoughGas)), "unexpected result: {result:?}");
+    assert_eq!(instance.reg(Reg::A0), 1);
+    assert_eq!(instance.gas(), 0);
+    assert_eq!(instance.program_counter(), Some(offsets[1]));
+    assert_eq!(instance.next_program_counter(), Some(offsets[1]));
+
+    instance.set_gas(1);
+    let result = instance.run().unwrap();
+    assert!(matches!(result, InterruptKind::NotEnoughGas), "unexpected result: {result:?}");
+    assert_eq!(instance.reg(Reg::A0), 1 + 2);
+    assert_eq!(instance.gas(), 0);
+    assert_eq!(instance.program_counter(), Some(offsets[2]));
+    assert_eq!(instance.next_program_counter(), Some(offsets[2]));
+
+    instance.set_gas(2);
+    let result = instance.run().unwrap();
+    assert!(matches!(result, InterruptKind::NotEnoughGas), "unexpected result: {result:?}");
+    assert_eq!(instance.reg(Reg::A0), 1 + 2 + 4 + 8);
+    assert_eq!(instance.gas(), 0);
+    assert_eq!(instance.program_counter(), Some(offsets[4]));
+    assert_eq!(instance.next_program_counter(), Some(offsets[4]));
+}
+
 fn consume_gas_in_host_function(config: Config, gas_metering_kind: GasMeteringKind) {
     let _ = env_logger::try_init();
 

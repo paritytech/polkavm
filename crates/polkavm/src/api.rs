@@ -298,6 +298,8 @@ pub(crate) struct ModulePrivate {
     cost_model: CostModelRef,
     #[cfg(feature = "module-cache")]
     pub(crate) module_key: Option<ModuleKey>,
+
+    is_per_instruction_metering: bool,
 }
 
 /// A compiled PolkaVM program module.
@@ -324,6 +326,10 @@ impl Module {
             // SAFETY: self.0 is only ever `None` in the destructor.
             unsafe { core::hint::unreachable_unchecked() }
         }
+    }
+
+    pub(crate) fn is_per_instruction_metering(&self) -> bool {
+        self.state().is_per_instruction_metering
     }
 
     pub(crate) fn is_strict(&self) -> bool {
@@ -431,12 +437,19 @@ impl Module {
             bail!("cannot use custom codegen: `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` is not enabled");
         }
 
+        if config.is_per_instruction_metering && engine.selected_backend == BackendKind::Compiler {
+            bail!("per instruction metering is not supported with the recompiler");
+        }
+
         log::trace!(
             "Creating new module from a {}-bit program blob",
             if blob.is_64_bit() { 64 } else { 32 }
         );
 
         let cost_model = config.cost_model.clone().unwrap_or_else(|| engine.default_cost_model.clone());
+        if config.is_per_instruction_metering && core::ptr::addr_of!(*cost_model) != core::ptr::addr_of!(*CostModel::naive_ref()) {
+            bail!("per instruction metering is not supported with a non-default cost model");
+        }
 
         #[cfg(feature = "module-cache")]
         let module_key = {
@@ -668,6 +681,7 @@ impl Module {
             page_size_mask,
             page_shift,
             cost_model,
+            is_per_instruction_metering: config.is_per_instruction_metering,
 
             #[cfg(feature = "module-cache")]
             module_key,

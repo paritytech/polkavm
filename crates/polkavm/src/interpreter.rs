@@ -915,9 +915,22 @@ impl InterpretedInstance {
         self.compile_block::<DEBUG>(program_counter)
     }
 
+    #[inline(always)]
+    fn compile_block<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<Target> {
+        if self.module.is_per_instruction_metering() {
+            // TODO: Remove this.
+            self.compile_block_impl::<DEBUG, true>(program_counter)
+        } else {
+            self.compile_block_impl::<DEBUG, false>(program_counter)
+        }
+    }
+
     #[inline(never)]
     #[cold]
-    fn compile_block<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<Target> {
+    fn compile_block_impl<const DEBUG: bool, const PER_INSTRUCTION_METERING: bool>(
+        &mut self,
+        program_counter: ProgramCounter,
+    ) -> Option<Target> {
         if program_counter.0 > self.module.code_len() {
             return None;
         }
@@ -949,15 +962,23 @@ impl InterpretedInstance {
             }
 
             if self.module.gas_metering().is_some() {
-                if charge_gas_index.is_none() {
+                if !PER_INSTRUCTION_METERING {
+                    if charge_gas_index.is_none() {
+                        if DEBUG {
+                            log::debug!("  [{}]: {}: charge_gas", self.compiled_handlers.len(), instruction.offset);
+                        }
+
+                        charge_gas_index = Some((instruction.offset, self.compiled_handlers.len()));
+                        emit!(self, charge_gas(instruction.offset, 0));
+                    }
+                    instruction.visit(&mut gas_visitor);
+                } else {
                     if DEBUG {
                         log::debug!("  [{}]: {}: charge_gas", self.compiled_handlers.len(), instruction.offset);
                     }
 
-                    charge_gas_index = Some((instruction.offset, self.compiled_handlers.len()));
-                    emit!(self, charge_gas(instruction.offset, 0));
+                    emit!(self, charge_gas(instruction.offset, 1));
                 }
-                instruction.visit(&mut gas_visitor);
             }
 
             if DEBUG {

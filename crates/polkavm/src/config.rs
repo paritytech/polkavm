@@ -442,6 +442,7 @@ pub struct ModuleConfig {
     cache_by_hash: bool,
     pub(crate) custom_codegen: Option<Arc<dyn CustomCodegen>>,
     pub(crate) cost_model: Option<CostModelRef>,
+    pub(crate) is_per_instruction_metering: bool,
 }
 
 impl Default for ModuleConfig {
@@ -464,6 +465,7 @@ impl ModuleConfig {
             cache_by_hash: false,
             custom_codegen: None,
             cost_model: None,
+            is_per_instruction_metering: false,
         }
     }
 
@@ -581,6 +583,22 @@ impl ModuleConfig {
         self
     }
 
+    /// Returns whether per-instruction gas metering is enabled.
+    pub fn per_instruction_metering(&self) -> bool {
+        self.is_per_instruction_metering
+    }
+
+    /// Sets whether per-instruction gas metering is enabled.
+    ///
+    /// This can only be used with the interpreter and with the default gas cost model.
+    /// This option is DEPRECATED and will be removed in the future!
+    ///
+    /// Default: `false`
+    pub fn set_per_instruction_metering(&mut self, value: bool) -> &mut Self {
+        self.is_per_instruction_metering = value;
+        self
+    }
+
     #[cfg(feature = "module-cache")]
     pub(crate) fn hash(&self, cost_model: &CostModelRef) -> Option<polkavm_common::hasher::Hash> {
         if self.custom_codegen.is_some() {
@@ -595,6 +613,7 @@ impl ModuleConfig {
             step_tracing,
             dynamic_paging,
             allow_sbrk,
+            is_per_instruction_metering,
             // Deliberately ignored.
             cost_model: _,
             cache_by_hash: _,
@@ -614,6 +633,7 @@ impl ModuleConfig {
             u32::from(step_tracing),
             u32::from(dynamic_paging),
             u32::from(allow_sbrk),
+            u32::from(is_per_instruction_metering),
         ]);
 
         use core::hash::Hash;
