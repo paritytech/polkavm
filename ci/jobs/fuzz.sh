@@ -17,3 +17,6 @@ cargo fuzz run fuzz_linker -- -runs=10000
 
 echo ">> cargo fuzz run (fuzz_polkavm)"
 cargo fuzz run fuzz_polkavm -- -runs=10000
+
+echo ">> cargo fuzz run (fuzz_program_blob)"
+cargo fuzz run fuzz_program_blob -- -runs=10000
