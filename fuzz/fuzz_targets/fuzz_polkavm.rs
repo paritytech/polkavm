@@ -7,6 +7,7 @@ use polkavm::Engine;
 use polkavm::InterruptKind;
 use polkavm::ModuleConfig;
 use polkavm::ProgramCounter;
+use polkavm::SetCacheSizeLimitArgs;
 
 use polkavm_common::program::asm;
 use polkavm_common::program::Instruction;
@@ -15,6 +16,12 @@ use polkavm_common::program::Reg;
 use polkavm_common::writer::ProgramBlobBuilder;
 
 use polkavm::RETURN_TO_HOST;
+
+#[derive(Arbitrary, Debug)]
+struct CacheSizeConfig {
+    max_cache_size_bytes: usize,
+    max_block_size: u32,
+}
 
 #[derive(Arbitrary, Debug)]
 enum ArglessKind {
@@ -516,7 +523,7 @@ fn build_program_blob(data: Vec<OperationKind>) -> ProgramBlob {
     ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap()
 }
 
-fn interpreter_fuzzer_harness(data: Vec<OperationKind>) {
+fn interpreter_fuzzer_harness(data: Vec<OperationKind>, cache_config: Option<CacheSizeConfig>) {
     let blob = build_program_blob(data);
 
     let mut config = polkavm::Config::new();
@@ -530,6 +537,14 @@ fn interpreter_fuzzer_harness(data: Vec<OperationKind>) {
 
     let module = polkavm::Module::from_blob(&engine, &module_config, blob).unwrap();
     let mut instance = module.instantiate().unwrap();
+
+    if let Some(config) = cache_config {
+        let _ = instance.set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+            max_cache_size_bytes: config.max_cache_size_bytes,
+            max_block_size: config.max_block_size,
+        }));
+    }
+
     instance.set_gas(1000000);
     instance.set_next_program_counter(ProgramCounter(0));
 
@@ -582,11 +597,18 @@ fn correctness_fuzzer_harness(data: Vec<OperationKind>) {
         let interrupt_recompiler = instance_recompiler.run().unwrap();
 
         if interrupt_interpreter != interrupt_recompiler {
-            panic!("interrupt code mismatch (interpreter: {:?}, recompiler: {:?})", interrupt_interpreter, interrupt_recompiler);
+            panic!(
+                "interrupt code mismatch (interpreter: {:?}, recompiler: {:?})",
+                interrupt_interpreter, interrupt_recompiler
+            );
         }
 
         if instance_interpreter.program_counter() != instance_recompiler.program_counter() {
-            panic!("program counter mismatch (interpreter: {:?}, recompiler: {:?})", instance_interpreter.program_counter(), instance_recompiler.program_counter());
+            panic!(
+                "program counter mismatch (interpreter: {:?}, recompiler: {:?})",
+                instance_interpreter.program_counter(),
+                instance_recompiler.program_counter()
+            );
         }
 
         //
@@ -597,7 +619,11 @@ fn correctness_fuzzer_harness(data: Vec<OperationKind>) {
             let reg_interpreter = instance_interpreter.reg(reg);
             let reg_recompiler = instance_recompiler.reg(reg);
 
-            assert_eq!(reg_interpreter, reg_recompiler, "register comparison failed for {:?} (interpreter: {:?}, recompiler: {:?})", reg, reg_interpreter, reg_recompiler);
+            assert_eq!(
+                reg_interpreter, reg_recompiler,
+                "register comparison failed for {:?} (interpreter: {:?}, recompiler: {:?})",
+                reg, reg_interpreter, reg_recompiler
+            );
         }
 
         //
@@ -616,10 +642,10 @@ fn correctness_fuzzer_harness(data: Vec<OperationKind>) {
     }
 }
 
-fuzz_target!(|data: Vec<OperationKind>| {
+fuzz_target!(|data: (Vec<OperationKind>, Option<CacheSizeConfig>)| {
     if std::env::var("CORRECTNESS_FUZZER").is_ok() {
-        correctness_fuzzer_harness(data);
+        correctness_fuzzer_harness(data.0);
     } else {
-        interpreter_fuzzer_harness(data);
+        interpreter_fuzzer_harness(data.0, data.1);
     }
 });

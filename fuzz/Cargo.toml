@@ -49,6 +49,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_program_blob"
+path = "fuzz_targets/fuzz_program_blob.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 resolver = "2"
 members = ["."]
