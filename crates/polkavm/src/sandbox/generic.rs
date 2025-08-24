@@ -383,6 +383,16 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
                 vmctx.regs[reg as usize] = value;
             }
 
+            //
+            // RCX is TMP_REG, which is not mapped to any guest register.
+            // therefore we store it separately here.
+            //
+            // N.B Even though it's a volatile register, we still need to
+            // restore it to handle page faults correctly.
+            //
+            polkavm_common::static_assert!(polkavm_common::regmap::TMP_REG.equals(NativeReg::rcx));
+            vmctx.tmp_reg.store(fetch_reg!(rcx), Ordering::Relaxed);
+
             vmctx.next_native_program_counter.store(rip, Ordering::Relaxed);
 
             if is_page_fault {
@@ -553,6 +563,7 @@ struct VmCtx {
     exit_reason: ExitReason,
 
     regs: CacheAligned<[RegValue; REG_COUNT]>,
+    tmp_reg: AtomicU64,
     sandbox: *mut Sandbox,
     program_counter: AtomicU32,
     next_program_counter: AtomicU32,
@@ -580,6 +591,7 @@ impl VmCtx {
             arg: AtomicU32::new(0),
             gas: AtomicI64::new(0),
             regs: CacheAligned([0; REG_COUNT]),
+            tmp_reg: AtomicU64::new(0),
             sandbox: core::ptr::null_mut(),
             program_counter: AtomicU32::new(0),
             next_program_counter: AtomicU32::new(0),
@@ -829,6 +841,7 @@ impl Sandbox {
         self.vmctx_mut().heap_map_index = 0;
         self.vmctx_mut().page_size = 0;
         self.vmctx_mut().regs.fill(0);
+        self.vmctx_mut().tmp_reg.store(0, Ordering::Relaxed);
         self.vmctx_mut().program_counter.store(0, Ordering::Relaxed);
         self.vmctx_mut().next_program_counter.store(0, Ordering::Relaxed);
         self.vmctx_mut().next_native_program_counter.store(0, Ordering::Relaxed);
@@ -1472,6 +1485,7 @@ impl super::Sandbox for Sandbox {
             THREAD_VMCTX.with(|thread_ctx| core::ptr::write(thread_ctx.get(), vmctx));
 
             let guest_memory = self.memory.as_ptr().cast::<u8>().add(self.guest_memory_offset);
+            let tmp_reg = self.vmctx().tmp_reg.load(Ordering::Relaxed);
 
             core::arch::asm!(r#"
                 push rbp
@@ -1503,7 +1517,6 @@ impl super::Sandbox for Sandbox {
                 // the inline assembly doesn't support using them as operands.
                 clobber_abi("C"),
                 lateout("rax") _,
-                lateout("rcx") _,
                 lateout("rdx") _,
                 lateout("rsi") _,
                 lateout("rdi") _,
@@ -1513,6 +1526,7 @@ impl super::Sandbox for Sandbox {
                 lateout("r11") _,
                 lateout("r12") _,
                 lateout("r13") _,
+                inlateout("rcx") tmp_reg => _,
                 inlateout("r14") vmctx => _,
                 in("r15") guest_memory,
             );

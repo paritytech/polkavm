@@ -228,6 +228,11 @@ impl RegIndex {
             RegSize::R32 => self.name32(),
         }
     }
+
+    #[inline]
+    pub const fn equals(self, other: Self) -> bool {
+        (self as u8) == (other as u8)
+    }
 }
 
 impl core::fmt::Display for RegIndex {
