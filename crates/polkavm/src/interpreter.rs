@@ -499,7 +499,7 @@ impl InterpretedInstance {
 
         // Calculate the minimum number of compiled handlers required to guarantee a tight upper bound.
         // We must be able to hold at least two basic blocks (including gas metering) and we should also account for precompiled stubs.
-        let minimum_compiled_handlers = cast((max_block_size + 1) * 2 + INTERPRETER_CACHE_RESERVED_ENTRIES).to_usize();
+        let minimum_compiled_handlers = (cast(max_block_size).to_usize() + 1) * 2 + INTERPRETER_CACHE_RESERVED_ENTRIES as usize;
 
         if compiled_handlers_hard_limit < minimum_compiled_handlers {
             log::debug!(
