@@ -34,8 +34,7 @@ echo ">> cargo test (generic-sandbox)"
 cargo test --features generic-sandbox -p polkavm -- \
     tests::compiler_generic_* \
     --skip tests::compiler_generic_memset_basic \
-    --skip tests::compiler_generic_memset_with_dynamic_paging \
-    --skip tests::compiler_generic_pinky_dynamic_paging_64
+    --skip tests::compiler_generic_memset_with_dynamic_paging
 
 echo ">> cargo run (examples)"
 POLKAVM_TRACE_EXECUTION=1 POLKAVM_ALLOW_INSECURE=1 cargo run -p hello-world-host
