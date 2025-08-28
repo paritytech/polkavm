@@ -3,7 +3,7 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
-rustup toolchain install --component=rust-src nightly-2024-11-01-x86_64-unknown-linux-gnu
+rustup toolchain install --component=rust-src 1.88.0
 
 POLKAVM_CRATES_ROOT="$(pwd)/proxy-crates"
 
@@ -16,14 +16,14 @@ if [ ! -d "polkadot-sdk" ]; then
     git clone --depth 1 "https://github.com/paritytech/polkadot-sdk.git"
 fi
 cd polkadot-sdk
-COMMIT=2700dbf2dda8b7f593447c939e1a26dacdb8ce45
+COMMIT=3dfbdf4a454f35238500779e503e1ec32ba7fc63
 git fetch --depth=1 origin $COMMIT
 git checkout $COMMIT
 
 echo '[toolchain]' > rust-toolchain.toml
-echo 'channel = "nightly-2024-11-01"' >> rust-toolchain.toml
+echo 'channel = "1.88.0"' >> rust-toolchain.toml
 
-PALLET_REVIVE_FIXTURES_RUSTUP_TOOLCHAIN=nightly-2024-11-01-x86_64-unknown-linux-gnu \
+PALLET_REVIVE_FIXTURES_RUSTUP_TOOLCHAIN=1.88.0 \
 PALLET_REVIVE_FIXTURES_STRIP=0 \
 PALLET_REVIVE_FIXTURES_OPTIMIZE=1 \
 cargo test \
