@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 
+#[allow(dead_code)]
 #[derive(Copy, Clone, Default)]
 pub struct GuestInit<'a> {
     pub page_size: u32,
