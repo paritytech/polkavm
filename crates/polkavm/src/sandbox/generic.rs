@@ -1478,7 +1478,7 @@ impl super::Sandbox for Sandbox {
                 push rbx
 
                 // Fill in the return address.
-                lea rbx, [rip+1f]
+                lea rbx, [rip+2f]
                 mov [r14], rbx
 
                 // Fill in the return stack pointer.
@@ -1491,7 +1491,7 @@ impl super::Sandbox for Sandbox {
                 jmp {entry_point}
 
                 // We will jump here on exit.
-                1:
+                2:
 
                 pop rbx
                 pop rbp
