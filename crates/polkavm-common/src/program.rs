@@ -4855,7 +4855,8 @@ impl ProgramBlob {
             } => (page_size, instruction_count, basic_block_count),
         };
 
-        let cache_entry_count_upper_bound = cast(instruction_count + basic_block_count + INTERPRETER_CACHE_RESERVED_ENTRIES).to_usize();
+        let cache_entry_count_upper_bound =
+            cast(instruction_count).to_usize() + cast(basic_block_count).to_usize() + INTERPRETER_CACHE_RESERVED_ENTRIES as usize;
         let cache_size_upper_bound = interpreter_calculate_cache_size(cache_entry_count_upper_bound);
 
         let mut purgeable_ram_consumption = match args {
@@ -4866,7 +4867,7 @@ impl ProgramBlob {
                 ..
             } => {
                 let max_cache_size_bytes = cast(max_cache_size_bytes).to_usize();
-                let cache_entry_count_hard_limit = cast(max_block_size + INTERPRETER_CACHE_RESERVED_ENTRIES).to_usize();
+                let cache_entry_count_hard_limit = cast(max_block_size).to_usize() + INTERPRETER_CACHE_RESERVED_ENTRIES as usize;
                 let cache_bytes_hard_limit = interpreter_calculate_cache_size(cache_entry_count_hard_limit);
                 if cache_bytes_hard_limit > max_cache_size_bytes {
                     return Err("maximum cache size is too small for the given max block size");
