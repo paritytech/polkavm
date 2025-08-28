@@ -264,11 +264,12 @@ impl DynamicMemory {
     }
 }
 
-#[allow(clippy::as_conversions)]
 macro_rules! cast_handler {
-    ($e:expr) => {
-        $e as Handler
-    };
+    ($e:expr) => {{
+        #[allow(clippy::as_conversions)]
+        let handler = $e as Handler;
+        handler
+    }};
 }
 
 macro_rules! emit {

@@ -634,7 +634,7 @@ unsafe fn initialize(mut stack: *mut usize) {
 
     let mut sa: linux_raw::kernel_sigaction = core::mem::zeroed();
     // TODO: Fill in `sa_mask`?
-    sa.sa_handler = Some(core::mem::transmute(signal_handler as usize));
+    sa.sa_handler = Some(core::mem::transmute::<usize, unsafe extern "C" fn(i32)>(signal_handler as usize));
     sa.sa_flags |=
         linux_raw::SA_RESTORER as u64 | linux_raw::SA_SIGINFO as u64 | linux_raw::SA_NODEFER as u64 | linux_raw::SA_ONSTACK as u64;
     sa.sa_restorer = Some(signal_restorer);

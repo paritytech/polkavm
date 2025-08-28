@@ -2649,7 +2649,7 @@ fn decompress_zstd(mut bytes: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
     let mut fp = ruzstd::streaming_decoder::StreamingDecoder::new(&mut bytes).unwrap();
 
-    let mut buffer = [0_u8; 32 * 1024];
+    let mut buffer = vec![0_u8; 32 * 1024];
     loop {
         let count = fp.read(&mut buffer).unwrap();
         if count == 0 {

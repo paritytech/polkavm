@@ -602,7 +602,7 @@ fn bounded_interpreter_cache(config: Config) {
         .is_ok());
 
     for (max_block_size, max_cache_size_bytes) in [(0, 24 * 12), (5, 24 * 22), (12, 1000000)] {
-        for start_block in 0..exports.len() {
+        for (start_block, export) in exports.iter().enumerate() {
             log::debug!(
                 "Testing with max_block_size: {}, max_cache_size_bytes: {}, start_block: {}",
                 max_block_size,
@@ -617,7 +617,7 @@ fn bounded_interpreter_cache(config: Config) {
             instance.set_reg(Reg::A3, 0);
             instance.set_reg(Reg::A4, 0);
             instance.set_reg(Reg::A5, 0);
-            instance.set_next_program_counter(exports[start_block]);
+            instance.set_next_program_counter(*export);
 
             assert!(instance
                 .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
@@ -1076,7 +1076,7 @@ fn jump_indirect_simple(engine_config: Config) {
     );
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-    let module = Module::from_blob(&engine, &Default::default(), blob.clone()).unwrap();
+    let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1113,7 +1113,7 @@ fn jump_indirect_big_table(engine_config: Config) {
     );
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-    let module = Module::from_blob(&engine, &Default::default(), blob.clone()).unwrap();
+    let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1180,8 +1180,8 @@ fn dynamic_paging_basic(mut engine_config: Config) {
 
     // Now handle it.
     instance.zero_memory(segfault.page_address, page_size).unwrap();
-    assert_eq!(instance.is_memory_accessible(0x10000, 0x4, false), true);
-    assert_eq!(instance.is_memory_accessible(0x10000 + page_size, 0x4, false), false);
+    assert!(instance.is_memory_accessible(0x10000, 0x4, false));
+    assert!(!instance.is_memory_accessible(0x10000 + page_size, 0x4, false));
 
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x10000 + page_size);
@@ -2163,7 +2163,7 @@ fn decompress_zstd(mut bytes: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
     let mut fp = ruzstd::streaming_decoder::StreamingDecoder::new(&mut bytes).unwrap();
 
-    let mut buffer = [0_u8; 32 * 1024];
+    let mut buffer = vec![0_u8; 32 * 1024];
     loop {
         let count = fp.read(&mut buffer).unwrap();
         if count == 0 {

@@ -204,6 +204,7 @@ impl From<ProgramFromElfError> for String {
     }
 }
 
+#[allow(clippy::std_instead_of_core)]
 impl std::error::Error for ProgramFromElfError {}
 
 impl core::fmt::Display for ProgramFromElfError {
@@ -698,7 +699,7 @@ impl<T> BasicInst<T> {
             | BasicInst::AnyAny { dst, .. } => RegMask::from(dst),
             BasicInst::Ecalli { nth_import } => imports[nth_import].dst_mask(),
             BasicInst::Sbrk { dst, .. } => RegMask::from(dst),
-            BasicInst::Memset { .. } => RegMask::from(Reg::A0) | RegMask::from(Reg::A2),
+            BasicInst::Memset => RegMask::from(Reg::A0) | RegMask::from(Reg::A2),
         }
     }
 
@@ -708,7 +709,7 @@ impl<T> BasicInst<T> {
             | BasicInst::Ecalli { .. }
             | BasicInst::StoreAbsolute { .. }
             | BasicInst::StoreIndirect { .. }
-            | BasicInst::Memset { .. } => true,
+            | BasicInst::Memset => true,
             BasicInst::LoadAbsolute { .. } | BasicInst::LoadIndirect { .. } => !config.elide_unnecessary_loads,
             BasicInst::Nop
             | BasicInst::LoadHeapBase { .. }
@@ -899,7 +900,7 @@ impl<T> BasicInst<T> {
             | BasicInst::AnyAny { .. }
             | BasicInst::Cmov { .. }
             | BasicInst::Sbrk { .. }
-            | BasicInst::Memset { .. }
+            | BasicInst::Memset
             | BasicInst::Ecalli { .. } => (None, None),
         }
     }

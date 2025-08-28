@@ -219,8 +219,8 @@ fn restart_with_sudo() -> Result<(), String> {
 
         let mut argv = Vec::new();
         argv.push(sudo_path.as_ptr().cast());
-        argv.push(b"--preserve-env=RUST_LOG\0".as_ptr().cast());
-        argv.push(b"--\0".as_ptr().cast());
+        argv.push(c"--preserve-env=RUST_LOG".as_ptr().cast());
+        argv.push(c"--".as_ptr().cast());
         argv.push(exe.as_ptr());
         argv.extend(
             cmdline[..cmdline.len() - 1]

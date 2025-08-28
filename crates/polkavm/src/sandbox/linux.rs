@@ -883,7 +883,7 @@ unsafe fn child_main(uid_map: &str, gid_map: &str, fds: ChildFds, sandboxing_ena
         linux_raw::sys_kill(pid, linux_raw::SIGSTOP)?;
     }
 
-    let child_argv: [*const u8; 2] = [b"polkavm-zygote\0".as_ptr(), core::ptr::null()];
+    let child_argv: [*const u8; 2] = [cstr!("polkavm-zygote").as_ptr().cast(), core::ptr::null()];
     let child_envp: [*const u8; 1] = [core::ptr::null()];
     linux_raw::sys_execveat(
         Some(fd_zygote.borrow()),

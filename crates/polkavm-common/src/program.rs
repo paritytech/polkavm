@@ -205,7 +205,7 @@ where
     }
 
     debug_assert!(code.len() <= u32::MAX as usize);
-    debug_assert_eq!(bitmask.len(), (code.len() + 7) / 8);
+    debug_assert_eq!(bitmask.len(), code.len().div_ceil(8));
     debug_assert!(offset as usize <= code.len());
     debug_assert!(get_bit_for_offset(bitmask, code.len(), offset), "bit at {offset} is zero");
 
@@ -256,7 +256,7 @@ where
     T: OpcodeVisitor,
 {
     debug_assert!(code.len() <= u32::MAX as usize);
-    debug_assert_eq!(bitmask.len(), (code.len() + 7) / 8);
+    debug_assert_eq!(bitmask.len(), code.len().div_ceil(8));
     debug_assert!(offset as usize <= code.len());
     debug_assert!(get_bit_for_offset(bitmask, code.len(), offset), "bit at {offset} is zero");
 
@@ -3123,8 +3123,7 @@ impl From<ProgramParseError> for alloc::string::String {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for ProgramParseError {}
+impl core::error::Error for ProgramParseError {}
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 #[repr(transparent)]
@@ -3697,7 +3696,10 @@ fn test_is_jump_target_valid() {
 
     macro_rules! g {
         ($code_length:expr, $bits:expr) => {{
-            let mut bitmask = [0; ($code_length + 7) / 8];
+            let mut bitmask = [0; {
+                let value: usize = $code_length;
+                value.div_ceil(8)
+            }];
             for bit in $bits {
                 let bit: usize = bit;
                 assert!(bit < $code_length);
@@ -3879,7 +3881,7 @@ where
     #[inline]
     fn new(instruction_set: I, code: &'a [u8], bitmask: &'a [u8], offset: u32, is_bounded: bool) -> Self {
         assert!(code.len() <= u32::MAX as usize);
-        assert_eq!(bitmask.len(), (code.len() + 7) / 8);
+        assert_eq!(bitmask.len(), code.len().div_ceil(8));
 
         let is_valid = get_bit_for_offset(bitmask, code.len(), offset);
         let mut is_done = false;

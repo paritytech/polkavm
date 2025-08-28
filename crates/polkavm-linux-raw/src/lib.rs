@@ -1001,7 +1001,8 @@ macro_rules! bpf {
 
     (@into_u32 $value:expr) => {{
         let value = $value;
-        if value as i128 > core::u32::MAX as i128 || (value as i128) < core::i32::MIN as i128 {
+        #[allow(clippy::cast_lossless)]
+        if value as i128 > u32::MAX as i128 || (value as i128) < i32::MIN as i128 {
             panic!("out of range value");
         }
         value as u32
@@ -1245,8 +1246,7 @@ impl core::fmt::Display for Error {
     }
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for Error {}
+impl core::error::Error for Error {}
 
 #[cfg(feature = "std")]
 impl From<std::string::String> for Error {

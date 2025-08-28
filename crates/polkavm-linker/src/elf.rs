@@ -188,23 +188,12 @@ impl Relocation {
     }
 }
 
+#[cfg_attr(test, derive(Default))]
 pub struct Elf<'data> {
     sections: Vec<Section<'data>>,
     section_index_by_name: HashMap<String, Vec<SectionIndex>>,
     symbols: Vec<Symbol>,
     is_64_bit: bool,
-}
-
-#[cfg(test)]
-impl<'data> Default for Elf<'data> {
-    fn default() -> Self {
-        Elf {
-            sections: Default::default(),
-            section_index_by_name: Default::default(),
-            symbols: Default::default(),
-            is_64_bit: false,
-        }
-    }
 }
 
 impl<'data> Elf<'data> {

@@ -962,8 +962,7 @@ pub enum MemoryAccessError {
     Error(Error),
 }
 
-#[cfg(feature = "std")]
-impl std::error::Error for MemoryAccessError {}
+impl core::error::Error for MemoryAccessError {}
 
 impl core::fmt::Display for MemoryAccessError {
     fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {

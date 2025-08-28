@@ -26,7 +26,7 @@ version = "0.28.0"
 authors = ["Jan Bujak <jan@parity.io>", "Parity Technologies <admin@parity.io>"]
 license = "MIT/Apache-2.0"
 edition = "2021"
-rust-version = "1.75.0"
+rust-version = "1.86.0"
 repository = "https://github.com/koute/polkavm"
 
 [workspace.dependencies]
@@ -81,6 +81,9 @@ type_complexity = "allow"
 too_many_arguments = "allow"
 needless_late_init = "allow"
 neg_multiply = "allow"
+needless_lifetimes = "allow"
+unnecessary_map_or = "allow"
+manual_range_patterns = "allow"
 
 # These are are 'allow' by default.
 alloc_instead_of_core = "warn"

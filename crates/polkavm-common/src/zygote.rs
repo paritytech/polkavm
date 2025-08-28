@@ -19,7 +19,7 @@ macro_rules! define_address_table {
         }
 
         #[derive(Copy, Clone)]
-        #[repr(packed)]
+        #[repr(Rust, packed)]
         pub struct $name_packed {
             $(pub $name: u64),+
         }
@@ -317,6 +317,7 @@ pub struct VmCtx {
 #[test]
 fn test_gas_offset() {
     // NOTE: The codegen depends on the gas field being at this *exact* offset.
+    // SAFETY: It's valid to initialize VmCtx will all zeros, and it's only test code anyway.
     #[allow(unsafe_code)]
     let vmctx: VmCtx = unsafe { core::mem::zeroed() };
     assert_eq!(core::ptr::addr_of!(vmctx.gas) as usize - core::ptr::addr_of!(vmctx) as usize, 0x60);

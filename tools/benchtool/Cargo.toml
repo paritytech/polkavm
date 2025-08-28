@@ -29,6 +29,9 @@ wasmtime = { version = "26.0.1", default-features = false, features = ["cranelif
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(dummy)'] }
 
+[lints.clippy]
+unnecessary_map_or = "allow"
+
 [features]
 default = [
     "native",

@@ -254,7 +254,7 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
 
         fn parse_slice(text: &str) -> Option<Vec<u8>> {
             let text = text.trim().replace(' ', "");
-            if text.bytes().len() % 2 != 0 {
+            if text.len() % 2 != 0 {
                 return None;
             }
 
