@@ -101,6 +101,8 @@ jobs:
       run: cd crates/polkavm-zygote && rustup component add rustfmt
     - name: Install rustfmt (guest-programs toolchain)
       run: cd guest-programs && rustup component add rustfmt
+    - name: Install rustfmt (fuzz toolchain)
+      run: cd fuzz && rustup component add rustfmt
     - name: Run rustfmt
       run: ./ci/jobs/rustfmt.sh
   pallet-revive-tests:

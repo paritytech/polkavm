@@ -514,7 +514,7 @@ impl InterpretedInstance {
             ));
         }
 
-        let compiled_handlers_soft_limit = compiled_handlers_hard_limit - cast(max_block_size + 1).to_usize();
+        let compiled_handlers_soft_limit = compiled_handlers_hard_limit - (cast(max_block_size).to_usize() + 1);
         self.max_compiled_handlers = Some(compiled_handlers_soft_limit);
         Ok(())
     }

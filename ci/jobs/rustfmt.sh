@@ -15,7 +15,10 @@ cd ../..
 
 echo ">> cargo fmt (guests)"
 cd guest-programs
-
 cargo fmt --check --all
+cd ..
 
-cd ../..
+echo ">> cargo fmt (fuzz)"
+cd fuzz
+cargo fmt --check --all
+cd ..
