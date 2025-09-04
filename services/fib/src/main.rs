@@ -22,6 +22,8 @@ use utils::host_functions::{export, fetch, gas, write};
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
+
+polkavm_derive::sbrk(1024*1024);
     let mut num_segments: u32 = 1;
     let (_wi_index, _wi_service_index, wi_payload_start_address, _wi_payload_length, _wphash) =
         if let Some(args) = parse_refine_args(start_address, length) {
@@ -269,6 +271,7 @@ static mut buffer: [u8; 4104] = [
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
     // parse accumulate args
+    polkavm_derive::sbrk(1024*1024);
     let (_timeslot, _service_index, number_of_operands) = if let Some(args) = parse_accumulate_args(start_address, length) {
         (args.t, args.s, args.number_of_operands)
     } else {

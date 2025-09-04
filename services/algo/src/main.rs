@@ -38,6 +38,7 @@ pub struct XorShift64Star {
     state: u64,
 }
 
+
 impl XorShift64Star {
     pub const fn new(seed: u64) -> Self {
         // seed must be nonzero
@@ -5004,6 +5005,8 @@ fn run_program(idx: u8) -> u64 {
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn refine(start_address: u64, length: u64) -> (u64, u64) {
+
+       polkavm_derive::sbrk(1024*1024);
     let args = if let Some(a) = parse_refine_args(start_address, length) {
         a
     } else {
@@ -5047,6 +5050,8 @@ static mut operand: [u8; 512] = [0; 512];
 
 #[polkavm_derive::polkavm_export]
 extern "C" fn accumulate(start_address: u64, length: u64) -> (u64, u64) {
+       polkavm_derive::sbrk(1024*1024);
+
     let (_timeslot, _service_index, number_of_operands) = if let Some(args) = parse_accumulate_args(start_address, length) {
         (args.t, args.s, args.number_of_operands)
     } else {
