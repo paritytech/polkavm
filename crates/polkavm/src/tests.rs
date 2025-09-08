@@ -4135,7 +4135,7 @@ fn run_riscv_test(engine_config: Config, elf: &[u8], testnum_reg: Reg, optimize:
     instance.set_next_program_counter(entry_point);
     let result = instance.run().unwrap();
     if !matches!(result, InterruptKind::Finished) {
-        panic!("test {} failed: unexpecte result: {result:?}", instance.reg(testnum_reg));
+        panic!("test {} failed: unexpected result: {result:?}", instance.reg(testnum_reg));
     }
 }
 
