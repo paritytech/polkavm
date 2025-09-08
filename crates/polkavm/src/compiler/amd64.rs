@@ -147,11 +147,13 @@ macro_rules! load_store_operand {
     };
 }
 
+#[derive(Copy, Clone)]
 enum Signedness {
     Signed,
     Unsigned,
 }
 
+#[derive(Copy, Clone)]
 enum DivRem {
     Div,
     Rem,
@@ -353,24 +355,6 @@ where
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
-    fn clear_reg(&mut self, reg: RawReg) {
-        let reg = conv_reg(reg);
-        self.push(xor((RegSize::R32, reg, reg)));
-    }
-
-    #[cfg_attr(not(debug_assertions), inline(always))]
-    fn fill_with_ones(&mut self, reg: RawReg) {
-        match self.reg_size() {
-            RegSize::R32 => {
-                self.push(mov_imm(conv_reg(reg), imm32(0xffffffff)));
-            }
-            RegSize::R64 => {
-                self.push(mov_imm(conv_reg(reg), imm64(cast(0xffffffff_u32).to_signed())));
-            }
-        }
-    }
-
-    #[cfg_attr(not(debug_assertions), inline(always))]
     fn compare_reg_reg(&mut self, d: RawReg, s1: RawReg, s2: RawReg, condition: Condition) {
         let reg_size = self.reg_size();
         let s1 = conv_reg(s1);
@@ -552,112 +536,6 @@ where
         asm.assert_reserved_exactly_as_needed();
     }
 
-    fn div_rem(&mut self, reg_size: RegSize, d: RawReg, s1: RawReg, s2: RawReg, div_rem: DivRem, kind: Signedness) {
-        // Unlike most other architectures RISC-V doesn't trap on division by zero
-        // nor on division with overflow, and has well defined results in such cases.
-
-        let label_divisor_is_zero = self.asm.forward_declare_label();
-        let label_next = self.asm.forward_declare_label();
-
-        self.push(test((reg_size, conv_reg(s2), conv_reg(s2))));
-        self.push(jcc_label8(Condition::Equal, label_divisor_is_zero));
-
-        if matches!(kind, Signedness::Signed) {
-            let label_normal = self.asm.forward_declare_label();
-            match reg_size {
-                RegSize::R32 => {
-                    self.push(cmp((conv_reg(s1), imm32(cast(i32::MIN).to_unsigned()))));
-                    self.push(jcc_label8(Condition::NotEqual, label_normal));
-                }
-                RegSize::R64 => {
-                    self.push(mov(RegSize::R64, TMP_REG, conv_reg(s1)));
-                    self.push(cmp((TMP_REG, imm32(0))));
-                    self.push(jcc_label8(Condition::NotEqual, label_normal));
-                    self.push(shr_imm(RegSize::R64, TMP_REG, 32));
-                    self.push(cmp((TMP_REG, imm32(cast(i32::MIN).to_unsigned()))));
-                    self.push(jcc_label8(Condition::NotEqual, label_normal));
-                }
-            }
-
-            match reg_size {
-                RegSize::R32 => self.push(cmp((conv_reg(s2), imm32(cast(-1_i32).to_unsigned())))),
-                RegSize::R64 => self.push(cmp((conv_reg(s2), imm64(-1_i32)))),
-            }
-            self.push(jcc_label8(Condition::NotEqual, label_normal));
-
-            match div_rem {
-                DivRem::Div => self.mov(d, s1),
-                DivRem::Rem => self.clear_reg(d),
-            }
-            self.push(jmp_label8(label_next));
-            self.define_label(label_normal);
-        }
-
-        // The division instruction always accepts the dividend and returns the result in rdx:rax.
-        // This isn't great because we're using these registers for the VM's registers, so we need
-        // to do all of this in such a way that those won't be accidentally overwritten.
-
-        const _: () = {
-            assert!(TMP_REG as u32 != rdx as u32);
-            assert!(TMP_REG as u32 != rax as u32);
-        };
-
-        // Push the registers that will be clobbered.
-        self.push(push(rdx));
-        self.push(push(rax));
-
-        // Push the operands.
-        self.push(push(conv_reg(s1)));
-        self.push(push(conv_reg(s2)));
-
-        // Pop the divisor.
-        self.push(pop(TMP_REG));
-
-        // Pop the dividend.
-        self.push(xor((RegSize::R32, rdx, rdx)));
-        self.push(pop(rax));
-
-        match kind {
-            Signedness::Unsigned => self.push(div(reg_size, TMP_REG)),
-            Signedness::Signed => {
-                match reg_size {
-                    RegSize::R32 => self.push(cdq()),
-                    RegSize::R64 => self.push(cqo()),
-                }
-                self.push(idiv(reg_size, TMP_REG))
-            }
-        }
-
-        // Move the result to the temporary register.
-        match div_rem {
-            DivRem::Div => self.push(mov(reg_size, TMP_REG, rax)),
-            DivRem::Rem => self.push(mov(reg_size, TMP_REG, rdx)),
-        }
-
-        // Restore the original registers.
-        self.push(pop(rax));
-        self.push(pop(rdx));
-
-        // Move the output into the destination registers.
-        self.push(mov(reg_size, conv_reg(d), TMP_REG));
-
-        // Go to the next instruction.
-        self.push(jmp_label8(label_next));
-
-        self.define_label(label_divisor_is_zero);
-        match div_rem {
-            DivRem::Div => self.fill_with_ones(d),
-            DivRem::Rem if d == s1 => {}
-            DivRem::Rem => self.mov(d, s1),
-        }
-
-        self.define_label(label_next);
-
-        if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
-            self.push(movsxd_32_to_64(conv_reg(d), conv_reg(d)))
-        }
-    }
-
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn vmctx_field(offset: usize) -> MemOp {
         match S::KIND {
@@ -829,6 +707,186 @@ where
         self.save_registers_to_vmctx();
         self.push(mov_imm64(TMP_REG, S::address_table().syscall_not_enough_gas));
         self.push(jmp(TMP_REG));
+    }
+
+    fn emit_divrem_trampoline_common(&mut self, reg_size: RegSize, div_rem: DivRem, kind: Signedness) {
+        let label = match (reg_size, div_rem, kind) {
+            (RegSize::R32, DivRem::Div, Signedness::Unsigned) => {
+                log::trace!("Emitting trampoline: divu32");
+                self.div32u_label
+            }
+            (RegSize::R32, DivRem::Div, Signedness::Signed) => {
+                log::trace!("Emitting trampoline: divs32");
+                self.div32s_label
+            }
+            (RegSize::R32, DivRem::Rem, Signedness::Unsigned) => {
+                log::trace!("Emitting trampoline: remu32");
+                self.rem32u_label
+            }
+            (RegSize::R32, DivRem::Rem, Signedness::Signed) => {
+                log::trace!("Emitting trampoline: rems32");
+                self.rem32s_label
+            }
+            (RegSize::R64, DivRem::Div, Signedness::Unsigned) => {
+                log::trace!("Emitting trampoline: divu64");
+                self.div64u_label
+            }
+            (RegSize::R64, DivRem::Div, Signedness::Signed) => {
+                log::trace!("Emitting trampoline: divs64");
+                self.div64s_label
+            }
+            (RegSize::R64, DivRem::Rem, Signedness::Unsigned) => {
+                log::trace!("Emitting trampoline: remu64");
+                self.rem64u_label
+            }
+            (RegSize::R64, DivRem::Rem, Signedness::Signed) => {
+                log::trace!("Emitting trampoline: rems64");
+                self.rem64s_label
+            }
+        };
+
+        self.define_label(label);
+        self.push(push(rax));
+        self.push(push(rdx));
+        self.push(push(rbx));
+
+        let dividend_address = if matches!(kind, Signedness::Signed) {
+            self.push(push(r12));
+
+            reg_indirect(RegSize::R64, rsp + 40)
+        } else {
+            reg_indirect(RegSize::R64, rsp + 32)
+        };
+
+        // Dividend in rax, divisor in rcx (TMP_REG).
+        self.push(load(LoadKind::U64, rax, dividend_address));
+
+        // Create mask for division-by-zero check.
+        // if divisor == 0 then rbx = 1 else rbx = 0
+        self.push(xor((RegSize::R32, rbx, rbx)));
+        self.push(test((reg_size, TMP_REG, TMP_REG)));
+        self.push(setcc(Condition::Equal, rbx));
+
+        if matches!(kind, Signedness::Signed) {
+            // rdx = (dividend == i32::MIN) ? 1 : 0
+            match reg_size {
+                RegSize::R32 => self.push(mov_imm(rdx, imm32(cast(i32::MIN).to_unsigned()))),
+                RegSize::R64 => self.push(mov_imm64(rdx, cast(i64::MIN).to_unsigned())),
+            }
+
+            self.push(cmp((reg_size, rax, rdx)));
+            self.push(setcc(Condition::Equal, rdx));
+
+            // r12 = (divisor == -1) ? 1 : 0
+            self.push(xor((RegSize::R32, r12, r12)));
+            match reg_size {
+                RegSize::R32 => self.push(cmp((TMP_REG, imm32(cast(-1_i32).to_unsigned())))),
+                RegSize::R64 => self.push(cmp((TMP_REG, imm64(-1_i32)))),
+            }
+            self.push(setcc(Condition::Equal, r12));
+
+            // r12 = (dividend == i32::MIN && divisor == -1) ? 1 : 0
+            self.push(and((reg_size, r12, rdx)));
+
+            // ZF is tainted, update it to reflect whether we have a division-by-zero or overflow.
+            self.push(mov(reg_size, rdx, rbx));
+            self.push(or((reg_size, rdx, r12)));
+
+            // safe_divisor = if mask != 0 then 1 else divisor
+            self.push(cmov(Condition::NotEqual, reg_size, TMP_REG, rdx));
+        } else {
+            self.push(cmov(Condition::Equal, reg_size, TMP_REG, rbx));
+        }
+
+        // Actual division.
+        match kind {
+            Signedness::Unsigned => {
+                self.push(xor((RegSize::R32, rdx, rdx)));
+                self.push(div(reg_size, TMP_REG))
+            }
+            Signedness::Signed => {
+                match reg_size {
+                    RegSize::R32 => self.push(cdq()),
+                    RegSize::R64 => self.push(cqo()),
+                }
+                self.push(idiv(reg_size, TMP_REG))
+            }
+        }
+
+        let result = match div_rem {
+            DivRem::Div => {
+                // select quotient: if overflow, return i32::MIN
+                if matches!(kind, Signedness::Signed) {
+                    // r12 = (dividend == i32::MIN && divisor == -1) ? i32::MIN : 0
+                    match reg_size {
+                        RegSize::R32 => self.push(shl_imm(reg_size, r12, 31)),
+                        RegSize::R64 => self.push(shl_imm(reg_size, r12, 63)),
+                    }
+
+                    self.push(cmov(Condition::NotEqual, reg_size, rax, r12));
+                }
+
+                // select quotient: if divisor was 0, return -1
+                self.push(neg(reg_size, rbx));
+                self.push(cmov(Condition::NotEqual, reg_size, rax, rbx));
+
+                rax
+            }
+            DivRem::Rem => {
+                // select remainder: if overflow, return 0
+                if matches!(kind, Signedness::Signed) {
+                    self.push(xor((r12, imm32(1))));
+                    self.push(cmov(Condition::Equal, reg_size, rdx, r12));
+                }
+
+                // select remainder: if divisor was 0, return dividend
+                self.push(test((reg_size, rbx, rbx)));
+                self.push(cmov(Condition::NotEqual, reg_size, rdx, dividend_address));
+
+                rdx
+            }
+        };
+
+        if reg_size == RegSize::R32 && B::BITNESS == Bitness::B64 {
+            self.push(movsxd_32_to_64(TMP_REG, result));
+        } else {
+            self.push(mov(reg_size, TMP_REG, result));
+        }
+
+        // Restore stack and return.
+        if matches!(kind, Signedness::Signed) {
+            self.push(pop(r12));
+        }
+
+        self.push(pop(rbx));
+        self.push(pop(rdx));
+        self.push(pop(rax));
+        self.push(ret());
+    }
+
+    pub(crate) fn emit_divrem_trampoline(&mut self) {
+        log::trace!("Emitting trampoline: divrem");
+
+        polkavm_common::static_assert!(TMP_REG as u32 != rdx as u32);
+        polkavm_common::static_assert!(TMP_REG as u32 != rax as u32);
+
+        // Unsigned 32-bit division.
+        self.emit_divrem_trampoline_common(RegSize::R32, DivRem::Div, Signedness::Unsigned);
+        self.emit_divrem_trampoline_common(RegSize::R32, DivRem::Rem, Signedness::Unsigned);
+
+        // Signed 32-bit division.
+        self.emit_divrem_trampoline_common(RegSize::R32, DivRem::Div, Signedness::Signed);
+        self.emit_divrem_trampoline_common(RegSize::R32, DivRem::Rem, Signedness::Signed);
+
+        if B::BITNESS == Bitness::B64 {
+            // Unsigned 64-bit division.
+            self.emit_divrem_trampoline_common(RegSize::R64, DivRem::Div, Signedness::Unsigned);
+            self.emit_divrem_trampoline_common(RegSize::R64, DivRem::Rem, Signedness::Unsigned);
+
+            // Signed 64-bit division.
+            self.emit_divrem_trampoline_common(RegSize::R64, DivRem::Div, Signedness::Signed);
+            self.emit_divrem_trampoline_common(RegSize::R64, DivRem::Rem, Signedness::Signed);
+        }
     }
 
     pub(crate) fn trace_execution(&mut self, code_offset: u32) {
@@ -1781,48 +1839,74 @@ where
         }
     }
 
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn divrem(&mut self, reg_size: RegSize, div_rem: DivRem, kind: Signedness, d: RawReg, s1: RawReg, s2: RawReg) {
+        let label = match (reg_size, div_rem, kind) {
+            (RegSize::R32, DivRem::Div, Signedness::Unsigned) => self.div32u_label,
+            (RegSize::R32, DivRem::Div, Signedness::Signed) => self.div32s_label,
+            (RegSize::R32, DivRem::Rem, Signedness::Unsigned) => self.rem32u_label,
+            (RegSize::R32, DivRem::Rem, Signedness::Signed) => self.rem32s_label,
+            (RegSize::R64, DivRem::Div, Signedness::Unsigned) => self.div64u_label,
+            (RegSize::R64, DivRem::Div, Signedness::Signed) => self.div64s_label,
+            (RegSize::R64, DivRem::Rem, Signedness::Unsigned) => self.rem64u_label,
+            (RegSize::R64, DivRem::Rem, Signedness::Signed) => self.rem64s_label,
+        };
+
+        let d = conv_reg(d);
+        let s1 = conv_reg(s1);
+        let s2 = conv_reg(s2);
+
+        let asm = self.asm.reserve::<polkavm_assembler::U5>();
+        let asm = asm.push(mov(reg_size, TMP_REG, s2));
+        let asm = asm.push(push(s1));
+        let asm = asm.push(call_label32(label));
+        let asm = asm.push(pop(d));
+        let asm = asm.push(mov(RegSize::R64, d, TMP_REG));
+        asm.assert_reserved_exactly_as_needed();
+    }
+
     #[inline(always)]
     pub fn div_unsigned_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
-        self.div_rem(RegSize::R32, d, s1, s2, DivRem::Div, Signedness::Unsigned);
+        self.divrem(RegSize::R32, DivRem::Div, Signedness::Unsigned, d, s1, s2);
     }
 
     #[inline(always)]
     pub fn div_unsigned_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         assert_eq!(B::BITNESS, Bitness::B64);
-        self.div_rem(RegSize::R64, d, s1, s2, DivRem::Div, Signedness::Unsigned);
+        self.divrem(RegSize::R64, DivRem::Div, Signedness::Unsigned, d, s1, s2);
     }
 
     #[inline(always)]
     pub fn div_signed_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
-        self.div_rem(RegSize::R32, d, s1, s2, DivRem::Div, Signedness::Signed);
+        self.divrem(RegSize::R32, DivRem::Div, Signedness::Signed, d, s1, s2);
     }
 
     #[inline(always)]
     pub fn div_signed_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         assert_eq!(B::BITNESS, Bitness::B64);
-        self.div_rem(RegSize::R64, d, s1, s2, DivRem::Div, Signedness::Signed);
+        self.divrem(RegSize::R64, DivRem::Div, Signedness::Signed, d, s1, s2);
     }
 
     #[inline(always)]
     pub fn rem_unsigned_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
-        self.div_rem(RegSize::R32, d, s1, s2, DivRem::Rem, Signedness::Unsigned);
+        self.divrem(RegSize::R32, DivRem::Rem, Signedness::Unsigned, d, s1, s2);
     }
 
     #[inline(always)]
     pub fn rem_unsigned_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         assert_eq!(B::BITNESS, Bitness::B64);
-        self.div_rem(RegSize::R64, d, s1, s2, DivRem::Rem, Signedness::Unsigned);
+        self.divrem(RegSize::R64, DivRem::Rem, Signedness::Unsigned, d, s1, s2);
     }
 
     #[inline(always)]
     pub fn rem_signed_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
-        self.div_rem(RegSize::R32, d, s1, s2, DivRem::Rem, Signedness::Signed);
+        self.divrem(RegSize::R32, DivRem::Rem, Signedness::Signed, d, s1, s2);
     }
 
     #[inline(always)]
     pub fn rem_signed_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         assert_eq!(B::BITNESS, Bitness::B64);
-        self.div_rem(RegSize::R64, d, s1, s2, DivRem::Rem, Signedness::Signed);
+        self.divrem(RegSize::R64, DivRem::Rem, Signedness::Signed, d, s1, s2);
     }
 
     #[inline(always)]
