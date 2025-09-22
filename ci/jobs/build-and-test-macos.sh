@@ -14,3 +14,9 @@ POLKAVM_TRACE_EXECUTION=1 POLKAVM_ALLOW_INSECURE=1 POLKAVM_BACKEND=interpreter c
 
 echo ">> cargo run (examples, interpreter, aarch64-apple-darwin)"
 POLKAVM_TRACE_EXECUTION=1 POLKAVM_ALLOW_INSECURE=1 POLKAVM_BACKEND=interpreter cargo run --target=aarch64-apple-darwin -p hello-world-host
+
+echo ">> cargo test (generic-sandbox)"
+cargo test --features generic-sandbox -p polkavm -- \
+    tests::compiler_generic_ \
+    --skip tests::compiler_generic_memset_basic \
+    --skip tests::compiler_generic_memset_with_dynamic_paging
