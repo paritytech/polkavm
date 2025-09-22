@@ -746,6 +746,7 @@ impl Module {
             module: self.clone(),
             backend,
             crosscheck_instance,
+            host_side_aux_write_protect: false,
         })
     }
 
@@ -1033,6 +1034,7 @@ pub struct RawInstance {
     module: Module,
     backend: InstanceBackend,
     crosscheck_instance: Option<Box<InterpretedInstance>>,
+    host_side_aux_write_protect: bool,
 }
 
 impl RawInstance {
@@ -1259,7 +1261,25 @@ impl RawInstance {
 
         access_backend!(self.backend, |mut backend| backend
             .set_accessible_aux_size(size)
-            .into_result("failed to set accessible aux size"))
+            .into_result("failed to set accessible aux size"))?;
+
+        debug_assert_eq!(access_backend!(self.backend, |backend| backend.accessible_aux_size()), size);
+        Ok(())
+    }
+
+    /// Sets whether the aux data region is write-protected on the host-side.
+    ///
+    /// This affects `write_memory`, `zero_memory` and `is_memory_accessible`.
+    ///
+    /// Will return an error if called on an instance with dynamic paging enabled.
+    /// Infallible otherwise.
+    pub fn set_host_side_aux_write_protect(&mut self, is_write_protected: bool) -> Result<(), Error> {
+        if self.module.is_dynamic_paging() {
+            return Err("write-protecting the aux data region is only possible on modules without dynamic paging".into());
+        }
+
+        self.host_side_aux_write_protect = is_write_protected;
+        Ok(())
     }
 
     /// Resets the VM's memory to its initial state.
@@ -1285,7 +1305,8 @@ impl RawInstance {
             return false;
         }
 
-        if u64::from(address) + cast(size).to_u64() > 0x100000000 {
+        let upper_limit = if is_writable { self.get_write_upper_limit() } else { 0x100000000 };
+        if u64::from(address) + cast(size).to_u64() > upper_limit {
             return false;
         }
 
@@ -1391,6 +1412,15 @@ impl RawInstance {
         result
     }
 
+    fn get_write_upper_limit(&self) -> u64 {
+        if self.host_side_aux_write_protect {
+            debug_assert!(!self.module.is_dynamic_paging());
+            u64::from(self.module.memory_map().stack_address_high())
+        } else {
+            0x100000000
+        }
+    }
+
     /// Writes into the VM's memory.
     ///
     /// When dynamic paging is enabled calling this can be used to resolve a segfault. It can also
@@ -1407,7 +1437,7 @@ impl RawInstance {
             });
         }
 
-        if u64::from(address) + cast(data.len()).to_u64() > 0x100000000 {
+        if u64::from(address) + cast(data.len()).to_u64() > self.get_write_upper_limit() {
             return Err(MemoryAccessError::OutOfRangeAccess {
                 address,
                 length: cast(data.len()).to_u64(),
@@ -1551,7 +1581,7 @@ impl RawInstance {
             });
         }
 
-        if u64::from(address) + u64::from(length) > 0x100000000 {
+        if u64::from(address) + u64::from(length) > self.get_write_upper_limit() {
             return Err(MemoryAccessError::OutOfRangeAccess {
                 address,
                 length: u64::from(length),

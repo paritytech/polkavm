@@ -931,9 +931,6 @@ impl Sandbox {
         };
 
         if address >= self.aux_data_address && address_end < self.aux_data_address + self.aux_data_full_length {
-            if is_writable {
-                return Ok(());
-            }
             if address_end > self.aux_data_address + self.aux_data_length {
                 return Err(());
             }

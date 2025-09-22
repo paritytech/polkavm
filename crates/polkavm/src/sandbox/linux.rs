@@ -1995,11 +1995,10 @@ impl super::Sandbox for Sandbox {
         if !self.dynamic_paging_enabled {
             let memory_map = module.memory_map();
             let is_ok = if address >= memory_map.aux_data_address() {
-                let aux_data_size = module.memory_map().aux_data_size();
-                let aux_data_end = module.memory_map().aux_data_address() + aux_data_size;
-                let address_end = address as usize + data.len();
-                if address_end <= aux_data_end as usize {
-                    self.memory_mmap.as_slice_mut()[address as usize..address as usize + data.len()].copy_from_slice(data);
+                let aux_data_end = module.memory_map().aux_data_address() + self.aux_data_length;
+                let address_end = cast(address).to_usize() + data.len();
+                if address_end <= cast(aux_data_end).to_usize() {
+                    self.memory_mmap.as_slice_mut()[cast(address).to_usize()..address_end].copy_from_slice(data);
                     return Ok(());
                 } else {
                     false
@@ -2053,8 +2052,10 @@ impl super::Sandbox for Sandbox {
         if !self.dynamic_paging_enabled {
             let memory_map = module.memory_map();
             let is_ok = if address >= memory_map.aux_data_address() {
-                if u64::from(address) + u64::from(length) <= u64::from(memory_map.aux_data_range().end) {
-                    self.memory_mmap.as_slice_mut()[address as usize..address as usize + length as usize].fill(0);
+                let aux_data_end = module.memory_map().aux_data_address() + self.aux_data_length;
+                let address_end = cast(address).to_usize() + cast(length).to_usize();
+                if address_end <= cast(aux_data_end).to_usize() {
+                    self.memory_mmap.as_slice_mut()[cast(address).to_usize()..address_end].fill(0);
                     return Ok(());
                 } else {
                     false

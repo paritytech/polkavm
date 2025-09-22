@@ -2730,7 +2730,89 @@ fn aux_data_accessible_area(config: Config) {
     instance.set_next_program_counter(offsets[0]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
 
+    assert!(instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size - 3, 4, false));
+    assert!(instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 4, 4, false));
+    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 3, 4, false));
     assert!(instance.read_u32(module.memory_map().aux_data_address() + page_size - 3).is_ok());
+    assert!(instance
+        .read_u32(module.memory_map().aux_data_address() + page_size * 2 - 4)
+        .is_ok());
+    assert!(instance
+        .read_u32(module.memory_map().aux_data_address() + page_size * 2 - 3)
+        .is_err());
+
+    assert!(instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size - 3, 4, true));
+    assert!(instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 4, 4, true));
+    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 3, 4, true));
+    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2, 4, true));
+    assert!(instance
+        .write_u32(module.memory_map().aux_data_address() + page_size - 3, 0)
+        .is_ok());
+    assert!(instance
+        .write_u32(module.memory_map().aux_data_address() + page_size * 2 - 4, 0)
+        .is_ok());
+    assert!(instance
+        .write_u32(module.memory_map().aux_data_address() + page_size * 2 - 3, 0)
+        .is_err());
+    assert!(instance
+        .write_u32(module.memory_map().aux_data_address() + page_size * 2, 0)
+        .is_err());
+    assert!(instance
+        .zero_memory(module.memory_map().aux_data_address() + page_size - 3, 4)
+        .is_ok());
+    assert!(instance
+        .zero_memory(module.memory_map().aux_data_address() + page_size * 2 - 4, 4)
+        .is_ok());
+    assert!(instance
+        .zero_memory(module.memory_map().aux_data_address() + page_size * 2 - 3, 4)
+        .is_err());
+    assert!(instance
+        .zero_memory(module.memory_map().aux_data_address() + page_size * 2, 4)
+        .is_err());
+
+    instance.set_host_side_aux_write_protect(true).unwrap();
+
+    // Still readable as before.
+    assert!(instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size - 3, 4, false));
+    assert!(instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 4, 4, false));
+    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 3, 4, false));
+    assert!(instance.read_u32(module.memory_map().aux_data_address() + page_size - 3).is_ok());
+    assert!(instance
+        .read_u32(module.memory_map().aux_data_address() + page_size * 2 - 4)
+        .is_ok());
+    assert!(instance
+        .read_u32(module.memory_map().aux_data_address() + page_size * 2 - 3)
+        .is_err());
+
+    // Not writable anymore.
+    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size - 3, 4, true));
+    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 4, 4, true));
+    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 3, 4, true));
+    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2, 4, true));
+    assert!(instance
+        .write_u32(module.memory_map().aux_data_address() + page_size - 3, 0)
+        .is_err());
+    assert!(instance
+        .write_u32(module.memory_map().aux_data_address() + page_size * 2 - 4, 0)
+        .is_err());
+    assert!(instance
+        .write_u32(module.memory_map().aux_data_address() + page_size * 2 - 3, 0)
+        .is_err());
+    assert!(instance
+        .write_u32(module.memory_map().aux_data_address() + page_size * 2, 0)
+        .is_err());
+    assert!(instance
+        .zero_memory(module.memory_map().aux_data_address() + page_size - 3, 4)
+        .is_err());
+    assert!(instance
+        .zero_memory(module.memory_map().aux_data_address() + page_size * 2 - 4, 4)
+        .is_err());
+    assert!(instance
+        .zero_memory(module.memory_map().aux_data_address() + page_size * 2 - 3, 4)
+        .is_err());
+    assert!(instance
+        .zero_memory(module.memory_map().aux_data_address() + page_size * 2, 4)
+        .is_err());
 }
 
 fn access_memory_from_host(config: Config) {
