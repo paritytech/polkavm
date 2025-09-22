@@ -415,6 +415,21 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
 
         let rip = fetch_reg!(rip);
         let vmctx = &mut *vmctx;
+
+        // On Rosetta 2, the JMP emulation logic doesn't work same as on x64.
+        // Instead of triggering a GPF immdiately, it jumps to that address and then trigger a PF.
+        // Therefore the original program counter is lost.
+        // We fix this problem by storing the program counter in vmctx before jumping.
+        // See jump_indirect_impl for more details.
+        #[cfg(target_os = "macos")]
+        {
+            let is_invalid_rip = (rip >> 48) != 0;
+            if is_invalid_rip {
+                log::trace!("Jump table invalid address hit, returning to host");
+                trigger_exit(vmctx, ExitReason::Signal);
+            }
+        }
+
         if vmctx.program_range.contains(&rip) {
             use polkavm_common::regmap::NativeReg;
             for reg in polkavm_common::program::Reg::ALL {

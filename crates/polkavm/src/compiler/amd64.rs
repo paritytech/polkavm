@@ -920,6 +920,22 @@ where
                 asm.assert_reserved_exactly_as_needed();
             }
             SandboxKind::Generic => {
+                // On Rosetta 2, indirect jump to a non-canonical address doesn't trigger a SIGBUS right away.
+                // Instead, it jumps to the address, and then triggers a SIGBUS when trying to fetch the instruction.
+                // This means that previous program counter is now lost. There are other ways we can design it (by adding a
+                // dedicated jump table subroutine) but that would be less efficient.
+                // Therefore, let's store the executing address to the program counter before jumping.
+                #[cfg(target_os = "macos")]
+                {
+                    let label_start = self.asm.create_label();
+                    self.asm.push(lea_rip_label(TMP_REG, label_start));
+                    self.push(store(
+                        RegSize::R64,
+                        Self::vmctx_field(S::offset_table().next_native_program_counter),
+                        TMP_REG,
+                    ));
+                }
+
                 // TODO: This also could be more efficient.
                 self.push(lea_rip_label(TMP_REG, self.jump_table_label));
                 self.push(push(conv_reg(base)));
