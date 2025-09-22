@@ -325,6 +325,61 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
 
     let vmctx = THREAD_VMCTX.with(|thread_ctx| *thread_ctx.get());
     if !vmctx.is_null() {
+        #[cfg(target_os = "macos")]
+        macro_rules! macos_reg_field {
+            (rax) => {
+                (*context.uc_mcontext).__ss.__rax
+            };
+            (rbx) => {
+                (*context.uc_mcontext).__ss.__rbx
+            };
+            (rcx) => {
+                (*context.uc_mcontext).__ss.__rcx
+            };
+            (rdx) => {
+                (*context.uc_mcontext).__ss.__rdx
+            };
+            (rdi) => {
+                (*context.uc_mcontext).__ss.__rdi
+            };
+            (rsi) => {
+                (*context.uc_mcontext).__ss.__rsi
+            };
+            (rbp) => {
+                (*context.uc_mcontext).__ss.__rbp
+            };
+            (rsp) => {
+                (*context.uc_mcontext).__ss.__rsp
+            };
+            (r8) => {
+                (*context.uc_mcontext).__ss.__r8
+            };
+            (r9) => {
+                (*context.uc_mcontext).__ss.__r9
+            };
+            (r10) => {
+                (*context.uc_mcontext).__ss.__r10
+            };
+            (r11) => {
+                (*context.uc_mcontext).__ss.__r11
+            };
+            (r12) => {
+                (*context.uc_mcontext).__ss.__r12
+            };
+            (r13) => {
+                (*context.uc_mcontext).__ss.__r13
+            };
+            (r14) => {
+                (*context.uc_mcontext).__ss.__r14
+            };
+            (r15) => {
+                (*context.uc_mcontext).__ss.__r15
+            };
+            (rip) => {
+                (*context.uc_mcontext).__ss.__rip
+            };
+        }
+
         macro_rules! fetch_reg {
             ($reg:ident) => {{
                 #[cfg(target_os = "linux")]
@@ -333,7 +388,7 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
                 }
                 #[cfg(target_os = "macos")]
                 {
-                    (*context.uc_mcontext).__ss.$reg as u64
+                    macos_reg_field!($reg) as u64
                 }
                 #[cfg(target_os = "freebsd")]
                 {
@@ -343,19 +398,19 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
         }
 
         const X86_TRAP_PF: u64 = 14;
-        let is_page_fault = signal == sys::SIGSEGV && {
+        let is_page_fault = {
             #[cfg(target_os = "linux")]
             {
-                context.uc_mcontext.trapno == X86_TRAP_PF
+                signal == sys::SIGSEGV && context.uc_mcontext.trapno == X86_TRAP_PF
             }
-            // #[cfg(target_os = "macos")]
-            // {
-            //     (*context.uc_mcontext).__ss.trapno == X86_TRAP_PF
-            // }
-            // #[cfg(target_os = "freebsd")]
-            // {
-            //     context.uc_mcontext.mc_trapno == X86_TRAP_PF
-            // }
+            #[cfg(target_os = "macos")]
+            {
+                signal == sys::SIGBUS && (*context.uc_mcontext).__es.__trapno as u64 == X86_TRAP_PF
+            }
+            #[cfg(target_os = "freebsd")]
+            {
+                signal == sys::SIGBUS && context.uc_mcontext.mc_trapno == X86_TRAP_PF
+            }
         };
 
         let rip = fetch_reg!(rip);
@@ -401,14 +456,14 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
                     {
                         info.__bindgen_anon_1.__bindgen_anon_1._sifields._sigfault._addr as u64
                     }
-                    // #[cfg(target_os = "macos")]
-                    // {
-                    //     info.si_addr as u64
-                    // }
-                    // #[cfg(target_os = "freebsd")]
-                    // {
-                    //     info.si_addr as u64
-                    // }
+                    #[cfg(target_os = "macos")]
+                    {
+                        info.si_addr as u64
+                    }
+                    #[cfg(target_os = "freebsd")]
+                    {
+                        info.si_addr as u64
+                    }
                 };
 
                 log::trace!("Page fault at 0x{fault_address:x} (rip: 0x{rip:x})");
