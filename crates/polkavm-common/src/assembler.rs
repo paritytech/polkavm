@@ -447,9 +447,9 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                             ("clz", OpMarker::NONE) => Some(Instruction::count_leading_zero_bits_64 as F),
                             ("ctz", OpMarker::I32) => Some(Instruction::count_trailing_zero_bits_32 as F),
                             ("ctz", OpMarker::NONE) => Some(Instruction::count_trailing_zero_bits_64 as F),
-                            ("sext.b", _) => Some(Instruction::sign_extend_8 as F),
-                            ("sext.h", _) => Some(Instruction::sign_extend_16 as F),
-                            ("zext.h", _) => Some(Instruction::zero_extend_16 as F),
+                            ("sext8", _) => Some(Instruction::sign_extend_8 as F),
+                            ("sext16", _) => Some(Instruction::sign_extend_16 as F),
+                            ("zext16", _) => Some(Instruction::zero_extend_16 as F),
                             ("reverse", _) => Some(Instruction::reverse_byte as F),
                             _ => None,
                         };

@@ -2,7 +2,7 @@ pre: a0 = 0xaa
 pre: gas = 10000
 
 pub @main:
-    a2 = sext.b a0
+    a2 = sext8 a0
 
 post: a2 = 0xffffffffffffffaa
 post: gas = 9998

@@ -2516,19 +2516,19 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn sign_extend_8(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = sext.b {s}")
+        write!(self, "{d} = sext8 {s}")
     }
 
     fn sign_extend_16(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = sext.h {s}")
+        write!(self, "{d} = sext16 {s}")
     }
 
     fn zero_extend_16(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        write!(self, "{d} = zext.h {s}")
+        write!(self, "{d} = zext16 {s}")
     }
 
     fn reverse_byte(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {

@@ -2,7 +2,7 @@ pre: a0 = 0xaaaa
 pre: gas = 10000
 
 pub @main:
-    a2 = sext.h a0
+    a2 = sext16 a0
 
 post: a2 = 0xffffffffffffaaaa
 post: gas = 9998

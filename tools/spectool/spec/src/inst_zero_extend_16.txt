@@ -2,7 +2,7 @@ pre: a0 = 0xaaaa
 pre: gas = 10000
 
 pub @main:
-    a2 = zext.h a0
+    a2 = zext16 a0
 
 post: a2 = 0x00000000aaaa
 post: gas = 9998
