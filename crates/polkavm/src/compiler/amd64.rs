@@ -1036,9 +1036,24 @@ where
     #[inline(always)]
     pub fn xnor(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         let reg_size = self.reg_size();
-        self.xor(d, s1, s2);
-        let asm = self.asm.reserve::<U1>();
-        asm.push(not(reg_size, conv_reg(d))).assert_reserved_exactly_as_needed();
+        let d = conv_reg(d);
+        let s1 = conv_reg(s1);
+        let s2 = conv_reg(s2);
+
+        let asm = self.asm.reserve::<U3>();
+        match (d, s1, s2) {
+            // d = ~(d ^ s2)
+            (_, _, _) if d == s1 => asm.push(xor((reg_size, d, s2))).push_none(),
+            // d = ~(s1 ^ d)
+            (_, _, _) if d == s2 => asm.push(xor((reg_size, d, s1))).push_none(),
+            // d = ~(s1 ^ s2)
+            _ => {
+                let asm = asm.push(mov(reg_size, d, s1));
+                asm.push(xor((reg_size, d, s2)))
+            }
+        }
+        .push(not(reg_size, d))
+        .assert_reserved_exactly_as_needed();
     }
 
     #[inline(always)]
