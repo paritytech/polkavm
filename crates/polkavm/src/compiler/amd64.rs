@@ -1015,17 +1015,17 @@ where
 
         let asm = self.asm.reserve::<U3>();
         if d == s1 {
-            // d = d & ~s2
+            // d = d | ~s2
             let asm = asm.push(mov(reg_size, TMP_REG, s2));
             let asm = asm.push(not(reg_size, TMP_REG));
             asm.push(or((reg_size, d, TMP_REG)))
         } else if d == s2 {
-            // d = s1 & ~d
+            // d = s1 | ~d
             let asm = asm.push(not(reg_size, s2));
             let asm = asm.push(or((reg_size, d, s1)));
             asm.push_none()
         } else {
-            // d = s1 & ~s2
+            // d = s1 | ~s2
             let asm = asm.push(mov(reg_size, d, s2));
             let asm = asm.push(not(reg_size, d));
             asm.push(or((reg_size, d, s1)))
