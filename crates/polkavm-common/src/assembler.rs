@@ -1,4 +1,4 @@
-use crate::program::{Instruction, Reg};
+use crate::program::{Instruction, RawReg, Reg};
 use crate::utils::{parse_imm, parse_immediate, parse_reg, ParsedImmediate};
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
@@ -437,66 +437,26 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                     }
                 }
 
-                if let Some(index) = rhs.find("cpop ") {
-                    if let Some(src) = parse_reg(rhs[index + 5..].trim()) {
-                        match op_marker {
-                            OpMarker::I32 => {
-                                emit_and_continue!(Instruction::count_set_bits_32(dst.into(), src.into()));
-                            }
-                            OpMarker::NONE => {
-                                emit_and_continue!(Instruction::count_set_bits_64(dst.into(), src.into()));
-                            }
+                if let Some((name, rhs)) = split(rhs, " ") {
+                    if let Some(src) = parse_reg(rhs) {
+                        type F = fn(RawReg, RawReg) -> Instruction;
+                        let ctor = match (name, op_marker) {
+                            ("cpop", OpMarker::I32) => Some(Instruction::count_set_bits_32 as F),
+                            ("cpop", OpMarker::NONE) => Some(Instruction::count_set_bits_64 as F),
+                            ("clz", OpMarker::I32) => Some(Instruction::count_leading_zero_bits_32 as F),
+                            ("clz", OpMarker::NONE) => Some(Instruction::count_leading_zero_bits_64 as F),
+                            ("ctz", OpMarker::I32) => Some(Instruction::count_trailing_zero_bits_32 as F),
+                            ("ctz", OpMarker::NONE) => Some(Instruction::count_trailing_zero_bits_64 as F),
+                            ("sext.b", _) => Some(Instruction::sign_extend_8 as F),
+                            ("sext.h", _) => Some(Instruction::sign_extend_16 as F),
+                            ("zext.h", _) => Some(Instruction::zero_extend_16 as F),
+                            ("reverse", _) => Some(Instruction::reverse_byte as F),
+                            _ => None,
+                        };
+
+                        if let Some(ctor) = ctor {
+                            emit_and_continue!(ctor(dst.into(), src.into()));
                         }
-                    }
-                }
-
-                if let Some(index) = rhs.find("clz ") {
-                    if let Some(src) = parse_reg(rhs[index + 4..].trim()) {
-                        match op_marker {
-                            OpMarker::I32 => {
-                                emit_and_continue!(Instruction::count_leading_zero_bits_32(dst.into(), src.into()));
-                            }
-                            OpMarker::NONE => {
-                                emit_and_continue!(Instruction::count_leading_zero_bits_64(dst.into(), src.into()));
-                            }
-                        }
-                    }
-                }
-
-                if let Some(index) = rhs.find("ctz ") {
-                    if let Some(src) = parse_reg(rhs[index + 4..].trim()) {
-                        match op_marker {
-                            OpMarker::I32 => {
-                                emit_and_continue!(Instruction::count_trailing_zero_bits_32(dst.into(), src.into()));
-                            }
-                            OpMarker::NONE => {
-                                emit_and_continue!(Instruction::count_trailing_zero_bits_64(dst.into(), src.into()));
-                            }
-                        }
-                    }
-                }
-
-                if let Some(index) = rhs.find("sext.b ") {
-                    if let Some(src) = parse_reg(rhs[index + 7..].trim()) {
-                        emit_and_continue!(Instruction::sign_extend_8(dst.into(), src.into()));
-                    }
-                }
-
-                if let Some(index) = rhs.find("sext.h ") {
-                    if let Some(src) = parse_reg(rhs[index + 7..].trim()) {
-                        emit_and_continue!(Instruction::sign_extend_16(dst.into(), src.into()));
-                    }
-                }
-
-                if let Some(index) = rhs.find("zext.h ") {
-                    if let Some(src) = parse_reg(rhs[index + 7..].trim()) {
-                        emit_and_continue!(Instruction::zero_extend_16(dst.into(), src.into()));
-                    }
-                }
-
-                if let Some(index) = rhs.find("reverse ") {
-                    if let Some(src) = parse_reg(rhs[index + 8..].trim()) {
-                        emit_and_continue!(Instruction::reverse_byte(dst.into(), src.into()));
                     }
                 }
 
@@ -519,14 +479,9 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                     emit_and_continue!(MaybeInstruction::LoadLabelAddress(dst, label.to_owned()));
                 }
 
-                if let Some(index) = rhs.find("~(") {
-                    let rhs = rhs[index + 2..].trim();
-                    if let Some(index) = rhs.find(')') {
-                        let rhs = rhs[..index].trim();
-                        if let Some(index) = rhs.find('^') {
-                            let src1 = rhs[..index].trim();
-                            let src2 = rhs[index + 1..].trim();
-
+                if let Some(rhs) = rhs.strip_prefix("~(") {
+                    if let Some(rhs) = rhs.strip_suffix(')') {
+                        if let Some((src1, src2)) = split(rhs.trim(), "^") {
                             if let Some(src1) = parse_reg(src1) {
                                 if let Some(src2) = parse_reg(src2) {
                                     let dst = dst.into();
@@ -884,45 +839,24 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                     }
                 }
 
-                enum MaxMinOp {
-                    Max,
-                    MaxUnsigned,
-                    Min,
-                    MinUnsigned,
-                }
+                if let Some(rhs) = rhs.strip_suffix(')') {
+                    let rhs = rhs.trim();
+                    if let Some((name, rhs)) = split(rhs, "(") {
+                        type F = fn(RawReg, RawReg, RawReg) -> Instruction;
+                        let ctor = match name {
+                            "maxs" => Some(Instruction::maximum as F),
+                            "maxu" => Some(Instruction::maximum_unsigned as F),
+                            "mins" => Some(Instruction::minimum as F),
+                            "minu" => Some(Instruction::minimum_unsigned as F),
+                            _ => None,
+                        };
 
-                #[allow(clippy::manual_map)]
-                let min_max_op = if let Some(index) = rhs.find("maxs(") {
-                    Some((index, 5, MaxMinOp::Max))
-                } else if let Some(index) = rhs.find("maxu(") {
-                    Some((index, 5, MaxMinOp::MaxUnsigned))
-                } else if let Some(index) = rhs.find("mins(") {
-                    Some((index, 5, MaxMinOp::Min))
-                } else if let Some(index) = rhs.find("minu(") {
-                    Some((index, 5, MaxMinOp::MinUnsigned))
-                } else {
-                    None
-                };
-
-                if let Some((index, op_len, op)) = min_max_op {
-                    let rhs = rhs[index + op_len..].trim();
-                    if let Some(index) = rhs.find(')') {
-                        let rhs = rhs[..index].trim();
-                        if let Some(index) = rhs.find(',') {
-                            let src1 = rhs[..index].trim();
-                            let src2 = rhs[index + 1..].trim();
-
-                            if let Some(src1) = parse_reg(src1) {
-                                if let Some(src2) = parse_reg(src2) {
-                                    let dst = dst.into();
-                                    let src1 = src1.into();
-                                    let src2 = src2.into();
-                                    emit_and_continue!(match op {
-                                        MaxMinOp::Max => Instruction::maximum(dst, src1, src2),
-                                        MaxMinOp::MaxUnsigned => Instruction::maximum_unsigned(dst, src1, src2),
-                                        MaxMinOp::Min => Instruction::minimum(dst, src1, src2),
-                                        MaxMinOp::MinUnsigned => Instruction::minimum_unsigned(dst, src1, src2),
-                                    });
+                        if let Some(ctor) = ctor {
+                            if let Some((src1, src2)) = split(rhs, ",") {
+                                if let Some(src1) = parse_reg(src1) {
+                                    if let Some(src2) = parse_reg(src2) {
+                                        emit_and_continue!(ctor(dst.into(), src1.into(), src2.into()));
+                                    }
                                 }
                             }
                         }
