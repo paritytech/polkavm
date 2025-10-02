@@ -3,7 +3,7 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 
-rustup toolchain install --component=rust-src 1.88.0
+rustup toolchain install --component=rust-src 1.91.0
 
 POLKAVM_CRATES_ROOT="$(pwd)/proxy-crates"
 
@@ -21,9 +21,9 @@ git fetch --depth=1 origin $COMMIT
 git checkout $COMMIT
 
 echo '[toolchain]' > rust-toolchain.toml
-echo 'channel = "1.88.0"' >> rust-toolchain.toml
+echo 'channel = "1.91.0"' >> rust-toolchain.toml
 
-PALLET_REVIVE_FIXTURES_RUSTUP_TOOLCHAIN=1.88.0 \
+PALLET_REVIVE_FIXTURES_RUSTUP_TOOLCHAIN=1.91.0 \
 PALLET_REVIVE_FIXTURES_STRIP=0 \
 PALLET_REVIVE_FIXTURES_OPTIMIZE=1 \
 cargo test \

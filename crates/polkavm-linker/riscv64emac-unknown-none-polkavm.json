@@ -13,7 +13,7 @@
   "max-atomic-width": 64,
   "panic-strategy": "abort",
   "relocation-model": "pie",
-  "target-pointer-width": "64",
+  "target-pointer-width": 64,
   "singlethread": true,
   "pre-link-args": {
     "ld": [
