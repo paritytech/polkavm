@@ -1055,11 +1055,24 @@ struct BasicBlock<BasicT, ControlT> {
     source: Source,
     ops: Vec<(SourceStack, BasicInst<BasicT>)>,
     next: EndOfBlock<ControlT>,
+    is_function: bool,
 }
 
 impl<BasicT, ControlT> BasicBlock<BasicT, ControlT> {
-    fn new(target: BlockTarget, source: Source, ops: Vec<(SourceStack, BasicInst<BasicT>)>, next: EndOfBlock<ControlT>) -> Self {
-        Self { target, source, ops, next }
+    fn new(
+        target: BlockTarget,
+        source: Source,
+        ops: Vec<(SourceStack, BasicInst<BasicT>)>,
+        next: EndOfBlock<ControlT>,
+        is_function: bool,
+    ) -> Self {
+        Self {
+            target,
+            source,
+            ops,
+            next,
+            is_function,
+        }
     }
 }
 
@@ -3008,7 +3021,7 @@ fn parse_code_section(
 
 fn split_code_into_basic_blocks(
     elf: &Elf,
-    #[allow(unused_variables)] section_to_function_name: &BTreeMap<SectionTarget, String>,
+    section_to_function_name: &BTreeMap<SectionTarget, String>,
     jump_targets: &HashSet<SectionTarget>,
     instructions: Vec<(Source, InstExt<SectionTarget, SectionTarget>)>,
 ) -> Result<Vec<BasicBlock<SectionTarget, SectionTarget>>, ProgramFromElfError> {
@@ -3095,6 +3108,7 @@ fn split_code_into_basic_blocks(
                             source: end_of_block_source.into(),
                             instruction: ControlInst::Jump { target: source.begin() },
                         },
+                        section_to_function_name.contains_key(&block_source.begin()),
                     ));
                 }
             }
@@ -3123,6 +3137,7 @@ fn split_code_into_basic_blocks(
                         source: source.into(),
                         instruction,
                     },
+                    section_to_function_name.contains_key(&block_source.begin()),
                 ));
 
                 if let ControlInst::Branch { target_false, .. } = instruction {
@@ -3203,7 +3218,7 @@ fn resolve_basic_block_references(
             )));
         };
 
-        output.push(BasicBlock::new(block.target, block.source, ops, next));
+        output.push(BasicBlock::new(block.target, block.source, ops, next, block.is_function));
     }
 
     Ok(output)
@@ -6097,6 +6112,7 @@ fn add_missing_fallthrough_blocks(
                     instruction: ControlInst::Jump { target },
                 }
             },
+            is_function: false,
         });
 
         new_used_blocks.push(new_block_index);
