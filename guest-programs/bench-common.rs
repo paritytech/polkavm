@@ -76,6 +76,30 @@ macro_rules! define_benchmark {
     };
 }
 
+#[cfg(target_env = "polkavm")]
+#[no_mangle]
+unsafe extern "C" fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    unsafe {
+        for offset in 0..n {
+            *dst.add(offset) = *src.add(offset);
+        }
+    }
+
+    dst
+}
+
+#[cfg(target_env = "polkavm")]
+#[no_mangle]
+unsafe extern "C" fn memset(dst: *mut u8, value: i32, n: usize) -> *mut u8 {
+    unsafe {
+        for offset in 0..n {
+            *dst.add(offset) = value as u8;
+        }
+    }
+
+    dst
+}
+
 #[cfg(target_os = "solana")]
 #[no_mangle]
 extern "C" fn sol_memcpy_(dst: *mut u8, src: *const u8, n: usize) {

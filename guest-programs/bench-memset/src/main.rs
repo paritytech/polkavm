@@ -3,13 +3,6 @@
 
 include!("../../bench-common.rs");
 
-#[cfg(target_env = "polkavm")]
-#[no_mangle]
-unsafe extern "C" fn memset(dst: *mut u8, value: usize, n: usize) -> *mut u8 {
-    polkavm_derive::memset(dst, value, n);
-    dst
-}
-
 struct State {
     memory: alloc::vec::Vec<u8>,
 }
