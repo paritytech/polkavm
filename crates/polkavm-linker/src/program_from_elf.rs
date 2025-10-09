@@ -2184,18 +2184,22 @@ fn convert_instruction(
                         },
                         (lhs, rhs) => {
                             let lhs = lhs
-                                .map(|reg| RegValue::InputReg {
+                                .map(|reg| RegValue::Reg {
                                     reg,
+                                    direction: Direction::Input,
                                     source_block: BlockTarget::from_raw(0),
                                     bits_used: u64::MAX,
+                                    addend: 0,
                                 })
                                 .unwrap_or(RegValue::Constant(0));
 
                             let rhs = rhs
-                                .map(|reg| RegValue::InputReg {
+                                .map(|reg| RegValue::Reg {
                                     reg,
+                                    direction: Direction::Input,
                                     source_block: BlockTarget::from_raw(0),
                                     bits_used: u64::MAX,
+                                    addend: 0,
                                 })
                                 .unwrap_or(RegValue::Constant(0));
 
@@ -2204,7 +2208,12 @@ fn convert_instruction(
                                     let imm: i32 = imm.try_into().expect("immediate operand overflow");
                                     BasicInst::LoadImmediate { dst, imm }
                                 }
-                                Some(RegValue::InputReg { reg, .. }) => BasicInst::MoveReg { dst, src: reg },
+                                Some(RegValue::Reg {
+                                    reg,
+                                    direction: Direction::Input,
+                                    addend: 0,
+                                    ..
+                                }) => BasicInst::MoveReg { dst, src: reg },
                                 _ => {
                                     return Err(ProgramFromElfError::other(format!(
                                         "found a {:?} instruction using a zero register",
@@ -3991,6 +4000,15 @@ pub enum AnyAnyKind {
     RotateRight64,
 }
 
+impl AnyAnyKind {
+    fn add_for_bitness(bitness: Bitness) -> Self {
+        match bitness {
+            Bitness::B32 => AnyAnyKind::Add32,
+            Bitness::B64 => AnyAnyKind::Add64,
+        }
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum RegKind {
     CountLeadingZeroBits32,
@@ -4435,6 +4453,7 @@ impl OperationKind {
     fn apply(self, elf: &Elf, lhs: RegValue, rhs: RegValue) -> Option<RegValue> {
         use OperationKind as O;
         use RegValue::Constant as C;
+        let native_add = if elf.is_64() { O::Add32 } else { O::Add64 };
 
         #[rustfmt::skip]
         let value = match (self, lhs, rhs) {
@@ -4596,6 +4615,12 @@ impl OperationKind {
             (O::RotateLeft32AndSignExtend,  C(0), _) => C(0),
             (O::RotateRight32AndSignExtend, C(0), _) => C(0),
 
+            (kind, RegValue::Reg { reg, direction, source_block, bits_used, addend }, C(imm)) |
+            (kind, C(imm), RegValue::Reg { reg, direction, source_block, bits_used, addend })
+                if kind == native_add => {
+                    RegValue::Reg { reg, direction, source_block, bits_used, addend: imm.wrapping_add(addend) }
+                },
+
             _ => return None,
         };
 
@@ -4603,21 +4628,24 @@ impl OperationKind {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+enum Direction {
+    Input,
+    Output,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 enum RegValue {
-    InputReg {
+    Reg {
         reg: Reg,
+        direction: Direction,
         source_block: BlockTarget,
         bits_used: u64,
+        addend: i64,
     },
     CodeAddress(BlockTarget),
     DataAddress(SectionTarget),
     Constant(i64),
-    OutputReg {
-        reg: Reg,
-        source_block: BlockTarget,
-        bits_used: u64,
-    },
     Unknown {
         unique: u64,
         bits_used: u64,
@@ -4651,7 +4679,15 @@ impl RegValue {
         match self {
             RegValue::CodeAddress(..) | RegValue::DataAddress(..) => u64::from(u32::MAX),
             RegValue::Constant(value) => value as u64,
-            RegValue::Unknown { bits_used, .. } | RegValue::InputReg { bits_used, .. } | RegValue::OutputReg { bits_used, .. } => bits_used,
+            RegValue::Unknown { bits_used, .. } => bits_used,
+            RegValue::Reg { bits_used, addend, .. } => {
+                if addend == 0 {
+                    bits_used
+                } else {
+                    let addend = cast(addend).to_unsigned();
+                    bits_used | (bits_used << 1) | addend | (addend << 1)
+                }
+            }
         }
     }
 }
@@ -4673,10 +4709,12 @@ impl BlockRegs {
     fn new_input(bitness: Bitness, source_block: BlockTarget) -> Self {
         BlockRegs {
             bitness,
-            regs: Reg::ALL.map(|reg| RegValue::InputReg {
+            regs: Reg::ALL.map(|reg| RegValue::Reg {
                 reg,
+                direction: Direction::Input,
                 source_block,
                 bits_used: bitness.bits_used_mask(),
+                addend: 0,
             }),
         }
     }
@@ -4684,10 +4722,12 @@ impl BlockRegs {
     fn new_output(bitness: Bitness, source_block: BlockTarget) -> Self {
         BlockRegs {
             bitness,
-            regs: Reg::ALL.map(|reg| RegValue::OutputReg {
+            regs: Reg::ALL.map(|reg| RegValue::Reg {
                 reg,
+                direction: Direction::Output,
                 source_block,
                 bits_used: bitness.bits_used_mask(),
+                addend: 0,
             }),
         }
     }
@@ -5034,6 +5074,40 @@ impl BlockRegs {
                 self.set_reg(dst, self.get_reg(src2));
             }
             BasicInst::AnyAny {
+                kind,
+                dst,
+                src1: RegImm::Reg(reg),
+                src2: RegImm::Imm(imm),
+            }
+            | BasicInst::AnyAny {
+                kind,
+                dst,
+                src1: RegImm::Imm(imm),
+                src2: RegImm::Reg(reg),
+            } if kind == AnyAnyKind::add_for_bitness(self.bitness) && matches!(self.get_reg(reg), RegValue::Reg { .. }) => {
+                let RegValue::Reg {
+                    reg,
+                    direction,
+                    source_block,
+                    bits_used,
+                    addend,
+                } = self.get_reg(reg)
+                else {
+                    unreachable!()
+                };
+
+                self.set_reg(
+                    dst,
+                    RegValue::Reg {
+                        reg,
+                        direction,
+                        source_block,
+                        bits_used,
+                        addend: cast(imm).to_i64_sign_extend().wrapping_add(addend),
+                    },
+                )
+            }
+            BasicInst::AnyAny {
                 kind: AnyAnyKind::Add32 | AnyAnyKind::Add64,
                 dst,
                 src1,
@@ -5186,6 +5260,28 @@ fn perform_constant_propagation(
     }
 
     let mut regs = info_for_block[current.index()].input_regs.clone();
+    for reg in Reg::ALL {
+        if let RegValue::Reg {
+            direction: Direction::Input,
+            source_block,
+            ..
+        } = regs.get_reg(reg)
+        {
+            // Reset the input regs in case of loops.
+            if source_block == current {
+                regs.set_reg(
+                    reg,
+                    RegValue::Reg {
+                        reg,
+                        direction: Direction::Input,
+                        source_block,
+                        bits_used: regs.bitness.bits_used_mask(),
+                        addend: 0,
+                    },
+                )
+            }
+        }
+    }
     let mut references = BTreeSet::new();
     let mut modified_this_block = false;
     for nth_instruction in 0..all_blocks[current.index()].ops.len() {
@@ -5310,10 +5406,12 @@ fn perform_constant_propagation(
         if let RegValue::Unknown { bits_used, .. } = regs.get_reg(reg) {
             regs.set_reg(
                 reg,
-                RegValue::OutputReg {
+                RegValue::Reg {
                     reg,
+                    direction: Direction::Output,
                     source_block: current,
                     bits_used,
+                    addend: 0,
                 },
             )
         }
