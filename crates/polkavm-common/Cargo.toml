@@ -9,6 +9,7 @@ repository.workspace = true
 description = "The common crate for PolkaVM"
 
 [dependencies]
+arbitrary = { workspace = true, optional = true }
 log = { workspace = true, optional = true }
 polkavm-assembler = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
@@ -16,6 +17,7 @@ blake3 = { workspace = true, optional = true }
 [features]
 default = []
 alloc = []
+arbitrary = ["std", "dep:arbitrary"]
 std = ["alloc", "blake3/std"]
 logging = ["dep:log"]
 regmap = ["dep:polkavm-assembler"]

@@ -19,6 +19,13 @@ impl PartialEq for RawReg {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for RawReg {
+    fn arbitrary(unstructured: &mut arbitrary::Unstructured) -> Result<Self, arbitrary::Error> {
+        Reg::arbitrary(unstructured).map(|reg| reg.into())
+    }
+}
+
 impl RawReg {
     #[inline]
     pub const fn get(self) -> Reg {
@@ -62,6 +69,7 @@ impl core::fmt::Display for RawReg {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(u32)]
 pub enum Reg {
     RA = 0,
@@ -962,6 +970,7 @@ macro_rules! define_opcodes {
         }
 
         #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+        #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
         #[allow(non_camel_case_types)]
         #[repr(u32)]
         pub enum Instruction {
