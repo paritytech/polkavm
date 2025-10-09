@@ -642,6 +642,14 @@ enum BasicInst<T> {
     LoadHeapBase {
         dst: Reg,
     },
+    Prologue {
+        stack_space: u32,
+        regs: Vec<(u32, Reg)>,
+    },
+    Epilogue {
+        stack_space: u32,
+        regs: Vec<(u32, Reg)>,
+    },
 }
 
 #[derive(Copy, Clone)]
@@ -679,6 +687,8 @@ impl<T> BasicInst<T> {
             BasicInst::Ecalli { nth_import } => imports[nth_import].src_mask(),
             BasicInst::Sbrk { size, .. } => RegMask::from(size),
             BasicInst::Memset => RegMask::from(Reg::A0) | RegMask::from(Reg::A1) | RegMask::from(Reg::A2),
+            BasicInst::Prologue { ref regs, .. } => RegMask::from(Reg::SP) | RegMask::from_regs(regs.iter().map(|&(_, reg)| reg)),
+            BasicInst::Epilogue { .. } => RegMask::from(Reg::SP),
         }
     }
 
@@ -700,18 +710,22 @@ impl<T> BasicInst<T> {
             BasicInst::Ecalli { nth_import } => imports[nth_import].dst_mask(),
             BasicInst::Sbrk { dst, .. } => RegMask::from(dst),
             BasicInst::Memset => RegMask::from(Reg::A0) | RegMask::from(Reg::A2),
+            BasicInst::Prologue { .. } => RegMask::from(Reg::SP),
+            BasicInst::Epilogue { ref regs, .. } => RegMask::from(Reg::SP) | RegMask::from_regs(regs.iter().map(|&(_, reg)| reg)),
         }
     }
 
     fn has_side_effects(&self, config: &Config) -> bool {
         match *self {
             BasicInst::Sbrk { .. }
+            | BasicInst::Prologue { .. }
             | BasicInst::Ecalli { .. }
             | BasicInst::StoreAbsolute { .. }
             | BasicInst::StoreIndirect { .. }
             | BasicInst::Memset => true,
             BasicInst::LoadAbsolute { .. } | BasicInst::LoadIndirect { .. } => !config.elide_unnecessary_loads,
             BasicInst::Nop
+            | BasicInst::Epilogue { .. }
             | BasicInst::LoadHeapBase { .. }
             | BasicInst::MoveReg { .. }
             | BasicInst::Reg { .. }
@@ -808,6 +822,24 @@ impl<T> BasicInst<T> {
                 dst: map(dst, OpKind::Write),
             }),
             BasicInst::Nop => Some(BasicInst::Nop),
+            BasicInst::Prologue { stack_space, regs } => {
+                let output = BasicInst::Prologue {
+                    stack_space,
+                    regs: regs.into_iter().map(|(offset, reg)| (offset, map(reg, OpKind::Read))).collect(),
+                };
+
+                assert_eq!(map(Reg::SP, OpKind::ReadWrite), Reg::SP);
+                Some(output)
+            }
+            BasicInst::Epilogue { stack_space, regs } => {
+                assert_eq!(map(Reg::SP, OpKind::ReadWrite), Reg::SP);
+                let output = BasicInst::Epilogue {
+                    stack_space,
+                    regs: regs.into_iter().map(|(offset, reg)| (offset, map(reg, OpKind::Write))).collect(),
+                };
+
+                Some(output)
+            }
         }
     }
 
@@ -878,6 +910,8 @@ impl<T> BasicInst<T> {
             BasicInst::LoadHeapBase { dst } => BasicInst::LoadHeapBase { dst },
             BasicInst::Memset => BasicInst::Memset,
             BasicInst::Nop => BasicInst::Nop,
+            BasicInst::Prologue { stack_space, regs } => BasicInst::Prologue { stack_space, regs },
+            BasicInst::Epilogue { stack_space, regs } => BasicInst::Epilogue { stack_space, regs },
         })
     }
 
@@ -889,6 +923,8 @@ impl<T> BasicInst<T> {
             BasicInst::LoadAbsolute { target, .. } | BasicInst::StoreAbsolute { target, .. } => (Some(*target), None),
             BasicInst::LoadAddress { target, .. } | BasicInst::LoadAddressIndirect { target, .. } => (None, Some(*target)),
             BasicInst::Nop
+            | BasicInst::Prologue { .. }
+            | BasicInst::Epilogue { .. }
             | BasicInst::LoadHeapBase { .. }
             | BasicInst::MoveReg { .. }
             | BasicInst::LoadImmediate { .. }
@@ -2731,6 +2767,183 @@ const FUNC3_SBRK: u32 = 0b001;
 const FUNC3_MEMSET: u32 = 0b010;
 const FUNC3_HEAP_BASE: u32 = 0b011;
 
+fn try_parse_epilogue(
+    decoder_config: &DecoderConfig,
+    elf: &Elf,
+    mut instruction: Inst,
+    pc: &mut usize,
+    source: Source,
+    text: &[u8],
+    output: &mut Vec<(Source, InstExt<SectionTarget, SectionTarget>)>,
+) -> Result<bool, ProgramFromElfError> {
+    // For example, the pattern is:
+    //    ld      ra,48(sp)
+    //    ld      s0,40(sp)
+    //    ld      s1,32(sp)
+    //    addi    sp,sp,56
+    //    ret
+
+    let (native_add_kind, native_load_kind, native_reg_size) = if elf.is_64() {
+        (RegImmKind::Add64, LoadKind::U64, 8)
+    } else {
+        (RegImmKind::Add32, LoadKind::U32, 4)
+    };
+
+    let mut stack_space = None;
+    let mut current_pc = *pc;
+    let mut regs = Vec::new();
+    loop {
+        if current_pc >= text.len() {
+            return Ok(false);
+        }
+
+        let Inst::Load {
+            kind,
+            dst,
+            base: RReg::SP,
+            offset,
+        } = instruction
+        else {
+            break;
+        };
+
+        let Some(dst) = cast_reg_non_zero(dst)? else {
+            return Ok(false);
+        };
+
+        if kind != native_load_kind || dst == Reg::SP || offset < 0 || (offset % native_reg_size) != 0 {
+            return Ok(false);
+        };
+
+        if let Some(stack_space) = stack_space {
+            if offset != stack_space - native_reg_size * (1 + regs.len() as i32) {
+                return Ok(false);
+            }
+        } else {
+            stack_space = Some(offset + native_reg_size);
+        }
+
+        let (next_inst_size, next_raw_inst) = read_instruction_bytes(text, current_pc);
+        current_pc += next_inst_size as usize;
+
+        if let Some(new_instruction) = Inst::decode(decoder_config, next_raw_inst) {
+            instruction = new_instruction;
+        } else {
+            return Ok(false);
+        }
+
+        regs.push((cast(offset).to_unsigned(), dst));
+    }
+
+    let Inst::RegImm {
+        kind,
+        dst: RReg::SP,
+        src: RReg::SP,
+        imm,
+    } = instruction
+    else {
+        return Ok(false);
+    };
+
+    let stack_space = stack_space.unwrap_or(imm);
+    if kind != native_add_kind || imm <= 0 || imm != stack_space {
+        return Ok(false);
+    }
+
+    *pc = current_pc;
+
+    output.push((
+        Source {
+            section_index: source.section_index,
+            offset_range: AddressRange::from(source.offset_range.start..current_pc as u64),
+        },
+        InstExt::Basic(BasicInst::Epilogue {
+            stack_space: cast(stack_space).to_unsigned(),
+            regs,
+        }),
+    ));
+
+    Ok(true)
+}
+
+fn try_parse_prologue(
+    decoder_config: &DecoderConfig,
+    elf: &Elf,
+    instruction: Inst,
+    pc: &mut usize,
+    source: Source,
+    text: &[u8],
+    output: &mut Vec<(Source, InstExt<SectionTarget, SectionTarget>)>,
+) -> Result<bool, ProgramFromElfError> {
+    let (native_add_kind, native_store_kind, native_reg_size) = if elf.is_64() {
+        (RegImmKind::Add64, StoreKind::U64, 8)
+    } else {
+        (RegImmKind::Add32, StoreKind::U32, 4)
+    };
+    let Inst::RegImm {
+        kind,
+        dst: RReg::SP,
+        src: RReg::SP,
+        imm,
+    } = instruction
+    else {
+        return Ok(false);
+    };
+    if kind != native_add_kind || imm >= 0 || (imm % native_reg_size) != 0 {
+        return Ok(false);
+    };
+
+    // For example, the pattern is:
+    //    addi    sp,sp,-56
+    //    sd      ra,48(sp)
+    //    sd      s0,40(sp)
+    //    sd      s1,32(sp)
+    // Which would result in:
+    //    Prologue { stack_space = 56, regs: [RA, S0, S1] }
+
+    let mut current_pc = *pc;
+    let mut remaining = imm;
+    let mut regs = Vec::new();
+    while current_pc < text.len() && remaining < 0 {
+        let (inst_size, raw_inst) = read_instruction_bytes(text, current_pc);
+        let Some(Inst::Store {
+            kind,
+            src,
+            base: RReg::SP,
+            offset,
+        }) = Inst::decode(decoder_config, raw_inst)
+        else {
+            break;
+        };
+
+        let Some(src) = cast_reg_non_zero(src)? else {
+            break;
+        };
+
+        if src == Reg::SP || kind != native_store_kind || offset * -1 != (remaining + native_reg_size) {
+            break;
+        }
+
+        regs.push((cast(offset).to_unsigned(), src));
+        current_pc += inst_size as usize;
+        remaining += native_reg_size;
+    }
+
+    *pc = current_pc;
+    output.push((
+        Source {
+            section_index: source.section_index,
+            offset_range: AddressRange::from(source.offset_range.start..current_pc as u64),
+        },
+        InstExt::Basic(BasicInst::Prologue {
+            stack_space: cast(imm * -1).to_unsigned(),
+            regs,
+        }),
+    ));
+
+    Ok(true)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn parse_code_section(
     elf: &Elf,
@@ -2741,6 +2954,7 @@ fn parse_code_section(
     metadata_to_nth_import: &mut HashMap<ExternMetadata, usize>,
     instruction_overrides: &mut HashMap<SectionTarget, InstExt<SectionTarget, SectionTarget>>,
     output: &mut Vec<(Source, InstExt<SectionTarget, SectionTarget>)>,
+    opt_level: OptLevel,
 ) -> Result<(), ProgramFromElfError> {
     let section_index = section.index();
     let section_name = section.name();
@@ -3008,6 +3222,16 @@ fn parse_code_section(
                             continue;
                         }
                     }
+                }
+            }
+
+            if matches!(opt_level, OptLevel::Oexperimental) {
+                if try_parse_prologue(decoder_config, elf, original_inst, &mut relative_offset, source, text, output)? {
+                    continue;
+                }
+
+                if try_parse_epilogue(decoder_config, elf, original_inst, &mut relative_offset, source, text, output)? {
+                    continue;
                 }
             }
 
@@ -3563,6 +3787,79 @@ fn perform_nop_elimination(all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>]
     all_blocks[current.index()].ops.retain(|(_, instruction)| !instruction.is_nop());
 }
 
+fn perform_meta_instruction_lowering(is_rv64: bool, all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>], current: BlockTarget) {
+    let block = &mut all_blocks[current.index()];
+    if !block
+        .ops
+        .iter()
+        .any(|(_, op)| matches!(op, BasicInst::Prologue { .. } | BasicInst::Epilogue { .. }))
+    {
+        return;
+    }
+
+    let (add_kind, store_kind, load_kind) = if is_rv64 {
+        (AnyAnyKind::Add64, StoreKind::U64, LoadKind::U64)
+    } else {
+        (AnyAnyKind::Add32, StoreKind::U32, LoadKind::U64)
+    };
+
+    let mut buffer = Vec::with_capacity(block.ops.len());
+    for (source, op) in block.ops.drain(..) {
+        match op {
+            BasicInst::Prologue { stack_space, ref regs } => {
+                buffer.push((
+                    source.clone(),
+                    BasicInst::AnyAny {
+                        kind: add_kind,
+                        dst: Reg::SP,
+                        src1: Reg::SP.into(),
+                        src2: (cast(stack_space).to_signed() * -1).into(),
+                    },
+                ));
+                for &(offset, src) in regs {
+                    buffer.push((
+                        source.clone(),
+                        BasicInst::StoreIndirect {
+                            kind: store_kind,
+                            src: src.into(),
+                            base: Reg::SP,
+                            offset: cast(offset).to_signed(),
+                        },
+                    ));
+                }
+            }
+            BasicInst::Epilogue { stack_space, ref regs } => {
+                for &(offset, dst) in regs {
+                    buffer.push((
+                        source.clone(),
+                        BasicInst::LoadIndirect {
+                            kind: load_kind,
+                            dst,
+                            base: Reg::SP,
+                            offset: cast(offset).to_signed(),
+                        },
+                    ));
+                }
+
+                buffer.push((
+                    source.clone(),
+                    BasicInst::AnyAny {
+                        kind: add_kind,
+                        dst: Reg::SP,
+                        src1: Reg::SP.into(),
+                        src2: cast(stack_space).to_signed().into(),
+                    },
+                ));
+            }
+            _ => {
+                buffer.push((source, op));
+            }
+        };
+    }
+
+    block.ops = buffer;
+}
+
 #[deny(clippy::as_conversions)]
 fn perform_inlining(
     all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>],
@@ -3665,7 +3962,15 @@ fn perform_inlining(
         }
 
         // Inline if the target block is small enough.
-        if all_blocks[target.index()].ops.len() <= inline_threshold {
+        let mut inline_cost = all_blocks[target.index()].ops.len();
+        if let Some((_, BasicInst::Prologue { regs, .. })) = all_blocks[target.index()].ops.first() {
+            inline_cost += regs.len();
+        }
+        if let Some((_, BasicInst::Epilogue { regs, .. })) = all_blocks[target.index()].ops.last() {
+            inline_cost += regs.len();
+        }
+
+        if inline_cost <= inline_threshold {
             return true;
         }
 
@@ -3867,8 +4172,12 @@ fn perform_dead_code_elimination(
         registers_needed.insert(next_instruction.src_mask());
 
         let mut dead_code = Vec::new();
-        for (nth_instruction, (_, op)) in all_blocks[block_target.index()].ops.iter().enumerate().rev() {
+        for (nth_instruction, (_, op)) in all_blocks[block_target.index()].ops.iter_mut().enumerate().rev() {
             let dst_mask = op.dst_mask(imports);
+            if let BasicInst::Epilogue { ref mut regs, .. } = op {
+                regs.retain(|&(_, reg)| (RegMask::from(reg) & registers_needed) != RegMask::empty());
+            }
+
             if !op.has_side_effects(config) && (dst_mask & registers_needed) == RegMask::empty() {
                 // This instruction has no side effects and its result is not used; it's dead.
                 dead_code.push(nth_instruction);
@@ -4696,6 +5005,7 @@ struct BlockInfo {
     input_regs: BlockRegs,
     output_regs: BlockRegs,
     registers_needed: RegMask,
+    stack: HashMap<RegValue, RegValue>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -5012,7 +5322,14 @@ impl BlockRegs {
         *unknown_counter += 1;
     }
 
-    fn set_reg_from_control_instruction(&mut self, imports: &[Import], unknown_counter: &mut u64, instruction: ControlInst<BlockTarget>) {
+    fn set_reg_from_control_instruction(
+        &mut self,
+        elf: &Elf,
+        imports: &[Import],
+        stack: &mut HashMap<RegValue, RegValue>,
+        unknown_counter: &mut u64,
+        instruction: ControlInst<BlockTarget>,
+    ) {
         #[allow(clippy::single_match)]
         match instruction {
             ControlInst::CallIndirect { ra, target_return, .. } => {
@@ -5020,13 +5337,20 @@ impl BlockRegs {
                     dst: ra,
                     target: AnyTarget::Code(target_return),
                 };
-                self.set_reg_from_instruction(imports, unknown_counter, implicit_instruction);
+                self.set_reg_from_instruction(elf, imports, stack, unknown_counter, implicit_instruction);
             }
             _ => {}
         }
     }
 
-    fn set_reg_from_instruction(&mut self, imports: &[Import], unknown_counter: &mut u64, instruction: BasicInst<AnyTarget>) {
+    fn set_reg_from_instruction(
+        &mut self,
+        elf: &Elf,
+        imports: &[Import],
+        stack: &mut HashMap<RegValue, RegValue>,
+        unknown_counter: &mut u64,
+        instruction: BasicInst<AnyTarget>,
+    ) {
         match instruction {
             BasicInst::LoadImmediate { dst, imm } => {
                 self.set_reg(dst, RegValue::Constant(cast(imm).to_i64_sign_extend()));
@@ -5197,6 +5521,92 @@ impl BlockRegs {
             } => {
                 self.set_reg_unknown(dst, unknown_counter, u64::from(u32::MAX));
             }
+            BasicInst::Prologue { stack_space, regs } => {
+                let (kind, add_op) = if self.bitness == Bitness::B64 {
+                    (AnyAnyKind::Add64, OperationKind::Add64)
+                } else {
+                    (AnyAnyKind::Add32, OperationKind::Add32)
+                };
+
+                self.set_reg_from_instruction(
+                    elf,
+                    imports,
+                    stack,
+                    unknown_counter,
+                    BasicInst::AnyAny {
+                        kind,
+                        dst: Reg::SP,
+                        src1: Reg::SP.into(),
+                        src2: (cast(stack_space).to_signed() * -1).into(),
+                    },
+                );
+
+                let sp = self.get_reg(Reg::SP);
+                for (offset, reg) in regs {
+                    let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(cast(offset).to_signed()).to_i64_sign_extend())) else {
+                        continue;
+                    };
+
+                    if !matches!(key, RegValue::Reg { .. }) {
+                        continue;
+                    }
+
+                    let value = self.get_reg(reg);
+                    stack.insert(key, value);
+                }
+            }
+            BasicInst::Epilogue { stack_space, regs } => {
+                let (add_kind, add_op, load_kind) = if self.bitness == Bitness::B64 {
+                    (AnyAnyKind::Add64, OperationKind::Add64, LoadKind::U64)
+                } else {
+                    (AnyAnyKind::Add32, OperationKind::Add32, LoadKind::U32)
+                };
+
+                let sp = self.get_reg(Reg::SP);
+                self.set_reg_from_instruction(
+                    elf,
+                    imports,
+                    stack,
+                    unknown_counter,
+                    BasicInst::AnyAny {
+                        kind: add_kind,
+                        dst: Reg::SP,
+                        src1: Reg::SP.into(),
+                        src2: cast(stack_space).to_signed().into(),
+                    },
+                );
+
+                let mut restored = [false; Reg::ALL.len()];
+                for &(offset, reg) in &regs {
+                    let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(cast(offset).to_signed()).to_i64_sign_extend())) else {
+                        continue;
+                    };
+
+                    if let Some(value) = stack.remove(&key) {
+                        self.set_reg(reg, value);
+                        restored[reg.to_usize()] = true;
+                    }
+                }
+
+                for &(offset, dst) in &regs {
+                    if restored[dst.to_usize()] {
+                        continue;
+                    }
+
+                    self.set_reg_from_instruction(
+                        elf,
+                        imports,
+                        stack,
+                        unknown_counter,
+                        BasicInst::LoadIndirect {
+                            kind: load_kind,
+                            base: Reg::SP,
+                            dst,
+                            offset: cast(offset).to_signed(),
+                        },
+                    );
+                }
+            }
             _ => {
                 for dst in instruction.dst_mask(imports) {
                     self.set_reg_unknown(dst, unknown_counter, self.bitness.bits_used_mask());
@@ -5227,6 +5637,8 @@ fn perform_constant_propagation(
         return false;
     }
 
+    let mut stack: HashMap<RegValue, RegValue> = HashMap::new();
+
     let mut modified = false;
     if !reachability.is_dynamically_reachable()
         && !reachability.always_reachable_or_exported()
@@ -5256,6 +5668,25 @@ fn perform_constant_propagation(
                     modified = true;
                 }
             }
+        }
+
+        let mut common_stack_opt = None;
+        for &source in &reachability.reachable_from {
+            let source_stack = &info_for_block[source.index()].stack;
+            if let Some(ref common_stack) = common_stack_opt {
+                if common_stack == source_stack {
+                    continue;
+                }
+
+                common_stack_opt = None;
+                break;
+            } else {
+                common_stack_opt = Some(source_stack.clone());
+            }
+        }
+
+        if let Some(common_stack) = common_stack_opt {
+            stack = common_stack;
         }
     }
 
@@ -5288,6 +5719,44 @@ fn perform_constant_propagation(
         let mut instruction = all_blocks[current.index()].ops[nth_instruction].1.clone();
         if instruction.is_nop() {
             continue;
+        }
+
+        if let BasicInst::Epilogue {
+            regs: ref mut epilogue_regs,
+            ..
+        } = instruction
+        {
+            let add_op = if regs.bitness == Bitness::B64 {
+                OperationKind::Add64
+            } else {
+                OperationKind::Add32
+            };
+
+            let mut simplified = false;
+            let sp = regs.get_reg(Reg::SP);
+            epilogue_regs.retain(|&(offset, reg)| {
+                if let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(cast(offset).to_signed()).to_i64_sign_extend())) {
+                    if let Some(&restored_value) = stack.get(&key) {
+                        let current_value = regs.get_reg(reg);
+                        if current_value == restored_value {
+                            // If the register was saved on the stack but we haven't actually modified it then skip the restore.
+                            simplified = true;
+                            return false;
+                        }
+                    }
+                }
+
+                true
+            });
+
+            if simplified {
+                if !modified_this_block {
+                    references = gather_references(&all_blocks[current.index()]);
+                    modified_this_block = true;
+                    modified = true;
+                }
+                all_blocks[current.index()].ops[nth_instruction].1 = instruction.clone();
+            }
         }
 
         while let Some(new_instruction) = regs.simplify_instruction(elf, instruction.clone()) {
@@ -5372,7 +5841,7 @@ fn perform_constant_propagation(
             }
         }
 
-        regs.set_reg_from_instruction(imports, unknown_counter, instruction);
+        regs.set_reg_from_instruction(elf, imports, &mut stack, unknown_counter, instruction.clone());
     }
 
     if let Some((extra_instruction, new_instruction)) = regs.simplify_control_instruction(elf, all_blocks[current.index()].next.instruction)
@@ -5391,7 +5860,7 @@ fn perform_constant_propagation(
         }
 
         if let Some(extra_instruction) = extra_instruction {
-            regs.set_reg_from_instruction(imports, unknown_counter, extra_instruction.clone());
+            regs.set_reg_from_instruction(elf, imports, &mut stack, unknown_counter, extra_instruction.clone());
 
             all_blocks[current.index()]
                 .ops
@@ -5400,7 +5869,13 @@ fn perform_constant_propagation(
         all_blocks[current.index()].next.instruction = new_instruction;
     }
 
-    regs.set_reg_from_control_instruction(imports, unknown_counter, all_blocks[current.index()].next.instruction);
+    regs.set_reg_from_control_instruction(
+        elf,
+        imports,
+        &mut stack,
+        unknown_counter,
+        all_blocks[current.index()].next.instruction,
+    );
 
     for reg in Reg::ALL {
         if let RegValue::Unknown { bits_used, .. } = regs.get_reg(reg) {
@@ -5417,9 +5892,17 @@ fn perform_constant_propagation(
         }
     }
 
+    stack.retain(|_, value| !matches!(value, RegValue::Unknown { .. }));
+
     let output_regs_modified = info_for_block[current.index()].output_regs != regs;
     if output_regs_modified {
         info_for_block[current.index()].output_regs = regs.clone();
+        modified = true;
+    }
+
+    let stack_modified = info_for_block[current.index()].stack != stack;
+    if stack_modified {
+        info_for_block[current.index()].stack = stack;
         modified = true;
     }
 
@@ -5433,7 +5916,7 @@ fn perform_constant_propagation(
     }
 
     if let Some(ref mut optimize_queue) = optimize_queue {
-        if output_regs_modified {
+        if output_regs_modified || stack_modified {
             match all_blocks[current.index()].next.instruction {
                 ControlInst::Jump { target } => add_to_optimize_queue(all_blocks, reachability_graph, optimize_queue, target),
                 ControlInst::Branch {
@@ -5556,6 +6039,7 @@ fn optimize_program(
             input_regs: BlockRegs::new_input(bitness, current),
             output_regs: BlockRegs::new_output(bitness, current),
             registers_needed: RegMask::all(),
+            stack: HashMap::new(),
         });
     }
 
@@ -5645,6 +6129,10 @@ fn optimize_program(
     count_inline = 0;
     count_dce = 0;
     count_cp = 0;
+
+    for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
+        perform_meta_instruction_lowering(elf.is_64(), all_blocks, current);
+    }
 
     let timestamp = std::time::Instant::now();
     let mut opt_brute_force_iterations = 0;
@@ -7286,6 +7774,15 @@ impl RegMask {
     fn insert(&mut self, mask: impl Into<RegMask>) {
         *self |= mask.into();
     }
+
+    fn from_regs(regs: impl IntoIterator<Item = Reg>) -> Self {
+        let mut mask = Self::empty();
+        for reg in regs {
+            mask.insert(reg);
+        }
+
+        mask
+    }
 }
 
 impl From<Reg> for RegMask {
@@ -7886,6 +8383,8 @@ fn emit_code(
                 BasicInst::Sbrk { dst, size } => Instruction::sbrk(conv_reg(dst), conv_reg(size)),
                 BasicInst::Memset => Instruction::memset,
                 BasicInst::Nop => unreachable!("internal error: a nop instruction was not removed"),
+                BasicInst::Prologue { .. } => unreachable!("internal error: a prologue instruction was not removed"),
+                BasicInst::Epilogue { .. } => unreachable!("internal error: an epilogue instruction was not removed"),
             };
 
             code.push((source.clone(), op));
@@ -9395,6 +9894,7 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
             &mut metadata_to_nth_import,
             &mut instruction_overrides,
             &mut instructions,
+            config.opt_level,
         )?;
 
         if instructions.len() > initial_instruction_count {
@@ -9457,6 +9957,7 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
         } else {
             for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
                 perform_nop_elimination(&mut all_blocks, current);
+                perform_meta_instruction_lowering(is_rv64, &mut all_blocks, current);
             }
         }
         used_blocks = collect_used_blocks(&all_blocks, &reachability_graph);
