@@ -20,6 +20,18 @@ enum Bitness {
     B64,
 }
 
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum OptLevel {
+    #[clap(name = "0")]
+    O0,
+    #[clap(name = "1")]
+    O1,
+    #[clap(name = "2")]
+    O2,
+    #[clap(name = "experimental")]
+    Oexperimental,
+}
+
 #[derive(Parser, Debug)]
 #[clap(version)]
 enum Args {
@@ -33,8 +45,12 @@ enum Args {
         strip: bool,
 
         /// Will disable optimizations.
-        #[clap(long)]
+        #[clap(long, hide = true)] // For backwards-compatibility.
         disable_optimizations: bool,
+
+        /// The optimization level.
+        #[clap(long, default_value = "2")]
+        opt_level: OptLevel,
 
         /// Will only run if the output file doesn't exist, or the input is newer.
         #[clap(long)]
@@ -119,6 +135,7 @@ fn main() {
             input,
             strip,
             disable_optimizations,
+            opt_level,
             run_only_if_newer,
             min_stack_size,
             dispatch_table,
@@ -127,6 +144,7 @@ fn main() {
             output,
             strip,
             disable_optimizations,
+            opt_level,
             run_only_if_newer,
             min_stack_size,
             dispatch_table,
@@ -173,6 +191,7 @@ fn main_link(
     output: PathBuf,
     strip: bool,
     disable_optimizations: bool,
+    opt_level: OptLevel,
     run_only_if_newer: bool,
     min_stack_size: Option<u32>,
     dispatch_table: Option<String>,
@@ -187,9 +206,17 @@ fn main_link(
         }
     }
 
+    let opt_level = match opt_level {
+        _ if disable_optimizations => polkavm_linker::OptLevel::O0,
+        OptLevel::O0 => polkavm_linker::OptLevel::O0,
+        OptLevel::O1 => polkavm_linker::OptLevel::O1,
+        OptLevel::O2 => polkavm_linker::OptLevel::O2,
+        OptLevel::Oexperimental => polkavm_linker::OptLevel::Oexperimental,
+    };
+
     let mut config = polkavm_linker::Config::default();
     config.set_strip(strip);
-    config.set_optimize(!disable_optimizations);
+    config.set_opt_level(opt_level);
     if let Some(min_stack_size) = min_stack_size {
         config.set_min_stack_size(min_stack_size);
     }
