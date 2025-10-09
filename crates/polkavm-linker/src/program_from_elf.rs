@@ -5006,6 +5006,45 @@ struct BlockInfo {
     output_regs: BlockRegs,
     registers_needed: RegMask,
     stack: HashMap<RegValue, RegValue>,
+    terminator: Terminator,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+enum TerminatorKind {
+    Unimplemented,
+    InfiniteLoop,
+    JumpIndirect { block: BlockTarget, base: Reg, offset: i64 },
+}
+
+#[derive(Clone, Debug)]
+enum Terminator {
+    One(TerminatorKind),
+    Many(BTreeSet<TerminatorKind>),
+}
+
+impl Terminator {
+    fn merge(lhs: Self, rhs: Self) -> Self {
+        match (lhs, rhs) {
+            (Terminator::One(lhs), Terminator::One(rhs)) => {
+                if lhs == rhs {
+                    Terminator::One(lhs)
+                } else {
+                    let mut set = BTreeSet::new();
+                    set.insert(lhs);
+                    set.insert(rhs);
+                    Terminator::Many(set)
+                }
+            }
+            (Terminator::One(one), Terminator::Many(mut many)) | (Terminator::Many(mut many), Terminator::One(one)) => {
+                many.insert(one);
+                Terminator::Many(many)
+            }
+            (Terminator::Many(mut lhs), Terminator::Many(rhs)) => {
+                lhs.extend(rhs);
+                Terminator::Many(lhs)
+            }
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -5978,6 +6017,186 @@ fn perform_load_address_and_jump_fusion(all_blocks: &mut [BasicBlock<AnyTarget, 
     }
 }
 
+fn find_terminator(
+    all_blocks: &[BasicBlock<AnyTarget, BlockTarget>],
+    seen: &mut HashSet<BlockTarget>,
+    terminator_for: &mut [Option<Terminator>],
+    resolved_queue: &mut Vec<BlockTarget>,
+    unresolved_set: &mut BTreeSet<BlockTarget>,
+    current: BlockTarget,
+) -> Terminator {
+    if let Some(ref terminator) = terminator_for[current.index()] {
+        return terminator.clone();
+    }
+
+    if !seen.insert(current) {
+        return Terminator::One(TerminatorKind::InfiniteLoop);
+    }
+
+    let block = &all_blocks[current.index()];
+    let terminator = match block.next.instruction {
+        ControlInst::Jump { target } | ControlInst::Call { target, .. } => {
+            find_terminator(all_blocks, seen, terminator_for, resolved_queue, unresolved_set, target)
+        }
+        ControlInst::JumpIndirect { base, offset } | ControlInst::CallIndirect { base, offset, .. } => {
+            Terminator::One(TerminatorKind::JumpIndirect {
+                block: current,
+                base,
+                offset,
+            })
+        }
+        ControlInst::Branch {
+            target_true, target_false, ..
+        } => {
+            let lhs = find_terminator(all_blocks, seen, terminator_for, resolved_queue, unresolved_set, target_true);
+            let rhs = find_terminator(all_blocks, seen, terminator_for, resolved_queue, unresolved_set, target_false);
+            Terminator::merge(lhs, rhs)
+        }
+        ControlInst::Unimplemented => Terminator::One(TerminatorKind::Unimplemented),
+    };
+
+    seen.remove(&current);
+    terminator_for[current.index()] = Some(terminator.clone());
+    resolved_queue.push(current);
+    unresolved_set.remove(&current);
+
+    terminator
+}
+
+fn gather_terminators(all_blocks: &[BasicBlock<AnyTarget, BlockTarget>]) -> Vec<Terminator> {
+    let mut blocks_which_jump_to: Vec<Vec<BlockTarget>> = vec![Vec::new(); all_blocks.len()];
+    let mut terminator_for: Vec<Option<Terminator>> = vec![None; all_blocks.len()];
+    let mut resolved_queue = Vec::new();
+    let mut unresolved_set = BTreeSet::new();
+    let mut branch_queue = Vec::new();
+    for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
+        match all_blocks[current.index()].next.instruction {
+            ControlInst::Jump { target } | ControlInst::Call { target, .. } => {
+                if target == current {
+                    terminator_for[current.index()] = Some(Terminator::One(TerminatorKind::InfiniteLoop));
+                    resolved_queue.push(current);
+                } else {
+                    blocks_which_jump_to[target.index()].push(current);
+                    unresolved_set.insert(current);
+                }
+            }
+            ControlInst::JumpIndirect { base, offset } | ControlInst::CallIndirect { base, offset, .. } => {
+                terminator_for[current.index()] = Some(Terminator::One(TerminatorKind::JumpIndirect {
+                    block: current,
+                    base,
+                    offset,
+                }));
+                resolved_queue.push(current);
+            }
+            ControlInst::Branch {
+                target_true, target_false, ..
+            } => {
+                if target_true == current && target_false == current {
+                    terminator_for[current.index()] = Some(Terminator::One(TerminatorKind::InfiniteLoop));
+                    resolved_queue.push(current);
+                    continue;
+                }
+
+                if target_true == current {
+                    blocks_which_jump_to[target_false.index()].push(current);
+                } else if target_false == current {
+                    blocks_which_jump_to[target_true.index()].push(current);
+                }
+                unresolved_set.insert(current);
+            }
+            ControlInst::Unimplemented => {
+                terminator_for[current.index()] = Some(Terminator::One(TerminatorKind::Unimplemented));
+                resolved_queue.push(current);
+            }
+        }
+    }
+
+    while !resolved_queue.is_empty() || !branch_queue.is_empty() || !unresolved_set.is_empty() {
+        while let Some(expected_target) = resolved_queue.pop() {
+            for &current in &blocks_which_jump_to[expected_target.index()] {
+                match all_blocks[current.index()].next.instruction {
+                    ControlInst::Jump { target } | ControlInst::Call { target, .. } => {
+                        assert_eq!(target, expected_target);
+                        let terminator = terminator_for[expected_target.index()].clone();
+                        assert!(terminator.is_some());
+                        terminator_for[current.index()] = terminator;
+                        resolved_queue.push(current);
+                        unresolved_set.remove(&current);
+                    }
+                    ControlInst::Branch {
+                        target_true, target_false, ..
+                    } => {
+                        let (target_terminator, other_target_terminator) = if target_true == expected_target {
+                            (
+                                terminator_for[target_true.index()].as_ref().unwrap(),
+                                terminator_for[target_false.index()].as_ref(),
+                            )
+                        } else if target_false == expected_target {
+                            (
+                                terminator_for[target_false.index()].as_ref().unwrap(),
+                                terminator_for[target_true.index()].as_ref(),
+                            )
+                        } else {
+                            unreachable!()
+                        };
+
+                        if let Some(other_target_terminator) = other_target_terminator {
+                            terminator_for[current.index()] =
+                                Some(Terminator::merge(target_terminator.clone(), other_target_terminator.clone()));
+                            resolved_queue.push(current);
+                            unresolved_set.remove(&current);
+                            continue;
+                        }
+
+                        branch_queue.push(current);
+                    }
+                    ControlInst::JumpIndirect { .. } | ControlInst::CallIndirect { .. } | ControlInst::Unimplemented => {
+                        unreachable!()
+                    }
+                }
+            }
+        }
+
+        while let Some(current) = branch_queue.pop() {
+            let ControlInst::Branch {
+                target_true, target_false, ..
+            } = all_blocks[current.index()].next.instruction
+            else {
+                unreachable!()
+            };
+            let terminator_true = terminator_for[target_true.index()].as_ref();
+            let terminator_false = terminator_for[target_false.index()].as_ref();
+            if terminator_true.is_some() && terminator_false.is_some() {
+                continue;
+            }
+
+            assert!((terminator_true.is_none() && terminator_false.is_some()) || (terminator_true.is_some() && terminator_false.is_none()));
+            find_terminator(
+                all_blocks,
+                &mut HashSet::new(),
+                &mut terminator_for,
+                &mut resolved_queue,
+                &mut unresolved_set,
+                current,
+            );
+        }
+
+        while resolved_queue.is_empty() {
+            let Some(current) = unresolved_set.pop_first() else { break };
+            find_terminator(
+                all_blocks,
+                &mut HashSet::new(),
+                &mut terminator_for,
+                &mut resolved_queue,
+                &mut unresolved_set,
+                current,
+            );
+        }
+    }
+
+    terminator_for.into_iter().map(Option::unwrap).collect()
+}
+
 #[deny(clippy::as_conversions)]
 fn optimize_program(
     config: &Config,
@@ -6032,14 +6251,16 @@ fn optimize_program(
         optimize_queue.push(current);
     }
 
+    let terminators = gather_terminators(all_blocks);
     let mut unknown_counter = 0;
     let mut info_for_block = Vec::with_capacity(all_blocks.len());
-    for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
+    for (current, terminator) in (0..all_blocks.len()).map(BlockTarget::from_raw).zip(terminators.into_iter()) {
         info_for_block.push(BlockInfo {
             input_regs: BlockRegs::new_input(bitness, current),
             output_regs: BlockRegs::new_output(bitness, current),
             registers_needed: RegMask::all(),
             stack: HashMap::new(),
+            terminator,
         });
     }
 
