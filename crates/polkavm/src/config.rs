@@ -1,9 +1,10 @@
 #[allow(unused_imports)]
 use crate::error::bail;
 use crate::error::Error;
-use crate::gas::CostModelRef;
+use crate::gas::{CostModelKind, CostModelRef};
 use alloc::sync::Arc;
 use polkavm_assembler::Assembler;
+use polkavm_common::simulator::CacheModel;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum BackendKind {
@@ -110,7 +111,7 @@ pub struct Config {
     pub(crate) cache_enabled: bool,
     pub(crate) lru_cache_size: u32,
     pub(crate) sandboxing_enabled: bool,
-    pub(crate) default_cost_model: Option<CostModelRef>,
+    pub(crate) default_cost_model: Option<CostModelKind>,
 }
 
 impl Default for Config {
@@ -211,7 +212,13 @@ impl Config {
 
             if let Some(value) = std::env::var_os("POLKAVM_DEFAULT_COST_MODEL") {
                 if value == "naive" {
-                    config.default_cost_model = Some(CostModel::naive_ref());
+                    config.default_cost_model = Some(CostModelKind::Simple(CostModel::naive_ref()));
+                } else if value == "full-l1-hit" {
+                    config.default_cost_model = Some(CostModelKind::Full(CacheModel::L1Hit));
+                } else if value == "full-l2-hit" {
+                    config.default_cost_model = Some(CostModelKind::Full(CacheModel::L2Hit));
+                } else if value == "full-l3-hit" {
+                    config.default_cost_model = Some(CostModelKind::Full(CacheModel::L3Hit));
                 } else {
                     let blob = match std::fs::read(&value) {
                         Ok(blob) => blob,
@@ -224,7 +231,7 @@ impl Config {
                         bail!("failed to read gas cost model from {:?}: the cost model blob is invalid", value);
                     };
 
-                    config.default_cost_model = Some(CostModelRef::from(Arc::new(cost_model)));
+                    config.default_cost_model = Some(CostModelKind::Simple(CostModelRef::from(Arc::new(cost_model))));
                 }
             }
         }
@@ -396,13 +403,13 @@ impl Config {
     /// Default: `None`
     ///
     /// Corresponding environment variable: `POLKAVM_DEFAULT_COST_MODEL`
-    pub fn set_default_cost_model(&mut self, cost_model: Option<CostModelRef>) -> &mut Self {
+    pub fn set_default_cost_model(&mut self, cost_model: Option<CostModelKind>) -> &mut Self {
         self.default_cost_model = cost_model;
         self
     }
 
     /// Returns the default cost model.
-    pub fn default_cost_model(&self) -> Option<CostModelRef> {
+    pub fn default_cost_model(&self) -> Option<CostModelKind> {
         self.default_cost_model.clone()
     }
 }
@@ -441,7 +448,7 @@ pub struct ModuleConfig {
     pub(crate) allow_sbrk: bool,
     cache_by_hash: bool,
     pub(crate) custom_codegen: Option<Arc<dyn CustomCodegen>>,
-    pub(crate) cost_model: Option<CostModelRef>,
+    pub(crate) cost_model: Option<CostModelKind>,
     pub(crate) is_per_instruction_metering: bool,
 }
 
@@ -573,12 +580,12 @@ impl ModuleConfig {
     }
 
     /// Gets the currently set gas cost model.
-    pub fn cost_model(&self) -> Option<&CostModelRef> {
+    pub fn cost_model(&self) -> Option<&CostModelKind> {
         self.cost_model.as_ref()
     }
 
     /// Sets a custom gas cost model.
-    pub fn set_cost_model(&mut self, cost_model: Option<CostModelRef>) -> &mut Self {
+    pub fn set_cost_model(&mut self, cost_model: Option<CostModelKind>) -> &mut Self {
         self.cost_model = cost_model;
         self
     }
@@ -600,7 +607,7 @@ impl ModuleConfig {
     }
 
     #[cfg(feature = "module-cache")]
-    pub(crate) fn hash(&self, cost_model: &CostModelRef) -> Option<polkavm_common::hasher::Hash> {
+    pub(crate) fn hash(&self, cost_model: &CostModelKind) -> Option<polkavm_common::hasher::Hash> {
         if self.custom_codegen.is_some() {
             return None;
         }
@@ -637,7 +644,16 @@ impl ModuleConfig {
         ]);
 
         use core::hash::Hash;
-        cost_model.hash(&mut hasher);
+        match cost_model {
+            CostModelKind::Simple(cost_model) => {
+                hasher.update_u32_array([0]);
+                cost_model.hash(&mut hasher);
+            }
+            CostModelKind::Full(cost_model) => {
+                hasher.update_u32_array([1]);
+                cost_model.hash(&mut hasher);
+            }
+        }
 
         Some(hasher.finalize())
     }

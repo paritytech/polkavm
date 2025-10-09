@@ -1,7 +1,13 @@
 use super::backend_prelude::*;
 
 #[derive(Copy, Clone)]
-pub struct PolkaVM(pub polkavm::BackendKind, pub Option<polkavm::GasMeteringKind>, pub bool);
+pub enum CostModel {
+    Simple,
+    Full
+}
+
+#[derive(Copy, Clone)]
+pub struct PolkaVM(pub polkavm::BackendKind, pub Option<polkavm::GasMeteringKind>, pub bool, pub CostModel);
 
 pub struct Instance {
     ext_initialize: polkavm::ProgramCounter,
@@ -16,15 +22,17 @@ impl Backend for PolkaVM {
     type Instance = Instance;
 
     fn name(&self) -> &'static str {
-        match (self.0, self.1, self.2) {
-            (polkavm::BackendKind::Compiler, None, false) => "polkavm32_compiler_no_gas",
-            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async), false) => "polkavm32_compiler_async_gas",
-            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), false) => "polkavm32_compiler_sync_gas",
-            (polkavm::BackendKind::Interpreter, _, false) => "polkavm32_interpreter",
-            (polkavm::BackendKind::Compiler, None, true) => "polkavm64_compiler_no_gas",
-            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async), true) => "polkavm64_compiler_async_gas",
-            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), true) => "polkavm64_compiler_sync_gas",
-            (polkavm::BackendKind::Interpreter, _, true) => "polkavm64_interpreter",
+        match (self.0, self.1, self.2, self.3) {
+            (polkavm::BackendKind::Compiler, None, false, CostModel::Simple) => "polkavm32_compiler_no_gas",
+            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async), false, CostModel::Simple) => "polkavm32_compiler_async_gas",
+            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), false, CostModel::Simple) => "polkavm32_compiler_sync_gas",
+            (polkavm::BackendKind::Interpreter, _, false, CostModel::Simple) => "polkavm32_interpreter",
+            (polkavm::BackendKind::Compiler, None, true, CostModel::Simple) => "polkavm64_compiler_no_gas",
+            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async), true, CostModel::Simple) => "polkavm64_compiler_async_gas",
+            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), true, CostModel::Simple) => "polkavm64_compiler_sync_gas",
+            (polkavm::BackendKind::Interpreter, _, true, CostModel::Simple) => "polkavm64_interpreter",
+            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), true, CostModel::Full) => "polkavm64_compiler_full_model_sync_gas",
+            _ => unreachable!()
         }
     }
 
@@ -47,6 +55,11 @@ impl Backend for PolkaVM {
 
         let mut config = polkavm::ModuleConfig::default();
         config.set_gas_metering(self.1);
+        let cost_model = match self.3 {
+            CostModel::Simple => polkavm::CostModelKind::Simple(polkavm::CostModel::naive_ref()),
+            CostModel::Full => polkavm::CostModelKind::Full(polkavm::CacheModel::L2Hit),
+        };
+        config.set_cost_model(Some(cost_model));
         polkavm::Module::from_blob(engine, &config, blob).unwrap()
     }
 

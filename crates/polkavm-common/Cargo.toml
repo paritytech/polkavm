@@ -13,6 +13,7 @@ arbitrary = { workspace = true, optional = true }
 log = { workspace = true, optional = true }
 polkavm-assembler = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
+picosimd = { workspace = true }
 
 [features]
 default = []
@@ -24,8 +25,10 @@ regmap = ["dep:polkavm-assembler"]
 blake3 = ["dep:blake3"]
 unique-id = []
 export-internals-for-testing = []
+simd = []
 
 [dev-dependencies]
+env_logger = { workspace = true }
 proptest = { workspace = true }
 
 [lints]

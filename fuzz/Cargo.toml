@@ -8,7 +8,7 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
-arbitrary = { version = "1", features = ["derive"] }
+arbitrary = { version = "1.4.2", features = ["derive"] }
 libfuzzer-sys = "0.4"
 
 [dependencies.polkavm]
@@ -20,6 +20,7 @@ path = "../crates/polkavm-linker"
 
 [dependencies.polkavm-common]
 path = "../crates/polkavm-common"
+features = ["arbitrary"]
 
 [[bin]]
 name = "fuzz_shm_allocator"

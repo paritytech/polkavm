@@ -77,7 +77,7 @@ impl ModuleCache {
         &self,
         config: &ModuleConfig,
         blob: &ProgramBlob,
-        cost_model: &crate::gas::CostModelRef,
+        cost_model: &crate::gas::CostModelKind,
     ) -> (Option<ModuleKey>, Option<Module>) {
         if !self.enabled {
             return (None, None);

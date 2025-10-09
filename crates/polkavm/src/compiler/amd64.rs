@@ -10,11 +10,11 @@ use polkavm_assembler::{Label, NonZero, ReservedAssembler, U1, U2, U3, U4};
 
 use polkavm_common::cast::cast;
 use polkavm_common::program::{ProgramCounter, RawReg, Reg};
+use polkavm_common::utils::GasVisitorT;
 use polkavm_common::zygote::{VmCtx, VM_ADDR_VMCTX};
 
 use crate::compiler::{ArchVisitor, Bitness, BitnessT, SandboxKind};
 use crate::config::GasMeteringKind;
-use crate::gas::GasVisitorT;
 use crate::sandbox::Sandbox;
 
 /// The register used for the embedded sandbox to hold the base address of the guest's linear memory.

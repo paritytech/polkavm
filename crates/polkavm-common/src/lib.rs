@@ -43,3 +43,5 @@ pub mod hasher;
 mod blake3;
 
 pub mod cast;
+#[cfg(feature = "alloc")]
+pub mod simulator;

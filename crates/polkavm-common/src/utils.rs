@@ -4,7 +4,7 @@ use core::mem::MaybeUninit;
 use core::ops::{Deref, Range};
 
 use crate::cast::cast;
-use crate::program::Reg;
+use crate::program::{ParsingVisitor, Reg};
 #[cfg(feature = "alloc")]
 use alloc::{borrow::Cow, sync::Arc, vec::Vec};
 
@@ -344,6 +344,32 @@ pub fn parse_immediate(text: &str) -> Option<ParsedImmediate> {
     } else {
         Some(ParsedImmediate::U64(value))
     }
+}
+
+pub trait GasVisitorT: ParsingVisitor {
+    fn take_block_cost(&mut self) -> Option<u32>;
+    fn is_at_start_of_basic_block(&self) -> bool;
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Bitness {
+    B32,
+    B64,
+}
+
+pub trait BitnessT {
+    const BITNESS: Bitness;
+}
+
+pub struct B64;
+pub struct B32;
+
+impl BitnessT for B32 {
+    const BITNESS: Bitness = Bitness::B32;
+}
+
+impl BitnessT for B64 {
+    const BITNESS: Bitness = Bitness::B64;
 }
 
 #[test]

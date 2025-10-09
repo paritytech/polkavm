@@ -112,7 +112,7 @@ fn cleanup_warn<T>(result: Result<T, String>) -> Option<T> {
     }
 }
 
-fn list_cpus() -> Result<BTreeMap<usize, Vec<usize>>, String> {
+pub fn list_cpus() -> Result<BTreeMap<usize, Vec<usize>>, String> {
     let mut cores = BTreeMap::new();
     for chunk in read_string("/proc/cpuinfo")?.trim().split("\n\n") {
         let mut nth_logical = None;

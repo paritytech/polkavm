@@ -1,7 +1,7 @@
 use polkavm_common::abi::{MemoryMapBuilder, VM_CODE_ADDRESS_ALIGNMENT, VM_MAX_PAGE_SIZE, VM_MIN_PAGE_SIZE};
 use polkavm_common::cast::cast;
 use polkavm_common::program::{
-    self, FrameKind, Instruction, InstructionSet, LineProgramOp, Opcode, ProgramBlob, ProgramCounter, ProgramSymbol,
+    self, FrameKind, Instruction, InstructionFormat, InstructionSet, LineProgramOp, Opcode, ProgramBlob, ProgramCounter, ProgramSymbol,
 };
 use polkavm_common::utils::{align_to_next_page_u32, align_to_next_page_u64};
 use polkavm_common::varint;
@@ -1092,6 +1092,7 @@ struct BasicBlock<BasicT, ControlT> {
     ops: Vec<(SourceStack, BasicInst<BasicT>)>,
     next: EndOfBlock<ControlT>,
     is_function: bool,
+    is_unlikely: bool,
 }
 
 impl<BasicT, ControlT> BasicBlock<BasicT, ControlT> {
@@ -1108,6 +1109,7 @@ impl<BasicT, ControlT> BasicBlock<BasicT, ControlT> {
             ops,
             next,
             is_function,
+            is_unlikely: false,
         }
     }
 }
@@ -5023,6 +5025,14 @@ enum Terminator {
 }
 
 impl Terminator {
+    fn contains_infinite_loop(&self) -> bool {
+        match self {
+            Terminator::One(TerminatorKind::InfiniteLoop) => true,
+            Terminator::Many(set) => set.contains(&TerminatorKind::InfiniteLoop),
+            Terminator::One(..) => false,
+        }
+    }
+
     fn merge(lhs: Self, rhs: Self) -> Self {
         match (lhs, rhs) {
             (Terminator::One(lhs), Terminator::One(rhs)) => {
@@ -6205,7 +6215,7 @@ fn optimize_program(
     all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>],
     reachability_graph: &mut ReachabilityGraph,
     exports: &mut [Export],
-) {
+) -> Vec<BlockInfo> {
     let bitness = if elf.is_64() { Bitness::B64 } else { Bitness::B32 };
 
     let mut optimize_queue = VecSet::new();
@@ -6262,6 +6272,28 @@ fn optimize_program(
             stack: HashMap::new(),
             terminator,
         });
+    }
+
+    for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
+        let ControlInst::Branch {
+            target_true, target_false, ..
+        } = all_blocks[current.index()].next.instruction
+        else {
+            continue;
+        };
+
+        let terminator_true = &info_for_block[target_true.index()].terminator;
+        let terminator_false = &info_for_block[target_false.index()].terminator;
+
+        if matches!(terminator_true, Terminator::One(TerminatorKind::Unimplemented)) {
+            all_blocks[target_true.index()].is_unlikely = true;
+            continue;
+        }
+
+        if matches!(terminator_false, Terminator::One(TerminatorKind::Unimplemented)) {
+            all_blocks[target_false.index()].is_unlikely = true;
+            continue;
+        }
     }
 
     let mut count_inline = 0;
@@ -6388,6 +6420,8 @@ fn optimize_program(
     log::debug!("             Inlinining: {count_inline}");
     log::debug!("  Dead code elimination: {count_dce}");
     log::debug!("   Constant propagation: {count_cp}");
+
+    info_for_block
 }
 
 #[cfg(test)]
@@ -6630,7 +6664,7 @@ mod test {
             let target_to_got_offset = HashMap::new();
 
             let (jump_table, jump_target_for_block) = build_jump_table(all_blocks.len(), &used_blocks, &reachability_graph);
-            let code = emit_code(
+            let (code, _) = emit_code(
                 &Default::default(),
                 &imports,
                 &base_address_for_section,
@@ -6920,6 +6954,7 @@ fn add_missing_fallthrough_blocks(
                 }
             },
             is_function: false,
+            is_unlikely: false,
         });
 
         new_used_blocks.push(new_block_index);
@@ -8176,7 +8211,7 @@ fn emit_code(
     is_optimized: bool,
     is_rv64: bool,
     heap_base: u32,
-) -> Result<Vec<(SourceStack, Instruction)>, ProgramFromElfError> {
+) -> Result<(Vec<(SourceStack, Instruction)>, Vec<usize>), ProgramFromElfError> {
     use polkavm_common::program::Reg as PReg;
     fn conv_reg(reg: Reg) -> polkavm_common::program::RawReg {
         match reg {
@@ -8230,6 +8265,7 @@ fn emit_code(
 
     let mut basic_block_delimited = true;
     let mut code: Vec<(SourceStack, Instruction)> = Vec::new();
+    let mut offsets = Vec::new();
     for block_target in used_blocks {
         let block = &all_blocks[block_target.index()];
 
@@ -8244,6 +8280,8 @@ fn emit_code(
                 Instruction::fallthrough,
             ));
         }
+
+        offsets.push(code.len());
 
         macro_rules! codegen {
             (
@@ -8260,6 +8298,17 @@ fn emit_code(
                     ),+
                 }
             }
+        }
+
+        if block.is_unlikely && !(block.ops.is_empty() && matches!(block.next.instruction, ControlInst::Unimplemented)) {
+            code.push((
+                Source {
+                    section_index: block.source.section_index,
+                    offset_range: (block.source.offset_range.start..block.source.offset_range.start + 4).into(),
+                }
+                .into(),
+                Instruction::unlikely,
+            ));
         }
 
         for (source, op) in &block.ops {
@@ -8763,7 +8812,7 @@ fn emit_code(
         }
     }
 
-    Ok(code)
+    Ok((code, offsets))
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -9859,6 +9908,7 @@ pub struct Config {
     elide_unnecessary_loads: bool,
     dispatch_table: Vec<Vec<u8>>,
     min_stack_size: u32,
+    gas_cost_model_aware_optimizations: bool,
 }
 
 impl Default for Config {
@@ -9870,6 +9920,7 @@ impl Default for Config {
             elide_unnecessary_loads: true,
             dispatch_table: Vec::new(),
             min_stack_size: VM_MIN_PAGE_SIZE * 2,
+            gas_cost_model_aware_optimizations: true,
         }
     }
 }
@@ -9907,6 +9958,11 @@ impl Config {
 
     pub fn set_min_stack_size(&mut self, value: u32) -> &mut Self {
         self.min_stack_size = value;
+        self
+    }
+
+    pub fn set_enable_gas_cost_model_aware_optimizations(&mut self, value: bool) -> &mut Self {
+        self.gas_cost_model_aware_optimizations = value;
         self
     }
 }
@@ -10171,10 +10227,11 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
     let mut used_blocks;
 
     let mut regspill_size = 0;
+    let mut info_for_block = Vec::new();
     if matches!(config.opt_level, OptLevel::O1 | OptLevel::O2 | OptLevel::Oexperimental) {
         reachability_graph = calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations)?;
         if matches!(config.opt_level, OptLevel::O2 | OptLevel::Oexperimental) {
-            optimize_program(&config, &elf, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
+            info_for_block = optimize_program(&config, &elf, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
         } else {
             for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
                 perform_nop_elimination(&mut all_blocks, current);
@@ -10358,7 +10415,119 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
     log::trace!("Memory configuration: {:#?}", memory_config);
 
     let (jump_table, jump_target_for_block) = build_jump_table(all_blocks.len(), &used_blocks, &reachability_graph);
-    let code = emit_code(
+    let (code, mut block_offsets) = emit_code(
+        &section_to_function_name,
+        &imports,
+        &base_address_for_section,
+        section_got,
+        &target_to_got_offset,
+        &all_blocks,
+        &used_blocks,
+        &used_imports,
+        &jump_target_for_block,
+        matches!(config.opt_level, OptLevel::O2 | OptLevel::Oexperimental),
+        is_rv64,
+        memory_config.heap_base,
+    )?;
+
+    let mut blocks_with_zero_cost_unlikely = HashSet::new();
+
+    assert_eq!(block_offsets.len(), used_blocks.len());
+    block_offsets.push(code.len());
+
+    if config.gas_cost_model_aware_optimizations {
+        log::debug!("Performing gas cost model aware optimizations...");
+        for (current, range) in used_blocks.iter().copied().zip(block_offsets.windows(2).map(|w| w[0]..w[1])) {
+            use polkavm_common::program::ParsedInstruction;
+            use polkavm_common::simulator::{CacheModel, Simulator};
+            use polkavm_common::utils::{GasVisitorT, B64};
+
+            fn inst(instruction: Instruction) -> ParsedInstruction {
+                ParsedInstruction {
+                    kind: instruction,
+                    offset: ProgramCounter(0),
+                    next_offset: ProgramCounter(0),
+                }
+            }
+
+            let mut simulator = Simulator::<B64, ()>::new(&[], CacheModel::L2Hit, ());
+            simulator.set_force_branch_is_cheap(Some(false));
+
+            log::trace!("Simulating block {}..{}...", range.start, range.end);
+            let mut fmt = InstructionFormat::default();
+            fmt.is_64_bit = is_rv64;
+
+            for (_, instruction) in &code[range.clone()] {
+                log::trace!("  {}", instruction.display(&fmt));
+                inst(*instruction).visit_parsing(&mut simulator);
+            }
+            let cost_without_unlikely = simulator.take_block_cost().unwrap();
+            log::trace!("Cost without unlikely: {cost_without_unlikely}");
+
+            inst(Instruction::unlikely).visit_parsing(&mut simulator);
+            for (_, instruction) in &code[range] {
+                inst(*instruction).visit_parsing(&mut simulator);
+            }
+            let cost_with_unlikely = simulator.take_block_cost().unwrap();
+            log::trace!("Cost with unlikely: {cost_with_unlikely}");
+
+            if cost_with_unlikely == cost_without_unlikely {
+                blocks_with_zero_cost_unlikely.insert(current);
+            }
+        }
+    }
+
+    for &current in &used_blocks {
+        if !blocks_with_zero_cost_unlikely.contains(&current) {
+            continue;
+        }
+
+        let Some(reachability) = reachability_graph.for_code.get(&current) else {
+            continue;
+        };
+        if !reachability.is_only_statically_reachable() {
+            continue;
+        }
+
+        if !reachability
+            .reachable_from
+            .iter()
+            .any(|source| matches!(all_blocks[source.index()].next.instruction, ControlInst::Branch { .. }))
+        {
+            continue;
+        }
+
+        all_blocks[current.index()].is_unlikely = true;
+    }
+
+    if !info_for_block.is_empty() {
+        for &current in &used_blocks {
+            let ControlInst::Branch {
+                target_true, target_false, ..
+            } = all_blocks[current.index()].next.instruction
+            else {
+                continue;
+            };
+
+            let terminator_true = &info_for_block[target_true.index()].terminator;
+            let terminator_false = &info_for_block[target_false.index()].terminator;
+
+            if terminator_true.contains_infinite_loop()
+                && !terminator_false.contains_infinite_loop()
+                && target_true.index() < target_false.index()
+                && !all_blocks[target_true.index()].is_unlikely
+            {
+                if let Some(reachability) = reachability_graph.for_code.get(&target_false) {
+                    if reachability.is_only_reachable_from(current) {
+                        all_blocks[target_false.index()].is_unlikely = true;
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+
+    let (code, _) = emit_code(
         &section_to_function_name,
         &imports,
         &base_address_for_section,

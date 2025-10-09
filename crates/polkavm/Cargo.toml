@@ -13,7 +13,7 @@ description = "A fast and secure RISC-V based virtual machine"
 [dependencies]
 log = { workspace = true }
 polkavm-assembler = { workspace = true, features = ["alloc"] }
-polkavm-common = { workspace = true, features = ["alloc", "logging", "regmap", "unique-id"] }
+polkavm-common = { workspace = true, features = ["alloc", "logging", "regmap", "unique-id", "simd"] }
 schnellru = { workspace = true, optional = true }
 
 [target.'cfg(all(not(miri), target_arch = "x86_64", target_os = "linux"))'.dependencies]

@@ -969,6 +969,31 @@ macro_rules! define_opcodes {
             fn invalid(&mut self) -> Self::ReturnTy;
         }
 
+        #[macro_export]
+        macro_rules! impl_parsing_visitor_for_instruction_visitor {
+            ($visitor_ty:ident) => {
+                impl ParsingVisitor for $visitor_ty {
+                    type ReturnTy = <$visitor_ty as $crate::program::InstructionVisitor>::ReturnTy;
+
+                    $(fn $name_argless(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_argless(self) })+
+                    $(fn $name_reg_imm(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm(self, reg, imm) })+
+                    $(fn $name_reg_imm_offset(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm_offset(self, reg, imm1, imm2) })+
+                    $(fn $name_reg_imm_imm(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm_imm(self, reg, imm1, imm2) })+
+                    $(fn $name_reg_reg_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm(self, reg1, reg2, imm) })+
+                    $(fn $name_reg_reg_offset(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_offset(self, reg1, reg2, imm) })+
+                    $(fn $name_reg_reg_reg(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_reg(self, reg1, reg2, reg3) })+
+                    $(fn $name_offset(&mut self, _offset: u32, _args_length: u32, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_offset(self, imm) })+
+                    $(fn $name_imm(&mut self, _offset: u32, _args_length: u32, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm(self, imm) })+
+                    $(fn $name_imm_imm(&mut self, _offset: u32, _args_length: u32, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm_imm(self, imm1, imm2) })+
+                    $(fn $name_reg_reg(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg(self, reg1, reg2) })+
+                    $(fn $name_reg_reg_imm_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm_imm(self, reg1, reg2, imm1, imm2) })+
+                    $(fn $name_reg_imm64(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm: u64) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm64(self, reg, imm) })+
+
+                    fn invalid(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::invalid(self) }
+                }
+            };
+        }
+
         #[derive(Copy, Clone, PartialEq, Eq, Debug)]
         #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
         #[allow(non_camel_case_types)]
@@ -1007,6 +1032,25 @@ macro_rules! define_opcodes {
                     $(Self::$name_reg_reg_imm_imm(reg1, reg2, imm1, imm2) => visitor.$name_reg_reg_imm_imm(reg1, reg2, imm1, imm2),)+
                     $(Self::$name_reg_imm64(reg, imm) => visitor.$name_reg_imm64(reg, imm),)+
                     Self::invalid => visitor.invalid(),
+                }
+            }
+
+            pub fn visit_parsing<T>(self, offset: u32, args_length: u32, visitor: &mut T) -> T::ReturnTy where T: ParsingVisitor {
+                match self {
+                    $(Self::$name_argless => visitor.$name_argless(offset, args_length),)+
+                    $(Self::$name_reg_imm(reg, imm) => visitor.$name_reg_imm(offset, args_length, reg, imm),)+
+                    $(Self::$name_reg_imm_offset(reg, imm1, imm2) => visitor.$name_reg_imm_offset(offset, args_length, reg, imm1, imm2),)+
+                    $(Self::$name_reg_imm_imm(reg, imm1, imm2) => visitor.$name_reg_imm_imm(offset, args_length, reg, imm1, imm2),)+
+                    $(Self::$name_reg_reg_imm(reg1, reg2, imm) => visitor.$name_reg_reg_imm(offset, args_length, reg1, reg2, imm),)+
+                    $(Self::$name_reg_reg_offset(reg1, reg2, imm) => visitor.$name_reg_reg_offset(offset, args_length, reg1, reg2, imm),)+
+                    $(Self::$name_reg_reg_reg(reg1, reg2, reg3) => visitor.$name_reg_reg_reg(offset, args_length, reg1, reg2, reg3),)+
+                    $(Self::$name_offset(imm) => visitor.$name_offset(offset, args_length, imm),)+
+                    $(Self::$name_imm(imm) => visitor.$name_imm(offset, args_length, imm),)+
+                    $(Self::$name_imm_imm(imm1, imm2) => visitor.$name_imm_imm(offset, args_length, imm1, imm2),)+
+                    $(Self::$name_reg_reg(reg1, reg2) => visitor.$name_reg_reg(offset, args_length, reg1, reg2),)+
+                    $(Self::$name_reg_reg_imm_imm(reg1, reg2, imm1, imm2) => visitor.$name_reg_reg_imm_imm(offset, args_length, reg1, reg2, imm1, imm2),)+
+                    $(Self::$name_reg_imm64(reg, imm) => visitor.$name_reg_imm64(offset, args_length, reg, imm),)+
+                    Self::invalid => visitor.invalid(offset, args_length),
                 }
             }
 
@@ -3863,6 +3907,16 @@ pub struct ParsedInstruction {
     pub next_offset: ProgramCounter,
 }
 
+impl ParsedInstruction {
+    #[inline]
+    pub fn visit_parsing<T>(&self, visitor: &mut T) -> <T as ParsingVisitor>::ReturnTy
+    where
+        T: ParsingVisitor,
+    {
+        self.kind.visit_parsing(self.offset.0, self.next_offset.0 - self.offset.0, visitor)
+    }
+}
+
 impl core::ops::Deref for ParsedInstruction {
     type Target = Instruction;
 
@@ -3936,6 +3990,14 @@ where
     {
         // TODO: Make this directly dispatched?
         Some(self.next()?.visit(visitor))
+    }
+
+    #[inline]
+    pub fn visit_parsing<T>(&mut self, visitor: &mut T) -> Option<<T as ParsingVisitor>::ReturnTy>
+    where
+        T: ParsingVisitor,
+    {
+        Some(self.next()?.visit_parsing(visitor))
     }
 }
 

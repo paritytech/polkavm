@@ -1,5 +1,6 @@
 use std::{collections::HashMap, io::Write};
 
+use polkavm::CostModelKind;
 use polkavm_common::program::{ParsedInstruction, ProgramBlob, ProgramCounter, ISA32_V1, ISA64_V1};
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -131,6 +132,7 @@ pub struct Disassembler<'a> {
     emit_exports: bool,
     show_offsets: bool,
     show_native_offsets: bool,
+    cost_model: Option<CostModelKind>,
 }
 
 impl<'a> Disassembler<'a> {
@@ -155,6 +157,7 @@ impl<'a> Disassembler<'a> {
             emit_exports: true,
             show_offsets: true,
             show_native_offsets: true,
+            cost_model: None,
         })
     }
 
@@ -194,6 +197,10 @@ impl<'a> Disassembler<'a> {
         self.show_native_offsets = value;
     }
 
+    pub fn cost_model(&mut self, value: Option<CostModelKind>) {
+        self.cost_model = value;
+    }
+
     fn instructions(&self) -> Vec<ParsedInstruction> {
         if self.blob.is_64_bit() {
             self.blob.instructions(ISA64_V1).collect()
@@ -206,6 +213,8 @@ impl<'a> Disassembler<'a> {
         let mut config = polkavm::Config::from_env()?;
         config.set_worker_count(0);
         config.set_backend(Some(polkavm::BackendKind::Interpreter));
+        config.set_allow_experimental(true);
+        config.set_default_cost_model(self.cost_model.clone());
 
         let engine = polkavm::Engine::new(&config)?;
 

@@ -1,10 +1,25 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use polkavm_common::program::{InstructionSet, InstructionVisitor, Instructions, Opcode, RawReg};
+use polkavm_common::program::{InstructionSet, InstructionVisitor, Instructions, Opcode, ParsingVisitor, RawReg};
+use polkavm_common::simulator::CacheModel;
+use polkavm_common::utils::GasVisitorT;
 
-pub trait GasVisitorT: InstructionVisitor {
-    fn take_block_cost(&mut self) -> Option<u32>;
-    fn is_at_start_of_basic_block(&self) -> bool;
+#[derive(Clone)]
+pub enum CostModelKind {
+    Simple(CostModelRef),
+    Full(CacheModel),
+}
+
+impl From<CostModelRef> for CostModelKind {
+    fn from(cost_model: CostModelRef) -> CostModelKind {
+        CostModelKind::Simple(cost_model)
+    }
+}
+
+impl From<Arc<CostModel>> for CostModelKind {
+    fn from(cost_model: Arc<CostModel>) -> CostModelKind {
+        CostModelKind::Simple(cost_model.into())
+    }
 }
 
 #[derive(Clone)]
@@ -297,6 +312,15 @@ impl CostModel {
     }
 }
 
+impl CostModelKind {
+    pub(crate) fn is_naive(&self) -> bool {
+        match self {
+            CostModelKind::Simple(ref cost_model) => cost_model.pointer == core::ptr::addr_of!(NAIVE_COST_MODEL),
+            CostModelKind::Full(..) => false,
+        }
+    }
+}
+
 // TODO: Come up with a better cost model.
 pub struct GasVisitor {
     cost_model: CostModelRef,
@@ -330,6 +354,8 @@ impl GasVisitorT for GasVisitor {
         self.cost == 0
     }
 }
+
+polkavm_common::impl_parsing_visitor_for_instruction_visitor!(GasVisitor);
 
 impl InstructionVisitor for GasVisitor {
     type ReturnTy = ();
@@ -1073,7 +1099,7 @@ where
     I: InstructionSet,
 {
     debug_assert!(visitor.is_at_start_of_basic_block());
-    while instructions.visit(&mut visitor).is_some() {
+    while instructions.visit_parsing(&mut visitor).is_some() {
         if let Some(cost) = visitor.take_block_cost() {
             return (cost, false);
         }
@@ -1085,7 +1111,7 @@ where
         let started_out_of_bounds = visitor.is_at_start_of_basic_block();
 
         // We've ended out of bounds, so assume there's an implicit trap there.
-        visitor.trap();
+        visitor.trap(0, 0); // TODO: Currently it doesn't matter, but pass correct offsets.
         (visitor.take_block_cost().unwrap(), started_out_of_bounds)
     }
 }
@@ -1095,6 +1121,6 @@ where
     G: GasVisitorT,
 {
     debug_assert!(gas_visitor.is_at_start_of_basic_block());
-    gas_visitor.trap();
+    gas_visitor.trap(0, 0); // TODO: Currently it doesn't matter, but pass correct offsets.
     gas_visitor.take_block_cost().unwrap()
 }

@@ -317,6 +317,11 @@ fn main_disassemble(
     disassembler.show_offsets(show_offsets);
     disassembler.show_native_offsets(show_native_offsets);
 
+    // TODO: Should be set with command line arguments.
+    if let Ok(config) = polkavm::Config::from_env() {
+        disassembler.cost_model(config.default_cost_model());
+    }
+
     if display_gas {
         disassembler.display_gas().map_err(|error| error.to_string())?;
     }

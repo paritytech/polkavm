@@ -6,7 +6,7 @@ extern crate polkavm_linux_raw as linux_raw;
 use polkavm_common::{
     cast::cast,
     program::Reg,
-    utils::{align_to_next_page_usize, slice_assume_init_mut},
+    utils::{align_to_next_page_usize, slice_assume_init_mut, Bitness},
     zygote::{
         AddressTable, AddressTablePacked, ExtTable, ExtTablePacked, VmCtx, VmFd, VmMap, VMCTX_FUTEX_BUSY, VMCTX_FUTEX_GUEST_ECALLI,
         VMCTX_FUTEX_GUEST_NOT_ENOUGH_GAS, VMCTX_FUTEX_GUEST_PAGEFAULT, VMCTX_FUTEX_GUEST_SIGNAL, VMCTX_FUTEX_GUEST_STEP,
@@ -31,7 +31,6 @@ use crate::config::Config;
 use crate::config::GasMeteringKind;
 use crate::page_set::PageSet;
 use crate::shm_allocator::{ShmAllocation, ShmAllocator};
-use crate::utils::Bitness;
 use crate::{Gas, InterruptKind, ProgramCounter, RegValue, Segfault};
 
 pub struct GlobalState {

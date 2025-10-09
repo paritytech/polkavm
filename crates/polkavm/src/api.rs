@@ -9,7 +9,7 @@ use polkavm_common::program::{
     FrameKind, ISA32_V1_NoSbrk, ISA64_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode, ProgramBlob, Reg, ISA32_V1,
     ISA64_V1,
 };
-use polkavm_common::utils::{ArcBytes, AsUninitSliceMut};
+use polkavm_common::utils::{ArcBytes, AsUninitSliceMut, B32, B64};
 
 if_compiler_is_supported! {
     use polkavm_common::program::{
@@ -19,7 +19,7 @@ if_compiler_is_supported! {
 
 use crate::config::{BackendKind, Config, GasMeteringKind, ModuleConfig, SandboxKind};
 use crate::error::{bail, bail_static, Error};
-use crate::gas::{CostModel, CostModelRef, GasVisitor};
+use crate::gas::{CostModel, CostModelKind, GasVisitor};
 use crate::interpreter::InterpretedInstance;
 use crate::utils::{GuestInit, InterruptKind};
 use crate::{Gas, ProgramCounter};
@@ -31,7 +31,6 @@ if_compiler_is_supported! {
     {
         use crate::sandbox::{Sandbox, SandboxInstance};
         use crate::compiler::{CompiledModule, CompilerCache};
-        use crate::utils::{B32, B64};
 
         #[cfg(target_os = "linux")]
         use crate::sandbox::linux::Sandbox as SandboxLinux;
@@ -99,6 +98,7 @@ pub struct RuntimeInstructionSet {
 }
 
 impl InstructionSet for RuntimeInstructionSet {
+    #[allow(clippy::collapsible_else_if)]
     fn opcode_from_u8(self, byte: u8) -> Option<Opcode> {
         if !self.is_64_bit {
             if self.allow_sbrk {
@@ -125,7 +125,7 @@ pub struct Engine {
     state: Arc<EngineState>,
     allow_dynamic_paging: bool,
     allow_experimental: bool,
-    default_cost_model: CostModelRef,
+    default_cost_model: CostModelKind,
 }
 
 impl Engine {
@@ -241,7 +241,10 @@ impl Engine {
             state,
             allow_dynamic_paging: config.allow_dynamic_paging(),
             allow_experimental: config.allow_experimental,
-            default_cost_model: config.default_cost_model.clone().unwrap_or(CostModel::naive_ref()),
+            default_cost_model: config
+                .default_cost_model
+                .clone()
+                .unwrap_or(CostModelKind::Simple(CostModel::naive_ref())),
         })
     }
 
@@ -299,7 +302,7 @@ pub(crate) struct ModulePrivate {
     page_size_mask: u32,
     page_shift: u32,
     instruction_set: RuntimeInstructionSet,
-    cost_model: CostModelRef,
+    cost_model: CostModelKind,
     #[cfg(feature = "module-cache")]
     pub(crate) module_key: Option<ModuleKey>,
 
@@ -405,7 +408,7 @@ impl Module {
     }
 
     /// Returns the cost model associated with this module.
-    pub fn cost_model(&self) -> &CostModelRef {
+    pub fn cost_model(&self) -> &CostModelKind {
         &self.state().cost_model
     }
 
@@ -447,8 +450,14 @@ impl Module {
         );
 
         let cost_model = config.cost_model.clone().unwrap_or_else(|| engine.default_cost_model.clone());
-        if config.is_per_instruction_metering && core::ptr::addr_of!(*cost_model) != core::ptr::addr_of!(*CostModel::naive_ref()) {
-            bail!("per instruction metering is not supported with a non-default cost model");
+        if config.is_per_instruction_metering && !cost_model.is_naive() {
+            bail!("per instruction metering is not supported with a non-naive gas cost model");
+        }
+
+        // TODO: Use cpuid instead so that we don't have to gate this to 'std'-only.
+        #[cfg(all(target_arch = "x86_64", feature = "std"))]
+        if matches!(cost_model, CostModelKind::Full(..)) && !std::is_x86_feature_detected!("avx2") {
+            bail!("on AMD64 the full gas cost model is only supported on CPUs with AVX2 support");
         }
 
         #[cfg(feature = "module-cache")]
@@ -534,9 +543,42 @@ impl Module {
 
         #[allow(unused_macros)]
         macro_rules! compile_module {
-            ($sandbox_kind:ident, $bitness_kind:ident, $isa:ident, $isa_no_sbrk:ident, $visitor_name:ident, $module_kind:ident, $gas_kind:ident) => {{
+            ($sandbox_kind:ident, $bitness_kind:ident, $isa:ident, $isa_no_sbrk:ident, $visitor_name:ident, $module_kind:ident) => {
+                match cost_model {
+                    CostModelKind::Simple(ref cost_model) => {
+                        compile_module!(
+                            $sandbox_kind,
+                            $bitness_kind,
+                            $isa,
+                            $isa_no_sbrk,
+                            $visitor_name,
+                            $module_kind,
+                            GasVisitor,
+                            GasVisitor,
+                            GasVisitor::new(cost_model.clone())
+                        )
+                    }
+                    CostModelKind::Full(cost_model) => {
+                        use polkavm_common::simulator::Simulator;
+                        let gas_visitor = Simulator::<$bitness_kind, ()>::new(blob.code(), cost_model, ());
+                        compile_module!(
+                            $sandbox_kind,
+                            $bitness_kind,
+                            $isa,
+                            $isa_no_sbrk,
+                            $visitor_name,
+                            $module_kind,
+                            Simulator::<'a, $bitness_kind, ()>,
+                            Simulator::<$bitness_kind, ()>,
+                            gas_visitor
+                        )
+                    }
+                }
+            };
+
+            ($sandbox_kind:ident, $bitness_kind:ident, $isa:ident, $isa_no_sbrk:ident, $visitor_name:ident, $module_kind:ident, $gas_kind:ty, $gas_kind_no_lifetime:ty, $gas_visitor:expr) => {{
                 type VisitorTy<'a> = crate::compiler::CompilerVisitor<'a, $sandbox_kind, $bitness_kind, $gas_kind>;
-                let (mut visitor, aux) = crate::compiler::CompilerVisitor::<$sandbox_kind, $bitness_kind, $gas_kind>::new(
+                let (mut visitor, aux) = crate::compiler::CompilerVisitor::<$sandbox_kind, $bitness_kind, $gas_kind_no_lifetime>::new(
                     &engine.state.compiler_cache,
                     config,
                     instruction_set,
@@ -547,7 +589,7 @@ impl Module {
                     config.step_tracing || engine.crosscheck,
                     cast(blob.code().len()).assert_always_fits_in_u32(),
                     init,
-                    GasVisitor::new(cost_model.clone()),
+                    $gas_visitor,
                 )?;
 
                 if config.allow_sbrk {
@@ -574,9 +616,9 @@ impl Module {
                                 #[cfg(target_os = "linux")]
                                 {
                                     if blob.is_64_bit() {
-                                        compile_module!(SandboxLinux, B64, ISA64_V1, ISA64_V1_NoSbrk, COMPILER_VISITOR_LINUX, Linux, GasVisitor)
+                                        compile_module!(SandboxLinux, B64, ISA64_V1, ISA64_V1_NoSbrk, COMPILER_VISITOR_LINUX, Linux)
                                     } else {
-                                        compile_module!(SandboxLinux, B32, ISA32_V1, ISA32_V1_NoSbrk, COMPILER_VISITOR_LINUX, Linux, GasVisitor)
+                                        compile_module!(SandboxLinux, B32, ISA32_V1, ISA32_V1_NoSbrk, COMPILER_VISITOR_LINUX, Linux)
                                     }
                                 }
 
@@ -590,9 +632,9 @@ impl Module {
                                 #[cfg(feature = "generic-sandbox")]
                                 {
                                     if blob.is_64_bit() {
-                                        compile_module!(SandboxGeneric, B64, ISA64_V1, ISA64_V1_NoSbrk, COMPILER_VISITOR_GENERIC, Generic, GasVisitor)
+                                        compile_module!(SandboxGeneric, B64, ISA64_V1, ISA64_V1_NoSbrk, COMPILER_VISITOR_GENERIC, Generic)
                                     } else {
-                                        compile_module!(SandboxGeneric, B32, ISA32_V1, ISA32_V1_NoSbrk, COMPILER_VISITOR_GENERIC, Generic, GasVisitor)
+                                        compile_module!(SandboxGeneric, B32, ISA32_V1, ISA32_V1_NoSbrk, COMPILER_VISITOR_GENERIC, Generic)
                                     }
                                 }
 
@@ -849,12 +891,29 @@ impl Module {
     /// Will return `None` if the given `code_offset` is invalid.
     /// Mostly only useful for debugging.
     pub fn calculate_gas_cost_for(&self, code_offset: ProgramCounter) -> Option<Gas> {
-        if !self.is_jump_target_valid(code_offset) {
+        if !self.is_jump_target_valid(code_offset) && code_offset.0 < self.code_len() {
             return None;
         }
 
-        let visitor = GasVisitor::new(self.state().cost_model.clone());
-        let gas = crate::gas::calculate_for_block(visitor, self.instructions_bounded_at(code_offset));
+        let gas = match self.state().cost_model {
+            CostModelKind::Simple(ref cost_model) => {
+                let gas_visitor = GasVisitor::new(cost_model.clone());
+                let instructions = self.instructions_bounded_at(code_offset);
+                crate::gas::calculate_for_block(gas_visitor, instructions)
+            }
+            CostModelKind::Full(cost_model) => {
+                use polkavm_common::simulator::Simulator;
+                let instructions = self.instructions_bounded_at(code_offset);
+                if self.is_64_bit() {
+                    let gas_visitor = Simulator::<B64, ()>::new(self.blob().code(), cost_model, ());
+                    crate::gas::calculate_for_block(gas_visitor, instructions)
+                } else {
+                    let gas_visitor = Simulator::<B32, ()>::new(self.blob().code(), cost_model, ());
+                    crate::gas::calculate_for_block(gas_visitor, instructions)
+                }
+            }
+        };
+
         Some(i64::from(gas.0))
     }
 

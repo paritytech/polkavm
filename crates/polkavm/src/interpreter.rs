@@ -3,7 +3,7 @@
 #![deny(clippy::as_conversions)]
 use crate::api::{MemoryAccessError, Module, RegValue, SetCacheSizeLimitArgs};
 use crate::error::Error;
-use crate::gas::{GasVisitor, GasVisitorT};
+use crate::gas::{CostModelKind, GasVisitor};
 use crate::utils::{FlatMap, InterruptKind, Segfault};
 use crate::{Gas, GasMeteringKind, ProgramCounter};
 use alloc::boxed::Box;
@@ -19,7 +19,7 @@ use polkavm_common::program::{
     asm, interpreter_calculate_cache_num_entries, InstructionVisitor, RawReg, Reg, INTERPRETER_CACHE_ENTRY_SIZE,
     INTERPRETER_CACHE_RESERVED_ENTRIES, INTERPRETER_FLATMAP_ENTRY_SIZE,
 };
-use polkavm_common::utils::{align_to_next_page_usize, byte_slice_init, slice_assume_init_mut};
+use polkavm_common::utils::{align_to_next_page_usize, byte_slice_init, slice_assume_init_mut, GasVisitorT};
 
 type Target = u32;
 
@@ -903,35 +903,55 @@ impl InterpretedInstance {
         self.compile_block::<DEBUG>(program_counter)
     }
 
-    #[inline(always)]
-    fn compile_block<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<Target> {
-        if self.module.is_per_instruction_metering() {
-            // TODO: Remove this.
-            self.compile_block_impl::<DEBUG, true>(program_counter)
-        } else {
-            self.compile_block_impl::<DEBUG, false>(program_counter)
-        }
-    }
-
     #[inline(never)]
-    #[cold]
-    fn compile_block_impl<const DEBUG: bool, const PER_INSTRUCTION_METERING: bool>(
-        &mut self,
-        program_counter: ProgramCounter,
-    ) -> Option<Target> {
+    fn compile_block<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<Target> {
         if program_counter.0 > self.module.code_len() {
             return None;
         }
-
-        let Ok(origin) = u32::try_from(self.compiled_handlers.len()) else {
-            panic!("internal compiled program counter overflow: the program is too big!");
-        };
 
         if DEBUG {
             log::debug!("Compiling block:");
         }
 
-        let mut gas_visitor = GasVisitor::new(self.module.cost_model().clone());
+        match self.module.cost_model() {
+            CostModelKind::Simple(cost_model) => {
+                if self.module.is_per_instruction_metering() {
+                    // TODO: Remove this.
+                    self.compile_block_impl::<_, DEBUG, true>(program_counter, GasVisitor::new(cost_model.clone()))
+                } else {
+                    self.compile_block_impl::<_, DEBUG, false>(program_counter, GasVisitor::new(cost_model.clone()))
+                }
+            }
+            CostModelKind::Full(cost_model) => {
+                use polkavm_common::simulator::Simulator;
+                use polkavm_common::utils::{B32, B64};
+
+                let blob = self.module.blob().clone(); // TODO: Unnecessary clone.
+                let code = blob.code();
+
+                if self.module.blob().is_64_bit() {
+                    let gas_visitor = Simulator::<B64, ()>::new(code, *cost_model, ());
+                    self.compile_block_impl::<_, DEBUG, false>(program_counter, gas_visitor)
+                } else {
+                    let gas_visitor = Simulator::<B32, ()>::new(code, *cost_model, ());
+                    self.compile_block_impl::<_, DEBUG, false>(program_counter, gas_visitor)
+                }
+            }
+        }
+    }
+
+    fn compile_block_impl<G, const DEBUG: bool, const PER_INSTRUCTION_METERING: bool>(
+        &mut self,
+        program_counter: ProgramCounter,
+        mut gas_visitor: G,
+    ) -> Option<Target>
+    where
+        G: GasVisitorT,
+    {
+        let Ok(origin) = u32::try_from(self.compiled_handlers.len()) else {
+            panic!("internal compiled program counter overflow: the program is too big!");
+        };
+
         let mut charge_gas_index = None;
         let mut is_jump_target_valid = self.module.is_jump_target_valid(program_counter);
         for instruction in self.module.instructions_bounded_at(program_counter) {
@@ -959,7 +979,7 @@ impl InterpretedInstance {
                         charge_gas_index = Some((instruction.offset, self.compiled_handlers.len()));
                         emit!(self, charge_gas(instruction.offset, 0));
                     }
-                    instruction.visit(&mut gas_visitor);
+                    instruction.visit_parsing(&mut gas_visitor);
                 } else {
                     if DEBUG {
                         log::debug!("  [{}]: {}: charge_gas", self.compiled_handlers.len(), instruction.offset);
@@ -1047,7 +1067,10 @@ impl InterpretedInstance {
         }
 
         let gas_cost = if self.module.gas_metering().is_some() {
-            crate::gas::trap_cost(GasVisitor::new(self.module.cost_model().clone()))
+            match self.module.cost_model() {
+                CostModelKind::Simple(cost_model) => crate::gas::trap_cost(GasVisitor::new(cost_model.clone())),
+                CostModelKind::Full(cost_model) => polkavm_common::simulator::trap_cost(*cost_model),
+            }
         } else {
             0
         };

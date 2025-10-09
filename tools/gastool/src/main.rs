@@ -6,7 +6,10 @@ use clap::Parser;
 use core::sync::atomic::{AtomicBool, Ordering};
 use memoffset::offset_of;
 use polkavm::program::Instruction;
-use polkavm::{Config, CostModel, CustomCodegen, Engine, Error, InterruptKind, Module, ModuleConfig, ProgramBlob, ProgramCounter, Reg};
+use polkavm::{
+    CacheModel, Config, CostModel, CostModelKind, CustomCodegen, Engine, Error, InterruptKind, Module, ModuleConfig, ProgramBlob,
+    ProgramCounter, Reg,
+};
 use polkavm_assembler::amd64::addr::*;
 use polkavm_assembler::amd64::inst::*;
 use polkavm_assembler::amd64::Reg::rsp;
@@ -853,6 +856,17 @@ impl<'a> core::ops::DerefMut for InstructionBuffer<'a> {
     }
 }
 
+fn get_frequency(cpu: usize) -> Result<u64, Error> {
+    let frequency = crate::system::read_string(format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/cpuinfo_cur_freq"))?
+        .trim()
+        .parse::<u64>()
+        .unwrap()
+        * 1000;
+
+    log::info!("CPU frequency: {:.02} GHz ({frequency})", frequency as f64 / 1_000_000_000_f64);
+    Ok(frequency)
+}
+
 impl Context {
     fn new(isolation_args: IsolationArgs) -> Result<Self, Error> {
         let cpu = isolation_args.cpu;
@@ -881,13 +895,7 @@ impl Context {
         let cpuid = raw_cpuid::CpuId::new();
         log::info!("CPU: {}", cpuid.get_processor_brand_string().unwrap().as_str());
 
-        let frequency: u64 = crate::system::read_string(format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/cpuinfo_cur_freq"))?
-            .trim()
-            .parse::<u64>()
-            .unwrap()
-            * 1000;
-
-        log::info!("CPU frequency: {:.02} GHz ({frequency})", frequency as f64 / 1_000_000_000_f64);
+        let frequency = get_frequency(cpu)?;
 
         let mut l1_cache = None;
         let mut l2_cache = None;
@@ -2364,35 +2372,66 @@ fn main_generate_model(
     division_benchmark!(rem_signed_32);
     division_benchmark!(rem_unsigned_32);
 
-    let branch_miss = {
-        let mut n = 0;
-        ctx.benchmark("branch_miss", |mut code| {
-            pcg_rand_u32(code.code, pcg_increment, pcg_state_reg, pcg_tmp_reg, A1);
-            code.push(and_imm(A1, A1, 1));
-            code.push(branch_eq(A1, S1, n + 1));
-            n += 1;
-        })
-        .repeat_code(10000)
-        .setup_code(|mut code| {
-            code.extend_from_slice(&pcg_init_code);
-            code.push(load_imm(S1, 1));
-        })
-        .counters(vec![CounterKind::BranchesRetired, CounterKind::BranchesRetiredMisprediction])
-        .run()
+    let mut branch_miss_cost: Option<u32> = None;
+    let mut branch_imm_miss_cost: Option<u32> = None;
+
+    for (branch_kind_name, branch_kind) in [
+        ("branch_eq", branch_eq as fn(Reg, Reg, u32) -> Instruction),
+        ("branch_not_eq", branch_not_eq),
+    ] {
+        for arg in [0, 1] {
+            let mut n = 0;
+            let result = ctx
+                .benchmark(format!("{branch_kind_name}_0_{arg}"), |mut code| {
+                    code.push(branch_kind(A1, S1, n + 1));
+                    n += 1;
+                })
+                .repeat_code(10000)
+                .setup_code(|mut code| {
+                    code.push(load_imm(A1, 0));
+                    code.push(load_imm(S1, arg));
+                })
+                .counters(vec![CounterKind::BranchesRetired, CounterKind::BranchesRetiredMisprediction])
+                .run();
+
+            assert_eq!(result.counters[&CounterKind::BranchesRetired].med, 10000, "unexpected branch count");
+            if result.counters[&CounterKind::BranchesRetiredMisprediction].med >= 9000 {
+                branch_miss_cost = branch_miss_cost.max(Some(result.cost_per_operation));
+            }
+        }
+    }
+
+    for (branch_kind_name, branch_kind) in [
+        ("branch_eq_imm", branch_eq_imm as fn(Reg, u32, u32) -> Instruction),
+        ("branch_not_eq_imm", branch_not_eq_imm),
+    ] {
+        for arg in [0, 1] {
+            let mut n = 0;
+            let result = ctx
+                .benchmark(format!("{branch_kind_name}_0_{arg}"), |mut code| {
+                    code.push(branch_kind(A1, arg, n + 1));
+                    n += 1;
+                })
+                .repeat_code(10000)
+                .setup_code(|mut code| {
+                    code.push(load_imm(A1, 0));
+                })
+                .counters(vec![CounterKind::BranchesRetired, CounterKind::BranchesRetiredMisprediction])
+                .run();
+
+            assert_eq!(result.counters[&CounterKind::BranchesRetired].med, 10000, "unexpected branch count");
+            if result.counters[&CounterKind::BranchesRetiredMisprediction].med >= 9000 {
+                branch_imm_miss_cost = branch_imm_miss_cost.max(Some(result.cost_per_operation));
+            }
+        }
+    }
+
+    let Some(branch_miss_cost) = branch_miss_cost else {
+        return Err("failed to calculate branch miss cost".into());
     };
 
-    let branch_miss_imm = {
-        let mut n = 0;
-        ctx.benchmark("branch_miss_imm", |mut code| {
-            pcg_rand_u32(code.code, pcg_increment, pcg_state_reg, pcg_tmp_reg, A1);
-            code.push(and_imm(A1, A1, 1));
-            code.push(branch_eq_imm(A1, 1, n + 1));
-            n += 1;
-        })
-        .repeat_code(10000)
-        .setup_code(|mut code| code.extend_from_slice(&pcg_init_code))
-        .counters(vec![CounterKind::BranchesRetired, CounterKind::BranchesRetiredMisprediction])
-        .run()
+    let Some(branch_imm_miss_cost) = branch_imm_miss_cost else {
+        return Err("failed to calculate branch_imm miss cost".into());
     };
 
     let basic_block = {
@@ -2408,23 +2447,23 @@ fn main_generate_model(
     model.trap = basic_block.cost_per_operation;
     model.invalid = model.trap;
 
-    model.branch_greater_or_equal_signed = branch_miss.cost_per_operation + basic_block.cost_per_operation;
-    model.branch_greater_or_equal_unsigned = branch_miss.cost_per_operation + basic_block.cost_per_operation;
-    model.branch_less_signed = branch_miss.cost_per_operation + basic_block.cost_per_operation;
-    model.branch_less_unsigned = branch_miss.cost_per_operation + basic_block.cost_per_operation;
-    model.branch_not_eq = branch_miss.cost_per_operation + basic_block.cost_per_operation;
-    model.branch_eq = branch_miss.cost_per_operation + basic_block.cost_per_operation;
+    model.branch_greater_or_equal_signed = branch_miss_cost + basic_block.cost_per_operation;
+    model.branch_greater_or_equal_unsigned = branch_miss_cost + basic_block.cost_per_operation;
+    model.branch_less_signed = branch_miss_cost + basic_block.cost_per_operation;
+    model.branch_less_unsigned = branch_miss_cost + basic_block.cost_per_operation;
+    model.branch_not_eq = branch_miss_cost + basic_block.cost_per_operation;
+    model.branch_eq = branch_miss_cost + basic_block.cost_per_operation;
 
-    model.branch_greater_or_equal_signed_imm = branch_miss_imm.cost_per_operation + basic_block.cost_per_operation;
-    model.branch_greater_or_equal_unsigned_imm = branch_miss_imm.cost_per_operation + basic_block.cost_per_operation;
-    model.branch_greater_signed_imm = branch_miss_imm.cost_per_operation + basic_block.cost_per_operation;
-    model.branch_greater_unsigned_imm = branch_miss_imm.cost_per_operation + basic_block.cost_per_operation;
-    model.branch_less_or_equal_signed_imm = branch_miss_imm.cost_per_operation + basic_block.cost_per_operation;
-    model.branch_less_or_equal_unsigned_imm = branch_miss_imm.cost_per_operation + basic_block.cost_per_operation;
-    model.branch_less_signed_imm = branch_miss_imm.cost_per_operation + basic_block.cost_per_operation;
-    model.branch_less_unsigned_imm = branch_miss_imm.cost_per_operation + basic_block.cost_per_operation;
-    model.branch_not_eq_imm = branch_miss_imm.cost_per_operation + basic_block.cost_per_operation;
-    model.branch_eq_imm = branch_miss_imm.cost_per_operation + basic_block.cost_per_operation;
+    model.branch_greater_or_equal_signed_imm = branch_imm_miss_cost + basic_block.cost_per_operation;
+    model.branch_greater_or_equal_unsigned_imm = branch_imm_miss_cost + basic_block.cost_per_operation;
+    model.branch_greater_signed_imm = branch_imm_miss_cost + basic_block.cost_per_operation;
+    model.branch_greater_unsigned_imm = branch_imm_miss_cost + basic_block.cost_per_operation;
+    model.branch_less_or_equal_signed_imm = branch_imm_miss_cost + basic_block.cost_per_operation;
+    model.branch_less_or_equal_unsigned_imm = branch_imm_miss_cost + basic_block.cost_per_operation;
+    model.branch_less_signed_imm = branch_imm_miss_cost + basic_block.cost_per_operation;
+    model.branch_less_unsigned_imm = branch_imm_miss_cost + basic_block.cost_per_operation;
+    model.branch_not_eq_imm = branch_imm_miss_cost + basic_block.cost_per_operation;
+    model.branch_eq_imm = branch_imm_miss_cost + basic_block.cost_per_operation;
 
     model.jump = {
         let mut n = 0;
@@ -2695,7 +2734,42 @@ struct State {
     frames: u64,
 }
 
-fn prepare_doom(engine: &polkavm::Engine, blob: &ProgramBlob, step_tracing: bool) -> Result<polkavm::InstancePre<State, String>, String> {
+fn prepare_benchmark(
+    benchmark: Benchmark,
+    engine: &polkavm::Engine,
+    blob: &ProgramBlob,
+    step_tracing: bool,
+) -> Result<polkavm::InstancePre<State, String>, String> {
+    match benchmark {
+        Benchmark::Doom => prepare_benchmark_doom(engine, blob, step_tracing),
+        _ => prepare_benchmark_generic(engine, blob, step_tracing),
+    }
+}
+
+fn prepare_benchmark_generic(
+    engine: &polkavm::Engine,
+    blob: &ProgramBlob,
+    step_tracing: bool,
+) -> Result<polkavm::InstancePre<State, String>, String> {
+    let mut module_config = polkavm::ModuleConfig::default();
+    if step_tracing {
+        module_config.set_gas_metering(None);
+        module_config.set_step_tracing(true);
+    } else {
+        module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
+        module_config.set_step_tracing(false);
+    }
+    let module = polkavm::Module::from_blob(engine, &module_config, blob.clone())?;
+    let linker: polkavm::Linker<State, String> = polkavm::Linker::new();
+
+    Ok(linker.instantiate_pre(&module)?)
+}
+
+fn prepare_benchmark_doom(
+    engine: &polkavm::Engine,
+    blob: &ProgramBlob,
+    step_tracing: bool,
+) -> Result<polkavm::InstancePre<State, String>, String> {
     const DOOM_WAD: &[u8] = include_bytes!("../../../examples/doom/roms/doom1.wad");
 
     let mut module_config = polkavm::ModuleConfig::default();
@@ -2740,8 +2814,7 @@ fn prepare_doom(engine: &polkavm::Engine, blob: &ProgramBlob, step_tracing: bool
         length as i32
     })?;
 
-    let instance_pre = linker.instantiate_pre(&module)?;
-    Ok(instance_pre)
+    Ok(linker.instantiate_pre(&module)?)
 }
 
 #[derive(Copy, Clone, PartialOrd, Ord, PartialEq, Eq)]
@@ -2920,86 +2993,128 @@ impl Category {
     }
 }
 
-fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf) -> Result<(), String> {
-    let mut cost_model = polkavm::CostModel::naive();
+fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf, benchmark: Benchmark, analyze: bool) -> Result<(), String> {
+    std::fs::create_dir_all(&cache_path).map_err(|error| format!("failed to create '{}': {error}", cache_path.display()))?;
+
+    let mut cost_model: CostModelKind = CostModelKind::Simple(CostModel::naive_ref());
+    let mut is_cost_model_full = false;
     if let Some(cost_model_path) = cost_model_path {
-        log::info!("Loading cost model from: '{}'", cost_model_path.display());
-        let blob = std::fs::read(&cost_model_path).map_err(|error| format!("failed to read {}: {}", cost_model_path.display(), error))?;
-        if let Some(map) = core::str::from_utf8(&blob).ok().and_then(|blob| serde_json::from_str(blob).ok()) {
-            let map: BTreeMap<String, u32> = map;
-            cost_model = deserialize_cost_model_from_map(map)
-                .map_err(|error| format!("failed to parse the cost model in {}: {error}", cost_model_path.display()))?;
-        } else if let Some(new_cost_model) = polkavm::CostModel::deserialize(&blob) {
-            cost_model = new_cost_model;
+        let name = cost_model_path.to_str().unwrap();
+        if name == "full-l1-hit" {
+            cost_model = CostModelKind::Full(CacheModel::L1Hit);
+            is_cost_model_full = true;
+        } else if name == "full-l2-hit" {
+            cost_model = CostModelKind::Full(CacheModel::L2Hit);
+            is_cost_model_full = true;
+        } else if name == "full-l3-hit" {
+            cost_model = CostModelKind::Full(CacheModel::L3Hit);
+            is_cost_model_full = true;
         } else {
-            return Err(format!("failed to parse the cost model in {}", cost_model_path.display()));
+            log::info!("Loading cost model from: '{}'", cost_model_path.display());
+            let blob =
+                std::fs::read(&cost_model_path).map_err(|error| format!("failed to read {}: {}", cost_model_path.display(), error))?;
+            if let Some(map) = core::str::from_utf8(&blob).ok().and_then(|blob| serde_json::from_str(blob).ok()) {
+                let map: BTreeMap<String, u32> = map;
+                cost_model = Arc::new(
+                    deserialize_cost_model_from_map(map)
+                        .map_err(|error| format!("failed to parse the cost model in {}: {error}", cost_model_path.display()))?,
+                )
+                .into();
+            } else if let Some(new_cost_model) = polkavm::CostModel::deserialize(&blob) {
+                cost_model = Arc::new(new_cost_model).into();
+            } else {
+                return Err(format!("failed to parse the cost model in {}", cost_model_path.display()));
+            }
         }
     }
 
-    let cost_model = Arc::new(cost_model);
+    let blob_path = match benchmark {
+        Benchmark::Doom => {
+            let doom_blob_path = cache_path.join("doom64.polkavm");
+            if !doom_blob_path.exists() {
+                std::fs::create_dir_all(&cache_path).map_err(|error| format!("failed to create {}: {}", cache_path.display(), error))?;
+                log::info!("Decompressing ELF file...");
+                let elf = decompress_zstd(include_bytes!("../../../test-data/doom_64.elf.zst"));
+                log::info!("Linking...");
+                let mut config = polkavm_linker::Config::default();
+                config.set_optimize(true);
+                config.set_strip(true);
+                let blob = polkavm_linker::program_from_elf(config, &elf)?;
+                std::fs::write(&doom_blob_path, &blob)
+                    .map_err(|error| format!("failed to write {}: {}", doom_blob_path.display(), error))?;
+                log::info!("Blob linked!");
+            }
 
-    let doom_blob_path = cache_path.join("doom64.polkavm");
-    if !doom_blob_path.exists() {
-        std::fs::create_dir_all(&cache_path).map_err(|error| format!("failed to create {}: {}", cache_path.display(), error))?;
-        log::info!("Decompressing ELF file...");
-        let elf = decompress_zstd(include_bytes!("../../../test-data/doom_64.elf.zst"));
-        log::info!("Linking...");
-        let mut config = polkavm_linker::Config::default();
-        config.set_optimize(true);
-        config.set_strip(true);
-        let blob = polkavm_linker::program_from_elf(config, &elf)?;
-        std::fs::write(&doom_blob_path, &blob).map_err(|error| format!("failed to write {}: {}", doom_blob_path.display(), error))?;
-        log::info!("Blob linked!");
-    }
+            doom_blob_path
+        }
+        Benchmark::Pinky | Benchmark::PrimeSieve => {
+            let cached_blob_path = cache_path.join(format!("{}.polkavm", benchmark.name()));
+            if !cached_blob_path.exists() {
+                let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("..")
+                    .join("guest-programs")
+                    .join("target")
+                    .join("riscv64emac-unknown-none-polkavm")
+                    .join("release");
 
-    let blob = std::fs::read(&doom_blob_path).map_err(|error| format!("failed to read {}: {}", doom_blob_path.display(), error))?;
+                let elf_path = root.join(format!("bench-{}", benchmark.name()));
+                let elf = std::fs::read(&elf_path).map_err(|error| format!("failed to read {}: {}", elf_path.display(), error))?;
+                log::info!("Linking...");
+                let mut config = polkavm_linker::Config::default();
+                config.set_optimize(true);
+                config.set_strip(true);
+                let blob = polkavm_linker::program_from_elf(config, &elf)?;
+                std::fs::write(&cached_blob_path, &blob)
+                    .map_err(|error| format!("failed to write {}: {}", cached_blob_path.display(), error))?;
+                log::info!("Blob linked!");
+            }
+
+            cached_blob_path
+        }
+    };
+
+    let blob = std::fs::read(&blob_path).map_err(|error| format!("failed to read {}: {}", blob_path.display(), error))?;
     let blob = ProgramBlob::parse(blob.into())?;
 
     let mut offset_to_opcode = HashMap::new();
     let mut offset_to_basic_block_number = HashMap::new();
     let mut basic_block_to_offset = Vec::new();
-    basic_block_to_offset.push(ProgramCounter(0));
-    for instruction in blob.instructions(polkavm::program::ISA64_V1) {
-        offset_to_opcode.insert(instruction.offset, instruction.opcode());
-        offset_to_basic_block_number.insert(instruction.offset, basic_block_to_offset.len() - 1);
-        if instruction.opcode().starts_new_basic_block() {
-            basic_block_to_offset.push(instruction.next_offset);
-        }
-    }
+    let mut instruction_counts: BTreeMap<polkavm::program::Opcode, u64> = BTreeMap::new();
+    let mut pc_counts: BTreeMap<ProgramCounter, u64> = BTreeMap::new();
+    let (ext_initialize, ext_run) = match benchmark {
+        Benchmark::Doom => ("ext_initialize", "ext_tick"),
+        _ => ("initialize", "run"),
+    };
 
-    let instruction_counts_path = cache_path.join("instruction_counts.json");
-    let pc_counts_path = cache_path.join("pc_counts.json");
-    if !instruction_counts_path.exists() || !pc_counts_path.exists() {
-        if cfg!(debug_assertions) {
-            log::error!("ERROR: missing instruction counts; rerun in release mode!");
-            std::process::exit(1);
-        }
-        log::info!("Gathering instruction counts...");
-        let mut config = polkavm::Config::from_env()?;
-        config.set_allow_experimental(true);
-        config.set_backend(Some(polkavm::BackendKind::Interpreter));
-        let engine = polkavm::Engine::new(&config)?;
-        let instance_pre = prepare_doom(&engine, &blob, true)?;
-
-        let mut instance = instance_pre.instantiate()?;
-        let mut state = State { frames: 0 };
-        let mut result = instance.call_typed(&mut state, "ext_initialize", ());
-        let mut pc_counts: HashMap<u32, u64> = HashMap::new();
-        loop {
-            if let Some(pc) = instance.program_counter() {
-                *pc_counts.entry(pc.0).or_insert(0) += 1;
-            }
-            match result {
-                Ok(()) => break,
-                Err(polkavm::CallError::Step) => {
-                    result = instance.continue_execution(&mut state);
-                }
-                Err(error) => panic!("unexpected error: {error:?}"),
+    if analyze {
+        basic_block_to_offset.push(ProgramCounter(0));
+        for instruction in blob.instructions(polkavm::program::ISA64_V1) {
+            offset_to_opcode.insert(instruction.offset, instruction.opcode());
+            offset_to_basic_block_number.insert(instruction.offset, basic_block_to_offset.len() - 1);
+            if instruction.opcode().starts_new_basic_block() {
+                basic_block_to_offset.push(instruction.next_offset);
             }
         }
 
-        for _ in 0..LOOPS {
-            result = instance.call_typed(&mut state, "ext_tick", ());
+        let instruction_counts_path = cache_path.join(format!("{}-instruction_counts.json", benchmark.name()));
+        let pc_counts_path = cache_path.join(format!("{}-pc_counts.json", benchmark.name()));
+        if !instruction_counts_path.exists() || !pc_counts_path.exists() {
+            if cfg!(debug_assertions) {
+                log::error!("ERROR: missing instruction counts; rerun in release mode!");
+                std::process::exit(1);
+            }
+            log::info!("Gathering instruction counts...");
+            let mut config = polkavm::Config::from_env()?;
+            config.set_allow_experimental(true);
+            config.set_backend(Some(polkavm::BackendKind::Interpreter));
+            let engine = polkavm::Engine::new(&config)?;
+            let instance_pre = prepare_benchmark(benchmark, &engine, &blob, true)?;
+
+            let mut instance = instance_pre.instantiate()?;
+            let mut state = State { frames: 0 };
+            let mut result = instance.call_typed(&mut state, ext_initialize, ());
+            let mut pc_counts: HashMap<u32, u64> = HashMap::new();
             loop {
                 if let Some(pc) = instance.program_counter() {
                     *pc_counts.entry(pc.0).or_insert(0) += 1;
@@ -3012,47 +3127,63 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf) -
                     Err(error) => panic!("unexpected error: {error:?}"),
                 }
             }
+
+            for _ in 0..LOOPS {
+                result = instance.call_typed(&mut state, ext_run, ());
+                loop {
+                    if let Some(pc) = instance.program_counter() {
+                        *pc_counts.entry(pc.0).or_insert(0) += 1;
+                    }
+                    match result {
+                        Ok(()) => break,
+                        Err(polkavm::CallError::Step) => {
+                            result = instance.continue_execution(&mut state);
+                        }
+                        Err(error) => panic!("unexpected error: {error:?}"),
+                    }
+                }
+            }
+
+            let output = serde_json::to_string_pretty(&pc_counts).unwrap();
+            std::fs::write(&pc_counts_path, output).map_err(|error| format!("failed to write {}: {}", pc_counts_path.display(), error))?;
+
+            let mut counts = BTreeMap::new();
+            for (location, count) in pc_counts {
+                let opcode = *offset_to_opcode.get(&ProgramCounter(location)).unwrap();
+                *counts.entry(opcode).or_insert(0) += count;
+            }
+
+            let counts: BTreeMap<_, _> = counts.into_iter().map(|(opcode, count)| (opcode.to_string(), count)).collect();
+
+            let output = serde_json::to_string_pretty(&counts).unwrap();
+            std::fs::write(&instruction_counts_path, output)
+                .map_err(|error| format!("failed to write {}: {}", instruction_counts_path.display(), error))?;
         }
 
-        let output = serde_json::to_string_pretty(&pc_counts).unwrap();
-        std::fs::write(&pc_counts_path, output).map_err(|error| format!("failed to write {}: {}", pc_counts_path.display(), error))?;
-
-        let mut counts = BTreeMap::new();
-        for (location, count) in pc_counts {
-            let opcode = *offset_to_opcode.get(&ProgramCounter(location)).unwrap();
-            *counts.entry(opcode).or_insert(0) += count;
-        }
-
-        let counts: BTreeMap<_, _> = counts.into_iter().map(|(opcode, count)| (opcode.to_string(), count)).collect();
-
-        let output = serde_json::to_string_pretty(&counts).unwrap();
-        std::fs::write(&instruction_counts_path, output)
-            .map_err(|error| format!("failed to write {}: {}", instruction_counts_path.display(), error))?;
-    }
-
-    let instruction_counts: BTreeMap<polkavm::program::Opcode, u64> = {
-        let instruction_counts: String = std::fs::read_to_string(&instruction_counts_path)
-            .map_err(|error| format!("failed to read {}: {}", instruction_counts_path.display(), error))?;
-        let instruction_counts: BTreeMap<String, u64> = serde_json::from_str(&instruction_counts)
-            .map_err(|error| format!("failed to parse {}: {}", instruction_counts_path.display(), error))?;
-        let mut out = BTreeMap::new();
-        for (opcode, count) in instruction_counts {
-            let opcode = opcode
-                .parse()
+        instruction_counts = {
+            let instruction_counts: String = std::fs::read_to_string(&instruction_counts_path)
+                .map_err(|error| format!("failed to read {}: {}", instruction_counts_path.display(), error))?;
+            let instruction_counts: BTreeMap<String, u64> = serde_json::from_str(&instruction_counts)
                 .map_err(|error| format!("failed to parse {}: {}", instruction_counts_path.display(), error))?;
-            out.insert(opcode, count);
-        }
-        out
-    };
+            let mut out = BTreeMap::new();
+            for (opcode, count) in instruction_counts {
+                let opcode = opcode
+                    .parse()
+                    .map_err(|error| format!("failed to parse {}: {}", instruction_counts_path.display(), error))?;
+                out.insert(opcode, count);
+            }
+            out
+        };
 
-    let pc_counts: BTreeMap<ProgramCounter, u64> = {
-        let pc_counts: String =
-            std::fs::read_to_string(&pc_counts_path).map_err(|error| format!("failed to read {}: {}", pc_counts_path.display(), error))?;
+        pc_counts = {
+            let pc_counts: String = std::fs::read_to_string(&pc_counts_path)
+                .map_err(|error| format!("failed to read {}: {}", pc_counts_path.display(), error))?;
 
-        let pc_counts: BTreeMap<u32, u64> =
-            serde_json::from_str(&pc_counts).map_err(|error| format!("failed to parse {}: {}", pc_counts_path.display(), error))?;
+            let pc_counts: BTreeMap<u32, u64> =
+                serde_json::from_str(&pc_counts).map_err(|error| format!("failed to parse {}: {}", pc_counts_path.display(), error))?;
 
-        pc_counts.into_iter().map(|(pc, count)| (ProgramCounter(pc), count)).collect()
+            pc_counts.into_iter().map(|(pc, count)| (ProgramCounter(pc), count)).collect()
+        };
     };
 
     restart_with_sudo_or_exit();
@@ -3060,6 +3191,16 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf) -
     let mut tweaks = crate::system::Tweaks::default();
     log::info!("Disabling turbo boost...");
     tweaks.write("/sys/devices/system/cpu/cpufreq/boost", "0")?;
+
+    log::info!("Setting the frequency governor to 'performance'...");
+    for cpu in crate::system::list_cpus()?
+        .values()
+        .flatten()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+    {
+        tweaks.write(format!("/sys/devices/system/cpu/cpu{cpu}/cpufreq/scaling_governor"), "performance")?;
+    }
 
     log::info!("Instruction counts:");
     for (&opcode, &count) in &instruction_counts {
@@ -3070,24 +3211,26 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf) -
     let mut config = polkavm::Config::from_env()?;
     config.set_allow_experimental(true);
     config.set_backend(Some(polkavm::BackendKind::Compiler));
-    config.set_default_cost_model(Some(cost_model.into()));
+    config.set_default_cost_model(Some(cost_model));
     let compiler_engine = polkavm::Engine::new(&config)?;
-    let instance_pre = prepare_doom(&compiler_engine, &blob, false)?;
+    let instance_pre = prepare_benchmark(benchmark, &compiler_engine, &blob, false)?;
 
     const INITIAL_GAS: i64 = 100_000_000_000_000;
     const LOOPS: usize = 100;
 
     log::info!("Running warmup...");
     let cost_model;
+    let module;
     {
         let mut instance = instance_pre.instantiate()?;
         instance.set_gas(INITIAL_GAS);
         let mut state = State { frames: 0 };
-        instance.call_typed(&mut state, "ext_initialize", ()).unwrap();
+        instance.call_typed(&mut state, ext_initialize, ()).unwrap();
         for _ in 0..LOOPS {
-            instance.call_typed(&mut state, "ext_tick", ()).unwrap();
+            instance.call_typed(&mut state, ext_run, ()).unwrap();
         }
         cost_model = instance.module().cost_model().clone();
+        module = instance.module().clone();
     }
 
     log::info!("Running...");
@@ -3099,9 +3242,9 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf) -
 
         let timestamp = std::time::Instant::now();
         let mut state = State { frames: 0 };
-        instance.call_typed(&mut state, "ext_initialize", ()).unwrap();
+        instance.call_typed(&mut state, ext_initialize, ()).unwrap();
         for _ in 0..LOOPS {
-            instance.call_typed(&mut state, "ext_tick", ()).unwrap();
+            instance.call_typed(&mut state, ext_run, ()).unwrap();
         }
         let elapsed = timestamp.elapsed();
         elapsed_samples.push(elapsed.as_nanos());
@@ -3110,128 +3253,189 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf) -
 
     elapsed_samples.sort();
 
-    let gas_consumed = INITIAL_GAS - final_gas;
+    let raw_gas_consumed = INITIAL_GAS - final_gas;
+    let gas_time_consumed = if is_cost_model_full {
+        let frequency = get_frequency(0)?;
+        ((raw_gas_consumed as f64 / frequency as f64) * 1_000_000_000_000_f64) as i64
+    } else {
+        raw_gas_consumed
+    };
+
     log::info!(
-        "Gas consumed:  {:>19} ({} -> {})",
-        pretty_print(gas_consumed),
+        "Gas (raw) consumed: {:>19} ({} -> {})",
+        pretty_print(raw_gas_consumed),
         pretty_print(INITIAL_GAS),
         pretty_print(final_gas)
     );
 
-    let time_consumed = elapsed_samples[elapsed_samples.len() / 2] as f64 * 1000.0;
-    log::info!("Time expected: {:>19}", pretty_print(time_consumed as i64));
-    log::info!("Overhead: {:.02}x", gas_consumed as f64 / time_consumed);
-
-    let mut instruction_counts: Vec<_> = instruction_counts
-        .into_iter()
-        .map(|(opcode, count)| {
-            let cost = count * u64::from(cost_model.cost_for_opcode(opcode));
-            (opcode, cost, count)
-        })
-        .collect();
-
-    instruction_counts.sort_by_key(|(_, cost, _)| core::cmp::Reverse(*cost));
-
-    let mut category_counts = BTreeMap::new();
-    for &(opcode, cost, count) in &instruction_counts {
-        let category = Category::from_opcode(opcode);
-        let (ref mut acc_cost, ref mut acc_count) = category_counts.entry(category).or_insert((0, 0));
-        *acc_cost += cost;
-        *acc_count += count;
+    if is_cost_model_full {
+        log::info!("Gas (time) consumed: {:>19}", pretty_print(gas_time_consumed),);
     }
 
-    let mut category_counts: Vec<_> = category_counts
-        .into_iter()
-        .map(|(opcode, (cost, count))| (opcode, cost, count))
-        .collect();
-    category_counts.sort_by_key(|(_, cost, _)| core::cmp::Reverse(*cost));
+    let wall_time_consumed = elapsed_samples[elapsed_samples.len() / 2] as f64 * 1000.0;
+    log::info!("Time expected:       {:>19}", pretty_print(wall_time_consumed as i64));
+    log::info!("Overhead: {:.02}x", gas_time_consumed as f64 / wall_time_consumed);
 
-    let mut pc_costs: Vec<_> = pc_counts
-        .iter()
-        .map(|(&pc, &count)| {
-            let opcode = offset_to_opcode.get(&pc).unwrap();
-            let cost = count * u64::from(cost_model.cost_for_opcode(*opcode));
-            (pc, count, cost)
-        })
-        .collect();
+    if analyze {
+        let mut format = InstructionFormat::default();
+        format.is_64_bit = true;
 
-    pc_costs.sort_by_key(|(_, _, cost)| core::cmp::Reverse(*cost));
+        if let CostModelKind::Simple(cost_model) = cost_model {
+            let mut instruction_counts: Vec<_> = instruction_counts
+                .into_iter()
+                .map(|(opcode, count)| {
+                    let cost = count * u64::from(cost_model.cost_for_opcode(opcode));
+                    (opcode, cost, count)
+                })
+                .collect();
 
-    let mut basic_block_costs = vec![0; basic_block_to_offset.len()];
-    for (&pc, &count) in &pc_counts {
-        let basic_block_number = *offset_to_basic_block_number.get(&pc).unwrap();
-        let opcode = offset_to_opcode.get(&pc).unwrap();
-        let cost = count * u64::from(cost_model.cost_for_opcode(*opcode));
-        basic_block_costs[basic_block_number] += cost;
-    }
-    let mut basic_block_costs: Vec<_> = basic_block_costs.into_iter().enumerate().collect();
-    basic_block_costs.retain(|(_, cost)| *cost > 0);
-    basic_block_costs.sort_by_key(|(_, cost)| core::cmp::Reverse(*cost));
+            instruction_counts.sort_by_key(|(_, cost, _)| core::cmp::Reverse(*cost));
 
-    log::info!("Top costly instruction categories:");
-    for (category, cost, count) in category_counts {
-        log::info!(
-            "  {:>36} {:>6} {:>18} ({:>12})",
-            category.to_string(),
-            format!("{:.02}%", (cost as f64 / gas_consumed as f64) * 100.0),
-            pretty_print(cost as i64),
-            pretty_print(count as i64),
-        );
-    }
+            let mut category_counts = BTreeMap::new();
+            for &(opcode, cost, count) in &instruction_counts {
+                let category = Category::from_opcode(opcode);
+                let (ref mut acc_cost, ref mut acc_count) = category_counts.entry(category).or_insert((0, 0));
+                *acc_cost += cost;
+                *acc_count += count;
+            }
 
-    log::info!("Top costly instructions:");
-    for (opcode, cost, count) in instruction_counts {
-        log::info!(
-            "  {:>36} {:>6} {:>18} ({:>12} x {:>9})",
-            opcode.to_string(),
-            format!("{:.02}%", (cost as f64 / gas_consumed as f64) * 100.0),
-            pretty_print(cost as i64),
-            pretty_print(count as i64),
-            pretty_print(u64::from(cost_model.cost_for_opcode(opcode)) as i64),
-        );
-    }
+            let mut category_counts: Vec<_> = category_counts
+                .into_iter()
+                .map(|(opcode, (cost, count))| (opcode, cost, count))
+                .collect();
+            category_counts.sort_by_key(|(_, cost, _)| core::cmp::Reverse(*cost));
 
-    let mut format = InstructionFormat::default();
-    format.is_64_bit = true;
+            let mut pc_costs: Vec<_> = pc_counts
+                .iter()
+                .map(|(&pc, &count)| {
+                    let opcode = offset_to_opcode.get(&pc).unwrap();
+                    let cost = count * u64::from(cost_model.cost_for_opcode(*opcode));
+                    (pc, count, cost)
+                })
+                .collect();
 
-    log::info!("Top costly locations:");
-    for &(pc, count, cost) in pc_costs.iter().take(100) {
-        let opcode = offset_to_opcode.get(&pc).unwrap();
-        log::info!(
-            "  {:>6}: {:>15} ({:>11} x {:>6}): {}",
-            pc.0,
-            pretty_print(cost as i64),
-            pretty_print(count as i64),
-            pretty_print(u64::from(cost_model.cost_for_opcode(*opcode)) as i64),
-            blob.instructions_bounded_at(polkavm::program::ISA64_V1, pc)
-                .next()
-                .unwrap()
-                .display(&format),
-        );
-    }
+            pc_costs.sort_by_key(|(_, _, cost)| core::cmp::Reverse(*cost));
 
-    let pc_costs: HashMap<_, _> = pc_costs.into_iter().map(|(pc, count, cost)| (pc, (count, cost))).collect();
+            let mut basic_block_costs = vec![0; basic_block_to_offset.len()];
+            for (&pc, &count) in &pc_counts {
+                let basic_block_number = *offset_to_basic_block_number.get(&pc).unwrap();
+                let opcode = offset_to_opcode.get(&pc).unwrap();
+                let cost = count * u64::from(cost_model.cost_for_opcode(*opcode));
+                basic_block_costs[basic_block_number] += cost;
+            }
+            let mut basic_block_costs: Vec<_> = basic_block_costs.into_iter().enumerate().collect();
+            basic_block_costs.retain(|(_, cost)| *cost > 0);
+            basic_block_costs.sort_by_key(|(_, cost)| core::cmp::Reverse(*cost));
 
-    log::info!("Top costly basic blocks:");
-    for (basic_block_number, cost) in basic_block_costs.into_iter().take(20) {
-        let pc = basic_block_to_offset[basic_block_number];
-        log::info!(
-            "  @{}: {:>15} ({:.02}%) = {} x {}",
-            basic_block_number,
-            pretty_print(cost as i64),
-            (cost as f64 / gas_consumed as f64) * 100.0,
-            instance_pre.module().calculate_gas_cost_for(pc).unwrap(),
-            pc_counts.get(&pc).unwrap(),
-        );
-        for instruction in blob.instructions_bounded_at(polkavm::program::ISA64_V1, pc) {
-            log::info!(
-                "    {:>6}: {:>15}: {}",
-                instruction.offset,
-                pretty_print(pc_costs.get(&instruction.offset).copied().unwrap().1 as i64),
-                instruction.display(&format)
-            );
-            if instruction.starts_new_basic_block() {
-                break;
+            log::info!("Top costly instruction categories:");
+            for (category, cost, count) in category_counts {
+                log::info!(
+                    "  {:>36} {:>6} {:>18} ({:>12})",
+                    category.to_string(),
+                    format!("{:.02}%", (cost as f64 / raw_gas_consumed as f64) * 100.0),
+                    pretty_print(cost as i64),
+                    pretty_print(count as i64),
+                );
+            }
+
+            log::info!("Top costly instructions:");
+            for (opcode, cost, count) in instruction_counts {
+                log::info!(
+                    "  {:>36} {:>6} {:>18} ({:>12} x {:>9})",
+                    opcode.to_string(),
+                    format!("{:.02}%", (cost as f64 / raw_gas_consumed as f64) * 100.0),
+                    pretty_print(cost as i64),
+                    pretty_print(count as i64),
+                    pretty_print(u64::from(cost_model.cost_for_opcode(opcode)) as i64),
+                );
+            }
+
+            log::info!("Top costly locations:");
+            for &(pc, count, cost) in pc_costs.iter().take(100) {
+                let opcode = offset_to_opcode.get(&pc).unwrap();
+                log::info!(
+                    "  {:>6}: {:>15} ({:>11} x {:>6}): {}",
+                    pc.0,
+                    pretty_print(cost as i64),
+                    pretty_print(count as i64),
+                    pretty_print(u64::from(cost_model.cost_for_opcode(*opcode)) as i64),
+                    blob.instructions_bounded_at(polkavm::program::ISA64_V1, pc)
+                        .next()
+                        .unwrap()
+                        .display(&format),
+                );
+            }
+
+            let pc_costs: HashMap<_, _> = pc_costs.into_iter().map(|(pc, count, cost)| (pc, (count, cost))).collect();
+
+            log::info!("Top costly basic blocks:");
+            for (basic_block_number, cost) in basic_block_costs.into_iter().take(20) {
+                let pc = basic_block_to_offset[basic_block_number];
+                log::info!(
+                    "  @{}: {:>15} ({:.02}%) = {} x {}",
+                    basic_block_number,
+                    pretty_print(cost as i64),
+                    (cost as f64 / raw_gas_consumed as f64) * 100.0,
+                    instance_pre.module().calculate_gas_cost_for(pc).unwrap(),
+                    pc_counts.get(&pc).unwrap(),
+                );
+
+                for instruction in blob.instructions_bounded_at(polkavm::program::ISA64_V1, pc) {
+                    log::info!(
+                        "    {:>6}: {:>15}: {}",
+                        instruction.offset,
+                        pretty_print(pc_costs.get(&instruction.offset).copied().unwrap().1 as i64),
+                        instruction.display(&format)
+                    );
+                    if instruction.starts_new_basic_block() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            let mut basic_block_costs: Vec<_> = basic_block_to_offset
+                .iter()
+                .enumerate()
+                .map(|(basic_block_number, &offset)| {
+                    let cost_per_one = module.calculate_gas_cost_for(offset).unwrap();
+                    let count = pc_counts.get(&offset).copied().unwrap_or(0);
+                    let cost = cost_per_one * count as i64;
+                    (basic_block_number, offset, cost, cost_per_one, count)
+                })
+                .collect();
+
+            basic_block_costs.retain(|(_, _, cost, _, _)| *cost > 0);
+            basic_block_costs.sort_by_key(|(_, _, cost, _, _)| core::cmp::Reverse(*cost));
+
+            log::info!("Top costly basic blocks:");
+            for (basic_block_number, pc, cost, cost_per_one, count) in basic_block_costs.into_iter().take(20) {
+                log::info!(
+                    "  @{}: {:>15} ({:.02}%) = {} x {}",
+                    basic_block_number,
+                    pretty_print(cost),
+                    (cost as f64 / raw_gas_consumed as f64) * 100.0,
+                    cost_per_one,
+                    count,
+                );
+
+                let mut block_instructions = Vec::new();
+                for instruction in blob.instructions_bounded_at(polkavm::program::ISA64_V1, pc) {
+                    block_instructions.push(instruction);
+
+                    log::info!("    {:>6}: {}", instruction.offset, instruction.display(&format));
+                    if instruction.starts_new_basic_block() {
+                        break;
+                    }
+                }
+
+                if let CostModelKind::Full(cost_model) = cost_model {
+                    let (timeline, cycles) =
+                        polkavm_common::simulator::timeline_for_instructions(blob.code(), cost_model, &block_instructions);
+                    log::info!("  Timeline ({cycles} cycles):");
+                    for line in timeline.split("\n") {
+                        log::info!("    {line}");
+                    }
+                }
             }
         }
     }
@@ -3260,6 +3464,23 @@ struct IsolationArgs {
         action = clap::ArgAction::Set,
     )]
     minimize_noise: bool,
+}
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum Benchmark {
+    Doom,
+    Pinky,
+    PrimeSieve,
+}
+
+impl Benchmark {
+    fn name(self) -> &'static str {
+        match self {
+            Benchmark::Doom => "doom",
+            Benchmark::Pinky => "pinky",
+            Benchmark::PrimeSieve => "prime-sieve",
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -3303,6 +3524,12 @@ enum Args {
 
         #[clap(long)]
         cache_path: PathBuf,
+
+        #[clap(long)]
+        benchmark: Benchmark,
+
+        #[clap(long)]
+        do_not_analyze: bool,
     },
 }
 
@@ -3345,7 +3572,12 @@ fn main() {
             isolation_args,
             output_chart,
         } => main_cache_miss_benchmark(isolation_args, output_chart).map_err(|error| error.to_string()),
-        Args::TestCostModel { cost_model, cache_path } => main_test_cost_model(cost_model, cache_path),
+        Args::TestCostModel {
+            cost_model,
+            cache_path,
+            benchmark,
+            do_not_analyze,
+        } => main_test_cost_model(cost_model, cache_path, benchmark, !do_not_analyze),
     };
 
     if let Err(error) = result {

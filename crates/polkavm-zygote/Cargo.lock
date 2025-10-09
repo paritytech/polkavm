@@ -9,6 +9,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7a70ba024b9dc04c27ea2f0c0548feb474ec5c54bba33a7f72f873a39d07b24"
 
 [[package]]
+name = "picosimd"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83bd2c4dd3c2cf5366fd00a2c4e5b2b42b73ef7c7bf024ae6ef45473c6b81fca"
+
+[[package]]
 name = "polkavm-assembler"
 version = "0.29.0"
 dependencies = [
@@ -19,6 +25,7 @@ dependencies = [
 name = "polkavm-common"
 version = "0.29.0"
 dependencies = [
+ "picosimd",
  "polkavm-assembler",
 ]
 
