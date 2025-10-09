@@ -6888,14 +6888,16 @@ struct Reachability {
 }
 
 impl Reachability {
-    fn is_only_reachable_from(&self, block_target: BlockTarget) -> bool {
+    fn is_only_statically_reachable(&self) -> bool {
         !self.always_reachable
             && !self.always_dynamically_reachable
             && self.referenced_by_data.is_empty()
             && self.address_taken_in.is_empty()
-            && self.reachable_from.len() == 1
-            && self.reachable_from.contains(&block_target)
             && self.exports.is_empty()
+    }
+
+    fn is_only_reachable_from(&self, block_target: BlockTarget) -> bool {
+        self.is_only_statically_reachable() && self.reachable_from.len() == 1 && self.reachable_from.contains(&block_target)
     }
 
     fn is_unreachable(&self) -> bool {
