@@ -5801,12 +5801,12 @@ mod test {
             let mut all_blocks = resolve_basic_block_references(&data_sections_set, &section_to_block, &all_blocks).unwrap();
             let mut reachability_graph =
                 calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations).unwrap();
-            if matches!(config.opt_level, OptLevel::O2) {
+            if matches!(config.opt_level, OptLevel::O2 | OptLevel::Oexperimental) {
                 optimize_program(&config, &elf, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
             }
             let mut used_blocks = collect_used_blocks(&all_blocks, &reachability_graph);
 
-            if matches!(config.opt_level, OptLevel::O2) {
+            if matches!(config.opt_level, OptLevel::O2 | OptLevel::Oexperimental) {
                 used_blocks = add_missing_fallthrough_blocks(&mut all_blocks, &mut reachability_graph, used_blocks);
                 merge_consecutive_fallthrough_blocks(&mut all_blocks, &mut reachability_graph, &mut section_to_block, &mut used_blocks);
                 replace_immediates_with_registers(&mut all_blocks, &imports, &used_blocks);
@@ -9031,6 +9031,7 @@ pub enum OptLevel {
     O0,
     O1,
     O2,
+    Oexperimental,
 }
 
 pub struct Config {
@@ -9351,9 +9352,9 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
     let mut used_blocks;
 
     let mut regspill_size = 0;
-    if matches!(config.opt_level, OptLevel::O1 | OptLevel::O2) {
+    if matches!(config.opt_level, OptLevel::O1 | OptLevel::O2 | OptLevel::Oexperimental) {
         reachability_graph = calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations)?;
-        if matches!(config.opt_level, OptLevel::O2) {
+        if matches!(config.opt_level, OptLevel::O2 | OptLevel::Oexperimental) {
             optimize_program(&config, &elf, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
         } else {
             for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
@@ -9372,7 +9373,7 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
         );
         used_blocks = add_missing_fallthrough_blocks(&mut all_blocks, &mut reachability_graph, used_blocks);
         merge_consecutive_fallthrough_blocks(&mut all_blocks, &mut reachability_graph, &mut section_to_block, &mut used_blocks);
-        if matches!(config.opt_level, OptLevel::O2) {
+        if matches!(config.opt_level, OptLevel::O2 | OptLevel::Oexperimental) {
             replace_immediates_with_registers(&mut all_blocks, &imports, &used_blocks);
         }
 
@@ -9547,7 +9548,7 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
         &used_blocks,
         &used_imports,
         &jump_target_for_block,
-        matches!(config.opt_level, OptLevel::O2),
+        matches!(config.opt_level, OptLevel::O2 | OptLevel::Oexperimental),
         is_rv64,
         memory_config.heap_base,
     )?;
