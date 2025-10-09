@@ -6,13 +6,14 @@ use alloc::vec::Vec;
 use polkavm_common::abi::{MemoryMap, MemoryMapBuilder, VM_ADDR_RETURN_TO_HOST};
 use polkavm_common::cast::cast;
 use polkavm_common::program::{
-    FrameKind, ISA32_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode, ProgramBlob, Reg, ISA32_V1, ISA64_V1,
+    FrameKind, ISA32_V1_NoSbrk, ISA64_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode, ProgramBlob, Reg, ISA32_V1,
+    ISA64_V1,
 };
 use polkavm_common::utils::{ArcBytes, AsUninitSliceMut};
 
 if_compiler_is_supported! {
     use polkavm_common::program::{
-        build_static_dispatch_table, ISA64_V1_NoSbrk,
+        build_static_dispatch_table
     };
 }
 
@@ -106,7 +107,11 @@ impl InstructionSet for RuntimeInstructionSet {
                 ISA32_V1_NoSbrk.opcode_from_u8(byte)
             }
         } else {
-            ISA64_V1.opcode_from_u8(byte)
+            if self.allow_sbrk {
+                ISA64_V1.opcode_from_u8(byte)
+            } else {
+                ISA64_V1_NoSbrk.opcode_from_u8(byte)
+            }
         }
     }
 }
