@@ -2236,6 +2236,21 @@ fn main_benchmark_optimistic(isolation_args: IsolationArgs) -> Result<(), Error>
     };
 
     log::info!("branch_hit: {}", branch_hit.cost_per_operation + basic_block.cost_per_operation);
+
+    {
+        ctx.benchmark("l1_hit", |mut code| {
+            code.push(load_indirect_u64(A0, A0, 0x20000));
+        })
+        .repeat_code(10000)
+        .counters(vec![
+            CounterKind::L1DataAccess,
+            CounterKind::L1DataMiss,
+            CounterKind::L3CacheHit,
+            CounterKind::L3CacheMiss,
+        ])
+        .rw_data_size(4096)
+        .run();
+    }
     Ok(())
 }
 
