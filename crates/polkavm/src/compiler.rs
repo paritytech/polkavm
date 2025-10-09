@@ -654,6 +654,13 @@ where
     }
 
     #[inline(always)]
+    fn unlikely(&mut self, code_offset: u32, args_length: u32) -> Self::ReturnTy {
+        self.before_instruction(code_offset);
+        self.gas_visitor.unlikely();
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+    }
+
+    #[inline(always)]
     fn sbrk(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.sbrk(d, s);

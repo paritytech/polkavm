@@ -985,7 +985,9 @@ impl InterpretedInstance {
             });
 
             #[cfg(debug_assertions)]
-            debug_assert!(self.compiled_handlers.len() > original_length);
+            debug_assert!(
+                instruction.opcode() == polkavm_common::program::Opcode::unlikely || self.compiled_handlers.len() > original_length
+            );
 
             if instruction.opcode().starts_new_basic_block() {
                 break;
@@ -3906,6 +3908,8 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
         let target = self.next_program_counter();
         emit!(self, unresolved_fallthrough(target));
     }
+
+    fn unlikely(&mut self) -> Self::ReturnTy {}
 
     fn sbrk(&mut self, dst: RawReg, size: RawReg) -> Self::ReturnTy {
         emit!(self, sbrk(dst, size));

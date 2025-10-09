@@ -144,7 +144,7 @@ macro_rules! define_cost_model_struct {
 }
 
 define_cost_model_struct! {
-    version: 1,
+    version: 2,
 
     add_32,
     add_64,
@@ -282,6 +282,7 @@ define_cost_model_struct! {
     sub_32,
     sub_64,
     trap,
+    unlikely,
     xnor,
     xor,
     xor_imm,
@@ -349,6 +350,11 @@ impl InstructionVisitor for GasVisitor {
     fn fallthrough(&mut self) -> Self::ReturnTy {
         self.cost += self.cost_model.fallthrough;
         self.start_new_basic_block();
+    }
+
+    #[inline(always)]
+    fn unlikely(&mut self) -> Self::ReturnTy {
+        self.cost += self.cost_model.unlikely
     }
 
     #[inline(always)]

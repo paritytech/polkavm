@@ -1498,6 +1498,7 @@ define_opcodes! {
         [I_64, I_32] trap                                     = 0,
         [I_64, I_32] fallthrough                              = 1,
         [I_64, I_32] memset                                   = 2,
+        [I_64, I_32] unlikely                                 = 3,
     ]
 
     // Instructions with args: reg, imm
@@ -1945,6 +1946,10 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
 
     fn fallthrough(&mut self) -> Self::ReturnTy {
         write!(self, "fallthrough")
+    }
+
+    fn unlikely(&mut self) -> Self::ReturnTy {
+        write!(self, "unlikely")
     }
 
     fn sbrk(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
