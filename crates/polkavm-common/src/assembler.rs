@@ -318,6 +318,10 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
             emit_and_continue!(Instruction::fallthrough);
         }
 
+        if line == "unlikely" {
+            emit_and_continue!(Instruction::unlikely);
+        }
+
         if line == "ret" {
             emit_and_continue!(Instruction::jump_indirect(Reg::RA.into(), 0));
         }
