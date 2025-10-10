@@ -1532,8 +1532,6 @@ const I_32: usize = 0;
 const I_64: usize = 1;
 const I_SBRK: usize = 2;
 
-// NOTE: The opcodes here are assigned roughly in the order of how common a given instruction is,
-// except the `trap` which is deliberately hardcoded as zero.
 define_opcodes! {
     $
 
