@@ -2270,7 +2270,19 @@ fn timeline_for_instructions_impl(
         .take_while(|inst| !inst.kind.opcode().starts_new_basic_block())
         .count();
 
-    let instructions = &instructions[..(count + 1).min(instructions.len())];
+    let mut instructions = instructions[..(count + 1).min(instructions.len())].to_vec();
+    if !instructions
+        .last()
+        .map(|instruction| instruction.kind.opcode().starts_new_basic_block())
+        .unwrap_or(false)
+    {
+        let next_pc = instructions.last().map(|instruction| instruction.next_offset.0).unwrap_or(0);
+        instructions.push(crate::program::ParsedInstruction {
+            kind: crate::program::Instruction::invalid,
+            offset: crate::program::ProgramCounter(next_pc),
+            next_offset: crate::program::ProgramCounter(next_pc + 1),
+        });
+    }
 
     let mut timeline_map = BTreeMap::new();
     let mut sim = Simulator::<B64, _>::new(
@@ -2282,7 +2294,7 @@ fn timeline_for_instructions_impl(
         },
     );
 
-    for &instruction in instructions {
+    for &instruction in &instructions {
         assert!(sim.take_block_cost().is_none());
         instruction.visit_parsing(&mut sim);
     }
