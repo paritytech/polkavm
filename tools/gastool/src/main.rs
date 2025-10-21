@@ -90,7 +90,7 @@ fn test_pcg() {
             }
             Instruction::rotate_right_32(dst, src1, src2) => {
                 regs[dst.get() as usize] =
-                    (((regs[src1.get() as usize] as u32).rotate_right(regs[src2.get() as usize] as u32) as i32) as i64) as u64
+                    (i64::from((regs[src1.get() as usize] as u32).rotate_right(regs[src2.get() as usize] as u32) as i32)) as u64
             }
             _ => unimplemented!("unimplemented instruction: {instruction:?}"),
         }
