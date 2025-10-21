@@ -1,0 +1,41 @@
+pub @main:
+    unlikely
+pub @expected_exit: %no_fallthrough
+    t1 = u8 [s0]
+    a1 = u8 [s0 + 0x11]
+    a2 = 0x172d0
+    a3 = u8 [s0 + 0x16]
+    t0 = sp + 0x58
+    a1 = a1 << 0x3
+    a1 = a1 + a2
+    a2 = u8 [a1]
+    a5 = u8 [a1 + 0x1]
+    s1 = u8 [a1 + 0x2]
+    a4 = u8 [a1 + 0x3]
+    a3 = a3 + t0
+    a5 = a5 << 0x8
+    s1 = s1 << 0x10
+    a4 = a4 << 0x18
+    a2 = a2 | a5
+    a5 = u8 [a1 + 0x4]
+    a0 = u8 [a1 + 0x5]
+    a4 = a4 | s1
+    s1 = u8 [a1 + 0x6]
+    a1 = u8 [a1 + 0x7]
+    a0 = a0 << 0x8
+    a0 = a0 | a5
+    s1 = s1 << 0x10
+    a1 = a1 << 0x18
+    a1 = a1 | s1
+    a2 = a2 | a4
+    a0 = a0 | a1
+    a1 = s0 - t1
+    a0 = a0 << 0x20
+    a0 = a0 | a2
+    u64 [sp + 0x58] = a0
+    a0 = u8 [a3]
+    a1 = u8 [a1 + 0x4]
+    a0 = a1 * a0
+    a1 = u8 [s0 + 0x23]
+    jump @main if a1 != 0
+    trap

@@ -8,4 +8,4 @@ pub @main:
     a0 = i16 [0x20000]
 
 post: a0 = 0xffffffffffff8281
-post: gas = 9998
+post: gas = 9975

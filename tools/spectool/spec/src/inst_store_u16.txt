@@ -6,4 +6,4 @@ pre: gas = 10000
 pub @main:
     u16 [0x20000] = a0
 
-post: gas = 9998
+post: gas = 9975

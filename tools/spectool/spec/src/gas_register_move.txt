@@ -1,0 +1,6 @@
+pub @main:
+    s0 = 1
+    a0 = s0
+    a1 = a0 + 1
+pub @expected_exit: %no_fallthrough
+    trap

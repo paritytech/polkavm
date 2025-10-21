@@ -8,4 +8,4 @@ pub @main:
     a0 = i32 [0x20000]
 
 post: a0 = 0xffffffff84838281
-post: gas = 9998
+post: gas = 9975

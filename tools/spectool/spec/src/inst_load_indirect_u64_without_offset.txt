@@ -8,4 +8,4 @@ pub @main:
     a1 = u64 [a0]
 
 post: a1 = 0x8887868584838281
-post: gas = 9998
+post: gas = 9975

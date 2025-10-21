@@ -10,4 +10,4 @@ pub @main:
 
 post: a0 = 1234
 post: a2 = 0xdeadbeef
-post: gas = 9995
+post: gas = 9974

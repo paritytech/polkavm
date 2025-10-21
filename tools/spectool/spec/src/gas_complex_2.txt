@@ -1,0 +1,18 @@
+pub @main:
+pub @expected_exit:
+    i32 a1 = clz a0
+    i32 a0 = a0 << a1
+    a1 = a1 << 0x17
+    i32 a2 = a0 >> 0x8
+    a3 = a0 >> 0x7
+    a3 = a3 & ~a2
+    i32 a2 = a2 - a1
+    a0 = a0 << 0x18
+    a3 = a3 & 0x1
+    i32 a0 = a0 - a3
+    i32 a0 = a0 >> 0x1f
+    a1 = a2 + 0x4e800000
+    i32 a0 = a0 + a1
+    a1 = 0x46008c00
+    ra = 0x24
+    jump @main

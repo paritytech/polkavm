@@ -5,4 +5,4 @@ pub @main:
 pub @expected_exit:
     ret
 
-post: gas = 9999
+post: gas = 9978

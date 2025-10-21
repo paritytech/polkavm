@@ -10,5 +10,5 @@ pub @main:
 
 post: a0 = 1234
 post: a2 = 0
-post: gas = 9997
+post: gas = 9976
 post: pc = @main[2]

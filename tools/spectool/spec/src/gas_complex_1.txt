@@ -1,0 +1,11 @@
+pub @main:
+pub @expected_exit:
+    a2 = i16 [a0 + 0x6]
+    a1 = a1 & 0x7
+    a3 = 0x1
+    a1 = a1 << 0x8
+    a2 = a2 & 0xfffffffffffff8ff
+    a1 = a1 | a2
+    a2 = a1 + a3
+    u8 [a0 + 0x2] = a3
+    trap

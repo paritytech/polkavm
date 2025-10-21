@@ -8,5 +8,5 @@ pub @main:
     a1 = 0xdeadbeef
 
 post: a1 = 0
-post: gas = 9998
+post: gas = 9977
 post: pc = @main[1]

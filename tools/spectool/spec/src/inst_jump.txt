@@ -8,4 +8,4 @@ pub @main:
     a0 = 0xdeadbeef
 
 post: a0 = 0xdeadbeef
-post: gas = 9996
+post: gas = 9983

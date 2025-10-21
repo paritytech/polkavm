@@ -5,9 +5,10 @@
 
 use clap::Parser;
 use core::fmt::Write;
-use polkavm::{Engine, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg};
+use polkavm::{CacheModel, CostModelKind, Engine, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg};
 use polkavm_common::assembler::assemble;
 use polkavm_common::program::{asm, ProgramCounter, ProgramParts, ISA64_V1};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
@@ -29,6 +30,7 @@ fn main() {
 
 struct Testcase {
     disassembly: String,
+    timelines: Vec<(String, u32, u32)>,
     json: TestcaseJson,
 }
 
@@ -64,6 +66,7 @@ struct TestcaseJson {
     expected_gas: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     expected_page_fault_address: Option<u32>,
+    block_gas_costs: BTreeMap<u32, u32>,
 }
 
 fn extract_chunks(base_address: u32, slice: &[u8]) -> Vec<MemoryChunk> {
@@ -267,11 +270,13 @@ fn main_generate() {
         let parts = ProgramParts::from_bytes(blob.into()).unwrap();
         let blob = ProgramBlob::from_parts(parts.clone()).unwrap();
 
+        let cache_model = CacheModel::L2Hit;
         let mut module_config = ModuleConfig::default();
         module_config.set_strict(true);
         module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
         module_config.set_step_tracing(true);
         module_config.set_dynamic_paging(true);
+        module_config.set_cost_model(Some(CostModelKind::Full(cache_model)));
 
         let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
         let mut instance = module.instantiate().unwrap();
@@ -425,6 +430,19 @@ fn main_generate() {
             continue;
         }
 
+        let mut blocks = Vec::new();
+        let mut buffer = Vec::new();
+        for instruction in blob.instructions_bounded_at(polkavm::program::ISA64_V1, ProgramCounter(0)) {
+            buffer.push(instruction);
+            if instruction.starts_new_basic_block() {
+                blocks.push(core::mem::take(&mut buffer));
+            }
+        }
+
+        if !buffer.is_empty() {
+            blocks.push(buffer);
+        }
+
         let mut disassembler = polkavm_disassembler::Disassembler::new(&blob, polkavm_disassembler::DisassemblyFormat::Guest).unwrap();
         disassembler.show_raw_bytes(true);
         disassembler.prefer_non_abi_reg_names(true);
@@ -437,8 +455,34 @@ fn main_generate() {
         disassembler.disassemble_into(&mut disassembly).unwrap();
         let disassembly = String::from_utf8(disassembly).unwrap();
 
+        let mut block_gas_costs = BTreeMap::new();
+        let mut timelines = Vec::new();
+        let mut timeline_config = polkavm_common::simulator::TimelineConfig::default();
+        timeline_config.instruction_format.prefer_non_abi_reg_names = true;
+        timeline_config.instruction_format.prefer_unaliased = true;
+        let jump_target_formatter = |target: u32, fmt: &mut core::fmt::Formatter| write!(fmt, "{}", target);
+        timeline_config.instruction_format.jump_target_formatter = Some(&jump_target_formatter);
+        for block in blocks {
+            let (timeline, block_cycles) =
+                polkavm_common::simulator::timeline_for_instructions(blob.code(), cache_model, &block, timeline_config.clone());
+            timelines.push((timeline, block[0].offset.0, block_cycles));
+
+            block_gas_costs.insert(block[0].offset.0, block_cycles);
+
+            // Just a sanity check.
+            assert_eq!(i64::from(block_cycles), module.calculate_gas_cost_for(block[0].offset).unwrap());
+
+            // Another sanity check.
+            let mut timeline_config_clone = timeline_config.clone();
+            timeline_config_clone.should_enable_fast_forward = true;
+            let (_, block_cycles_fast_forward) =
+                polkavm_common::simulator::timeline_for_instructions(blob.code(), cache_model, &block, timeline_config.clone());
+            assert_eq!(block_cycles, block_cycles_fast_forward);
+        }
+
         tests.push(Testcase {
             disassembly,
+            timelines,
             json: TestcaseJson {
                 name,
                 initial_regs,
@@ -453,6 +497,7 @@ fn main_generate() {
                 expected_memory,
                 expected_gas,
                 expected_page_fault_address: page_fault_address,
+                block_gas_costs,
             },
         });
     }
@@ -598,7 +643,15 @@ fn main_generate() {
             test.json.initial_gas, test.json.expected_gas
         )
         .unwrap();
-        writeln!(&mut index_md).unwrap();
+
+        for (timeline, pc, gas_cost) in &test.timelines {
+            writeln!(&mut index_md, "Gas simulation at offset {pc} with total cost of {gas_cost}:\n").unwrap();
+            writeln!(&mut index_md, "```").unwrap();
+            for line in timeline.lines() {
+                writeln!(&mut index_md, "    {line}").unwrap();
+            }
+            writeln!(&mut index_md, "```\n").unwrap();
+        }
     }
 
     std::fs::write(root.join("output").join("TESTCASES.md"), index_md).unwrap();

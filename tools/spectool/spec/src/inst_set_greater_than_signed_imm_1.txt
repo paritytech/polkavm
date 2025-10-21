@@ -5,4 +5,4 @@ pub @main:
     a2 = a0 >s -10
 
 post: a2 = 1
-post: gas = 9998
+post: gas = 9997

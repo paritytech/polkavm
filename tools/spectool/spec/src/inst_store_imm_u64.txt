@@ -5,4 +5,4 @@ pre: gas = 10000
 pub @main:
     u64 [0x20000] = 0x12345678
 
-post: gas = 9998
+post: gas = 9975

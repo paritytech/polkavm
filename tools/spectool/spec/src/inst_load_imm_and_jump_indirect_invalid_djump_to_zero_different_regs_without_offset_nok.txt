@@ -9,4 +9,4 @@ pub @expected_exit:
 
 post: a1 = 1234
 post: a2 = 0
-post: gas = 9999
+post: gas = 9978

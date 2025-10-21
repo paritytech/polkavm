@@ -1,0 +1,6 @@
+pub @main:
+pub @expected_exit:
+    s0 = u64 [sp]
+    s0 = a1 + a2
+    s0 = u64 [s0]
+    jump [s0]

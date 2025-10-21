@@ -6,4 +6,4 @@ pub @main:
     i32 a2 = a0 << a1
 
 post: a2 = 0x3a8
-post: gas = 9998
+post: gas = 9997

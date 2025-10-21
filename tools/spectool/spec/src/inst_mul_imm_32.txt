@@ -5,4 +5,4 @@ pub @main:
     i32 a2 = a0 * 7
 
 post: a2 = 21
-post: gas = 9998
+post: gas = 9996

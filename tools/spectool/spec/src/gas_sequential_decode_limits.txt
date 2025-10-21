@@ -1,0 +1,7 @@
+pub @main:
+    a0 = 0x12345678aabbccdd
+    a1 = 0x12345678aabbccdd
+    a2 = 0x12345678aabbccdd
+    a3 = 0x12345678aabbccdd
+pub @expected_exit: %no_fallthrough
+    trap

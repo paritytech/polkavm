@@ -8,4 +8,4 @@ pub @main:
 pub @expected_exit:
     u16 [a0 + 4097] = a1
 
-post: gas = 9998
+post: gas = 9975

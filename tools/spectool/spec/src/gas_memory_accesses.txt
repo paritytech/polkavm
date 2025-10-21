@@ -1,0 +1,8 @@
+pub @main:
+    a0 = s1
+pub @expected_exit: %no_fallthrough
+    ra = u64 [sp + 0x30]
+    s0 = u64 [sp + 0x28]
+    s1 = u64 [sp + 0x20]
+    sp = sp + 0x38
+    trap

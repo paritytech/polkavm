@@ -1,0 +1,5 @@
+pub @main:
+pub @expected_exit:
+    a2 = u8 [a0 + 11]
+    jump @main if a2 == 0
+    trap
