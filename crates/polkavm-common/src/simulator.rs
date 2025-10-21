@@ -2,7 +2,7 @@
 #![allow(unsafe_code)]
 
 use crate::cast::cast;
-use crate::program::{Opcode, ParsingVisitor, RawReg};
+use crate::program::{InstructionFormat, Opcode, ParsingVisitor, RawReg};
 use crate::utils::{Bitness, BitnessT, GasVisitorT, B64};
 use alloc::string::String;
 use alloc::vec;
@@ -2216,21 +2216,31 @@ where
     }
 }
 
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct TimelineConfig<'a> {
+    pub should_enable_fast_forward: bool,
+    pub instruction_format: InstructionFormat<'a>,
+}
+
+impl<'a> Default for TimelineConfig<'a> {
+    fn default() -> Self {
+        TimelineConfig {
+            should_enable_fast_forward: false,
+            instruction_format: InstructionFormat {
+                is_64_bit: true,
+                ..InstructionFormat::default()
+            },
+        }
+    }
+}
+
 pub fn timeline_for_instructions(
     code: &[u8],
     cache_model: CacheModel,
     instructions: &[crate::program::ParsedInstruction],
+    config: TimelineConfig,
 ) -> (String, u32) {
-    timeline_for_instructions_impl(code, cache_model, instructions, false)
-}
-
-fn timeline_for_instructions_impl(
-    code: &[u8],
-    cache_model: CacheModel,
-    instructions: &[crate::program::ParsedInstruction],
-    should_enable_fast_forward: bool,
-) -> (String, u32) {
-    use crate::program::InstructionFormat;
     use alloc::collections::BTreeMap;
 
     struct TimelineTracer<'a> {
@@ -2289,7 +2299,7 @@ fn timeline_for_instructions_impl(
         code,
         cache_model,
         TimelineTracer {
-            should_enable_fast_forward,
+            should_enable_fast_forward: config.should_enable_fast_forward,
             timeline: &mut timeline_map,
         },
     );
@@ -2313,11 +2323,6 @@ fn timeline_for_instructions_impl(
         timeline[index] = char::from(event);
     }
 
-    let format = InstructionFormat {
-        is_64_bit: true,
-        ..InstructionFormat::default()
-    };
-
     let mut timeline_s = String::new();
     for (nth_instruction, instruction) in instructions.iter().enumerate() {
         use core::fmt::Write;
@@ -2325,10 +2330,10 @@ fn timeline_for_instructions_impl(
         let line = &timeline[nth_instruction * total_cycles..(nth_instruction + 1) * total_cycles];
         timeline_s.extend(line.iter().copied());
         timeline_s.push_str("  ");
-        writeln!(&mut timeline_s, "{}", instruction.display(&format)).unwrap();
+        writeln!(&mut timeline_s, "{}", instruction.display(&config.instruction_format)).unwrap();
     }
 
-    if should_enable_fast_forward {
+    if config.should_enable_fast_forward {
         let mut timeline_new = String::with_capacity(timeline_s.len());
         let mut is_in_cycles = true;
         let mut last = '.';
@@ -2369,7 +2374,7 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use super::{timeline_for_instructions, timeline_for_instructions_impl, CacheModel};
+    use super::{timeline_for_instructions, CacheModel, TimelineConfig};
     use crate::assembler::assemble;
     use crate::program::{ProgramBlob, ISA64_V1};
 
@@ -2388,7 +2393,7 @@ mod tests {
         let blob = ProgramBlob::parse(program.into()).unwrap();
         let instructions: Vec<_> = blob.instructions(ISA64_V1).collect();
 
-        let (timeline_s, cycles) = timeline_for_instructions(blob.code(), config, &instructions);
+        let (timeline_s, cycles) = timeline_for_instructions(blob.code(), config, &instructions, TimelineConfig::default());
         let mut expected_timeline_s = String::new();
         let mut expected_cycles = 0;
         for line in expected_timeline.lines() {
@@ -2412,7 +2417,11 @@ mod tests {
         #[cfg(feature = "logging")]
         log::debug!("Rerunning with fast-forward enabled...");
 
-        let (timeline_ff_s, cycles_ff) = timeline_for_instructions_impl(blob.code(), config, &instructions, true);
+        let timeline_config = TimelineConfig {
+            should_enable_fast_forward: true,
+            ..TimelineConfig::default()
+        };
+        let (timeline_ff_s, cycles_ff) = timeline_for_instructions(blob.code(), config, &instructions, timeline_config);
         assert_eq!(cycles_ff, cycles);
         if timeline_ff_s != expected_timeline_s {
             panic!("Timeline mismatch for fast-forward!\n\nExpected timeline:\n{expected_timeline_s}\nActual timeline:\n{timeline_ff_s}");

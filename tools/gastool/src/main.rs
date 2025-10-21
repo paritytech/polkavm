@@ -3429,8 +3429,12 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf, b
                 }
 
                 if let CostModelKind::Full(cost_model) = cost_model {
-                    let (timeline, cycles) =
-                        polkavm_common::simulator::timeline_for_instructions(blob.code(), cost_model, &block_instructions);
+                    let (timeline, cycles) = polkavm_common::simulator::timeline_for_instructions(
+                        blob.code(),
+                        cost_model,
+                        &block_instructions,
+                        polkavm_common::simulator::TimelineConfig::default(),
+                    );
                     log::info!("  Timeline ({cycles} cycles):");
                     for line in timeline.split("\n") {
                         log::info!("    {line}");
