@@ -8,7 +8,7 @@ use memoffset::offset_of;
 use polkavm::program::Instruction;
 use polkavm::{
     CacheModel, Config, CostModel, CostModelKind, CustomCodegen, Engine, Error, InterruptKind, Module, ModuleConfig, ProgramBlob,
-    ProgramCounter, Reg,
+    ProgramCounter, ProgramParts, Reg,
 };
 use polkavm_assembler::amd64::addr::*;
 use polkavm_assembler::amd64::inst::*;
@@ -2993,7 +2993,21 @@ impl Category {
     }
 }
 
-fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf, benchmark: Benchmark, analyze: bool) -> Result<(), String> {
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct TestcaseJson {
+    name: String,
+    program: Vec<u8>,
+    block_gas_costs: BTreeMap<u32, i64>,
+}
+
+fn main_test_cost_model(
+    cost_model_path: Option<PathBuf>,
+    cache_path: PathBuf,
+    benchmark: Benchmark,
+    analyze: bool,
+    output_testcase: Option<PathBuf>,
+) -> Result<(), String> {
     std::fs::create_dir_all(&cache_path).map_err(|error| format!("failed to create '{}': {error}", cache_path.display()))?;
 
     let mut cost_model: CostModelKind = CostModelKind::Simple(CostModel::naive_ref());
@@ -3075,7 +3089,8 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf, b
     };
 
     let blob = std::fs::read(&blob_path).map_err(|error| format!("failed to read {}: {}", blob_path.display(), error))?;
-    let blob = ProgramBlob::parse(blob.into())?;
+    let parts = ProgramParts::from_bytes(blob.into())?;
+    let blob = ProgramBlob::from_parts(parts.clone())?;
 
     let mut offset_to_opcode = HashMap::new();
     let mut offset_to_basic_block_number = HashMap::new();
@@ -3086,6 +3101,45 @@ fn main_test_cost_model(cost_model_path: Option<PathBuf>, cache_path: PathBuf, b
         Benchmark::Doom => ("ext_initialize", "ext_tick"),
         _ => ("initialize", "run"),
     };
+
+    if let Some(output_path) = output_testcase {
+        let mut config = polkavm::Config::from_env()?;
+        config.set_allow_experimental(true);
+        config.set_backend(Some(polkavm::BackendKind::Interpreter));
+        let engine = polkavm::Engine::new(&config)?;
+        let instance_pre = prepare_benchmark(benchmark, &engine, &blob, false)?;
+        let module = instance_pre.module();
+        let mut block_gas_costs = BTreeMap::new();
+        let mut is_new_block = true;
+        for instruction in blob.instructions_bounded_at(polkavm::program::ISA64_V1, ProgramCounter(0)) {
+            if is_new_block {
+                let cost = module.calculate_gas_cost_for(instruction.offset).unwrap();
+                block_gas_costs.insert(instruction.offset.0, cost);
+            }
+
+            is_new_block = instruction.starts_new_basic_block();
+        }
+
+        let json = TestcaseJson {
+            name: match benchmark {
+                Benchmark::Doom => "doom",
+                Benchmark::Pinky => "pinky",
+                Benchmark::PrimeSieve => "prime-sieve",
+            }
+            .to_owned(),
+            program: parts.code_and_jump_table.to_vec(),
+            block_gas_costs,
+        };
+
+        let payload = serde_json::to_string(&json).unwrap();
+        if !std::fs::read(&output_path)
+            .map(|old_payload| old_payload == payload.as_bytes())
+            .unwrap_or(false)
+        {
+            log::info!("Generating {output_path:?}...");
+            std::fs::write(output_path, payload).unwrap();
+        }
+    }
 
     if analyze {
         basic_block_to_offset.push(ProgramCounter(0));
@@ -3534,6 +3588,9 @@ enum Args {
 
         #[clap(long)]
         do_not_analyze: bool,
+
+        #[clap(long)]
+        output_testcase: Option<PathBuf>,
     },
 }
 
@@ -3581,7 +3638,8 @@ fn main() {
             cache_path,
             benchmark,
             do_not_analyze,
-        } => main_test_cost_model(cost_model, cache_path, benchmark, !do_not_analyze),
+            output_testcase,
+        } => main_test_cost_model(cost_model, cache_path, benchmark, !do_not_analyze, output_testcase),
     };
 
     if let Err(error) = result {

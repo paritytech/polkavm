@@ -577,6 +577,7 @@ dependencies = [
  "polkavm-linux-raw",
  "raw-cpuid",
  "ruzstd",
+ "serde",
  "serde_json",
 ]
 

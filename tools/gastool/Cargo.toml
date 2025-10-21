@@ -23,6 +23,7 @@ polkavm-linux-raw.workspace = true
 polkavm.workspace = true
 raw-cpuid = "11.5.0"
 ruzstd.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 [lints]
