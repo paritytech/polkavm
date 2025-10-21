@@ -1898,6 +1898,7 @@ impl Instruction {
 
 pub const MAX_INSTRUCTION_LENGTH: usize = 2 + MAX_VARINT_LENGTH * 2;
 
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct InstructionFormat<'a> {
     pub prefer_non_abi_reg_names: bool,
