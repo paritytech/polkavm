@@ -1324,6 +1324,11 @@ where
         self.dispatch_simple_alu_2op(d, s1)
     }
 
+    #[inline(always)]
+    fn reverse_byte(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        self.dispatch_simple_alu_2op(d, s)
+    }
+
     // Simple ALU instructions (2 op), 32-bit
 
     #[inline(always)]
@@ -1350,11 +1355,6 @@ where
     #[inline(always)]
     fn rotate_right_imm_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _c: u32) -> Self::ReturnTy {
         self.dispatch_simple_alu_2op_32bit(d, s1)
-    }
-
-    #[inline(always)]
-    fn reverse_byte(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        self.dispatch_simple_alu_2op(d, s)
     }
 
     // Trivial (2 op, 1 cycle)
@@ -1394,7 +1394,7 @@ where
         self.dispatch_trivial_2op_1c(d, s)
     }
 
-    // Trivial (3 op, 2 cycles)
+    // Trivial (2 op, 2 cycles)
 
     #[inline(always)]
     fn count_trailing_zero_bits_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
