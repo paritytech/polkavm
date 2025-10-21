@@ -192,6 +192,11 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
         }
     }
 
+    enum Export {
+        ByBlock(u32),
+        ByInstruction(u32),
+    }
+
     let mut instructions: Vec<MaybeInstruction> = Vec::new();
     let mut label_to_index = BTreeMap::new();
     let mut at_block_start = true;
@@ -286,13 +291,19 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
             continue;
         }
 
-        if let Some((is_export, line)) = line
+        if let Some((is_export, mut line)) = line
             .strip_prefix("pub @")
             .map(|line| (true, line))
             .or_else(|| line.strip_prefix('@').map(|line| (false, line)))
         {
+            let mut no_fallthrough = false;
+            if let Some(line_no_fallthrough) = line.strip_suffix("%no_fallthrough") {
+                no_fallthrough = true;
+                line = line_no_fallthrough.trim();
+            }
+
             if let Some(label) = line.strip_suffix(':') {
-                if !at_block_start {
+                if !at_block_start && !no_fallthrough {
                     instructions.push(Instruction::fallthrough.into());
                     at_block_start = true;
                     current_basic_block += 1;
@@ -303,7 +314,11 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
                 }
 
                 if is_export {
-                    exports.insert(label, current_basic_block);
+                    if at_block_start {
+                        exports.insert(label, Export::ByBlock(current_basic_block));
+                    } else {
+                        exports.insert(label, Export::ByInstruction(instructions.len() as u32));
+                    }
                 }
 
                 continue;
@@ -1070,8 +1085,11 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
     builder.set_rw_data_size(rw_data_size);
     builder.set_stack_size(stack_size);
     builder.set_code(&code, &jump_table);
-    for (label, target_index) in exports {
-        builder.add_export_by_basic_block(target_index, label.as_bytes());
+    for (label, export) in exports {
+        match export {
+            Export::ByBlock(target_index) => builder.add_export_by_basic_block(target_index, label.as_bytes()),
+            Export::ByInstruction(target_index) => builder.add_export_by_instruction(target_index, label.as_bytes()),
+        }
     }
 
     builder.to_vec()

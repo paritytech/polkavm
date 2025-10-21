@@ -90,7 +90,7 @@ pub struct ProgramBlobBuilder {
     ro_data: Vec<u8>,
     rw_data: Vec<u8>,
     imports: Vec<ProgramSymbol<Box<[u8]>>>,
-    exports: Vec<(u32, ProgramSymbol<Box<[u8]>>)>,
+    exports: Vec<(Export, ProgramSymbol<Box<[u8]>>)>,
     code: Vec<Instruction>,
     jump_table: Vec<u32>,
     custom: Vec<(u8, Vec<u8>)>,
@@ -104,6 +104,12 @@ struct SerializedCode {
     code: Vec<u8>,
     bitmask: Vec<u8>,
     exports: Vec<(u32, Vec<u8>)>,
+}
+
+#[derive(Copy, Clone)]
+enum Export {
+    ByBlock(u32),
+    ByInstruction(u32),
 }
 
 impl ProgramBlobBuilder {
@@ -142,7 +148,13 @@ impl ProgramBlobBuilder {
     }
 
     pub fn add_export_by_basic_block(&mut self, target_basic_block: u32, symbol: &[u8]) {
-        self.exports.push((target_basic_block, ProgramSymbol::new(symbol.into())));
+        self.exports
+            .push((Export::ByBlock(target_basic_block), ProgramSymbol::new(symbol.into())));
+    }
+
+    pub fn add_export_by_instruction(&mut self, target_instruction: u32, symbol: &[u8]) {
+        self.exports
+            .push((Export::ByInstruction(target_instruction), ProgramSymbol::new(symbol.into())));
     }
 
     pub fn add_dispatch_table_entry(&mut self, symbol: impl Into<Vec<u8>>) {
@@ -172,7 +184,7 @@ impl ProgramBlobBuilder {
 
         let mut instructions = Vec::with_capacity(self.dispatch_table.len() + self.code.len());
         for (nth, symbol) in self.dispatch_table.iter().enumerate() {
-            let Some(&(target_basic_block, _)) = self.exports.iter().find(|(_, export_symbol)| symbol == export_symbol.as_bytes()) else {
+            let Some(&(target, _)) = self.exports.iter().find(|(_, export_symbol)| symbol == export_symbol.as_bytes()) else {
                 return Err(alloc::format!(
                     "failed to build a dispatch table: symbol not found: {}",
                     ProgramSymbol::new(symbol)
@@ -184,6 +196,16 @@ impl ProgramBlobBuilder {
                 0
             } else {
                 5
+            };
+
+            let target_basic_block = match target {
+                Export::ByBlock(target) => target,
+                Export::ByInstruction(..) => {
+                    return Err(alloc::format!(
+                        "failed to build a dispatch table: points to a symbol which is not basic block based: {}",
+                        ProgramSymbol::new(symbol)
+                    ));
+                }
             };
 
             instructions.push(SerializedInstruction {
@@ -334,9 +356,15 @@ impl ProgramBlobBuilder {
 
         output.bitmask = bitmask.finish();
 
-        for (target_basic_block, symbol) in &self.exports {
-            let target_basic_block = *target_basic_block as usize + basic_block_shift as usize;
-            let nth_instruction = basic_block_to_instruction_index[target_basic_block];
+        for (target, symbol) in &self.exports {
+            let nth_instruction = match target {
+                Export::ByBlock(target_basic_block) => {
+                    let target_basic_block = *target_basic_block as usize + basic_block_shift as usize;
+                    basic_block_to_instruction_index[target_basic_block]
+                }
+                Export::ByInstruction(nth_instruction) => *nth_instruction as usize,
+            };
+
             let offset = instructions[nth_instruction].position;
             output.exports.push((offset, symbol.as_bytes().to_vec()));
         }
