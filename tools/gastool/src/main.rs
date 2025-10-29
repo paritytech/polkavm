@@ -3106,19 +3106,46 @@ fn main_test_cost_model(
         let mut config = polkavm::Config::from_env()?;
         config.set_allow_experimental(true);
         config.set_backend(Some(polkavm::BackendKind::Interpreter));
-        config.set_default_cost_model(Some(cost_model));
+        config.set_default_cost_model(Some(cost_model.clone()));
         let engine = polkavm::Engine::new(&config)?;
         let instance_pre = prepare_benchmark(benchmark, &engine, &blob, false)?;
         let module = instance_pre.module();
         let mut block_gas_costs = BTreeMap::new();
         let mut is_new_block = true;
+        let mut blocks = Vec::new();
+        let mut block = Vec::new();
         for instruction in blob.instructions_bounded_at(polkavm::program::ISA64_V1, ProgramCounter(0)) {
             if is_new_block {
+                if !block.is_empty() {
+                    blocks.push(core::mem::take(&mut block));
+                }
                 let cost = module.calculate_gas_cost_for(instruction.offset).unwrap();
                 block_gas_costs.insert(instruction.offset.0, cost);
             }
 
             is_new_block = instruction.starts_new_basic_block();
+            block.push(instruction);
+        }
+
+        if !block.is_empty() {
+            blocks.push(block);
+        }
+
+        let mut timelines = Vec::new();
+        let mut timeline_config = polkavm_common::simulator::TimelineConfig::default();
+        timeline_config.instruction_format.prefer_non_abi_reg_names = true;
+        timeline_config.instruction_format.prefer_unaliased = true;
+        let jump_target_formatter = |target: u32, fmt: &mut core::fmt::Formatter| write!(fmt, "{}", target);
+        timeline_config.instruction_format.jump_target_formatter = Some(&jump_target_formatter);
+        let cache_model = match cost_model {
+            CostModelKind::Simple(_) => panic!("not supported for the simple model"),
+            CostModelKind::Full(kind) => kind,
+        };
+
+        for block in blocks {
+            let (timeline, block_cycles) =
+                polkavm_common::simulator::timeline_for_instructions(blob.code(), cache_model, &block, timeline_config.clone());
+            timelines.push((timeline, block[0].offset.0, block_cycles));
         }
 
         let json = TestcaseJson {
@@ -3138,7 +3165,31 @@ fn main_test_cost_model(
             .unwrap_or(false)
         {
             log::info!("Generating {output_path:?}...");
-            std::fs::write(output_path, payload).unwrap();
+            std::fs::write(&output_path, payload).unwrap();
+        }
+
+        let mut payload = String::new();
+        for (timeline, pc, gas_cost) in timelines {
+            use core::fmt::Write;
+
+            writeln!(&mut payload, "Gas simulation at offset {pc} with total cost of {gas_cost}:\n").unwrap();
+            writeln!(&mut payload, "```").unwrap();
+            for line in timeline.lines() {
+                writeln!(&mut payload, "    {line}").unwrap();
+            }
+            writeln!(&mut payload, "```\n").unwrap();
+        }
+
+        let mut timeline_path = output_path.clone();
+        timeline_path.set_extension("md");
+        assert_ne!(output_path, timeline_path);
+
+        if !std::fs::read(&timeline_path)
+            .map(|old_payload| old_payload == payload.as_bytes())
+            .unwrap_or(false)
+        {
+            log::info!("Generating {timeline_path:?}...");
+            std::fs::write(timeline_path, payload).unwrap();
         }
 
         return Ok(());
