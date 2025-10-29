@@ -1,0 +1,8 @@
+pub @main:
+    jump @branch_target if a0 == 0
+pub @branch_fallthrough:
+    trap
+pub @branch_target:
+    a0 = 2
+pub @expected_exit: %no_fallthrough
+    trap
