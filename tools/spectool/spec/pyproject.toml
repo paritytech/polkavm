@@ -1,4 +1,7 @@
 [project]
+name = "spectool"
+version = "0.0.0"
+
 dependencies = [
     "asn1tools>=0.166.0",
 ]

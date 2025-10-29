@@ -1,4 +1,4 @@
-#!/usr/bin/env -S rye run python
+#!/usr/bin/env -S uv run --no-sync python
 
 from pathlib import Path
 import asn1tools
