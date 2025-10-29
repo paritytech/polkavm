@@ -61,7 +61,10 @@ Testcase ::= SEQUENCE {
         halt,
 
         -- the execution finished with a page fault
-        page-fault
+        page-fault,
+
+        -- we've ran out of gas
+        out-of-gas
     },
 
     -- (the "ω′" from the paper)

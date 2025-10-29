@@ -37,7 +37,7 @@
     },
     "expected-status": {
       "type": "string",
-      "enum": ["panic", "halt", "page-fault"]
+      "enum": ["panic", "halt", "page-fault", "out-of-gas"]
     },
     "expected-regs": {
       "type": "array",
@@ -54,6 +54,15 @@
     },
     "expected-page-fault-address": {
       "$ref": "#/$defs/u32"
+    },
+    "block-gas-costs": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^-?[0-9]+$"
+      },
+      "additionalProperties": {
+        "type": "number"
+      }
     }
   },
   "required": ["name", "initial-regs", "initial-pc", "initial-page-map", "initial-memory", "initial-gas", "program", "expected-status", "expected-regs", "expected-pc", "expected-memory", "expected-gas"],
