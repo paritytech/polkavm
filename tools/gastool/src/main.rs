@@ -3106,6 +3106,7 @@ fn main_test_cost_model(
         let mut config = polkavm::Config::from_env()?;
         config.set_allow_experimental(true);
         config.set_backend(Some(polkavm::BackendKind::Interpreter));
+        config.set_default_cost_model(Some(cost_model));
         let engine = polkavm::Engine::new(&config)?;
         let instance_pre = prepare_benchmark(benchmark, &engine, &blob, false)?;
         let module = instance_pre.module();
