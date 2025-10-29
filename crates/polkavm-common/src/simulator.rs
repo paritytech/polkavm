@@ -611,11 +611,18 @@ where
                     .simd_eq(i16x32::splat(RESOURCES_UNDERFLOW_MASK_I16))
                     .clamp_to_i8_range();
                 let have_enough_resources = have_enough_resources.and(is_waiting_to_start);
-                let mask = have_enough_resources.most_significant_bits().rotate_left(self.reorder_buffer_head);
+                let mask = have_enough_resources.most_significant_bits().rotate_right(self.reorder_buffer_head);
                 let position = mask.trailing_zeros();
-
                 if position != 32 {
-                    let position = position.wrapping_sub(self.reorder_buffer_head) % (REORDER_BUFFER_SIZE as u32);
+                    let position = (position + self.reorder_buffer_head) % (REORDER_BUFFER_SIZE as u32);
+                    #[cfg(all(test, feature = "logging"))]
+                    log::debug!(
+                        "tick_cycle_avx2[{}]: starting: instruction={}, slot={}",
+                        self.cycles,
+                        self.rob_instruction[cast(position).to_usize()],
+                        position,
+                    );
+
                     let resources_consumed = self.rob_required_resources.as_slice()[cast(position).to_usize()];
                     self.resources_available -= resources_consumed as u32;
                     self.rob_state.as_slice_mut()[cast(position).to_usize()] += 1;
