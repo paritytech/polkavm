@@ -3139,6 +3139,8 @@ fn main_test_cost_model(
             log::info!("Generating {output_path:?}...");
             std::fs::write(output_path, payload).unwrap();
         }
+
+        return Ok(());
     }
 
     if analyze {
