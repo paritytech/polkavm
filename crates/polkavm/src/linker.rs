@@ -1,4 +1,4 @@
-use crate::api::RegValue;
+use crate::api::{MemoryProtection, RegValue};
 use crate::error::bail;
 use crate::program::ProgramSymbol;
 use crate::{Error, InterruptKind, Module, ProgramCounter, RawInstance, Reg};
@@ -860,7 +860,7 @@ impl<UserData, UserError> Instance<UserData, UserError> {
                         && segfault.page_address + segfault.page_size <= module.memory_map().stack_address_high()
                     {
                         self.instance
-                            .zero_memory(segfault.page_address, segfault.page_size)
+                            .zero_memory_with_memory_protection(segfault.page_address, segfault.page_size, MemoryProtection::ReadWrite)
                             .map_err(|error| {
                                 CallError::Error(Error::from_display(format!(
                                     "failed to zero memory when handling a segfault at 0x{:x}: {error}",
@@ -872,13 +872,29 @@ impl<UserData, UserError> Instance<UserData, UserError> {
                     }
 
                     macro_rules! handle {
-                        ($range:ident, $data:ident) => {{
+                        ($range:ident, $data:ident, $protection:ident) => {{
                             if segfault.page_address >= module.memory_map().$range().start
                                 && segfault.page_address + segfault.page_size <= module.memory_map().$range().end
                             {
                                 let data_offset = (segfault.page_address - module.memory_map().$range().start) as usize;
                                 let data = module.blob().$data();
-                                if let Some(chunk_length) = data.len().checked_sub(data_offset) {
+                                let chunk_length = data.len().checked_sub(data_offset);
+                                let initial_protection = if chunk_length.is_some() {
+                                    MemoryProtection::ReadWrite
+                                } else {
+                                    MemoryProtection::$protection
+                                };
+
+                                self.instance
+                                    .zero_memory_with_memory_protection(segfault.page_address, segfault.page_size, initial_protection)
+                                    .map_err(|error| {
+                                        CallError::Error(Error::from_display(format!(
+                                            "failed to zero memory when handling a segfault at 0x{:x}: {error}",
+                                            segfault.page_address
+                                        )))
+                                    })?;
+
+                                if let Some(chunk_length) = chunk_length {
                                     let chunk_length = core::cmp::min(chunk_length, segfault.page_size as usize);
                                     self.instance
                                         .write_memory(segfault.page_address, &data[data_offset..data_offset + chunk_length])
@@ -888,24 +904,26 @@ impl<UserData, UserError> Instance<UserData, UserError> {
                                                 segfault.page_address
                                             )))
                                         })?;
-                                } else {
+                                };
+
+                                if MemoryProtection::$protection == MemoryProtection::Read && initial_protection != MemoryProtection::Read {
                                     self.instance
-                                        .zero_memory(segfault.page_address, segfault.page_size)
+                                        .protect_memory(segfault.page_address, segfault.page_size)
                                         .map_err(|error| {
                                             CallError::Error(Error::from_display(format!(
-                                                "failed to zero memory when handling a segfault at 0x{:x}: {error}",
+                                                "failed to protect memory when handling a segfault at 0x{:x}: {error}",
                                                 segfault.page_address
                                             )))
                                         })?;
-                                };
+                                }
 
                                 continue;
                             }
                         }};
                     }
 
-                    handle!(ro_data_range, ro_data);
-                    handle!(rw_data_range, rw_data);
+                    handle!(ro_data_range, ro_data, Read);
+                    handle!(rw_data_range, rw_data, ReadWrite);
 
                     log::debug!("Unexpected segfault: 0x{:x}", segfault.page_address);
                     break Err(CallError::Trap);

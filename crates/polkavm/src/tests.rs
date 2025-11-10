@@ -1,7 +1,7 @@
 use crate::mutex::Mutex;
 use crate::{
-    BackendKind, CallError, Caller, Config, Engine, GasMeteringKind, InterruptKind, Linker, MemoryAccessError, Module, ModuleConfig,
-    ProgramBlob, ProgramCounter, Reg, Segfault, SetCacheSizeLimitArgs,
+    BackendKind, CallError, Caller, Config, Engine, GasMeteringKind, InterruptKind, Linker, MemoryAccessError, MemoryProtection, Module,
+    ModuleConfig, ProgramBlob, ProgramCounter, Reg, Segfault, SetCacheSizeLimitArgs,
 };
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -113,6 +113,18 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
 fn get_native_page_size() -> usize {
     if_compiler_is_supported! {
         { crate::sandbox::get_native_page_size() } else { 4096 }
+    }
+}
+
+#[track_caller]
+fn assert_out_of_range_access<T>(result: Result<T, MemoryAccessError>, expected_address: u32, expected_length: u32) {
+    match result {
+        Ok(_) => panic!("expected Err(MemoryAccessError::OutOfRangeAccess), got Ok"),
+        Err(MemoryAccessError::OutOfRangeAccess { address, length })
+            if address == expected_address && length == u64::from(expected_length) => {}
+        Err(error) => panic!(
+            "expected Err(MemoryAccessError::OutOfRangeAccess {{ address: {expected_address}, length: {expected_length} }}), got {error:?}"
+        ),
     }
 }
 
@@ -807,6 +819,11 @@ fn zero_memory(engine_config: Config) {
         .collect();
 
     let mut instance = module.instantiate().unwrap();
+    assert_out_of_range_access(
+        instance.zero_memory(memory_map.ro_data_address(), 1),
+        memory_map.ro_data_address(),
+        1,
+    );
     instance.set_next_program_counter(offsets[0]);
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Ecalli(..));
@@ -1183,10 +1200,21 @@ fn dynamic_paging_basic(mut engine_config: Config) {
     assert_eq!(segfault.page_address, 0x10000);
     assert_eq!(segfault.page_size, page_size);
 
+    // Both normal 'zero_memory' and 'write_memory' cannot resolve pagefaults.
+    assert_out_of_range_access(
+        instance.zero_memory(segfault.page_address, page_size),
+        segfault.page_address,
+        page_size,
+    );
+    assert_out_of_range_access(instance.write_memory(segfault.page_address, &[0, 0]), segfault.page_address, 2);
+    assert_out_of_range_access(instance.read_u8(segfault.page_address), segfault.page_address, 1);
+
     // Now handle it.
-    instance.zero_memory(segfault.page_address, page_size).unwrap();
-    assert!(instance.is_memory_accessible(0x10000, 0x4, false));
-    assert!(!instance.is_memory_accessible(0x10000 + page_size, 0x4, false));
+    instance
+        .zero_memory_with_memory_protection(segfault.page_address, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
+    assert!(instance.is_memory_accessible(0x10000, 0x4, MemoryProtection::Read));
+    assert!(!instance.is_memory_accessible(0x10000 + page_size, 0x4, MemoryProtection::Read));
 
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x10000 + page_size);
@@ -1197,7 +1225,9 @@ fn dynamic_paging_basic(mut engine_config: Config) {
     assert_eq!(instance.reg(Reg::A1), 0);
     assert_eq!(instance.reg(Reg::A2), 0x12);
     assert_eq!(instance.reg(Reg::T0), 0x5678);
-    instance.zero_memory(segfault.page_address, page_size).unwrap();
+    instance
+        .zero_memory_with_memory_protection(segfault.page_address, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
 
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A2), 0);
@@ -1205,6 +1235,29 @@ fn dynamic_paging_basic(mut engine_config: Config) {
 
     // Running the program again produces no more segfaults, since everything is faulted already.
     instance.set_next_program_counter(offsets[0]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+
+    // Clear the first page and make it read-only.
+    instance
+        .zero_memory_with_memory_protection(0x10000, page_size, MemoryProtection::Read)
+        .unwrap();
+
+    // Cannot write to the page anymore, but can read it.
+    assert_out_of_range_access(instance.zero_memory(0x10000, page_size), 0x10000, page_size);
+    assert_out_of_range_access(instance.zero_memory(0x10000, 1), 0x10000, 1);
+    assert_out_of_range_access(instance.write_memory(0x10000, &[0]), 0x10000, 1);
+    assert_eq!(instance.read_u8(0x10000).unwrap(), 0);
+
+    // The program cannot store anything there either.
+    instance.set_next_program_counter(offsets[0]);
+    let segfault = expect_segfault(instance.run().unwrap());
+    assert_eq!(segfault.page_address, 0x10000);
+    assert_eq!(segfault.page_size, page_size);
+    assert_eq!(instance.program_counter(), Some(offsets[1]));
+    assert_eq!(instance.next_program_counter(), Some(offsets[1]));
+
+    // But it can read.
+    instance.set_next_program_counter(offsets[2]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
 }
 
@@ -1234,7 +1287,9 @@ fn dynamic_paging_freeing_pages(mut engine_config: Config) {
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(offsets[0]);
     let segfault = expect_segfault(instance.run().unwrap());
-    instance.zero_memory(segfault.page_address, page_size).unwrap();
+    instance
+        .zero_memory_with_memory_protection(segfault.page_address, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
 
     instance.set_next_program_counter(offsets[0]);
@@ -1292,7 +1347,9 @@ fn dynamic_paging_protect_memory(mut engine_config: Config) {
     assert_eq!(segfault.page_address, 0x10000);
     assert!(!segfault.is_write_protected);
     assert_eq!(instance.program_counter(), Some(offsets[0]));
-    instance.zero_memory(segfault.page_address, page_size).unwrap();
+    instance
+        .zero_memory_with_memory_protection(segfault.page_address, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
     instance.protect_memory(segfault.page_address, page_size).unwrap();
 
     let segfault = expect_segfault(instance.run().unwrap());
@@ -1347,7 +1404,9 @@ fn dynamic_paging_stress_test(mut engine_config: Config) {
                 instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
                 instance.set_next_program_counter(offsets[0]);
                 let segfault = expect_segfault(instance.run().unwrap());
-                instance.zero_memory(segfault.page_address, page_size).unwrap();
+                instance
+                    .zero_memory_with_memory_protection(segfault.page_address, page_size, MemoryProtection::ReadWrite)
+                    .unwrap();
                 match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
             });
             threads.push(thread);
@@ -1393,7 +1452,9 @@ fn dynamic_paging_initialize_multiple_pages(mut engine_config: Config) {
     instance.set_next_program_counter(offsets[0]);
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x10000);
-    instance.zero_memory(0x10000, page_size * 2).unwrap();
+    instance
+        .zero_memory_with_memory_protection(0x10000, page_size * 2, MemoryProtection::ReadWrite)
+        .unwrap();
     // We've zeroed two pages, so we don't get a segfault anymore.
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
 }
@@ -1430,7 +1491,9 @@ fn dynamic_paging_preinitialize_pages(mut engine_config: Config) {
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(offsets[0]);
-    instance.zero_memory(0x10000, page_size * 2).unwrap();
+    instance
+        .zero_memory_with_memory_protection(0x10000, page_size * 2, MemoryProtection::ReadWrite)
+        .unwrap();
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
 }
 
@@ -1494,8 +1557,17 @@ fn dynamic_paging_read_at_page_boundary(mut engine_config: Config) {
     instance.set_next_program_counter(offsets[0]);
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x10000);
+    instance
+        .zero_memory_with_memory_protection(0x10000, page_size * 2, MemoryProtection::ReadWrite)
+        .unwrap();
     instance.write_memory(0x10fff, &[0xaa, 0xbb]).unwrap();
 
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x00bbaa00);
+
+    instance.set_reg(Reg::A0, 0);
+    instance.protect_memory(0x10000, page_size * 2).unwrap();
+    instance.set_next_program_counter(offsets[0]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0x00bbaa00);
 }
@@ -1648,12 +1720,16 @@ fn dynamic_paging_write_at_page_boundary_with_no_pages(mut engine_config: Config
     instance.set_next_program_counter(offsets[0]);
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x10000);
-    instance.zero_memory(0x10000, page_size).unwrap();
+    instance
+        .zero_memory_with_memory_protection(0x10000, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
 
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x11000);
     assert_eq!(instance.read_memory(0x10ffe, 2).unwrap(), vec![0, 0]);
-    instance.zero_memory(0x11000, page_size).unwrap();
+    instance
+        .zero_memory_with_memory_protection(0x11000, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
 
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.read_memory(0x10ffe, 2).unwrap(), vec![0x78, 0x56]);
@@ -1684,12 +1760,16 @@ fn dynamic_paging_write_at_page_boundary_with_first_page(mut engine_config: Conf
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(offsets[0]);
-    instance.zero_memory(0x10000, page_size).unwrap();
+    instance
+        .zero_memory_with_memory_protection(0x10000, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
 
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x11000);
     assert_eq!(instance.read_memory(0x10ffe, 2).unwrap(), vec![0, 0]);
-    instance.zero_memory(0x11000, page_size).unwrap();
+    instance
+        .zero_memory_with_memory_protection(0x11000, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
 
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.read_memory(0x10ffe, 2).unwrap(), vec![0x78, 0x56]);
@@ -1720,12 +1800,16 @@ fn dynamic_paging_write_at_page_boundary_with_second_page(mut engine_config: Con
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(offsets[0]);
-    instance.zero_memory(0x11000, page_size).unwrap();
+    instance
+        .zero_memory_with_memory_protection(0x11000, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
 
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x10000);
     assert_eq!(instance.read_memory(0x11000, 2).unwrap(), vec![0, 0]);
-    instance.zero_memory(0x10000, page_size).unwrap();
+    instance
+        .zero_memory_with_memory_protection(0x10000, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
 
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.read_memory(0x11000, 2).unwrap(), vec![0x34, 0x12]);
@@ -1760,7 +1844,9 @@ fn dynamic_paging_change_written_value_and_address_during_segfault(mut engine_co
     instance.set_reg(Reg::A1, 0x10001);
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x10000);
-    instance.zero_memory(0x10000, page_size).unwrap();
+    instance
+        .zero_memory_with_memory_protection(0x10000, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
     instance.set_reg(Reg::A0, 0x55667788);
     instance.set_reg(Reg::A1, 0x10002);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
@@ -1790,7 +1876,9 @@ fn dynamic_paging_cancel_segfault_by_changing_address(mut engine_config: Config)
         .collect();
 
     let mut instance = module.instantiate().unwrap();
-    instance.zero_memory(0x11000, page_size).unwrap();
+    instance
+        .zero_memory_with_memory_protection(0x11000, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(offsets[0]);
     instance.set_reg(Reg::A0, 0x10000);
@@ -1833,7 +1921,7 @@ fn dynamic_paging_worker_recycle_turn_dynamic_paging_on_and_off(mut engine_confi
         if !is_dynamic {
             assert_eq!(instance.read_u32(0x20000).unwrap(), 0);
         } else {
-            assert!(instance.read_u32(0x20000).is_err());
+            assert_out_of_range_access(instance.read_u32(0x20000), 0x20000, 4);
         }
 
         instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1843,13 +1931,17 @@ fn dynamic_paging_worker_recycle_turn_dynamic_paging_on_and_off(mut engine_confi
             assert_eq!(segfault.page_address, 0x20000);
             assert_eq!(segfault.page_size, page_size);
             let segfault = expect_segfault(instance.run().unwrap());
-            instance.zero_memory(segfault.page_address + 4, page_size).unwrap();
+            assert_out_of_range_access(instance.read_u32(0x21000), 0x21000, 4);
+            instance
+                .zero_memory_with_memory_protection(segfault.page_address, page_size + 4, MemoryProtection::ReadWrite)
+                .unwrap();
             match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
             assert_eq!(instance.read_u32(0x20000).unwrap(), 0x12345678);
+            assert_eq!(instance.read_u32(0x21000).unwrap(), 0);
             instance.set_next_program_counter(ProgramCounter(0));
             match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
         } else {
-            assert!(instance.read_u32(0x21000).is_err());
+            assert_out_of_range_access(instance.read_u32(0x21000), 0x21000, 4);
             assert_eq!(instance.read_u32(0x20000).unwrap(), 0);
             match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
             assert_eq!(instance.read_u32(0x20000).unwrap(), 0x12345678);
@@ -1949,7 +2041,9 @@ fn dynamic_paging_change_program_counter_during_segfault(mut engine_config: Conf
     instance.set_next_program_counter(offsets[2]);
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x11000);
-    instance.zero_memory(segfault.page_address, page_size).unwrap();
+    instance
+        .zero_memory_with_memory_protection(segfault.page_address, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.read_u32(0x11000).unwrap(), 2);
 }
@@ -2195,7 +2289,9 @@ fn dynamic_paging_parallel_page_fault_stress_test(mut engine_config: Config) {
                     break;
                 }
                 assert_eq!(segfault.page_address, address);
-                instance.zero_memory(segfault.page_address, segfault.page_size).unwrap();
+                instance
+                    .zero_memory_with_memory_protection(segfault.page_address, segfault.page_size, MemoryProtection::ReadWrite)
+                    .unwrap();
                 address += segfault.page_size;
             }
             flag.disarm();
@@ -2786,9 +2882,17 @@ fn aux_data_accessible_area(config: Config) {
     instance.set_next_program_counter(offsets[0]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
 
-    assert!(instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size - 3, 4, false));
-    assert!(instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 4, 4, false));
-    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 3, 4, false));
+    assert!(instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size - 3, 4, MemoryProtection::Read));
+    assert!(instance.is_memory_accessible(
+        module.memory_map().aux_data_address() + page_size * 2 - 4,
+        4,
+        MemoryProtection::Read
+    ));
+    assert!(!instance.is_memory_accessible(
+        module.memory_map().aux_data_address() + page_size * 2 - 3,
+        4,
+        MemoryProtection::Read
+    ));
     assert!(instance.read_u32(module.memory_map().aux_data_address() + page_size - 3).is_ok());
     assert!(instance
         .read_u32(module.memory_map().aux_data_address() + page_size * 2 - 4)
@@ -2797,10 +2901,26 @@ fn aux_data_accessible_area(config: Config) {
         .read_u32(module.memory_map().aux_data_address() + page_size * 2 - 3)
         .is_err());
 
-    assert!(instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size - 3, 4, true));
-    assert!(instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 4, 4, true));
-    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 3, 4, true));
-    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2, 4, true));
+    assert!(instance.is_memory_accessible(
+        module.memory_map().aux_data_address() + page_size - 3,
+        4,
+        MemoryProtection::ReadWrite
+    ));
+    assert!(instance.is_memory_accessible(
+        module.memory_map().aux_data_address() + page_size * 2 - 4,
+        4,
+        MemoryProtection::ReadWrite
+    ));
+    assert!(!instance.is_memory_accessible(
+        module.memory_map().aux_data_address() + page_size * 2 - 3,
+        4,
+        MemoryProtection::ReadWrite
+    ));
+    assert!(!instance.is_memory_accessible(
+        module.memory_map().aux_data_address() + page_size * 2,
+        4,
+        MemoryProtection::ReadWrite
+    ));
     assert!(instance
         .write_u32(module.memory_map().aux_data_address() + page_size - 3, 0)
         .is_ok());
@@ -2829,9 +2949,17 @@ fn aux_data_accessible_area(config: Config) {
     instance.set_host_side_aux_write_protect(true).unwrap();
 
     // Still readable as before.
-    assert!(instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size - 3, 4, false));
-    assert!(instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 4, 4, false));
-    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 3, 4, false));
+    assert!(instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size - 3, 4, MemoryProtection::Read));
+    assert!(instance.is_memory_accessible(
+        module.memory_map().aux_data_address() + page_size * 2 - 4,
+        4,
+        MemoryProtection::Read
+    ));
+    assert!(!instance.is_memory_accessible(
+        module.memory_map().aux_data_address() + page_size * 2 - 3,
+        4,
+        MemoryProtection::Read
+    ));
     assert!(instance.read_u32(module.memory_map().aux_data_address() + page_size - 3).is_ok());
     assert!(instance
         .read_u32(module.memory_map().aux_data_address() + page_size * 2 - 4)
@@ -2841,10 +2969,26 @@ fn aux_data_accessible_area(config: Config) {
         .is_err());
 
     // Not writable anymore.
-    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size - 3, 4, true));
-    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 4, 4, true));
-    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2 - 3, 4, true));
-    assert!(!instance.is_memory_accessible(module.memory_map().aux_data_address() + page_size * 2, 4, true));
+    assert!(!instance.is_memory_accessible(
+        module.memory_map().aux_data_address() + page_size - 3,
+        4,
+        MemoryProtection::ReadWrite
+    ));
+    assert!(!instance.is_memory_accessible(
+        module.memory_map().aux_data_address() + page_size * 2 - 4,
+        4,
+        MemoryProtection::ReadWrite
+    ));
+    assert!(!instance.is_memory_accessible(
+        module.memory_map().aux_data_address() + page_size * 2 - 3,
+        4,
+        MemoryProtection::ReadWrite
+    ));
+    assert!(!instance.is_memory_accessible(
+        module.memory_map().aux_data_address() + page_size * 2,
+        4,
+        MemoryProtection::ReadWrite
+    ));
     assert!(instance
         .write_u32(module.memory_map().aux_data_address() + page_size - 3, 0)
         .is_err());
@@ -3974,7 +4118,9 @@ fn memset_with_dynamic_paging(mut config: Config) {
     assert_eq!(instance.program_counter(), Some(offsets[0]));
     assert_eq!(instance.next_program_counter(), Some(offsets[0]));
     assert_eq!(instance.gas(), 98);
-    instance.zero_memory(segfault.page_address, segfault.page_size).unwrap();
+    instance
+        .zero_memory_with_memory_protection(segfault.page_address, segfault.page_size, MemoryProtection::ReadWrite)
+        .unwrap();
     assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
     assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_range().start + 3)); // Pointer is at the end.
     assert_eq!(instance.reg(Reg::A1), 0x1234567a); // Value is unchanged.
@@ -3986,7 +4132,9 @@ fn memset_with_dynamic_paging(mut config: Config) {
     assert_eq!(instance.gas(), 95);
 
     let mut instance = module.instantiate().unwrap();
-    instance.zero_memory(memory_map.rw_data_range().start, page_size).unwrap();
+    instance
+        .zero_memory_with_memory_protection(memory_map.rw_data_range().start, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
     instance.set_gas(100);
     instance.prepare_call_typed(offsets[0], (memory_map.rw_data_range().start + page_size - 1, 0x1234567a, 4));
     let segfault = expect_segfault(instance.run().unwrap());
@@ -4006,7 +4154,7 @@ fn memset_with_dynamic_paging(mut config: Config) {
     instance.set_reg(Reg::A1, 0x1234567b);
     instance.set_reg(Reg::A2, 2);
     instance
-        .zero_memory(memory_map.rw_data_range().start + page_size, page_size)
+        .zero_memory_with_memory_protection(memory_map.rw_data_range().start + page_size, page_size, MemoryProtection::ReadWrite)
         .unwrap();
     assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
     assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_range().start + page_size + 3)); // Pointer is incremented.

@@ -27,6 +27,12 @@ use crate::{Gas, ProgramCounter};
 #[cfg(feature = "module-cache")]
 use crate::module_cache::{ModuleCache, ModuleKey};
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum MemoryProtection {
+    Read,
+    ReadWrite,
+}
+
 if_compiler_is_supported! {
     {
         use crate::sandbox::{Sandbox, SandboxInstance};
@@ -1357,10 +1363,10 @@ impl RawInstance {
             .into_result("failed to reset the instance's memory"))
     }
 
-    /// Returns whether a given chunk of memory is accessible through [`read_memory_into`](Self::read_memory_into)/[`write_memory`](Self::write_memory).
+    /// Returns whether a given chunk of memory is accessible.
     ///
     /// If `size` is zero then this will always return `true`.
-    pub fn is_memory_accessible(&self, address: u32, size: u32, is_writable: bool) -> bool {
+    pub fn is_memory_accessible(&self, address: u32, size: u32, minimum_protection: MemoryProtection) -> bool {
         if size == 0 {
             return true;
         }
@@ -1369,7 +1375,11 @@ impl RawInstance {
             return false;
         }
 
-        let upper_limit = if is_writable { self.get_write_upper_limit() } else { 0x100000000 };
+        let upper_limit = match minimum_protection {
+            MemoryProtection::Read => 0x100000000,
+            MemoryProtection::ReadWrite => self.get_write_upper_limit(),
+        };
+
         if u64::from(address) + cast(size).to_u64() > upper_limit {
             return false;
         }
@@ -1398,17 +1408,23 @@ impl RawInstance {
                 return true;
             }
 
-            if !is_writable && is_within(map.ro_data_range(), address, size) {
+            if matches!(minimum_protection, MemoryProtection::Read) && is_within(map.ro_data_range(), address, size) {
                 return true;
             }
 
             false
         } else {
-            access_backend!(self.backend, |backend| backend.is_memory_accessible(address, size, is_writable))
+            access_backend!(self.backend, |backend| backend.is_memory_accessible(
+                address,
+                size,
+                minimum_protection
+            ))
         }
     }
 
     /// Reads the VM's memory.
+    ///
+    /// The whole memory region must be readable.
     pub fn read_memory_into<'slice, B>(&self, address: u32, buffer: &'slice mut B) -> Result<&'slice mut [u8], MemoryAccessError>
     where
         B: ?Sized + AsUninitSliceMut,
@@ -1459,16 +1475,15 @@ impl RawInstance {
             }
         }
 
-        #[cfg(debug_assertions)]
-        {
-            let is_accessible = self.is_memory_accessible(address, cast(length).assert_always_fits_in_u32(), false);
-            if is_accessible != result.is_ok() {
+        if cfg!(debug_assertions) {
+            let is_inaccessible = !self.is_memory_accessible(address, cast(length).assert_always_fits_in_u32(), MemoryProtection::Read);
+            if is_inaccessible != matches!(result, Err(MemoryAccessError::OutOfRangeAccess { .. })) {
                 panic!(
-                    "'read_memory_into' doesn't match with 'is_memory_accessible' for 0x{:x}-0x{:x} (read_memory_into = {}, is_memory_accessible = {})",
+                    "'read_memory_into' doesn't match with 'is_memory_accessible' for 0x{:x}-0x{:x} (read_memory_into = {:?}, is_memory_accessible = {})",
                     address,
                     cast(address).to_usize() + length,
-                    result.is_ok(),
-                    is_accessible,
+                    result.map(|_| ()),
+                    !is_inaccessible,
                 );
             }
         }
@@ -1487,8 +1502,7 @@ impl RawInstance {
 
     /// Writes into the VM's memory.
     ///
-    /// When dynamic paging is enabled calling this can be used to resolve a segfault. It can also
-    /// be used to preemptively initialize pages for which no segfault is currently triggered.
+    /// The whole memory region must be writable.
     pub fn write_memory(&mut self, address: u32, data: &[u8]) -> Result<(), MemoryAccessError> {
         if data.is_empty() {
             return Ok(());
@@ -1519,16 +1533,16 @@ impl RawInstance {
             }
         }
 
-        #[cfg(debug_assertions)]
-        {
-            let is_accessible = self.is_memory_accessible(address, cast(data.len()).assert_always_fits_in_u32(), true);
-            if is_accessible != result.is_ok() {
+        if cfg!(debug_assertions) {
+            let is_inaccessible =
+                !self.is_memory_accessible(address, cast(data.len()).assert_always_fits_in_u32(), MemoryProtection::ReadWrite);
+            if is_inaccessible != matches!(result, Err(MemoryAccessError::OutOfRangeAccess { .. })) {
                 panic!(
-                    "'write_memory' doesn't match with 'is_memory_accessible' for 0x{:x}-0x{:x} (write_memory = {}, is_memory_accessible = {})",
+                    "'write_memory' doesn't match with 'is_memory_accessible' for 0x{:x}-0x{:x} (write_memory = {:?}, is_memory_accessible = {})",
                     address,
                     cast(address).to_usize() + data.len(),
-                    result.is_ok(),
-                    is_accessible,
+                    result,
+                    !is_inaccessible,
                 );
             }
         }
@@ -1537,6 +1551,8 @@ impl RawInstance {
     }
 
     /// Reads the VM's memory.
+    ///
+    /// The whole memory region must be readable.
     pub fn read_memory(&self, address: u32, length: u32) -> Result<Vec<u8>, MemoryAccessError> {
         let mut buffer = Vec::new();
         buffer.reserve_exact(cast(length).to_usize());
@@ -1626,14 +1642,51 @@ impl RawInstance {
         self.write_memory(address, &[value])
     }
 
+    /// Fills the given memory region with zeros and changes memory protection flags. Similar to [`RawInstance::zero_memory`], but can only be called when dynamic paging is enabled.
+    ///
+    /// `address` must be a multiple of the page size. The value of `length` will be rounded up to the nearest multiple of the page size.
+    /// If `length` is zero then this call has no effect.
+    ///
+    /// Can be used to resolve a segfault. It can also be used to preemptively initialize pages for which no segfault is currently triggered.
+    pub fn zero_memory_with_memory_protection(
+        &mut self,
+        address: u32,
+        length: u32,
+        memory_protection: MemoryProtection,
+    ) -> Result<(), MemoryAccessError> {
+        if !self.module.is_dynamic_paging() {
+            return Err(MemoryAccessError::Error(
+                "'zero_memory_with_memory_protection' is only possible on modules with dynamic paging".into(),
+            ));
+        }
+
+        if length == 0 {
+            return Ok(());
+        }
+
+        if !self.module.is_multiple_of_page_size(address) {
+            return Err(MemoryAccessError::Error("address not a multiple of page size".into()));
+        }
+
+        self.zero_memory_impl(address, length, Some(memory_protection))
+    }
+
     /// Fills the given memory region with zeros.
+    ///
+    /// The whole memory region must be writable.
     ///
     /// `address` must be greater or equal to 0x10000 and `address + length` cannot be greater than 0x100000000.
     /// If `length` is zero then this call has no effect and will always succeed.
-    ///
-    /// When dynamic paging is enabled calling this can be used to resolve a segfault. It can also
-    /// be used to preemptively initialize pages for which no segfault is currently triggered.
     pub fn zero_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
+        self.zero_memory_impl(address, length, None)
+    }
+
+    fn zero_memory_impl(
+        &mut self,
+        address: u32,
+        length: u32,
+        memory_protection: Option<MemoryProtection>,
+    ) -> Result<(), MemoryAccessError> {
         if length == 0 {
             return Ok(());
         }
@@ -1652,14 +1705,33 @@ impl RawInstance {
             });
         }
 
-        let result = access_backend!(self.backend, |mut backend| backend.zero_memory(address, length));
+        let length = if memory_protection.is_none() {
+            length
+        } else {
+            self.module().round_to_page_size_up(length)
+        };
+
+        let result = access_backend!(self.backend, |mut backend| backend.zero_memory(address, length, memory_protection));
         if let Some(ref mut crosscheck) = self.crosscheck_instance {
-            let expected_result = crosscheck.zero_memory(address, length);
+            let expected_result = crosscheck.zero_memory(address, length, memory_protection);
             let expected_success = expected_result.is_ok();
             let success = result.is_ok();
             if success != expected_success {
                 let address_end = u64::from(address) + u64::from(length);
                 panic!("zero_memory: crosscheck mismatch, range = 0x{address:x}..0x{address_end:x}, interpreter = {expected_success}, backend = {success}");
+            }
+        }
+
+        if cfg!(debug_assertions) && memory_protection.is_none() {
+            let is_inaccessible = !self.is_memory_accessible(address, length, MemoryProtection::ReadWrite);
+            if is_inaccessible != matches!(result, Err(MemoryAccessError::OutOfRangeAccess { .. })) {
+                panic!(
+                    "'zero_memory' doesn't match with 'is_memory_accessible' for 0x{:x}-0x{:x} (zero_memory = {:?}, is_memory_accessible = {})",
+                    address,
+                    cast(address).to_usize() + cast(length).to_usize(),
+                    result,
+                    !is_inaccessible,
+                );
             }
         }
 
@@ -1670,17 +1742,17 @@ impl RawInstance {
     ///
     /// Is only supported when dynamic paging is enabled.
     pub fn protect_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
-        self.change_memory_protection(address, length, true)
+        self.change_memory_protection(address, length, MemoryProtection::Read)
     }
 
     /// Removes read-only protection from a given memory region.
     ///
     /// Is only supported when dynamic paging is enabled.
     pub fn unprotect_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
-        self.change_memory_protection(address, length, false)
+        self.change_memory_protection(address, length, MemoryProtection::ReadWrite)
     }
 
-    fn change_memory_protection(&mut self, address: u32, length: u32, make_read_only: bool) -> Result<(), MemoryAccessError> {
+    fn change_memory_protection(&mut self, address: u32, length: u32, protection: MemoryProtection) -> Result<(), MemoryAccessError> {
         if !self.module.is_dynamic_paging() {
             return Err(MemoryAccessError::Error(
                 "protecting/unprotecting memory is only possible on modules with dynamic paging".into(),
@@ -1705,11 +1777,8 @@ impl RawInstance {
             });
         }
 
-        access_backend!(self.backend, |mut backend| backend.change_memory_protection(
-            address,
-            length,
-            make_read_only
-        ))
+        access_backend!(self.backend, |mut backend| backend
+            .change_memory_protection(address, length, protection))
     }
 
     /// Frees the given page(s).

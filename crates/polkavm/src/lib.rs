@@ -139,7 +139,7 @@ pub mod program {
 
 pub type Gas = i64;
 
-pub use crate::api::{Engine, MemoryAccessError, Module, RawInstance, RegValue, SetCacheSizeLimitArgs};
+pub use crate::api::{Engine, MemoryAccessError, MemoryProtection, Module, RawInstance, RegValue, SetCacheSizeLimitArgs};
 pub use crate::config::{BackendKind, Config, CustomCodegen, GasMeteringKind, ModuleConfig, SandboxKind};
 pub use crate::error::Error;
 pub use crate::gas::{Cost, CostModel, CostModelKind, CostModelRef};

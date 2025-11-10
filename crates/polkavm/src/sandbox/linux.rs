@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::{get_native_page_size, OffsetTable, SandboxInit, SandboxKind, WorkerCache, WorkerCacheKind};
-use crate::api::{CompiledModuleKind, MemoryAccessError, Module};
+use crate::api::{CompiledModuleKind, MemoryAccessError, MemoryProtection, Module};
 use crate::compiler::CompiledModule;
 use crate::config::Config;
 use crate::config::GasMeteringKind;
@@ -1079,7 +1079,8 @@ pub struct Sandbox {
     is_program_counter_valid: bool,
     next_program_counter: Option<ProgramCounter>,
     next_program_counter_changed: bool,
-    page_set: PageSet,
+    page_set_present: PageSet,
+    page_set_writable: PageSet,
     dynamic_paging_enabled: bool,
     aux_data_address: u32,
     aux_data_length: u32,
@@ -1605,7 +1606,8 @@ impl super::Sandbox for Sandbox {
             is_program_counter_valid: false,
             next_program_counter: None,
             next_program_counter_changed: true,
-            page_set: PageSet::new(),
+            page_set_present: PageSet::new(),
+            page_set_writable: PageSet::new(),
             dynamic_paging_enabled: false,
             aux_data_address: 0,
             aux_data_length: 0,
@@ -1755,8 +1757,6 @@ impl super::Sandbox for Sandbox {
         }
 
         self.module = None;
-        self.page_set.clear();
-
         self.vmctx().jump_into.store(ZYGOTE_TABLES.1.ext_recycle, Ordering::Relaxed);
         self.wake_oneshot_and_expect_idle()
     }
@@ -1921,14 +1921,17 @@ impl super::Sandbox for Sandbox {
         self.wake_oneshot_and_expect_idle()
     }
 
-    fn is_memory_accessible(&self, address: u32, size: u32, _is_writable: bool) -> bool {
+    fn is_memory_accessible(&self, address: u32, size: u32, minimum_protection: MemoryProtection) -> bool {
         assert!(self.dynamic_paging_enabled);
         debug_assert_ne!(size, 0);
 
         let module = self.module.as_ref().unwrap();
         let page_start = module.address_to_page(module.round_to_page_size_down(address));
         let page_end = module.address_to_page(module.round_to_page_size_down(address + size - 1));
-        self.page_set.contains((page_start, page_end))
+        match minimum_protection {
+            MemoryProtection::Read => self.page_set_present.contains((page_start, page_end)),
+            MemoryProtection::ReadWrite => self.page_set_writable.contains((page_start, page_end)),
+        }
     }
 
     fn reset_memory(&mut self) -> Result<(), Error> {
@@ -1956,6 +1959,31 @@ impl super::Sandbox for Sandbox {
 
         if !self.dynamic_paging_enabled {
             let length = slice.len();
+
+            let module = self.module.as_ref().unwrap();
+            let memory_map = module.memory_map();
+            let is_ok = if address >= memory_map.aux_data_address() {
+                let aux_data_end = module.memory_map().aux_data_address() + self.aux_data_length;
+                let address_end = cast(address).to_usize() + length;
+                address_end <= cast(aux_data_end).to_usize()
+            } else if address >= memory_map.stack_address_low() {
+                u64::from(address) + cast(length).to_u64() <= u64::from(memory_map.stack_range().end)
+            } else if address >= memory_map.rw_data_address() {
+                let end = unsafe { *self.vmctx().heap_info.heap_threshold.get() };
+                u64::from(address) + cast(length).to_u64() <= end
+            } else if address >= memory_map.ro_data_address() {
+                u64::from(address) + cast(length).to_u64() <= u64::from(memory_map.ro_data_range().end)
+            } else {
+                false
+            };
+
+            if !is_ok {
+                return Err(MemoryAccessError::OutOfRangeAccess {
+                    address,
+                    length: cast(length).to_u64(),
+                });
+            }
+
             match linux_raw::vm_read_memory(self.child.pid, [slice], [(address as usize, length)]) {
                 Ok(actual_length) if actual_length == length => unsafe { Ok(slice_assume_init_mut(slice)) },
                 Ok(_) => Err(MemoryAccessError::Error("incomplete read".into())),
@@ -1965,7 +1993,7 @@ impl super::Sandbox for Sandbox {
             let module = self.module.as_ref().unwrap();
             let page_start = module.address_to_page(module.round_to_page_size_down(address));
             let page_end = module.address_to_page(module.round_to_page_size_down(address + slice.len() as u32 - 1));
-            if !self.page_set.contains((page_start, page_end)) {
+            if !self.page_set_present.contains((page_start, page_end)) {
                 return Err(MemoryAccessError::OutOfRangeAccess {
                     address,
                     length: cast(slice.len()).to_u64(),
@@ -2030,20 +2058,31 @@ impl super::Sandbox for Sandbox {
         } else {
             let page_start = module.address_to_page(module.round_to_page_size_down(address));
             let page_end = module.address_to_page(module.round_to_page_size_down(address + data.len() as u32 - 1));
-            self.page_set.insert((page_start, page_end));
+            if !self.page_set_writable.contains((page_start, page_end)) {
+                return Err(MemoryAccessError::OutOfRangeAccess {
+                    address,
+                    length: cast(data.len()).to_u64(),
+                });
+            }
+
             self.memory_mmap.as_slice_mut()[address as usize..address as usize + data.len()].copy_from_slice(data);
             Ok(())
         }
     }
 
-    fn zero_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
+    fn zero_memory(&mut self, address: u32, length: u32, memory_protection: Option<MemoryProtection>) -> Result<(), MemoryAccessError> {
         debug_assert_ne!(length, 0);
 
         log::trace!(
-            "Zeroing memory: 0x{:x}-0x{:x} ({} bytes)",
+            "Zeroing memory: 0x{:x}-0x{:x} ({} bytes{})",
             address,
             address as usize + length as usize,
-            length
+            length,
+            match memory_protection {
+                None => "",
+                Some(MemoryProtection::Read) => ", R",
+                Some(MemoryProtection::ReadWrite) => ", RW",
+            },
         );
 
         if length == 0 {
@@ -2052,6 +2091,8 @@ impl super::Sandbox for Sandbox {
 
         let module = self.module.as_ref().unwrap();
         if !self.dynamic_paging_enabled {
+            debug_assert!(memory_protection.is_none());
+
             let memory_map = module.memory_map();
             let is_ok = if address >= memory_map.aux_data_address() {
                 let aux_data_end = module.memory_map().aux_data_address() + self.aux_data_length;
@@ -2089,40 +2130,69 @@ impl super::Sandbox for Sandbox {
         } else {
             let page_start = module.address_to_page(module.round_to_page_size_down(address));
             let page_end = module.address_to_page(module.round_to_page_size_down(address + length - 1));
-            if module.is_multiple_of_page_size(address)
-                && module.is_multiple_of_page_size(length)
-                && self.page_set.is_whole_region_empty((page_start, page_end))
-            {
-                let mut arg: linux_raw::uffdio_zeropage = Default::default();
-                arg.range.start = u64::from(address);
-                arg.range.len = u64::from(length);
-                arg.mode = linux_raw::UFFDIO_ZEROPAGE_MODE_DONTWAKE;
 
-                log::trace!(
-                    "sys_uffdio_zeropage: 0x{:x}..0x{:x}",
-                    arg.range.start,
-                    arg.range.start + arg.range.len
-                );
-
-                if let Err(error) = linux_raw::sys_uffdio_zeropage(self.userfaultfd.borrow(), &mut arg) {
-                    return Err(MemoryAccessError::Error(error.into()));
-                }
-            } else {
-                self.memory_mmap.as_slice_mut()[address as usize..address as usize + length as usize].fill(0);
+            if memory_protection.is_some() {
+                debug_assert!(module.is_multiple_of_page_size(address));
+                debug_assert!(module.is_multiple_of_page_size(length));
             }
 
-            self.page_set.insert((page_start, page_end));
+            match memory_protection {
+                None => {
+                    if !self.page_set_writable.contains((page_start, page_end)) {
+                        return Err(MemoryAccessError::OutOfRangeAccess {
+                            address,
+                            length: u64::from(length),
+                        });
+                    }
+
+                    self.memory_mmap.as_slice_mut()[address as usize..address as usize + length as usize].fill(0);
+                    return Ok(());
+                }
+                Some(MemoryProtection::Read) => {
+                    if !self.page_set_present.is_whole_region_empty((page_start, page_end)) {
+                        self.madvise_remove(address, length)
+                            .map_err(|error| MemoryAccessError::Error(error.into()))?;
+                        self.page_set_writable.remove((page_start, page_end));
+                    }
+
+                    if let Err(error) = self.uffdio_zeropage(address, length) {
+                        self.page_set_present.remove((page_start, page_end));
+                        return Err(error);
+                    }
+
+                    self.page_set_present.insert((page_start, page_end));
+                    self.uffdio_writeprotect(address, length, MemoryProtection::Read)?;
+                }
+                Some(MemoryProtection::ReadWrite) => {
+                    if !self.page_set_present.is_whole_region_empty((page_start, page_end)) {
+                        self.madvise_remove(address, length)
+                            .map_err(|error| MemoryAccessError::Error(error.into()))?;
+                    }
+
+                    if let Err(error) = self.uffdio_zeropage(address, length) {
+                        self.page_set_present.remove((page_start, page_end));
+                        self.page_set_writable.remove((page_start, page_end));
+                        return Err(error);
+                    }
+
+                    self.page_set_present.insert((page_start, page_end));
+                    self.page_set_writable.insert((page_start, page_end));
+                }
+            }
         }
 
         Ok(())
     }
 
-    fn change_memory_protection(&mut self, address: u32, length: u32, make_read_only: bool) -> Result<(), MemoryAccessError> {
+    fn change_memory_protection(&mut self, address: u32, length: u32, protection: MemoryProtection) -> Result<(), MemoryAccessError> {
         assert!(self.dynamic_paging_enabled);
 
         log::trace!(
             "{} memory: 0x{:x}-0x{:x} ({} bytes)",
-            if make_read_only { "Protecting" } else { "Unprotecting" },
+            match protection {
+                MemoryProtection::Read => "Protecting",
+                MemoryProtection::ReadWrite => "Unprotecting",
+            },
             address,
             address as usize + length as usize,
             length
@@ -2131,24 +2201,18 @@ impl super::Sandbox for Sandbox {
         let module = self.module.as_ref().unwrap();
         let page_start = module.address_to_page(module.round_to_page_size_down(address));
         let page_end = module.address_to_page(module.round_to_page_size_down(address + length - 1));
-        if !self.page_set.contains((page_start, page_end)) {
+        if !self.page_set_present.contains((page_start, page_end)) {
             return Err(MemoryAccessError::OutOfRangeAccess {
                 address,
                 length: u64::from(length),
             });
         }
 
-        let mut arg: linux_raw::uffdio_writeprotect = Default::default();
-        arg.range.start = u64::from(address);
-        arg.range.len = u64::from(length);
-        arg.mode = if make_read_only {
-            linux_raw::UFFDIO_WRITEPROTECT_MODE_WP
-        } else {
-            0
-        };
+        self.uffdio_writeprotect(address, length, protection)?;
 
-        if let Err(error) = linux_raw::sys_uffdio_writeprotect(self.userfaultfd.borrow(), &mut arg) {
-            return Err(MemoryAccessError::Error(error.into()));
+        match protection {
+            MemoryProtection::Read => self.page_set_writable.remove((page_start, page_end)),
+            MemoryProtection::ReadWrite => self.page_set_writable.insert((page_start, page_end)),
         }
 
         Ok(())
@@ -2166,21 +2230,17 @@ impl super::Sandbox for Sandbox {
                 "freeing of pages when dynamic paging is not enabled is not implemented",
             ))
         } else {
-            unsafe {
-                linux_raw::sys_madvise(
-                    self.memory_mmap.as_mut_ptr().add(address as usize),
-                    length as usize,
-                    linux_raw::MADV_REMOVE,
-                )?;
-            }
+            self.madvise_remove(address, length)?;
 
             if address <= 0x10000 && length >= 0xffff0000 {
-                self.page_set.clear();
+                self.page_set_present.clear();
+                self.page_set_writable.clear();
             } else {
                 let module = self.module.as_ref().unwrap();
                 let page_start = module.address_to_page(module.round_to_page_size_down(address));
                 let page_end = module.address_to_page(module.round_to_page_size_down(address + length - 1));
-                self.page_set.remove((page_start, page_end));
+                self.page_set_present.remove((page_start, page_end));
+                self.page_set_writable.remove((page_start, page_end));
             }
 
             Ok(())
@@ -2444,5 +2504,52 @@ impl Sandbox {
         } else {
             Err(Error::from(format!("worker process unexpectedly quit: {status}")))
         }
+    }
+
+    fn uffdio_zeropage(&self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
+        let mut arg: linux_raw::uffdio_zeropage = Default::default();
+        arg.range.start = u64::from(address);
+        arg.range.len = u64::from(length);
+        arg.mode = linux_raw::UFFDIO_ZEROPAGE_MODE_DONTWAKE;
+
+        log::trace!(
+            "sys_uffdio_zeropage: 0x{:x}..0x{:x}",
+            arg.range.start,
+            arg.range.start + arg.range.len
+        );
+
+        if let Err(error) = linux_raw::sys_uffdio_zeropage(self.userfaultfd.borrow(), &mut arg) {
+            return Err(MemoryAccessError::Error(error.into()));
+        }
+
+        Ok(())
+    }
+
+    fn uffdio_writeprotect(&self, address: u32, length: u32, protection: MemoryProtection) -> Result<(), MemoryAccessError> {
+        let mut arg: linux_raw::uffdio_writeprotect = Default::default();
+        arg.range.start = u64::from(address);
+        arg.range.len = u64::from(length);
+        arg.mode = match protection {
+            MemoryProtection::Read => linux_raw::UFFDIO_WRITEPROTECT_MODE_WP,
+            MemoryProtection::ReadWrite => 0,
+        };
+
+        if let Err(error) = linux_raw::sys_uffdio_writeprotect(self.userfaultfd.borrow(), &mut arg) {
+            return Err(MemoryAccessError::Error(error.into()));
+        }
+
+        Ok(())
+    }
+
+    fn madvise_remove(&mut self, address: u32, length: u32) -> Result<(), Error> {
+        unsafe {
+            linux_raw::sys_madvise(
+                self.memory_mmap.as_mut_ptr().add(address as usize),
+                length as usize,
+                linux_raw::MADV_REMOVE,
+            )?;
+        }
+
+        Ok(())
     }
 }

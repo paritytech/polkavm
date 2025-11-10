@@ -619,7 +619,7 @@ where
 mod sse {
     use super::RawMask;
     #[cfg(test)]
-    use super::{BitSet, bits};
+    use super::{bits, BitSet};
 
     include!("page_set_sse.rs");
 }
@@ -745,6 +745,12 @@ impl PageSet {
     fn contains_partial_any(&self, group: usize, mask: PageSetGroup) -> bool {
         self.groups_filled.contains_one(group)
             || (self.groups_partial.contains_one(group) && !RawMask::is_zero(self.pages.data[group] & mask))
+    }
+
+    #[allow(dead_code)]
+    pub fn contains_one(&self, entry: u32) -> bool {
+        // TODO: Add a more efficient implementation.
+        self.contains((entry, entry))
     }
 
     #[inline(never)]

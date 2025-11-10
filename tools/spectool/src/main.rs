@@ -5,7 +5,7 @@
 
 use clap::Parser;
 use core::fmt::Write;
-use polkavm::{CacheModel, CostModelKind, Engine, InterruptKind, Module, ModuleConfig, ProgramBlob, Reg};
+use polkavm::{CacheModel, CostModelKind, Engine, InterruptKind, MemoryProtection, Module, ModuleConfig, ProgramBlob, Reg};
 use polkavm_common::assembler::assemble;
 use polkavm_common::program::{asm, ProgramCounter, ProgramParts, ISA64_V1};
 use polkavm_common::utils::parse_slice;
@@ -536,10 +536,17 @@ fn main_generate() {
                     length,
                     is_writable,
                 } => {
-                    instance.zero_memory(address, length).unwrap();
-                    if !is_writable {
-                        instance.protect_memory(address, length).unwrap();
-                    }
+                    instance
+                        .zero_memory_with_memory_protection(
+                            address,
+                            length,
+                            if is_writable {
+                                MemoryProtection::ReadWrite
+                            } else {
+                                MemoryProtection::Read
+                            },
+                        )
+                        .unwrap();
 
                     if final_state.status.is_empty() {
                         initial_page_map.push(Page {
@@ -558,7 +565,20 @@ fn main_generate() {
                     continue;
                 }
                 TestcaseStep::Write { address, contents } => {
+                    let mut pages_made_writable = Vec::new();
+                    for address in ((address / 4096 * 4096)..(address + contents.len() as u32).next_multiple_of(4096)).step_by(4096) {
+                        assert!(instance.is_memory_accessible(address, 4096, MemoryProtection::Read));
+                        if !instance.is_memory_accessible(address, 4096, MemoryProtection::ReadWrite) {
+                            pages_made_writable.push(address);
+                            instance.unprotect_memory(address, 4096).unwrap();
+                        }
+                    }
+
                     instance.write_memory(address, &contents).unwrap();
+                    for address in pages_made_writable {
+                        instance.protect_memory(address, 4096).unwrap();
+                    }
+
                     nth_step += 1;
                     continue;
                 }

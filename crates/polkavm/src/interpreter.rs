@@ -1,7 +1,7 @@
 #![allow(unknown_lints)] // Because of `non_local_definitions` on older rustc versions.
 #![allow(non_local_definitions)]
 #![deny(clippy::as_conversions)]
-use crate::api::{MemoryAccessError, Module, RegValue, SetCacheSizeLimitArgs};
+use crate::api::{MemoryAccessError, MemoryProtection, Module, RegValue, SetCacheSizeLimitArgs};
 use crate::error::Error;
 use crate::gas::{CostModelKind, GasVisitor};
 use crate::utils::{FlatMap, InterruptKind, Segfault};
@@ -539,15 +539,24 @@ impl InterpretedInstance {
         None
     }
 
-    pub fn is_memory_accessible(&self, address: u32, size: u32, _is_writable: bool) -> bool {
+    pub fn is_memory_accessible(&self, address: u32, size: u32, minimum_protection: MemoryProtection) -> bool {
         assert!(self.module.is_dynamic_paging());
 
         // TODO: This is very slow.
         let result = each_page(&self.module, address, size, |page_address, _, _, _| {
-            if !self.dynamic_memory.pages.contains_key(&page_address) {
-                Err(())
+            if let Some(page) = self.dynamic_memory.pages.get(&page_address) {
+                match minimum_protection {
+                    MemoryProtection::ReadWrite => {
+                        if page.is_read_only {
+                            Err(())
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    MemoryProtection::Read => Ok(()),
+                }
             } else {
-                Ok(())
+                Err(())
             }
         });
 
@@ -617,6 +626,13 @@ impl InterpretedInstance {
 
             slice.copy_from_slice(data);
         } else {
+            if !self.is_memory_accessible(address, cast(data.len()).assert_always_fits_in_u32(), MemoryProtection::ReadWrite) {
+                return Err(MemoryAccessError::OutOfRangeAccess {
+                    address,
+                    length: cast(data.len()).to_u64(),
+                });
+            }
+
             let dynamic_memory = &mut self.dynamic_memory;
             let page_size = self.module.memory_map().page_size();
             each_page::<()>(
@@ -635,8 +651,9 @@ impl InterpretedInstance {
         Ok(())
     }
 
-    pub fn zero_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
+    pub fn zero_memory(&mut self, address: u32, length: u32, memory_protection: Option<MemoryProtection>) -> Result<(), MemoryAccessError> {
         if !self.module.is_dynamic_paging() {
+            debug_assert!(memory_protection.is_none());
             let Some(slice) = self.basic_memory.get_memory_slice_mut::<true>(&self.module, address, length) else {
                 return Err(MemoryAccessError::OutOfRangeAccess {
                     address,
@@ -646,6 +663,21 @@ impl InterpretedInstance {
 
             slice.fill(0);
         } else {
+            if memory_protection.is_some() {
+                debug_assert!(self.module.is_multiple_of_page_size(address));
+                debug_assert!(self.module.is_multiple_of_page_size(length));
+            } else if !self.is_memory_accessible(address, length, MemoryProtection::ReadWrite) {
+                return Err(MemoryAccessError::OutOfRangeAccess {
+                    address,
+                    length: u64::from(length),
+                });
+            }
+
+            let is_read_only = memory_protection.map(|prot| match prot {
+                MemoryProtection::Read => true,
+                MemoryProtection::ReadWrite => false,
+            });
+
             let dynamic_memory = &mut self.dynamic_memory;
             let page_size = self.module.memory_map().page_size();
             each_page::<()>(
@@ -656,10 +688,17 @@ impl InterpretedInstance {
                     Entry::Occupied(mut entry) => {
                         let page = entry.get_mut();
                         page[page_offset..page_offset + length].fill(0);
+                        if let Some(is_read_only) = is_read_only {
+                            page.is_read_only = is_read_only;
+                        }
                         Ok(())
                     }
                     Entry::Vacant(entry) => {
-                        entry.insert(Page::empty(page_size));
+                        let mut page = Page::empty(page_size);
+                        if let Some(is_read_only) = is_read_only {
+                            page.is_read_only = is_read_only;
+                        }
+                        entry.insert(page);
                         Ok(())
                     }
                 },
@@ -670,7 +709,7 @@ impl InterpretedInstance {
         Ok(())
     }
 
-    pub fn change_memory_protection(&mut self, address: u32, length: u32, make_read_only: bool) -> Result<(), MemoryAccessError> {
+    pub fn change_memory_protection(&mut self, address: u32, length: u32, protection: MemoryProtection) -> Result<(), MemoryAccessError> {
         assert!(self.module.is_dynamic_paging());
 
         each_page(
@@ -679,7 +718,10 @@ impl InterpretedInstance {
             length,
             |page_address, page_offset, _buffer_offset, length| {
                 if let Some(page) = self.dynamic_memory.pages.get_mut(&page_address) {
-                    page.is_read_only = make_read_only;
+                    page.is_read_only = match protection {
+                        MemoryProtection::Read => true,
+                        MemoryProtection::ReadWrite => false,
+                    };
                     Ok(())
                 } else {
                     Err(MemoryAccessError::OutOfRangeAccess {

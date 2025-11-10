@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use polkavm_common::zygote::AddressTable;
 
-use crate::api::{EngineState, Module};
+use crate::api::{EngineState, MemoryProtection, Module};
 use crate::compiler::CompiledModule;
 use crate::config::{Config, SandboxKind};
 use crate::error::Error;
@@ -125,12 +125,12 @@ pub(crate) trait Sandbox: Sized {
     fn set_next_program_counter(&mut self, pc: ProgramCounter);
     fn accessible_aux_size(&self) -> u32;
     fn set_accessible_aux_size(&mut self, size: u32) -> Result<(), Self::Error>;
-    fn is_memory_accessible(&self, address: u32, size: u32, is_writable: bool) -> bool;
+    fn is_memory_accessible(&self, address: u32, size: u32, minimum_protection: MemoryProtection) -> bool;
     fn reset_memory(&mut self) -> Result<(), Self::Error>;
     fn read_memory_into<'slice>(&self, address: u32, slice: &'slice mut [MaybeUninit<u8>]) -> Result<&'slice mut [u8], MemoryAccessError>;
     fn write_memory(&mut self, address: u32, data: &[u8]) -> Result<(), MemoryAccessError>;
-    fn zero_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError>;
-    fn change_memory_protection(&mut self, address: u32, length: u32, make_read_only: bool) -> Result<(), MemoryAccessError>;
+    fn zero_memory(&mut self, address: u32, length: u32, memory_protection: Option<MemoryProtection>) -> Result<(), MemoryAccessError>;
+    fn change_memory_protection(&mut self, address: u32, length: u32, protection: MemoryProtection) -> Result<(), MemoryAccessError>;
     fn free_pages(&mut self, address: u32, length: u32) -> Result<(), Self::Error>;
     fn heap_size(&self) -> u32;
     fn sbrk(&mut self, size: u32) -> Result<Option<u32>, Self::Error>;
