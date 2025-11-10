@@ -487,6 +487,7 @@ mod tests {
         {
             let mut set = PageSet::new();
             set.insert((0, 100));
+            assert_eq!(set.to_vec(), vec![(0, 100)]);
             set.insert((120, 130));
             set.insert((140, 140));
             set.insert((150, 150));
@@ -598,6 +599,7 @@ mod tests {
         set.insert((55, 221));
         set.remove((117, 131));
 	    set.remove((65, 131));
+        assert_eq!(set.to_vec(), vec![(55, 64), (132, 221)]);
         assert!(!set.contains((85, 88)));
         assert!(set.contains((55, 64)));
         assert!(!set.contains((54, 64)));
