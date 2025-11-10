@@ -1592,6 +1592,34 @@ fn dynamic_paging_read_at_bottom_of_address_space(mut engine_config: Config) {
     assert_eq!(instance.run().unwrap(), InterruptKind::Trap);
 }
 
+fn dynamic_paging_read_memory_which_is_not_paged_in(mut engine_config: Config) {
+    engine_config.set_allow_dynamic_paging(true);
+
+    let _ = env_logger::try_init();
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_dynamic_paging(true);
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let instance = module.instantiate().unwrap();
+
+    #[allow(clippy::match_wildcard_for_single_variants)]
+    match instance.read_memory(0x10000, page_size).unwrap_err() {
+        MemoryAccessError::OutOfRangeAccess { address, length } => {
+            assert_eq!(address, 0x10000);
+            assert_eq!(length, u64::from(page_size));
+        }
+        error => panic!("unexpected error: {error}"),
+    }
+}
+
 fn dynamic_paging_write_at_page_boundary_with_no_pages(mut engine_config: Config) {
     engine_config.set_allow_dynamic_paging(true);
 
@@ -4208,6 +4236,7 @@ run_tests! {
     dynamic_paging_read_at_top_of_address_space
     dynamic_paging_read_at_bottom_of_address_space
     dynamic_paging_read_with_upper_bits_set
+    dynamic_paging_read_memory_which_is_not_paged_in
     dynamic_paging_write_at_page_boundary_with_no_pages
     dynamic_paging_write_at_page_boundary_with_first_page
     dynamic_paging_write_at_page_boundary_with_second_page

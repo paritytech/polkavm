@@ -1739,7 +1739,10 @@ impl super::Sandbox for Sandbox {
             let page_start = module.address_to_page(module.round_to_page_size_down(address));
             let page_end = module.address_to_page(module.round_to_page_size_down(address + slice.len() as u32 - 1));
             if !self.page_set.contains((page_start, page_end)) {
-                return Err(MemoryAccessError::Error("incomplete read".into()));
+                return Err(MemoryAccessError::OutOfRangeAccess {
+                    address,
+                    length: cast(slice.len()).to_u64(),
+                });
             }
         }
 
