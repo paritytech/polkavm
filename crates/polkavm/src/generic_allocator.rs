@@ -122,6 +122,7 @@ fn test_to_bin_index() {
     assert_eq!(self::u32::to_bin_index::<3, true>(2), 1);
 }
 
+#[allow(clippy::exhaustive_structs)]
 #[doc(hidden)]
 #[cfg_attr(test, derive(PartialEq, Debug))]
 pub struct AllocatorBinConfig {
