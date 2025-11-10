@@ -3956,7 +3956,11 @@ where
             (offset, None)
         } else if is_bounded {
             is_done = true;
-            (core::cmp::min(offset + 1, code.len() as u32), Some(offset))
+            if offset == u32::MAX {
+                (u32::MAX, None)
+            } else {
+                (core::cmp::min(offset + 1, code.len() as u32), Some(offset))
+            }
         } else {
             let next_offset = find_next_offset_unbounded(bitmask, code.len() as u32, offset);
             debug_assert!(
