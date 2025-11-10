@@ -818,6 +818,7 @@ fn zero_memory(engine_config: Config) {
     assert_eq!(instance.reg(A0), 0x12340000);
 }
 
+#[track_caller]
 fn expect_segfault(interrupt: InterruptKind) -> Segfault {
     match interrupt {
         InterruptKind::Segfault(segfault) => segfault,
