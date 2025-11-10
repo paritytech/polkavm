@@ -171,11 +171,13 @@ fn main() {
         Args::Assemble { input, output } => main_assemble(input, output),
         Args::Stats { inputs } => main_stats(inputs),
         Args::GetTargetJsonPath { bitness } => {
-            let result = match bitness {
-                Bitness::B32 => polkavm_linker::target_json_32_path(),
-                Bitness::B64 => polkavm_linker::target_json_64_path(),
+            let mut args = polkavm_linker::TargetJsonArgs::default();
+            args.is_64_bit = match bitness {
+                Bitness::B32 => false,
+                Bitness::B64 => true,
             };
 
+            let result = polkavm_linker::target_json_path(args);
             result.map(|path| print!("{}", path.to_str().unwrap()))
         }
     };

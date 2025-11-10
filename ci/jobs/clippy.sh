@@ -46,7 +46,7 @@ echo ">> cargo clippy (guests)"
 cd guest-programs
 cargo clippy  \
     -Z build-std=core,alloc \
-    --target "$PWD/../crates/polkavm-linker/riscv32emac-unknown-none-polkavm.json" \
+    --target "$PWD/../crates/polkavm-linker/targets/legacy/riscv32emac-unknown-none-polkavm.json" \
     --all
 
 cd ../..

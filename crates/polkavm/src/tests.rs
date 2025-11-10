@@ -40,10 +40,14 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
         .filter(|(k, _)| !["CARGO", "RUSTC", "RUSTUP"].iter().any(|e| k.contains(e)))
         .collect();
 
+    let mut args = polkavm_linker::TargetJsonArgs::default();
+    args.is_64_bit = is_64_bit;
+    args.rustc_version = polkavm_linker::RustcVersion::Legacy;
+
     let (target, target_path) = if is_64_bit {
-        ("riscv64emac-unknown-none-polkavm", polkavm_linker::target_json_64_path().unwrap())
+        ("riscv64emac-unknown-none-polkavm", polkavm_linker::target_json_path(args).unwrap())
     } else {
-        ("riscv32emac-unknown-none-polkavm", polkavm_linker::target_json_32_path().unwrap())
+        ("riscv32emac-unknown-none-polkavm", polkavm_linker::target_json_path(args).unwrap())
     };
 
     let (project, filename, profile, is_bin) = match kind {
