@@ -1,0 +1,13 @@
+pub @main:
+    ecalli 3
+    a0 = 0x30000
+    a2 = a1 + a0
+    ecalli 4
+pub @expected_exit: %no_fallthrough
+    ret
+
+step: run
+step: a1 = 10
+step: run
+step: ra = 0xffff0000
+step: run
