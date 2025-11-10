@@ -2897,4 +2897,42 @@ mod tests {
             ",
         );
     }
+
+    #[test]
+    fn test_xor_and_shift() {
+        assert_timeline(
+            test_config(),
+            "
+                a1 = a1 ^ 0xffffffffffffffff
+                a1 = a0 >> a1
+                fallthrough
+            ",
+            "
+                DeER..  a1 = a1 ^ 0xffffffffffffffff
+                D=eER.  a1 = a0 >> a1
+                .DeeER  fallthrough
+            ",
+        )
+    }
+
+    #[test]
+    fn test_move_reg_decode_slots() {
+        assert_timeline(
+            test_config(),
+            "
+                s0 = a1
+                a0 = a1
+                a1 = t0
+                a2 = s1
+                trap
+            ",
+            "
+                D.....  s0 = a1
+                D.....  a0 = a1
+                D.....  a1 = t0
+                D.....  a2 = s1
+                .DeeER  trap
+            ",
+        )
+    }
 }
