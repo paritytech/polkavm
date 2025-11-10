@@ -169,5 +169,7 @@ pub mod _for_testing {
             crate::sandbox::init_native_page_size();
             crate::shm_allocator::ShmAllocator::new()
         }
+
+        pub use crate::page_set::PageSet;
     }
 }

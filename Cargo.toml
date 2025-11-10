@@ -19,6 +19,7 @@ members = [
     "examples/doom",
     "examples/quake",
     "examples/hello-world",
+    "benches",
 ]
 
 [workspace.package]
