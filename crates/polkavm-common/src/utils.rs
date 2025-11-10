@@ -346,6 +346,23 @@ pub fn parse_immediate(text: &str) -> Option<ParsedImmediate> {
     }
 }
 
+#[cfg(feature = "alloc")]
+pub fn parse_slice(text: &str) -> Option<Vec<u8>> {
+    let text = text.trim().replace(' ', "");
+    if text.len() % 2 != 0 {
+        return None;
+    }
+
+    let mut output = Vec::new();
+    for chunk in text.as_bytes().chunks(2) {
+        let chunk = core::str::from_utf8(chunk).ok()?;
+        let chunk = u8::from_str_radix(chunk, 16).ok()?;
+        output.push(chunk);
+    }
+
+    Some(output)
+}
+
 pub trait GasVisitorT: ParsingVisitor {
     fn take_block_cost(&mut self) -> Option<u32>;
     fn is_at_start_of_basic_block(&self) -> bool;

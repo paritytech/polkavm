@@ -1,5 +1,5 @@
 use crate::program::{Instruction, RawReg, Reg};
-use crate::utils::{parse_imm, parse_immediate, parse_reg, ParsedImmediate};
+use crate::utils::{parse_imm, parse_immediate, parse_reg, parse_slice, ParsedImmediate};
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -255,22 +255,6 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
             };
             stack_size = size;
             continue;
-        }
-
-        fn parse_slice(text: &str) -> Option<Vec<u8>> {
-            let text = text.trim().replace(' ', "");
-            if text.len() % 2 != 0 {
-                return None;
-            }
-
-            let mut output = Vec::new();
-            for chunk in text.as_bytes().chunks(2) {
-                let chunk = core::str::from_utf8(chunk).ok()?;
-                let chunk = u8::from_str_radix(chunk, 16).ok()?;
-                output.push(chunk);
-            }
-
-            Some(output)
         }
 
         if let Some(line) = line.strip_prefix("%ro_data = ") {
