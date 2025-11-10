@@ -598,7 +598,7 @@ mod tests {
         let mut set = PageSet::new();
         set.insert((55, 221));
         set.remove((117, 131));
-	    set.remove((65, 131));
+        set.remove((65, 131));
         assert_eq!(set.to_vec(), vec![(55, 64), (132, 221)]);
         assert!(!set.contains((85, 88)));
         assert!(set.contains((55, 64)));
@@ -607,5 +607,67 @@ mod tests {
         assert!(set.contains((132, 221)));
         assert!(!set.contains((131, 221)));
         assert!(!set.contains((132, 222)));
+    }
+
+    #[test]
+    fn remove_in_the_middle_1() {
+        let _ = env_logger::try_init();
+
+        let mut set = PageSet::new();
+        set.insert((117, 221));
+        set.remove((137, 137));
+        assert_eq!(set.to_vec(), vec![(117, 136), (138, 221)]);
+        assert!(set.contains((181, 181)));
+    }
+
+    #[test]
+    fn remove_in_the_middle_2() {
+        let _ = env_logger::try_init();
+
+        let mut set = PageSet::new();
+        set.insert((65, 221));
+        set.remove((85, 147));
+        assert_eq!(set.to_vec(), vec![(65, 84), (148, 221)]);
+        assert!(!set.contains((131, 131)));
+        assert!(set.contains((150, 151)));
+    }
+
+    #[test]
+    fn insert_low() {
+        let _ = env_logger::try_init();
+
+        let mut set = PageSet::new();
+        set.insert((158, 255));
+        set.insert((0, 158));
+        assert_eq!(set.to_vec(), vec![(0, 255)]);
+        assert!(set.contains((0, 255)));
+    }
+
+    #[test]
+    fn remove_twice() {
+        let _ = env_logger::try_init();
+
+        let mut set = PageSet::new();
+        set.insert((255, 255));
+        assert_eq!(set.to_vec(), vec![(255, 255)]);
+        set.remove((121, 255));
+        assert_eq!(set.to_vec(), vec![]);
+        set.remove((121, 221));
+        assert_eq!(set.to_vec(), vec![]);
+        assert!(!set.contains((255, 255)));
+    }
+
+    #[test]
+    fn insert_remove_insert() {
+        let _ = env_logger::try_init();
+
+        let mut set = PageSet::new();
+        set.insert((38, 103));
+        assert_eq!(set.to_vec(), vec![(38, 103)]);
+        set.remove((64, 141));
+        assert_eq!(set.to_vec(), vec![(38, 63)]);
+        set.insert((85, 121));
+        assert_eq!(set.to_vec(), vec![(38, 63), (85, 121)]);
+        assert!(!set.contains((65, 85)));
     }
 }
