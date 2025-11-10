@@ -2114,20 +2114,35 @@ impl super::Sandbox for Sandbox {
         Ok(())
     }
 
-    fn protect_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
+    fn change_memory_protection(&mut self, address: u32, length: u32, make_read_only: bool) -> Result<(), MemoryAccessError> {
         assert!(self.dynamic_paging_enabled);
 
         log::trace!(
-            "Protecting memory: 0x{:x}-0x{:x} ({} bytes)",
+            "{} memory: 0x{:x}-0x{:x} ({} bytes)",
+            if make_read_only { "Protecting" } else { "Unprotecting" },
             address,
             address as usize + length as usize,
             length
         );
 
+        let module = self.module.as_ref().unwrap();
+        let page_start = module.address_to_page(module.round_to_page_size_down(address));
+        let page_end = module.address_to_page(module.round_to_page_size_down(address + length - 1));
+        if !self.page_set.contains((page_start, page_end)) {
+            return Err(MemoryAccessError::OutOfRangeAccess {
+                address,
+                length: u64::from(length),
+            });
+        }
+
         let mut arg: linux_raw::uffdio_writeprotect = Default::default();
         arg.range.start = u64::from(address);
         arg.range.len = u64::from(length);
-        arg.mode = linux_raw::UFFDIO_WRITEPROTECT_MODE_WP;
+        arg.mode = if make_read_only {
+            linux_raw::UFFDIO_WRITEPROTECT_MODE_WP
+        } else {
+            0
+        };
 
         if let Err(error) = linux_raw::sys_uffdio_writeprotect(self.userfaultfd.borrow(), &mut arg) {
             return Err(MemoryAccessError::Error(error.into()));
@@ -2337,8 +2352,9 @@ impl Sandbox {
 
                 let machine_code_address = self.vmctx().rip.load(Ordering::Relaxed);
                 let address = self.vmctx().arg.load(Ordering::Relaxed);
+                let is_write_protected = self.vmctx().arg2.load(Ordering::Relaxed);
                 log::trace!(
-                    "Child #{}: pagefault: rip=0x{machine_code_address:x}, address=0x{address:x}",
+                    "Child #{}: pagefault: rip=0x{machine_code_address:x}, address=0x{address:x}, is_write_protected={is_write_protected}",
                     self.child.pid
                 );
                 let page_size = get_native_page_size() as u32;
@@ -2358,7 +2374,11 @@ impl Sandbox {
                 .map_err(Error::from_str)?;
 
                 self.is_program_counter_valid = true;
-                return Ok(Interrupt::Segfault(Segfault { page_address, page_size }));
+                return Ok(Interrupt::Segfault(Segfault {
+                    page_address,
+                    page_size,
+                    is_write_protected: is_write_protected != 0,
+                }));
             }
 
             if state != VMCTX_FUTEX_BUSY {

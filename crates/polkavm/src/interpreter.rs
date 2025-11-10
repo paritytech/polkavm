@@ -670,7 +670,7 @@ impl InterpretedInstance {
         Ok(())
     }
 
-    pub fn protect_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
+    pub fn change_memory_protection(&mut self, address: u32, length: u32, make_read_only: bool) -> Result<(), MemoryAccessError> {
         assert!(self.module.is_dynamic_paging());
 
         each_page(
@@ -679,7 +679,7 @@ impl InterpretedInstance {
             length,
             |page_address, page_offset, _buffer_offset, length| {
                 if let Some(page) = self.dynamic_memory.pages.get_mut(&page_address) {
-                    page.is_read_only = true;
+                    page.is_read_only = make_read_only;
                     Ok(())
                 } else {
                     Err(MemoryAccessError::OutOfRangeAccess {
@@ -1206,7 +1206,7 @@ impl<'a> Visitor<'a> {
         Some(target)
     }
 
-    fn segfault_impl(&mut self, program_counter: ProgramCounter, page_address: u32) -> Option<Target> {
+    fn segfault_impl(&mut self, program_counter: ProgramCounter, page_address: u32, is_write_protected: bool) -> Option<Target> {
         if page_address < 1024 * 16 {
             return trap_impl::<false>(self, program_counter);
         }
@@ -1217,6 +1217,7 @@ impl<'a> Visitor<'a> {
         self.inner.interrupt = InterruptKind::Segfault(Segfault {
             page_address,
             page_size: self.inner.module.memory_map().page_size(),
+            is_write_protected,
         });
 
         None
@@ -1228,7 +1229,7 @@ impl<'a> Visitor<'a> {
         if self.inner.dynamic_memory.pages.contains_key(&page_address) {
             trap_impl::<DEBUG>(self, program_counter)
         } else {
-            self.segfault_impl(program_counter, page_address)
+            self.segfault_impl(program_counter, page_address, false)
         }
     }
 
@@ -1272,7 +1273,7 @@ impl<'a> Visitor<'a> {
                     let offset = cast(address).to_usize() - cast(page_address_lo).to_usize();
                     T::from_slice(&page[offset..offset + core::mem::size_of::<T>()])
                 } else {
-                    return self.segfault_impl(program_counter, page_address_lo);
+                    return self.segfault_impl(program_counter, page_address_lo, false);
                 }
             } else {
                 let mut iter = self.inner.dynamic_memory.pages.range(page_address_lo..=page_address_hi);
@@ -1291,7 +1292,7 @@ impl<'a> Visitor<'a> {
                         T::from_slice(buffer)
                     }
                     (None, _) => {
-                        return self.segfault_impl(program_counter, page_address_lo);
+                        return self.segfault_impl(program_counter, page_address_lo, false);
                     }
                     (Some((page_address, _)), _) => {
                         let missing_page_address = if *page_address == page_address_lo {
@@ -1300,7 +1301,7 @@ impl<'a> Visitor<'a> {
                             page_address_lo
                         };
 
-                        return self.segfault_impl(program_counter, missing_page_address);
+                        return self.segfault_impl(program_counter, missing_page_address, false);
                     }
                 }
             }
@@ -1384,14 +1385,14 @@ impl<'a> Visitor<'a> {
                             );
                         }
 
-                        return trap_impl::<DEBUG>(self, program_counter);
+                        return self.segfault_impl(program_counter, page_address_lo, true);
                     }
 
                     let offset = cast(address).to_usize() - cast(page_address_lo).to_usize();
                     let value = value.as_ref();
                     page[offset..offset + value.len()].copy_from_slice(value);
                 } else {
-                    return self.segfault_impl(program_counter, page_address_lo);
+                    return self.segfault_impl(program_counter, page_address_lo, false);
                 }
             } else {
                 let mut iter = self.inner.dynamic_memory.pages.range_mut(page_address_lo..=page_address_hi);
@@ -1408,7 +1409,8 @@ impl<'a> Visitor<'a> {
                                 );
                             }
 
-                            return trap_impl::<DEBUG>(self, program_counter);
+                            let address = if lo.is_read_only { page_address_lo } else { page_address_hi };
+                            return self.segfault_impl(program_counter, address, true);
                         }
 
                         let value = value.as_ref();
@@ -1419,7 +1421,7 @@ impl<'a> Visitor<'a> {
                         hi[..hi_len].copy_from_slice(&value[lo_len..]);
                     }
                     (None, _) => {
-                        return self.segfault_impl(program_counter, page_address_lo);
+                        return self.segfault_impl(program_counter, page_address_lo, false);
                     }
                     (Some((page_address, _)), _) => {
                         let missing_page_address = if *page_address == page_address_lo {
@@ -1428,7 +1430,7 @@ impl<'a> Visitor<'a> {
                             page_address_lo
                         };
 
-                        return self.segfault_impl(program_counter, missing_page_address);
+                        return self.segfault_impl(program_counter, missing_page_address, false);
                     }
                 }
             }

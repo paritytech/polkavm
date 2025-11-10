@@ -1276,15 +1276,38 @@ fn dynamic_paging_protect_memory(mut engine_config: Config) {
         .collect();
 
     let mut instance = module.instantiate().unwrap();
+    #[allow(clippy::match_wildcard_for_single_variants)]
+    match instance.protect_memory(0x10000, page_size).unwrap_err() {
+        MemoryAccessError::OutOfRangeAccess { address, length } => {
+            assert_eq!(address, 0x10000);
+            assert_eq!(length, u64::from(page_size));
+        }
+        error => panic!("unexpected error: {error}"),
+    }
+
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(offsets[0]);
     let segfault = expect_segfault(instance.run().unwrap());
+    assert_eq!(segfault.page_address, 0x10000);
+    assert!(!segfault.is_write_protected);
     assert_eq!(instance.program_counter(), Some(offsets[0]));
     instance.zero_memory(segfault.page_address, page_size).unwrap();
     instance.protect_memory(segfault.page_address, page_size).unwrap();
-    assert_eq!(instance.run().unwrap(), InterruptKind::Trap);
+
+    let segfault = expect_segfault(instance.run().unwrap());
+    assert_eq!(segfault.page_address, 0x10000);
+    assert!(segfault.is_write_protected);
     assert_eq!(instance.program_counter(), Some(offsets[1]));
-    assert_eq!(instance.next_program_counter(), None);
+    assert_eq!(instance.next_program_counter(), Some(offsets[1]));
+
+    let segfault = expect_segfault(instance.run().unwrap());
+    assert_eq!(segfault.page_address, 0x10000);
+    assert!(segfault.is_write_protected);
+    assert_eq!(instance.program_counter(), Some(offsets[1]));
+    assert_eq!(instance.next_program_counter(), Some(offsets[1]));
+
+    instance.unprotect_memory(segfault.page_address, page_size).unwrap();
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
 }
 
 #[cfg(not(feature = "std"))]

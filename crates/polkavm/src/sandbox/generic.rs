@@ -1120,22 +1120,27 @@ impl Sandbox {
         let page_address = fault_address.wrapping_sub(self.memory.as_ptr() as u64 + self.guest_memory_offset as u64) as u32;
         let page_address = page_address & !(page_size - 1);
 
-        let is_trap = if self.dynamic_paging_enabled && page_address >= 0x10000 {
+        let segfault_kind = if self.dynamic_paging_enabled && page_address >= 0x10000 {
             let module = self.module.as_ref().unwrap();
             let page_start = module.address_to_page(module.round_to_page_size_down(page_address));
-            self.page_set.contains((page_start, page_start))
+            Some(self.page_set.contains((page_start, page_start)))
         } else {
-            true
+            None
         };
 
-        if is_trap {
-            self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
-            Ok(InterruptKind::Trap)
-        } else {
+        if let Some(is_write_protected) = segfault_kind {
             self.vmctx()
                 .next_native_program_counter
                 .store(machine_code_address, Ordering::Relaxed);
-            Ok(InterruptKind::Segfault(Segfault { page_address, page_size }))
+
+            Ok(InterruptKind::Segfault(Segfault {
+                page_address,
+                page_size,
+                is_write_protected,
+            }))
+        } else {
+            self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
+            Ok(InterruptKind::Trap)
         }
     }
 
@@ -1837,24 +1842,34 @@ impl super::Sandbox for Sandbox {
         Ok(())
     }
 
-    fn protect_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
+    fn change_memory_protection(&mut self, address: u32, length: u32, make_read_only: bool) -> Result<(), MemoryAccessError> {
         assert!(self.dynamic_paging_enabled);
 
         log::trace!(
-            "Protecting memory: 0x{:x}-0x{:x} ({} bytes)",
+            "{} memory: 0x{:x}-0x{:x} ({} bytes)",
+            if make_read_only { "Protecting" } else { "Unprotecting" },
             address,
             address as usize + length as usize,
             length
         );
 
-        self.memory
-            .mprotect(self.guest_memory_offset + address as usize, length as usize, PROT_READ)
-            .map_err(|e| MemoryAccessError::Error(e.into()))?;
-
         let module = self.module.as_ref().unwrap();
         let page_start = module.address_to_page(module.round_to_page_size_down(address));
         let page_end = module.address_to_page(module.round_to_page_size_down(address + length - 1));
-        self.page_set.insert((page_start, page_end));
+        if !self.page_set.contains((page_start, page_end)) {
+            return Err(MemoryAccessError::OutOfRangeAccess {
+                address,
+                length: u64::from(length),
+            });
+        }
+
+        self.memory
+            .mprotect(
+                self.guest_memory_offset + address as usize,
+                length as usize,
+                if make_read_only { PROT_READ } else { PROT_READ | PROT_WRITE },
+            )
+            .map_err(|e| MemoryAccessError::Error(e.into()))?;
 
         Ok(())
     }

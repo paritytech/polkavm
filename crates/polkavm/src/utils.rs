@@ -103,6 +103,9 @@ pub struct Segfault {
 
     /// The size of the page.
     pub page_size: u32,
+
+    /// If `true` the access was a write to a read-only page which exists.
+    pub is_write_protected: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

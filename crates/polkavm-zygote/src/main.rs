@@ -372,9 +372,10 @@ unsafe extern "C" fn signal_handler(signal: u32, info: &linux_raw::siginfo_t, co
         );
 
         VMCTX.arg.store(address as u32, Ordering::Relaxed);
-        if !is_protection_fault {
-            futex_value = VMCTX_FUTEX_GUEST_PAGEFAULT;
-        }
+        VMCTX
+            .arg2
+            .store(u32::from(is_protection_fault && is_write_fault), Ordering::Relaxed);
+        futex_value = VMCTX_FUTEX_GUEST_PAGEFAULT;
     }
 
     if rip < VM_ADDR_NATIVE_CODE || rip > VM_ADDR_NATIVE_CODE + VMCTX.shm_code_length.load(Ordering::Relaxed) {

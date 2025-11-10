@@ -1670,9 +1670,20 @@ impl RawInstance {
     ///
     /// Is only supported when dynamic paging is enabled.
     pub fn protect_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
+        self.change_memory_protection(address, length, true)
+    }
+
+    /// Removes read-only protection from a given memory region.
+    ///
+    /// Is only supported when dynamic paging is enabled.
+    pub fn unprotect_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError> {
+        self.change_memory_protection(address, length, false)
+    }
+
+    fn change_memory_protection(&mut self, address: u32, length: u32, make_read_only: bool) -> Result<(), MemoryAccessError> {
         if !self.module.is_dynamic_paging() {
             return Err(MemoryAccessError::Error(
-                "protecting memory is only possible on modules with dynamic paging".into(),
+                "protecting/unprotecting memory is only possible on modules with dynamic paging".into(),
             ));
         }
 
@@ -1694,7 +1705,11 @@ impl RawInstance {
             });
         }
 
-        access_backend!(self.backend, |mut backend| backend.protect_memory(address, length))
+        access_backend!(self.backend, |mut backend| backend.change_memory_protection(
+            address,
+            length,
+            make_read_only
+        ))
     }
 
     /// Frees the given page(s).

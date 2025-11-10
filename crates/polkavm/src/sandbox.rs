@@ -130,7 +130,7 @@ pub(crate) trait Sandbox: Sized {
     fn read_memory_into<'slice>(&self, address: u32, slice: &'slice mut [MaybeUninit<u8>]) -> Result<&'slice mut [u8], MemoryAccessError>;
     fn write_memory(&mut self, address: u32, data: &[u8]) -> Result<(), MemoryAccessError>;
     fn zero_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError>;
-    fn protect_memory(&mut self, address: u32, length: u32) -> Result<(), MemoryAccessError>;
+    fn change_memory_protection(&mut self, address: u32, length: u32, make_read_only: bool) -> Result<(), MemoryAccessError>;
     fn free_pages(&mut self, address: u32, length: u32) -> Result<(), Self::Error>;
     fn heap_size(&self) -> u32;
     fn sbrk(&mut self, size: u32) -> Result<Option<u32>, Self::Error>;
