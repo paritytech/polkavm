@@ -238,7 +238,11 @@ impl PageSet {
                     max: removed_max,
                 },
             ) {
-                SubResult::Disjoint => break,
+                SubResult::Disjoint => {
+                    if interval.min <= removed_min {
+                        break;
+                    }
+                },
                 SubResult::None => {
                     log::trace!("    Remove: {interval:?}");
                     to_remove.push(interval);
@@ -584,5 +588,22 @@ mod tests {
             set.remove((10, 40));
             assert_eq!(set.to_vec(), vec![]);
         }
+    }
+
+    #[test]
+    fn disjoint_removal() {
+        let _ = env_logger::try_init();
+
+        let mut set = PageSet::new();
+        set.insert((55, 221));
+        set.remove((117, 131));
+	    set.remove((65, 131));
+        assert!(!set.contains((85, 88)));
+        assert!(set.contains((55, 64)));
+        assert!(!set.contains((54, 64)));
+        assert!(!set.contains((55, 65)));
+        assert!(set.contains((132, 221)));
+        assert!(!set.contains((131, 221)));
+        assert!(!set.contains((132, 222)));
     }
 }
