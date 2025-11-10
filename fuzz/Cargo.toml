@@ -57,6 +57,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_page_set"
+path = "fuzz_targets/fuzz_page_set.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 resolver = "2"
 members = ["."]
