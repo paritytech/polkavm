@@ -2159,7 +2159,9 @@ impl super::Sandbox for Sandbox {
         }
 
         if !self.dynamic_paging_enabled {
-            todo!();
+            Err(Error::from_str(
+                "freeing of pages when dynamic paging is not enabled is not implemented",
+            ))
         } else {
             unsafe {
                 linux_raw::sys_madvise(
