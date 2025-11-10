@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 #[clap(version)]
 enum Args {
     Generate,
-    Test,
 }
 
 fn main() {
@@ -24,7 +23,6 @@ fn main() {
     let args = Args::parse();
     match args {
         Args::Generate => main_generate(),
-        Args::Test => main_test(),
     }
 }
 
@@ -659,8 +657,4 @@ fn main_generate() {
     if found_errors {
         std::process::exit(1);
     }
-}
-
-fn main_test() {
-    todo!();
 }
