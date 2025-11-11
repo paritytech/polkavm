@@ -110,6 +110,8 @@ mod compiler;
 #[cfg(rustfmt)]
 mod generic_allocator;
 #[cfg(rustfmt)]
+mod page_set;
+#[cfg(rustfmt)]
 mod sandbox;
 #[cfg(rustfmt)]
 mod shm_allocator;
