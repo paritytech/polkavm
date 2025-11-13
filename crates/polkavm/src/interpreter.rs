@@ -413,7 +413,7 @@ pub(crate) struct InterpretedInstance {
     unresolved_program_counter: Option<ProgramCounter>,
     min_compiled_handlers: usize,
     max_compiled_handlers: Option<usize>,
-    imperfect_logger_filtering_workaround: bool,
+    debug_mode: bool,
 }
 
 impl InterpretedInstance {
@@ -439,7 +439,10 @@ impl InterpretedInstance {
             unresolved_program_counter: None,
             min_compiled_handlers: 0,
             max_compiled_handlers: None,
-            imperfect_logger_filtering_workaround,
+            debug_mode: cfg!(test)
+                || (!imperfect_logger_filtering_workaround
+                    && (log::log_enabled!(target: "polkavm", log::Level::Debug)
+                        || log::log_enabled!(target: "polkavm::interpreter", log::Level::Debug))),
         };
 
         instance.initialize_module();
@@ -776,11 +779,7 @@ impl InterpretedInstance {
 
     pub fn run(&mut self) -> Result<InterruptKind, Error> {
         #[allow(clippy::collapsible_else_if)]
-        if cfg!(test)
-            || (!self.imperfect_logger_filtering_workaround
-                && (log::log_enabled!(target: "polkavm", log::Level::Debug)
-                    || log::log_enabled!(target: "polkavm::interpreter", log::Level::Debug)))
-        {
+        if self.debug_mode {
             Ok(self.run_impl::<true>())
         } else {
             Ok(self.run_impl::<false>())
