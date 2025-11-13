@@ -1092,18 +1092,23 @@ impl Drop for Sandbox {
         let vmctx = self.vmctx();
         let child_futex_wait = unsafe { *vmctx.counters.syscall_futex_wait.get() };
         let child_loop_start = unsafe { *vmctx.counters.syscall_wait_loop_start.get() };
-        log::debug!(
-            "Host futex wait count: {}/{} ({:.02}%)",
-            self.count_futex_wait,
-            self.count_wait_loop_start,
-            self.count_futex_wait as f64 / self.count_wait_loop_start as f64 * 100.0
-        );
-        log::debug!(
-            "Child futex wait count: {}/{} ({:.02}%)",
-            child_futex_wait,
-            child_loop_start,
-            child_futex_wait as f64 / child_loop_start as f64 * 100.0
-        );
+        if self.count_wait_loop_start != 0 {
+            log::trace!(
+                "Host futex wait count: {}/{} ({:.02}%)",
+                self.count_futex_wait,
+                self.count_wait_loop_start,
+                self.count_futex_wait as f64 / self.count_wait_loop_start as f64 * 100.0
+            );
+        }
+
+        if child_loop_start != 0 {
+            log::trace!(
+                "Child futex wait count: {}/{} ({:.02}%)",
+                child_futex_wait,
+                child_loop_start,
+                child_futex_wait as f64 / child_loop_start as f64 * 100.0
+            );
+        }
     }
 }
 
