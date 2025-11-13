@@ -112,6 +112,7 @@ pub struct Config {
     pub(crate) lru_cache_size: u32,
     pub(crate) sandboxing_enabled: bool,
     pub(crate) default_cost_model: Option<CostModelKind>,
+    pub(crate) imperfect_logger_filtering_workaround: bool,
 }
 
 impl Default for Config {
@@ -166,6 +167,7 @@ impl Config {
             lru_cache_size: 0,
             sandboxing_enabled: true,
             default_cost_model: None,
+            imperfect_logger_filtering_workaround: false,
         }
     }
 
@@ -411,6 +413,26 @@ impl Config {
     /// Returns the default cost model.
     pub fn default_cost_model(&self) -> Option<CostModelKind> {
         self.default_cost_model.clone()
+    }
+
+    /// Returns whether the workaround for logger filtering being imperfect is enabled.
+    pub fn imperfect_logger_filtering_workaround(&self) -> bool {
+        self.imperfect_logger_filtering_workaround
+    }
+
+    /// Sets whether the workaround for logger filtering being imperfect is enabled
+    ///
+    /// If the `Log::enabled` implementation of your logger can return `true`
+    /// regardless of the target (in other words, if it ignores the module name)
+    /// then you should enable this. Otherwise you can suffer a huge performance
+    /// hit when running the interpreter if any debug logs are enabled.
+    ///
+    /// Will hard disable most of the interpreter's debugging logs.
+    ///
+    /// Default: `false`
+    pub fn set_imperfect_logger_filtering_workaround(&mut self, value: bool) -> &mut Self {
+        self.imperfect_logger_filtering_workaround = value;
+        self
     }
 }
 

@@ -48,11 +48,13 @@ if_compiler_is_supported! {
             pub(crate) sandbox_global: Option<crate::sandbox::GlobalStateKind>,
             pub(crate) sandbox_cache: Option<crate::sandbox::WorkerCacheKind>,
             compiler_cache: CompilerCache,
+            imperfect_logger_filtering_workaround: bool,
             #[cfg(feature = "module-cache")]
             module_cache: ModuleCache,
         }
     } else {
         pub(crate) struct EngineState {
+            imperfect_logger_filtering_workaround: bool,
             #[cfg(feature = "module-cache")]
             module_cache: ModuleCache,
         }
@@ -215,6 +217,7 @@ impl Engine {
                         sandbox_cache: Some(sandbox_cache),
                         compiler_cache: Default::default(),
 
+                        imperfect_logger_filtering_workaround: config.imperfect_logger_filtering_workaround,
                         #[cfg(feature = "module-cache")]
                         module_cache,
                     });
@@ -227,12 +230,14 @@ impl Engine {
                         sandbox_cache: None,
                         compiler_cache: Default::default(),
 
+                        imperfect_logger_filtering_workaround: config.imperfect_logger_filtering_workaround,
                         #[cfg(feature = "module-cache")]
                         module_cache
                     }))
                 }
             } else {
                 (None, Arc::new(EngineState {
+                    imperfect_logger_filtering_workaround: config.imperfect_logger_filtering_workaround,
                     #[cfg(feature = "module-cache")]
                     module_cache
                 }))
@@ -758,12 +763,12 @@ impl Module {
     /// Instantiates a new module.
     pub fn instantiate(&self) -> Result<RawInstance, Error> {
         let compiled_module = &self.state().compiled_module;
+        let Some(engine_state) = self.state().engine_state.as_ref() else {
+            return Err(Error::from_static_str("failed to instantiate module: empty module"));
+        };
+
         let backend = if_compiler_is_supported! {
             {{
-                let Some(engine_state) = self.state().engine_state.as_ref() else {
-                    return Err(Error::from_static_str("failed to instantiate module: empty module"));
-                };
-
                 match compiled_module {
                     #[cfg(target_os = "linux")]
                     CompiledModuleKind::Linux(..) => {
@@ -786,11 +791,15 @@ impl Module {
 
         let backend = match backend {
             Some(backend) => backend,
-            None => InstanceBackend::Interpreted(InterpretedInstance::new_from_module(self.clone(), false)),
+            None => InstanceBackend::Interpreted(InterpretedInstance::new_from_module(
+                self.clone(),
+                false,
+                engine_state.imperfect_logger_filtering_workaround,
+            )),
         };
 
         let crosscheck_instance = if self.state().crosscheck && !matches!(backend, InstanceBackend::Interpreted(..)) {
-            Some(Box::new(InterpretedInstance::new_from_module(self.clone(), true)))
+            Some(Box::new(InterpretedInstance::new_from_module(self.clone(), true, false)))
         } else {
             None
         };

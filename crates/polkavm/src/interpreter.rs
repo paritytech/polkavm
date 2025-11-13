@@ -413,10 +413,11 @@ pub(crate) struct InterpretedInstance {
     unresolved_program_counter: Option<ProgramCounter>,
     min_compiled_handlers: usize,
     max_compiled_handlers: Option<usize>,
+    imperfect_logger_filtering_workaround: bool,
 }
 
 impl InterpretedInstance {
-    pub fn new_from_module(module: Module, force_step_tracing: bool) -> Self {
+    pub fn new_from_module(module: Module, force_step_tracing: bool, imperfect_logger_filtering_workaround: bool) -> Self {
         let step_tracing = module.is_step_tracing() || force_step_tracing;
         let mut instance = Self {
             compiled_offset_for_block: FlatMap::new(module.code_len() + 1), // + 1 for one implicit out-of-bounds trap.
@@ -438,6 +439,7 @@ impl InterpretedInstance {
             unresolved_program_counter: None,
             min_compiled_handlers: 0,
             max_compiled_handlers: None,
+            imperfect_logger_filtering_workaround,
         };
 
         instance.initialize_module();
@@ -774,9 +776,10 @@ impl InterpretedInstance {
 
     pub fn run(&mut self) -> Result<InterruptKind, Error> {
         #[allow(clippy::collapsible_else_if)]
-        if log::log_enabled!(target: "polkavm", log::Level::Debug)
-            || log::log_enabled!(target: "polkavm::interpreter", log::Level::Debug)
-            || cfg!(test)
+        if cfg!(test)
+            || (!self.imperfect_logger_filtering_workaround
+                && (log::log_enabled!(target: "polkavm", log::Level::Debug)
+                    || log::log_enabled!(target: "polkavm::interpreter", log::Level::Debug)))
         {
             Ok(self.run_impl::<true>())
         } else {
