@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use polkavm_assembler::{Assembler, Label};
 use polkavm_common::abi::VM_CODE_ADDRESS_ALIGNMENT;
+use polkavm_common::cast::cast;
 use polkavm_common::program::{is_jump_target_valid, JumpTable, ProgramCounter, ProgramExport, RawReg};
 use polkavm_common::utils::{Bitness, BitnessT, GasVisitorT};
 use polkavm_common::zygote::VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH;
@@ -20,7 +21,7 @@ use crate::utils::{FlatMap, GuestInit};
 mod amd64;
 
 #[cfg(target_arch = "x86_64")]
-pub use crate::compiler::amd64::{on_page_fault, on_signal_trap};
+pub use crate::compiler::amd64::{extract_gas_cost, on_page_fault, on_signal_trap, step_prelude_length};
 
 /// The address to which to jump to for invalid dynamic jumps.
 ///
@@ -47,7 +48,6 @@ const END_BASIC_BLOCK_INVALID: usize = 2;
 struct CachePerCompilation {
     assembler: Assembler,
     program_counter_to_label: FlatMap<Label, false>,
-    gas_metering_stub_offsets: Vec<usize>,
     gas_cost_for_basic_block: Vec<u32>,
     export_to_label: HashMap<u32, Label>,
 }
@@ -55,6 +55,7 @@ struct CachePerCompilation {
 struct CachePerModule {
     program_counter_to_machine_code_offset_list: Vec<(ProgramCounter, u32)>,
     program_counter_to_machine_code_offset_map: HashMap<ProgramCounter, u32>,
+    gas_metering_stub_offsets: Vec<u32>,
 }
 
 #[derive(Default)]
@@ -87,7 +88,7 @@ where
     jump_table_label: Label,
     program_counter_to_machine_code_offset_list: Vec<(ProgramCounter, u32)>,
     program_counter_to_machine_code_offset_map: HashMap<ProgramCounter, u32>,
-    gas_metering_stub_offsets: Vec<usize>,
+    gas_metering_stub_offsets: Vec<u32>,
     gas_cost_for_basic_block: Vec<u32>,
     code_length: u32,
     sbrk_label: Label,
@@ -107,6 +108,7 @@ where
     memset_trampoline_start: usize,
     memset_trampoline_end: usize,
     custom_codegen: Option<Arc<dyn CustomCodegen>>,
+    last_basic_block_was_terminated: bool,
 
     _phantom: PhantomData<(S, B)>,
 }
@@ -182,7 +184,6 @@ where
         };
 
         let mut asm;
-        let mut gas_metering_stub_offsets: Vec<usize>;
         let mut gas_cost_for_basic_block: Vec<u32>;
         let program_counter_to_label;
         let export_to_label;
@@ -190,25 +191,26 @@ where
         if let Some(per_compilation_cache) = per_compilation_cache {
             asm = per_compilation_cache.assembler;
             program_counter_to_label = FlatMap::new_reusing_memory(per_compilation_cache.program_counter_to_label, code_length + 2);
-            gas_metering_stub_offsets = per_compilation_cache.gas_metering_stub_offsets;
             gas_cost_for_basic_block = per_compilation_cache.gas_cost_for_basic_block;
             export_to_label = per_compilation_cache.export_to_label;
         } else {
             asm = Assembler::new();
             program_counter_to_label = FlatMap::new(code_length + 2);
-            gas_metering_stub_offsets = Vec::new();
             gas_cost_for_basic_block = Vec::new();
             export_to_label = HashMap::new();
         }
 
         let program_counter_to_machine_code_offset_list: Vec<(ProgramCounter, u32)>;
         let program_counter_to_machine_code_offset_map: HashMap<ProgramCounter, u32>;
+        let mut gas_metering_stub_offsets: Vec<u32>;
         if let Some(per_module_cache) = per_module_cache {
             program_counter_to_machine_code_offset_list = per_module_cache.program_counter_to_machine_code_offset_list;
             program_counter_to_machine_code_offset_map = per_module_cache.program_counter_to_machine_code_offset_map;
+            gas_metering_stub_offsets = per_module_cache.gas_metering_stub_offsets;
         } else {
             program_counter_to_machine_code_offset_list = Vec::with_capacity(code_length as usize);
             program_counter_to_machine_code_offset_map = HashMap::with_capacity(exports.len());
+            gas_metering_stub_offsets = Vec::with_capacity(code_length as usize);
         }
 
         let ecall_label = asm.forward_declare_label();
@@ -272,6 +274,7 @@ where
             memset_trampoline_start: 0,
             memset_trampoline_end: 0,
             custom_codegen: config.custom_codegen.clone(),
+            last_basic_block_was_terminated: false,
             _phantom: PhantomData,
         };
 
@@ -313,18 +316,18 @@ where
         S: Sandbox,
     {
         log::trace!("Finishing compilation...");
-        let invalid_code_offset_address = self.asm.origin() + self.asm.len() as u64;
-        self.emit_trap_epilogue();
+        let invalid_code_offset = self.emit_trap_epilogue();
+        let invalid_code_offset_address = self.asm.origin() + cast(invalid_code_offset).to_u64();
         self.program_counter_to_machine_code_offset_list.shrink_to_fit();
 
-        let mut gas_metering_stub_offsets = core::mem::take(&mut self.gas_metering_stub_offsets);
+        let gas_metering_stub_offsets = core::mem::take(&mut self.gas_metering_stub_offsets);
         let mut gas_cost_for_basic_block = core::mem::take(&mut self.gas_cost_for_basic_block);
         if self.gas_metering.is_some() {
             log::trace!("Finalizing block costs...");
             assert_eq!(gas_metering_stub_offsets.len(), gas_cost_for_basic_block.len());
             for (&native_code_offset, &cost) in gas_metering_stub_offsets.iter().zip(gas_cost_for_basic_block.iter()) {
-                log::trace!("  0x{:08x}: {}", self.asm.origin() + native_code_offset as u64, cost);
-                ArchVisitor(&mut self).emit_weight(native_code_offset, cost);
+                log::trace!("  0x{:08x}: {}", self.asm.origin() + u64::from(native_code_offset), cost);
+                ArchVisitor(&mut self).emit_weight(cast(native_code_offset).to_usize(), cost);
             }
         }
 
@@ -413,9 +416,11 @@ where
                 native_code_origin,
                 program_counter_to_machine_code_offset_list: self.program_counter_to_machine_code_offset_list,
                 program_counter_to_machine_code_offset_map: self.program_counter_to_machine_code_offset_map,
+                gas_metering_stub_offsets,
                 cache: cache.clone(),
                 invalid_code_offset_address,
                 bitness: B::BITNESS,
+                step_tracing: self.step_tracing,
                 memset_trampoline_start: polkavm_common::cast::cast(self.memset_trampoline_start).to_u64(),
                 memset_trampoline_end: polkavm_common::cast::cast(self.memset_trampoline_end).to_u64(),
             }
@@ -427,14 +432,12 @@ where
                 self.asm.clear();
                 self.program_counter_to_label.clear();
                 self.export_to_label.clear();
-                gas_metering_stub_offsets.clear();
                 gas_cost_for_basic_block.clear();
 
                 cache.per_compilation.push(CachePerCompilation {
                     assembler: self.asm,
                     program_counter_to_label: self.program_counter_to_label,
                     export_to_label: self.export_to_label,
-                    gas_metering_stub_offsets,
                     gas_cost_for_basic_block,
                 });
             }
@@ -462,7 +465,8 @@ where
         }
 
         if let Some(gas_metering) = self.gas_metering {
-            self.gas_metering_stub_offsets.push(self.asm.len());
+            self.gas_metering_stub_offsets
+                .push(cast(self.asm.len()).assert_always_fits_in_u32());
             ArchVisitor(self).emit_gas_metering_stub(gas_metering);
         }
     }
@@ -489,6 +493,7 @@ where
             .push((ProgramCounter(next_program_counter), self.asm.len() as u32));
 
         if KIND == END_BASIC_BLOCK || KIND == END_BASIC_BLOCK_INVALID {
+            self.last_basic_block_was_terminated = true;
             if self.gas_metering.is_some() {
                 let cost = self.gas_visitor.take_block_cost().unwrap();
                 self.gas_cost_for_basic_block.push(cost);
@@ -497,15 +502,19 @@ where
             let can_jump_into_new_basic_block = KIND != END_BASIC_BLOCK_INVALID && (next_program_counter as usize) < self.code.len();
             debug_assert_eq!(self.is_jump_target_valid(next_program_counter), can_jump_into_new_basic_block);
             self.force_start_new_basic_block(next_program_counter, can_jump_into_new_basic_block);
-        } else if self.step_tracing {
-            self.step(next_program_counter);
+        } else {
+            self.last_basic_block_was_terminated = false;
+
+            if self.step_tracing {
+                self.step(next_program_counter);
+            }
         }
     }
 
     #[inline(never)]
     #[cold]
     fn step(&mut self, program_counter: u32) {
-        ArchVisitor(self).trace_execution(program_counter);
+        ArchVisitor(self).trace_execution(Some(program_counter));
     }
 
     #[cold]
@@ -557,15 +566,57 @@ where
         self.asm.define_label(label);
     }
 
-    fn emit_trap_epilogue(&mut self) {
-        self.before_instruction(self.code_length);
-        self.gas_visitor.trap(self.code_length, 0);
+    fn emit_trap_epilogue(&mut self) -> usize {
+        if !self.last_basic_block_was_terminated {
+            use polkavm_common::program::ParsingVisitor;
+
+            log::trace!("Last block was not terminated; emitting an extra trap...");
+            let implicit_trap_pc = self
+                .program_counter_to_machine_code_offset_list
+                .last()
+                .map(|&(pc, _)| pc)
+                .unwrap_or(ProgramCounter(0));
+            self.trap(implicit_trap_pc.0, 0);
+        }
+
+        // We already have a new basic block prologue generated by either the last instruction or the implicit trap, so let's grab its address.
+        let invalid_code_offset = cast(
+            self.program_counter_to_machine_code_offset_list
+                .last()
+                .map(|&(_, offset)| offset)
+                .unwrap(),
+        )
+        .to_usize();
+
+        // Revert the prologue we've already emitted.
+        self.asm.truncate(invalid_code_offset);
+        if self.gas_metering.is_some() {
+            self.gas_metering_stub_offsets.pop();
+        }
+
+        if self.step_tracing {
+            // Trace execution, but without modifying the program counter.
+            ArchVisitor(self).trace_execution(None);
+        }
+
+        if let Some(gas_metering) = self.gas_metering {
+            // Emit the gas metering stub again.
+            self.gas_metering_stub_offsets
+                .push(cast(self.asm.len()).assert_always_fits_in_u32());
+            ArchVisitor(self).emit_gas_metering_stub(gas_metering);
+        }
+
+        // Then emit the final trap that will stop the execution.
+        self.before_instruction(self.code_length + 1);
+        self.gas_visitor.trap(self.code_length + 1, 0);
         ArchVisitor(self).trap_without_modifying_program_counter();
 
         if self.gas_metering.is_some() {
             let cost = self.gas_visitor.take_block_cost().unwrap();
             self.gas_cost_for_basic_block.push(cost);
         }
+
+        invalid_code_offset
     }
 }
 
@@ -1758,7 +1809,10 @@ where
     // Maps guest code offsets for exports to native code offsets.
     // Used to make sure calls into exports are always O(1) instead of O(log n).
     program_counter_to_machine_code_offset_map: HashMap<ProgramCounter, u32>,
+    // Basic block offsets.
+    gas_metering_stub_offsets: Vec<u32>,
     cache: CompilerCache,
+    step_tracing: bool,
     pub(crate) invalid_code_offset_address: u64,
     pub(crate) bitness: Bitness,
 
@@ -1776,6 +1830,44 @@ where
 
     pub fn program_counter_to_machine_code_offset(&self) -> &[(ProgramCounter, u32)] {
         &self.program_counter_to_machine_code_offset_list
+    }
+
+    pub fn lookup_gas_metering_offset_for_basic_block_if_address_is_in_the_middle(&self, machine_code_address: u64) -> Option<u32> {
+        let machine_code_offset = machine_code_address.checked_sub(self.native_code_origin)?;
+        let machine_code_offset = cast(machine_code_offset).assert_always_fits_in_u32();
+
+        if !self.step_tracing {
+            // Every basic block starts with a gas metering stub.
+            match self.gas_metering_stub_offsets.binary_search(&machine_code_offset) {
+                Ok(_) | Err(0) => None,
+                Err(index) => Some(self.gas_metering_stub_offsets[index - 1]),
+            }
+        } else {
+            // Every basic block starts with a stepping stub, and *then* a gas metering stub.
+            match self.gas_metering_stub_offsets.binary_search(&machine_code_offset) {
+                Ok(index) => {
+                    // We've got an address which exactly matches the gas metering stub?!
+                    //
+                    // This should never happen, but nevertheless logically this is not the
+                    // start of the basic block, so return the offset.
+                    Some(self.gas_metering_stub_offsets[index])
+                }
+                Err(index) => {
+                    let basic_block_boundary = cast(self.gas_metering_stub_offsets[index]).to_u64()
+                        - cast(step_prelude_length::<S>()).to_u64()
+                        + self.native_code_origin;
+                    if machine_code_address == basic_block_boundary {
+                        None
+                    } else {
+                        Some(self.gas_metering_stub_offsets[index.checked_sub(1)?])
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn native_code_offset_to_address(&self, offset: u32) -> u64 {
+        self.native_code_origin + cast(offset).to_u64()
     }
 
     pub fn lookup_native_code_address(&self, program_counter: ProgramCounter) -> Option<u64> {
@@ -1818,14 +1910,17 @@ where
     fn drop(&mut self) {
         let mut program_counter_to_machine_code_offset_list = core::mem::take(&mut self.program_counter_to_machine_code_offset_list);
         let mut program_counter_to_machine_code_offset_map = core::mem::take(&mut self.program_counter_to_machine_code_offset_map);
+        let mut gas_metering_stub_offsets = core::mem::take(&mut self.gas_metering_stub_offsets);
         {
             let mut cache = self.cache.0.lock();
             if cache.per_module.is_empty() {
                 program_counter_to_machine_code_offset_list.clear();
                 program_counter_to_machine_code_offset_map.clear();
+                gas_metering_stub_offsets.clear();
                 cache.per_module.push(CachePerModule {
                     program_counter_to_machine_code_offset_list,
                     program_counter_to_machine_code_offset_map,
+                    gas_metering_stub_offsets,
                 });
             }
         }

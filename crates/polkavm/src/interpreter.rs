@@ -266,6 +266,13 @@ macro_rules! emit {
     };
 }
 
+macro_rules! emit_consistent_address {
+    ($self:ident, $handler_name:ident($($args:tt)*)) => {
+        $self.compiled_handlers.push($self.handlers::<DEBUG>().$handler_name);
+        $self.compiled_args.push(Args::$handler_name($($args)*));
+    };
+}
+
 macro_rules! emit_branch {
     ($self:ident, $name:ident, $s1:ident, $s2:ident, $i:ident) => {
         let target_true = ProgramCounter($i);
@@ -393,6 +400,11 @@ polkavm_common::static_assert!(
 
 polkavm_common::static_assert!(core::mem::size_of::<CompiledOffset>() == cast(INTERPRETER_FLATMAP_ENTRY_SIZE).to_usize());
 
+struct Handlers {
+    charge_gas: Handler,
+    step: Handler,
+}
+
 pub(crate) struct InterpretedInstance {
     module: Module,
     basic_memory: BasicMemory,
@@ -400,6 +412,7 @@ pub(crate) struct InterpretedInstance {
     regs: [u64; Reg::ALL.len()],
     program_counter: ProgramCounter,
     program_counter_valid: bool,
+    charge_gas_on_entry: bool,
     next_program_counter: Option<ProgramCounter>,
     next_program_counter_changed: bool,
     cycle_counter: u64,
@@ -414,6 +427,8 @@ pub(crate) struct InterpretedInstance {
     min_compiled_handlers: usize,
     max_compiled_handlers: Option<usize>,
     debug_mode: bool,
+    handlers_debug: Handlers,
+    handlers_non_debug: Handlers,
 }
 
 impl InterpretedInstance {
@@ -429,6 +444,7 @@ impl InterpretedInstance {
             regs: [0; Reg::ALL.len()],
             program_counter: ProgramCounter(!0),
             program_counter_valid: false,
+            charge_gas_on_entry: true,
             next_program_counter: None,
             next_program_counter_changed: true,
             cycle_counter: 0,
@@ -443,6 +459,22 @@ impl InterpretedInstance {
                 || (!imperfect_logger_filtering_workaround
                     && (log::log_enabled!(target: "polkavm", log::Level::Debug)
                         || log::log_enabled!(target: "polkavm::interpreter", log::Level::Debug))),
+
+            // This might seem silly, but Rust doesn't guarantee function pointer equality
+            // if a given piece of code is instantiated across different codegen units.
+            //
+            // In general it's probably unlikely we'll hit this in practice, but I don't
+            // particularly like the idea of having to debug this *if* we do, so this
+            // here should work around the issue and make sure the pointers are always
+            // the same for a given interpreter instance.
+            handlers_debug: Handlers {
+                charge_gas: cast_handler!(raw_handlers::charge_gas::<true>),
+                step: cast_handler!(raw_handlers::step::<true>),
+            },
+            handlers_non_debug: Handlers {
+                charge_gas: cast_handler!(raw_handlers::charge_gas::<false>),
+                step: cast_handler!(raw_handlers::step::<false>),
+            },
         };
 
         instance.initialize_module();
@@ -527,6 +559,7 @@ impl InterpretedInstance {
         self.program_counter_valid = false;
         self.next_program_counter = Some(pc);
         self.next_program_counter_changed = true;
+        self.charge_gas_on_entry = true;
     }
 
     pub fn accessible_aux_size(&self) -> u32 {
@@ -793,19 +826,42 @@ impl InterpretedInstance {
         }
 
         if self.next_program_counter_changed {
-            let Some(program_counter) = self.next_program_counter.take() else {
+            let Some(program_counter) = self.next_program_counter else {
                 panic!("failed to run: next program counter is not set");
             };
 
-            self.program_counter = program_counter;
-            self.next_program_counter_changed = false;
+            if let Some((offset, gas_cost)) = self.resolve_arbitrary_jump::<DEBUG>(program_counter) {
+                if gas_cost > self.gas {
+                    if DEBUG {
+                        log::debug!(
+                            "Not enough gas to start execution at {program_counter}: required={}, got={}",
+                            gas_cost,
+                            self.gas,
+                        )
+                    }
 
-            if let Some(offset) = self.resolve_arbitrary_jump::<DEBUG>(program_counter) {
+                    return InterruptKind::NotEnoughGas;
+                }
+
+                if DEBUG && gas_cost > 0 {
+                    log::debug!(
+                        "Charging gas on entry at {program_counter}: {} -> {}",
+                        self.gas,
+                        self.gas - gas_cost
+                    );
+                }
+
+                self.gas -= gas_cost;
                 self.compiled_offset = offset;
             } else {
                 self.compiled_offset = TARGET_OUT_OF_RANGE;
                 self.unresolved_program_counter = Some(program_counter);
             }
+
+            self.program_counter = program_counter;
+            self.next_program_counter = None;
+            self.next_program_counter_changed = false;
+            self.charge_gas_on_entry = false;
 
             if DEBUG {
                 log::debug!("Starting execution at: {} [{}]", program_counter, self.compiled_offset);
@@ -901,13 +957,54 @@ impl InterpretedInstance {
         self.compile_block::<DEBUG>(program_counter)
     }
 
+    #[inline(always)]
+    fn handlers<const DEBUG: bool>(&self) -> &Handlers {
+        if DEBUG {
+            &self.handlers_debug
+        } else {
+            &self.handlers_non_debug
+        }
+    }
+
+    #[allow(unpredictable_function_pointer_comparisons)]
+    fn extract_target_and_gas<const DEBUG: bool>(&self, compiled_offset: NonZeroU32) -> (Target, i64) {
+        let (is_jump_target_valid, target) = Self::unpack_target(compiled_offset);
+        if is_jump_target_valid
+            || self.module.gas_metering().is_none()
+            || self.module.is_per_instruction_metering()
+            || !self.charge_gas_on_entry
+        {
+            return (target, 0);
+        }
+
+        let mut start = cast(target).to_usize();
+        if self.compiled_handlers[start] == self.handlers::<DEBUG>().step
+            && self.compiled_handlers[start + 1] == self.handlers::<DEBUG>().charge_gas
+        {
+            start += 1;
+        } else {
+            while start > 0 && self.compiled_handlers[start] != self.handlers::<DEBUG>().charge_gas {
+                start -= 1;
+            }
+        }
+
+        assert_eq!(
+            self.compiled_handlers[start],
+            self.handlers::<DEBUG>().charge_gas,
+            "internal error: failed to find the 'charge_gas' handler when jumping into the middle of a basic block"
+        );
+
+        let args = self.compiled_args[start];
+        let gas_cost = cast(cast(args.a1).to_u64()).to_signed();
+        (target, gas_cost)
+    }
+
     /// Resolve a jump from *outside* of the program.
     ///
     /// Unlike jumps from within the program these can start execution anywhere to support suspend/resume of the VM.
-    fn resolve_arbitrary_jump<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<Target> {
+    fn resolve_arbitrary_jump<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<(Target, i64)> {
         if let Some(compiled_offset) = self.compiled_offset_for_block.get(program_counter.0) {
-            let (_, target) = Self::unpack_target(compiled_offset);
-            return Some(target);
+            return Some(self.extract_target_and_gas::<DEBUG>(compiled_offset));
         }
 
         if DEBUG {
@@ -930,7 +1027,11 @@ impl InterpretedInstance {
         self.compile_block::<DEBUG>(basic_block_offset)?;
 
         let compiled_offset = self.compiled_offset_for_block.get(program_counter.0)?;
-        Some(Self::unpack_target(compiled_offset).1)
+        if basic_block_offset == program_counter {
+            Some((Self::unpack_target(compiled_offset).1, 0))
+        } else {
+            Some(self.extract_target_and_gas::<DEBUG>(compiled_offset))
+        }
     }
 
     /// Resolve a fallthrough.
@@ -1010,7 +1111,7 @@ impl InterpretedInstance {
                 if DEBUG {
                     log::debug!("  [{}]: {}: step", self.compiled_handlers.len(), instruction.offset);
                 }
-                emit!(self, step(instruction.offset));
+                emit_consistent_address!(self, step(instruction.offset));
             }
 
             if self.module.gas_metering().is_some() {
@@ -1021,7 +1122,7 @@ impl InterpretedInstance {
                         }
 
                         charge_gas_index = Some((instruction.offset, self.compiled_handlers.len()));
-                        emit!(self, charge_gas(instruction.offset, 0));
+                        emit_consistent_address!(self, charge_gas(instruction.offset, 0));
                     }
                     instruction.visit_parsing(&mut gas_visitor);
                 } else {
@@ -1029,7 +1130,7 @@ impl InterpretedInstance {
                         log::debug!("  [{}]: {}: charge_gas", self.compiled_handlers.len(), instruction.offset);
                     }
 
-                    emit!(self, charge_gas(instruction.offset, 1));
+                    emit_consistent_address!(self, charge_gas(instruction.offset, 1));
                 }
             }
 

@@ -10,6 +10,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use polkavm_common::abi::MemoryMapBuilder;
+use polkavm_common::cast::cast;
 use polkavm_common::program::{asm, DefaultInstructionSet};
 use polkavm_common::program::{BlobLen, Reg::*, INTERPRETER_CACHE_ENTRY_SIZE, INTERPRETER_CACHE_RESERVED_ENTRIES};
 use polkavm_common::utils::align_to_next_page_u32;
@@ -745,10 +746,10 @@ fn step_tracing_out_of_gas(engine_config: Config) {
         .collect();
     let mut instance = module.instantiate().unwrap();
 
-    instance.set_gas(2);
+    instance.set_gas(4);
     instance.set_next_program_counter(offsets[1]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Step);
-    assert_eq!(instance.gas(), 2);
+    assert_eq!(instance.gas(), 4);
     assert_eq!(instance.program_counter(), Some(offsets[1]));
     assert_eq!(instance.next_program_counter(), Some(offsets[1]));
     if engine_config.backend() == Some(BackendKind::Compiler) {
@@ -758,7 +759,7 @@ fn step_tracing_out_of_gas(engine_config: Config) {
     // Setting the program counter again resets stepping.
     instance.set_next_program_counter(offsets[1]); // move_reg, fallthrough
     match_interrupt!(instance.run().unwrap(), InterruptKind::Step);
-    assert_eq!(instance.gas(), 2);
+    assert_eq!(instance.gas(), 4);
     assert_eq!(instance.program_counter(), Some(offsets[1]));
     assert_eq!(instance.next_program_counter(), Some(offsets[1]));
     if engine_config.backend() == Some(BackendKind::Compiler) {
@@ -766,7 +767,7 @@ fn step_tracing_out_of_gas(engine_config: Config) {
     }
 
     match_interrupt!(instance.run().unwrap(), InterruptKind::Step);
-    assert_eq!(instance.gas(), 0);
+    assert_eq!(instance.gas(), 2);
     assert_eq!(instance.program_counter(), Some(offsets[2])); // fallthrough
     assert_eq!(instance.next_program_counter(), Some(offsets[2]));
     if engine_config.backend() == Some(BackendKind::Compiler) {
@@ -774,7 +775,7 @@ fn step_tracing_out_of_gas(engine_config: Config) {
     }
 
     match_interrupt!(instance.run().unwrap(), InterruptKind::Step);
-    assert_eq!(instance.gas(), 0);
+    assert_eq!(instance.gas(), 2);
     assert_eq!(instance.program_counter(), Some(offsets[3])); // move_reg, move_reg, fallthrough
     assert_eq!(instance.next_program_counter(), Some(offsets[3]));
     if engine_config.backend() == Some(BackendKind::Compiler) {
@@ -783,13 +784,25 @@ fn step_tracing_out_of_gas(engine_config: Config) {
 
     for _ in 0..2 {
         match_interrupt!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
-        assert_eq!(instance.gas(), 0);
+        assert_eq!(instance.gas(), 2);
         assert_eq!(instance.program_counter(), Some(offsets[3]));
         assert_eq!(instance.next_program_counter(), Some(offsets[3]));
         if engine_config.backend() == Some(BackendKind::Compiler) {
             assert!(instance.next_native_program_counter().is_some());
         }
     }
+
+    instance.set_next_program_counter(ProgramCounter(cast(module.blob().code().len()).assert_always_fits_in_u32()));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Step);
+    assert_eq!(instance.gas(), 2);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.gas(), 1);
+
+    instance.set_next_program_counter(ProgramCounter(10000));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Step);
+    assert_eq!(instance.gas(), 1);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.gas(), 0);
 }
 
 fn zero_memory(engine_config: Config) {
@@ -954,31 +967,31 @@ fn jump_into_middle_of_basic_block_from_outside(engine_config: Config) {
     instance.set_next_program_counter(offsets[4]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0);
-    assert_eq!(instance.gas(), 1000);
+    assert_eq!(instance.gas(), 995);
 
     instance.set_reg(Reg::A0, 0);
     instance.set_next_program_counter(offsets[3]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 16);
-    assert_eq!(instance.gas(), 1000);
+    assert_eq!(instance.gas(), 990);
 
     instance.set_reg(Reg::A0, 0);
     instance.set_next_program_counter(offsets[1]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 4 + 8 + 16);
-    assert_eq!(instance.gas(), 1000);
+    assert_eq!(instance.gas(), 985);
 
     instance.set_reg(Reg::A0, 0);
     instance.set_next_program_counter(offsets[2]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 8 + 16);
-    assert_eq!(instance.gas(), 1000);
+    assert_eq!(instance.gas(), 980);
 
     instance.set_reg(Reg::A0, 0);
     instance.set_next_program_counter(offsets[0]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 2 + 4 + 8 + 16);
-    assert_eq!(instance.gas(), 995);
+    assert_eq!(instance.gas(), 975);
 }
 
 fn jump_into_middle_of_basic_block_from_within(engine_config: Config) {
@@ -3907,6 +3920,100 @@ fn gas_metering_with_implicit_trap(config: Config) {
     assert_eq!(instance.gas(), 8);
 }
 
+fn gas_gets_charged_when_jumping_in_the_middle_of_a_basic_block(config: Config) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new();
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::add_imm_32(A0, A0, 1),
+            asm::add_imm_32(A0, A0, 2),
+            asm::ecalli(0),
+            asm::add_imm_32(A0, A0, 4),
+            asm::add_imm_32(A0, A0, 8),
+            asm::ret(),
+        ],
+        &[],
+    );
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let offsets: Vec<_> = blob
+        .instructions(DefaultInstructionSet::default())
+        .map(|inst| inst.offset)
+        .collect();
+
+    let engine = Engine::new(&config).unwrap();
+    let mut module_config = ModuleConfig::default();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let initial_gas = 100;
+    let expected_gas_cost = 6;
+
+    // Execute from the first instruction.
+    let mut instance = module.instantiate().unwrap();
+    instance.set_gas(initial_gas);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(offsets[0]);
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Ecalli(0)));
+    let final_gas = instance.gas();
+    assert_eq!(final_gas, initial_gas - expected_gas_cost);
+    assert_eq!(instance.reg(Reg::A0), 1 + 2);
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.gas(), final_gas);
+    assert_eq!(instance.reg(Reg::A0), 1 + 2 + 4 + 8);
+
+    // Execute from the second instruction.
+    instance.set_gas(initial_gas);
+    instance.set_reg(Reg::A0, 0);
+    instance.set_next_program_counter(offsets[1]);
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Ecalli(0)));
+    assert_eq!(instance.gas(), final_gas);
+    assert_eq!(instance.reg(Reg::A0), 2);
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.gas(), final_gas);
+    assert_eq!(instance.reg(Reg::A0), 2 + 4 + 8);
+
+    // Execute from the third instruction.
+    instance.set_gas(initial_gas);
+    instance.set_reg(Reg::A0, 0);
+    instance.set_next_program_counter(offsets[2]);
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Ecalli(0)));
+    assert_eq!(instance.gas(), final_gas);
+    assert_eq!(instance.reg(Reg::A0), 0);
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.gas(), final_gas);
+    assert_eq!(instance.reg(Reg::A0), 4 + 8);
+
+    // Execute from the first instruction, but set the program counter after we've been interrupted.
+    instance.set_gas(initial_gas);
+    instance.set_reg(Reg::A0, 0);
+    instance.set_next_program_counter(offsets[0]);
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Ecalli(0)));
+    assert_eq!(instance.gas(), final_gas);
+    assert_eq!(instance.reg(Reg::A0), 1 + 2);
+    assert_eq!(instance.next_program_counter(), Some(offsets[3]));
+    instance.set_next_program_counter(offsets[3]);
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.gas(), initial_gas - (initial_gas - final_gas) * 2); // Charged again, since we've reset the PC.
+    assert_eq!(instance.reg(Reg::A0), 1 + 2 + 4 + 8);
+
+    // Execute from the second instruction, but without enough gas.
+    instance.set_gas(0);
+    instance.set_reg(Reg::A0, 0);
+    instance.set_next_program_counter(offsets[1]);
+    assert!(matches!(instance.run().unwrap(), InterruptKind::NotEnoughGas));
+    assert_eq!(instance.next_program_counter(), Some(offsets[1]));
+
+    instance.set_gas(initial_gas - final_gas);
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Ecalli(0)));
+    assert_eq!(instance.gas(), 0);
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.gas(), 0);
+    assert_eq!(instance.reg(Reg::A0), 2 + 4 + 8);
+}
+
 fn trapping_preserves_all_registers_normal_trap(config: Config) {
     let _ = env_logger::try_init();
 
@@ -4423,6 +4530,7 @@ run_tests! {
     consume_gas_in_host_function_async
     gas_metering_with_more_than_one_basic_block
     gas_metering_with_implicit_trap
+    gas_gets_charged_when_jumping_in_the_middle_of_a_basic_block
 
     trapping_preserves_all_registers_normal_trap
     trapping_preserves_all_registers_segfault

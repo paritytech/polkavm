@@ -426,3 +426,39 @@ where
 fn is_sandbox_logging_enabled() -> bool {
     cfg!(test) || log::log_enabled!(target: "polkavm", log::Level::Trace) || log::log_enabled!(target: "polkavm::zygote", log::Level::Trace)
 }
+
+// This is the same for both sandboxes.
+#[cfg(any(target_os = "linux", feature = "generic-sandbox"))]
+pub(crate) fn charge_gas_on_entry<S>(
+    module: &Module,
+    pc: ProgramCounter,
+    native_address: Option<u64>,
+    compiled_module: &CompiledModule<S>,
+    gas: i64,
+) -> Option<Result<i64, ()>>
+where
+    S: Sandbox,
+{
+    use polkavm_common::cast::cast;
+
+    module.gas_metering()?;
+
+    let native_address = native_address?;
+    let Some(origin) = compiled_module.lookup_gas_metering_offset_for_basic_block_if_address_is_in_the_middle(native_address) else {
+        log::debug!("Will not charge gas on entry: native address 0x{native_address:x} already points at the start of a basic block");
+        return None;
+    };
+
+    let origin_address = compiled_module.native_code_offset_to_address(origin);
+    let gas_cost = crate::compiler::extract_gas_cost::<S>(compiled_module.machine_code(), cast(origin).to_usize());
+    let gas_cost = cast(cast(gas_cost).to_u64()).to_signed();
+    if gas_cost > gas {
+        log::debug!("Not enough gas to start execution at {pc} (0x{native_address:x}, gas metering stub at 0x{origin_address:x}): required={gas_cost}, got={gas}");
+        return Some(Err(()));
+    }
+
+    let new_gas = gas - gas_cost;
+    log::debug!("Charging gas on entry at {pc} (0x{native_address:x}, gas metering stub at 0x{origin_address:x}): {gas} -> {new_gas}");
+
+    Some(Ok(new_gas))
+}

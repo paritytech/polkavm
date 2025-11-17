@@ -358,6 +358,10 @@ impl Assembler {
         &mut self.code
     }
 
+    pub fn truncate(&mut self, length: usize) {
+        self.code.truncate(length);
+    }
+
     pub fn spare_capacity(&self) -> usize {
         self.code.capacity() - self.code.len()
     }

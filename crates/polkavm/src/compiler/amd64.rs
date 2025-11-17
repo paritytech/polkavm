@@ -225,6 +225,7 @@ where
 
 const GAS_METERING_TRAP_OFFSET: u64 = 3;
 const GAS_COST_LINUX_SANDBOX_OFFSET: usize = 4;
+const GAS_COST_GENERIC_SANDBOX_OFFSET: usize = 7;
 const REP_STOSB_MACHINE_CODE: &[u8] = &[0xf3, 0xaa];
 
 #[derive(Copy, Clone)]
@@ -889,16 +890,29 @@ where
         }
     }
 
-    pub(crate) fn trace_execution(&mut self, code_offset: u32) {
+    pub(crate) fn trace_execution(&mut self, code_offset: Option<u32>) {
         let step_label = self.step_label;
+        let origin = self.asm.len();
         let asm = self.asm.reserve::<U3>();
-        let asm = asm.push(mov_imm(Self::vmctx_field(S::offset_table().program_counter), imm32(code_offset)));
-        let asm = asm.push(mov_imm(
-            Self::vmctx_field(S::offset_table().next_program_counter),
-            imm32(code_offset),
-        ));
+        let asm = if let Some(code_offset) = code_offset {
+            let asm = asm.push(mov_imm(Self::vmctx_field(S::offset_table().program_counter), imm32(code_offset)));
+            let asm = asm.push(mov_imm(
+                Self::vmctx_field(S::offset_table().next_program_counter),
+                imm32(code_offset),
+            ));
+            asm
+        } else if matches!(S::KIND, SandboxKind::Linux) {
+            let asm = asm.push(nop8());
+            let asm = asm.push(nop8());
+            asm
+        } else {
+            let asm = asm.push(nop11());
+            let asm = asm.push(nop11());
+            asm
+        };
         let asm = asm.push(call_label32(step_label));
         asm.assert_reserved_exactly_as_needed();
+        debug_assert_eq!(step_prelude_length::<S>(), self.asm.len() - origin);
     }
 
     pub(crate) fn emit_gas_metering_stub(&mut self, kind: GasMeteringKind) {
@@ -927,6 +941,7 @@ where
                 debug_assert_eq!(GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 5) as u64);
                 self.asm.push_raw(&[0x78, 0xf9]);
             } else {
+                debug_assert_eq!(GAS_COST_GENERIC_SANDBOX_OFFSET, self.asm.len() - origin - 4);
                 assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r15 - 0xfa0)); // Sanity check.
                 debug_assert!(self
                     .asm
@@ -2552,4 +2567,37 @@ where
     }
 
     Ok(())
+}
+
+pub fn extract_gas_cost<S>(machine_code: &[u8], basic_block_machine_code_offset: usize) -> u32
+where
+    S: Sandbox,
+{
+    let offset = if matches!(S::KIND, SandboxKind::Linux) {
+        debug_assert_eq!(
+            machine_code[basic_block_machine_code_offset..basic_block_machine_code_offset + 4],
+            [0x49, 0x81, 0x6f, 0x60]
+        );
+        GAS_COST_LINUX_SANDBOX_OFFSET
+    } else {
+        debug_assert_eq!(
+            machine_code[basic_block_machine_code_offset..basic_block_machine_code_offset + 5],
+            [0x49, 0x81, 0xaf, 0x60, 0xf0]
+        );
+        GAS_COST_GENERIC_SANDBOX_OFFSET
+    } + basic_block_machine_code_offset;
+
+    let xs = &machine_code[offset..offset + 4];
+    u32::from_le_bytes([xs[0], xs[1], xs[2], xs[3]])
+}
+
+#[inline(always)]
+pub fn step_prelude_length<S>() -> usize
+where
+    S: Sandbox,
+{
+    match S::KIND {
+        SandboxKind::Linux => 21,
+        SandboxKind::Generic => 27,
+    }
 }

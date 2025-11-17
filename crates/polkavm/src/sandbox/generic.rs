@@ -866,6 +866,7 @@ pub struct Sandbox {
     gas_metering: Option<GasMeteringKind>,
 
     is_program_counter_valid: bool,
+    charge_gas_on_entry: bool,
     next_program_counter: Option<ProgramCounter>,
     next_program_counter_changed: bool,
 
@@ -1429,6 +1430,7 @@ impl super::Sandbox for Sandbox {
             module: None,
             gas_metering: None,
             is_program_counter_valid: false,
+            charge_gas_on_entry: true,
             next_program_counter: None,
             next_program_counter_changed: true,
             page_set_present: PageSet::new(),
@@ -1522,6 +1524,7 @@ impl super::Sandbox for Sandbox {
         self.aux_data_full_length = module.memory_map().aux_data_size();
         self.aux_data_length = self.aux_data_full_length;
         self.dynamic_paging_enabled = module.is_dynamic_paging();
+        self.charge_gas_on_entry = true;
 
         Ok(())
     }
@@ -1540,33 +1543,37 @@ impl super::Sandbox for Sandbox {
     fn run(&mut self) -> Result<InterruptKind, Self::Error> {
         assert!(!matches!(self.poison, Poison::Poisoned), "sandbox has been poisoned");
 
-        if self.module.is_none() {
+        let Some(module) = self.module.as_ref() else {
             return Err(Error::from("no module loaded into the sandbox"));
         };
 
+        let compiled_module = Self::downcast_module(module);
         if self.next_program_counter_changed {
-            let Some(pc) = self.next_program_counter.take() else {
+            let Some(pc) = self.next_program_counter else {
                 panic!("failed to run: next program counter is not set");
             };
 
-            self.next_program_counter_changed = false;
-
-            let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
-            let Some(address) = compiled_module.lookup_native_code_address(pc) else {
-                log::debug!("Tried to call into {pc} which doesn't have any native code associated with it");
-                self.is_program_counter_valid = true;
-                self.vmctx().program_counter.store(pc.0, Ordering::Relaxed);
-                if self.module.as_ref().unwrap().is_step_tracing() {
-                    self.vmctx().next_program_counter.store(pc.0, Ordering::Relaxed);
-                    self.vmctx()
-                        .next_native_program_counter
-                        .store(compiled_module.invalid_code_offset_address, Ordering::Relaxed);
-                    return Ok(InterruptKind::Step);
-                } else {
-                    self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
-                    return Ok(InterruptKind::Trap);
+            let address = compiled_module.lookup_native_code_address(pc);
+            if self.charge_gas_on_entry {
+                match crate::sandbox::charge_gas_on_entry(module, pc, address, compiled_module, self.gas()) {
+                    Some(Ok(new_gas)) => self.vmctx().gas.store(new_gas, Ordering::Relaxed),
+                    Some(Err(())) => return Ok(InterruptKind::NotEnoughGas),
+                    None => {}
                 }
-            };
+            }
+
+            self.next_program_counter_changed = false;
+            self.next_program_counter = None;
+            self.charge_gas_on_entry = false;
+
+            let address = address.unwrap_or_else(|| {
+                log::debug!("Tried to call into {pc} which doesn't have any native code associated with it");
+                compiled_module.invalid_code_offset_address
+            });
+
+            if address >= compiled_module.invalid_code_offset_address {
+                self.vmctx().program_counter.store(pc.0, Ordering::Relaxed);
+            }
 
             log::trace!("Jumping into: {pc} (0x{address:x})");
             self.vmctx_mut().next_program_counter.store(pc.0, Ordering::Relaxed);
@@ -1717,6 +1724,7 @@ impl super::Sandbox for Sandbox {
         self.is_program_counter_valid = false;
         self.next_program_counter = Some(pc);
         self.next_program_counter_changed = true;
+        self.charge_gas_on_entry = true;
     }
 
     fn next_native_program_counter(&self) -> Option<usize> {
