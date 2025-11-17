@@ -1254,8 +1254,19 @@ impl RawInstance {
                     }
                 }
 
-                assert_eq!(self.program_counter(), crosscheck_program_counter);
-                assert_eq!(self.next_program_counter(), crosscheck_next_program_counter);
+                if self.program_counter() != crosscheck_program_counter {
+                    panic!(
+                        "run: crosscheck mismatch for program counter, interpreter = {crosscheck_program_counter:?}, backend = {:?}",
+                        self.program_counter()
+                    );
+                }
+
+                if self.next_program_counter() != crosscheck_next_program_counter {
+                    panic!(
+                        "run: crosscheck mismatch for next program counter, interpreter = {crosscheck_next_program_counter:?}, backend = {:?}",
+                        self.next_program_counter()
+                    );
+                }
 
                 if is_step && !self.module().state().step_tracing {
                     continue;
