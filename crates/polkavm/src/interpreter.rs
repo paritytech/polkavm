@@ -1110,15 +1110,7 @@ impl InterpretedInstance {
             emit!(self, step_out_of_range());
         }
 
-        let gas_cost = if self.module.gas_metering().is_some() {
-            match self.module.cost_model() {
-                CostModelKind::Simple(cost_model) => crate::gas::trap_cost(GasVisitor::new(cost_model.clone())),
-                CostModelKind::Full(cost_model) => polkavm_common::simulator::trap_cost(*cost_model),
-            }
-        } else {
-            0
-        };
-
+        let gas_cost = self.module.get_trap_gas_cost();
         emit!(self, out_of_range(gas_cost));
     }
 }

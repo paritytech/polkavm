@@ -418,6 +418,17 @@ impl Module {
         self.round_to_page_size_down(value) + (u32::from((value & self.state().page_size_mask) != 0) << self.state().page_shift)
     }
 
+    pub(crate) fn get_trap_gas_cost(&self) -> u32 {
+        if self.gas_metering().is_some() {
+            match self.cost_model() {
+                CostModelKind::Simple(cost_model) => crate::gas::trap_cost(GasVisitor::new(cost_model.clone())),
+                CostModelKind::Full(cost_model) => polkavm_common::simulator::trap_cost(*cost_model),
+            }
+        } else {
+            0
+        }
+    }
+
     /// Returns the cost model associated with this module.
     pub fn cost_model(&self) -> &CostModelKind {
         &self.state().cost_model
