@@ -229,7 +229,7 @@ fuzz_target!(|instructions: Vec<Instruction>| {
     config.set_strip(true);
     config.set_optimize(true);
 
-    polkavm_linker::program_from_elf(config, &program).unwrap();
+    polkavm_linker::program_from_elf(config, polkavm_linker::TargetInstructionSet::Latest, &program).unwrap();
 });
 
 #[repr(C)]

@@ -5,13 +5,12 @@ use std::sync::Arc;
 use polkavm_assembler::{Assembler, Label};
 use polkavm_common::abi::VM_CODE_ADDRESS_ALIGNMENT;
 use polkavm_common::cast::cast;
-use polkavm_common::program::{is_jump_target_valid, JumpTable, ProgramCounter, ProgramExport, RawReg};
+use polkavm_common::program::{is_jump_target_valid, InstructionSetKind, JumpTable, ProgramCounter, ProgramExport, RawReg};
 use polkavm_common::utils::{Bitness, BitnessT, GasVisitorT};
 use polkavm_common::zygote::VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH;
 
 use crate::error::Error;
 
-use crate::api::RuntimeInstructionSet;
 use crate::config::{CustomCodegen, GasMeteringKind, ModuleConfig, SandboxKind};
 use crate::mutex::Mutex;
 use crate::sandbox::{Sandbox, SandboxInit, SandboxProgram};
@@ -104,7 +103,7 @@ where
     rem64u_label: Label,
     rem64s_label: Label,
     invalid_jump_label: Label,
-    instruction_set: RuntimeInstructionSet,
+    instruction_set: InstructionSetKind,
     memset_trampoline_start: usize,
     memset_trampoline_end: usize,
     custom_codegen: Option<Arc<dyn CustomCodegen>>,
@@ -153,7 +152,7 @@ where
     pub(crate) fn new(
         cache: &CompilerCache,
         config: &'a ModuleConfig,
-        instruction_set: RuntimeInstructionSet,
+        instruction_set: InstructionSetKind,
         jump_table: JumpTable<'a>,
         code: &'a [u8],
         bitmask: &'a [u8],

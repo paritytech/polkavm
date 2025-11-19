@@ -1,7 +1,8 @@
 use polkavm_common::abi::{MemoryMapBuilder, VM_CODE_ADDRESS_ALIGNMENT, VM_MAX_PAGE_SIZE, VM_MIN_PAGE_SIZE};
 use polkavm_common::cast::cast;
 use polkavm_common::program::{
-    self, FrameKind, Instruction, InstructionFormat, InstructionSet, LineProgramOp, Opcode, ProgramBlob, ProgramCounter, ProgramSymbol,
+    self, FrameKind, Instruction, InstructionFormat, InstructionSet, InstructionSetKind, LineProgramOp, Opcode, ProgramBlob,
+    ProgramCounter, ProgramSymbol,
 };
 use polkavm_common::utils::{align_to_next_page_u32, align_to_next_page_u64};
 use polkavm_common::varint;
@@ -6211,6 +6212,7 @@ fn gather_terminators(all_blocks: &[BasicBlock<AnyTarget, BlockTarget>]) -> Vec<
 fn optimize_program(
     config: &Config,
     elf: &Elf,
+    isa: InstructionSetKind,
     imports: &[Import],
     all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>],
     reachability_graph: &mut ReachabilityGraph,
@@ -6274,25 +6276,27 @@ fn optimize_program(
         });
     }
 
-    for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
-        let ControlInst::Branch {
-            target_true, target_false, ..
-        } = all_blocks[current.index()].next.instruction
-        else {
-            continue;
-        };
+    if isa.supports_opcode(Opcode::unlikely) {
+        for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
+            let ControlInst::Branch {
+                target_true, target_false, ..
+            } = all_blocks[current.index()].next.instruction
+            else {
+                continue;
+            };
 
-        let terminator_true = &info_for_block[target_true.index()].terminator;
-        let terminator_false = &info_for_block[target_false.index()].terminator;
+            let terminator_true = &info_for_block[target_true.index()].terminator;
+            let terminator_false = &info_for_block[target_false.index()].terminator;
 
-        if matches!(terminator_true, Terminator::One(TerminatorKind::Unimplemented)) {
-            all_blocks[target_true.index()].is_unlikely = true;
-            continue;
-        }
+            if matches!(terminator_true, Terminator::One(TerminatorKind::Unimplemented)) {
+                all_blocks[target_true.index()].is_unlikely = true;
+                continue;
+            }
 
-        if matches!(terminator_false, Terminator::One(TerminatorKind::Unimplemented)) {
-            all_blocks[target_false.index()].is_unlikely = true;
-            continue;
+            if matches!(terminator_false, Terminator::One(TerminatorKind::Unimplemented)) {
+                all_blocks[target_false.index()].is_unlikely = true;
+                continue;
+            }
         }
     }
 
@@ -6503,12 +6507,13 @@ mod test {
         }
 
         fn append_assembly(&mut self, assembly: &str) {
-            let raw_blob = polkavm_common::assembler::assemble(assembly).unwrap();
+            let isa = InstructionSetKind::Latest32;
+            let raw_blob = polkavm_common::assembler::assemble(Some(isa), assembly).unwrap();
             let blob = ProgramBlob::parse(raw_blob.into()).unwrap();
             let mut program_counter_to_section_target = HashMap::new();
             let mut program_counter_to_instruction_index = HashMap::new();
             let mut in_new_block = true;
-            for instruction in blob.instructions(Bitness::B32) {
+            for instruction in blob.instructions() {
                 if in_new_block {
                     let block = self.add_section();
                     self.switch_section(block);
@@ -6524,7 +6529,7 @@ mod test {
                 }
             }
 
-            for instruction in blob.instructions(Bitness::B32) {
+            for instruction in blob.instructions() {
                 let out = &mut self.instructions[*program_counter_to_instruction_index.get(&instruction.offset).unwrap()].1;
                 match instruction.kind {
                     Instruction::fallthrough => {
@@ -6619,6 +6624,7 @@ mod test {
         }
 
         fn build(&self, config: Config) -> TestProgram {
+            let isa = InstructionSetKind::Latest32;
             let elf = Elf::default();
             let data_sections_set: HashSet<_> = core::iter::once(self.data_section).collect();
             let code_sections_set: HashSet<_> = self.next_offset_for_section.keys().copied().collect();
@@ -6643,7 +6649,7 @@ mod test {
             let mut reachability_graph =
                 calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations).unwrap();
             if matches!(config.opt_level, OptLevel::O2 | OptLevel::Oexperimental) {
-                optimize_program(&config, &elf, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
+                optimize_program(&config, &elf, isa, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
             }
             let mut used_blocks = collect_used_blocks(&all_blocks, &reachability_graph);
 
@@ -6680,7 +6686,7 @@ mod test {
             )
             .unwrap();
 
-            let mut builder = ProgramBlobBuilder::new();
+            let mut builder = ProgramBlobBuilder::new(isa);
 
             let mut export_count = 0;
             for current in used_blocks {
@@ -8830,15 +8836,6 @@ impl Bitness {
     }
 }
 
-impl InstructionSet for Bitness {
-    fn opcode_from_u8(self, byte: u8) -> Option<Opcode> {
-        match self {
-            Bitness::B32 => polkavm_common::program::ISA32_V1.opcode_from_u8(byte),
-            Bitness::B64 => polkavm_common::program::ISA64_V1.opcode_from_u8(byte),
-        }
-    }
-}
-
 impl From<Bitness> for u64 {
     fn from(value: Bitness) -> Self {
         match value {
@@ -9967,20 +9964,43 @@ impl Config {
     }
 }
 
-pub fn program_from_elf(config: Config, data: &[u8]) -> Result<Vec<u8>, ProgramFromElfError> {
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum TargetInstructionSet {
+    ReviveV1,
+    Latest,
+}
+
+pub fn program_from_elf(config: Config, isa: TargetInstructionSet, data: &[u8]) -> Result<Vec<u8>, ProgramFromElfError> {
     match Elf::parse::<object::elf::FileHeader32<object::endian::LittleEndian>>(data) {
-        Ok(elf) => program_from_elf_internal(config, elf),
+        Ok(elf) => program_from_elf_internal(config, isa, elf),
         Err(ProgramFromElfError(ProgramFromElfErrorKind::FailedToParseElf(e))) if e.to_string() == "Unsupported ELF header" => {
             let elf = Elf::parse::<object::elf::FileHeader64<object::endian::LittleEndian>>(data)?;
-            program_from_elf_internal(config, elf)
+            program_from_elf_internal(config, isa, elf)
         }
         Err(e) => Err(e),
     }
 }
 
-fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, ProgramFromElfError> {
+fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf: Elf) -> Result<Vec<u8>, ProgramFromElfError> {
     let is_rv64 = elf.is_64();
     let bitness = if is_rv64 { Bitness::B64 } else { Bitness::B32 };
+
+    let isa = match isa {
+        TargetInstructionSet::ReviveV1 => {
+            if !is_rv64 {
+                return Err(ProgramFromElfError::other("the ReviveV1 ISA only supports 64-bit"));
+            }
+
+            InstructionSetKind::ReviveV1
+        }
+        TargetInstructionSet::Latest => {
+            if is_rv64 {
+                InstructionSetKind::Latest64
+            } else {
+                InstructionSetKind::Latest32
+            }
+        }
+    };
 
     if elf.section_by_name(".got").next().is_none() {
         elf.add_empty_data_section(".got");
@@ -10231,7 +10251,7 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
     if matches!(config.opt_level, OptLevel::O1 | OptLevel::O2 | OptLevel::Oexperimental) {
         reachability_graph = calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations)?;
         if matches!(config.opt_level, OptLevel::O2 | OptLevel::Oexperimental) {
-            info_for_block = optimize_program(&config, &elf, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
+            info_for_block = optimize_program(&config, &elf, isa, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
         } else {
             for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
                 perform_nop_elimination(&mut all_blocks, current);
@@ -10435,7 +10455,7 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
     assert_eq!(block_offsets.len(), used_blocks.len());
     block_offsets.push(code.len());
 
-    if config.gas_cost_model_aware_optimizations {
+    if isa.supports_opcode(Opcode::unlikely) && config.gas_cost_model_aware_optimizations {
         log::debug!("Performing gas cost model aware optimizations...");
         for (current, range) in used_blocks.iter().copied().zip(block_offsets.windows(2).map(|w| w[0]..w[1])) {
             use polkavm_common::program::ParsedInstruction;
@@ -10450,7 +10470,7 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
                 }
             }
 
-            let mut simulator = Simulator::<B64, ()>::new(&[], CacheModel::L2Hit, ());
+            let mut simulator = Simulator::<B64, ()>::new(&[], isa, CacheModel::L2Hit, ());
             simulator.set_force_branch_is_cheap(Some(false));
 
             log::trace!("Simulating block {}..{}...", range.start, range.end);
@@ -10477,50 +10497,52 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
         }
     }
 
-    for &current in &used_blocks {
-        if !blocks_with_zero_cost_unlikely.contains(&current) {
-            continue;
-        }
-
-        let Some(reachability) = reachability_graph.for_code.get(&current) else {
-            continue;
-        };
-        if !reachability.is_only_statically_reachable() {
-            continue;
-        }
-
-        if !reachability
-            .reachable_from
-            .iter()
-            .any(|source| matches!(all_blocks[source.index()].next.instruction, ControlInst::Branch { .. }))
-        {
-            continue;
-        }
-
-        all_blocks[current.index()].is_unlikely = true;
-    }
-
-    if !info_for_block.is_empty() {
+    if isa.supports_opcode(Opcode::unlikely) {
         for &current in &used_blocks {
-            let ControlInst::Branch {
-                target_true, target_false, ..
-            } = all_blocks[current.index()].next.instruction
-            else {
+            if !blocks_with_zero_cost_unlikely.contains(&current) {
+                continue;
+            }
+
+            let Some(reachability) = reachability_graph.for_code.get(&current) else {
                 continue;
             };
+            if !reachability.is_only_statically_reachable() {
+                continue;
+            }
 
-            let terminator_true = &info_for_block[target_true.index()].terminator;
-            let terminator_false = &info_for_block[target_false.index()].terminator;
-
-            if terminator_true.contains_infinite_loop()
-                && !terminator_false.contains_infinite_loop()
-                && target_true.index() < target_false.index()
-                && !all_blocks[target_true.index()].is_unlikely
+            if !reachability
+                .reachable_from
+                .iter()
+                .any(|source| matches!(all_blocks[source.index()].next.instruction, ControlInst::Branch { .. }))
             {
-                if let Some(reachability) = reachability_graph.for_code.get(&target_false) {
-                    if reachability.is_only_reachable_from(current) {
-                        all_blocks[target_false.index()].is_unlikely = true;
-                        continue;
+                continue;
+            }
+
+            all_blocks[current.index()].is_unlikely = true;
+        }
+
+        if !info_for_block.is_empty() {
+            for &current in &used_blocks {
+                let ControlInst::Branch {
+                    target_true, target_false, ..
+                } = all_blocks[current.index()].next.instruction
+                else {
+                    continue;
+                };
+
+                let terminator_true = &info_for_block[target_true.index()].terminator;
+                let terminator_false = &info_for_block[target_false.index()].terminator;
+
+                if terminator_true.contains_infinite_loop()
+                    && !terminator_false.contains_infinite_loop()
+                    && target_true.index() < target_false.index()
+                    && !all_blocks[target_true.index()].is_unlikely
+                {
+                    if let Some(reachability) = reachability_graph.for_code.get(&target_false) {
+                        if reachability.is_only_reachable_from(current) {
+                            all_blocks[target_false.index()].is_unlikely = true;
+                            continue;
+                        }
                     }
                 }
             }
@@ -10802,12 +10824,7 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
 
     log::trace!("Instruction count: {}", code.len());
 
-    let mut builder = if elf.is_64() {
-        ProgramBlobBuilder::new_64bit()
-    } else {
-        ProgramBlobBuilder::new()
-    };
-
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.set_ro_data_size(memory_config.ro_data_size);
     builder.set_rw_data_size(memory_config.rw_data_size);
     builder.set_stack_size(memory_config.min_stack_size);
@@ -10945,7 +10962,7 @@ fn program_from_elf_internal(config: Config, mut elf: Elf) -> Result<Vec<u8>, Pr
     if !config.strip {
         let blob = ProgramBlob::parse(builder.to_vec().map_err(ProgramFromElfError::other)?.into())?;
         offsets = blob
-            .instructions(bitness)
+            .instructions()
             .skip(config.dispatch_table.len())
             .map(|instruction| (instruction.offset, instruction.next_offset))
             .collect();

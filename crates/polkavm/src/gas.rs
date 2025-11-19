@@ -152,6 +152,14 @@ macro_rules! define_cost_model_struct {
                     $(
                         Opcode::$field => self.$field,
                     )+
+
+                    Opcode::_NonExhaustive(()) => {
+                        #[cfg(debug_assertions)]
+                        unreachable!();
+
+                        #[cfg(not(debug_assertions))]
+                        0
+                    },
                 }
             }
         }

@@ -11,7 +11,7 @@ mod reader_wrapper;
 mod riscv;
 mod utils;
 
-pub use crate::program_from_elf::{program_from_elf, Config, OptLevel, ProgramFromElfError};
+pub use crate::program_from_elf::{program_from_elf, Config, OptLevel, ProgramFromElfError, TargetInstructionSet};
 pub use polkavm_common::assembler::assemble;
 pub use polkavm_common::program::{ProgramBlob, ProgramParseError, ProgramParts};
 

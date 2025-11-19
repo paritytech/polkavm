@@ -1,4 +1,6 @@
-use crate::program::{self, Instruction, ProgramCounter, ProgramSymbol, BLOB_LEN_OFFSET, BLOB_LEN_SIZE};
+use crate::program::{
+    self, Instruction, InstructionSet, InstructionSetKind, ProgramCounter, ProgramSymbol, BLOB_LEN_OFFSET, BLOB_LEN_SIZE,
+};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -15,14 +17,14 @@ impl InstructionBuffer {
         self.length as usize
     }
 
-    fn new(position: u32, minimum_size: u8, instruction: Instruction) -> Self {
+    fn new(isa: InstructionSetKind, position: u32, minimum_size: u8, instruction: Instruction) -> Self {
         let mut buffer = Self {
             bytes: [0; program::MAX_INSTRUCTION_LENGTH],
             length: 0,
         };
 
         let minimum_size = minimum_size as usize;
-        let mut length = instruction.serialize_into(position, &mut buffer.bytes);
+        let mut length = instruction.serialize_into(isa, position, &mut buffer.bytes);
         if length < minimum_size {
             let Instruction::jump(target) = instruction else {
                 // We currently only need this for jumps.
@@ -81,9 +83,9 @@ struct SerializedInstruction {
     minimum_size: u8,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ProgramBlobBuilder {
-    is_64: bool,
+    isa: InstructionSetKind,
     ro_data_size: u32,
     rw_data_size: u32,
     stack_size: u32,
@@ -95,6 +97,7 @@ pub struct ProgramBlobBuilder {
     jump_table: Vec<u32>,
     custom: Vec<(u8, Vec<u8>)>,
     dispatch_table: Vec<Vec<u8>>,
+    ignore_instruction_set_incompatibility: bool,
 }
 
 struct SerializedCode {
@@ -113,14 +116,26 @@ enum Export {
 }
 
 impl ProgramBlobBuilder {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(isa: InstructionSetKind) -> Self {
+        Self {
+            isa,
+            ro_data_size: Default::default(),
+            rw_data_size: Default::default(),
+            stack_size: Default::default(),
+            ro_data: Default::default(),
+            rw_data: Default::default(),
+            imports: Default::default(),
+            exports: Default::default(),
+            code: Default::default(),
+            jump_table: Default::default(),
+            custom: Default::default(),
+            dispatch_table: Default::default(),
+            ignore_instruction_set_incompatibility: false,
+        }
     }
 
-    pub fn new_64bit() -> Self {
-        let mut builder = Self::new();
-        builder.is_64 = true;
-        builder
+    pub fn set_ignore_instruction_set_incompatibility(&mut self, value: bool) {
+        self.ignore_instruction_set_incompatibility = value;
     }
 
     pub fn set_ro_data_size(&mut self, size: u32) {
@@ -223,6 +238,17 @@ impl ProgramBlobBuilder {
                 *target_basic_block += basic_block_shift;
             }
 
+            if !self.ignore_instruction_set_incompatibility {
+                let opcode = instruction.opcode();
+                if !self.isa.supports_opcode(opcode) {
+                    return Err(alloc::format!(
+                        "failed to build a program: the instruction '{}' is not available in the '{}' instruction set",
+                        opcode.name(),
+                        self.isa.name(),
+                    ));
+                }
+            }
+
             instructions.push(SerializedInstruction {
                 instruction,
                 bytes: InstructionBuffer::default(),
@@ -252,7 +278,7 @@ impl ProgramBlobBuilder {
             });
 
             entry.position = position;
-            entry.bytes = InstructionBuffer::new(position, entry.minimum_size, entry.instruction);
+            entry.bytes = InstructionBuffer::new(self.isa, position, entry.minimum_size, entry.instruction);
             position = position.checked_add(entry.bytes.len() as u32).expect("too many instructions");
         }
 
@@ -269,6 +295,7 @@ impl ProgramBlobBuilder {
 
                     if self_modified {
                         instructions[nth_instruction].bytes = InstructionBuffer::new(
+                            self.isa,
                             position,
                             instructions[nth_instruction].minimum_size,
                             instructions[nth_instruction].instruction,
@@ -374,12 +401,8 @@ impl ProgramBlobBuilder {
             let mut parsed = Vec::new();
             let mut offsets = alloc::collections::BTreeSet::new();
 
-            let parsed_instructions: Vec<_> = if self.is_64 {
-                crate::program::Instructions::new_unbounded(crate::program::ISA64_V1, &output.code, &output.bitmask, 0).collect()
-            } else {
-                crate::program::Instructions::new_unbounded(crate::program::ISA32_V1, &output.code, &output.bitmask, 0).collect()
-            };
-
+            let parsed_instructions: Vec<_> =
+                crate::program::Instructions::new_unbounded(self.isa, &output.code, &output.bitmask, 0).collect();
             for instruction in parsed_instructions {
                 if instruction.offset.0 as usize == output.code.len() {
                     // Implicit trap.
@@ -393,7 +416,8 @@ impl ProgramBlobBuilder {
             assert_eq!(parsed.len(), instructions.len());
             for (nth_instruction, (mut parsed, entry)) in parsed.into_iter().zip(instructions.into_iter()).enumerate() {
                 let parsed_length = parsed.next_offset.0 - parsed.offset.0;
-                if parsed.kind != entry.instruction || entry.position != parsed.offset.0 || u32::from(entry.bytes.length) != parsed_length {
+                let opcode_mismatch = parsed.kind != entry.instruction && !self.ignore_instruction_set_incompatibility;
+                if opcode_mismatch || entry.position != parsed.offset.0 || u32::from(entry.bytes.length) != parsed_length {
                     panic!(
                         concat!(
                             "Broken serialization for instruction #{}:\n",
@@ -443,11 +467,7 @@ impl ProgramBlobBuilder {
         let mut writer = Writer::new(&mut output);
 
         writer.push_raw_bytes(&program::BLOB_MAGIC);
-        if self.is_64 {
-            writer.push_byte(program::BLOB_VERSION_V1_64);
-        } else {
-            writer.push_byte(program::BLOB_VERSION_V1_32);
-        }
+        writer.push_byte(self.isa.blob_version());
         writer.push_raw_bytes(&[0; BLOB_LEN_SIZE]);
 
         if self.ro_data_size > 0 || self.rw_data_size > 0 || self.stack_size > 0 {

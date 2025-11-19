@@ -467,7 +467,6 @@ pub struct ModuleConfig {
     pub(crate) step_tracing: bool,
     pub(crate) dynamic_paging: bool,
     pub(crate) aux_data_size: u32,
-    pub(crate) allow_sbrk: bool,
     cache_by_hash: bool,
     pub(crate) custom_codegen: Option<Arc<dyn CustomCodegen>>,
     pub(crate) cost_model: Option<CostModelKind>,
@@ -490,7 +489,6 @@ impl ModuleConfig {
             step_tracing: false,
             dynamic_paging: false,
             aux_data_size: 0,
-            allow_sbrk: true,
             cache_by_hash: false,
             custom_codegen: None,
             cost_model: None,
@@ -566,18 +564,6 @@ impl ModuleConfig {
         self
     }
 
-    ///
-    /// Sets whether sbrk instruction is allowed.
-    ///
-    /// When enabled sbrk instruction is not allowed it will lead to a trap, otherwise
-    /// sbrk instruction is emulated.
-    ///
-    /// Default: `true`
-    pub fn set_allow_sbrk(&mut self, enabled: bool) -> &mut Self {
-        self.allow_sbrk = enabled;
-        self
-    }
-
     /// Returns whether the module will be cached by hash.
     pub fn cache_by_hash(&self) -> bool {
         self.cache_by_hash
@@ -641,7 +627,6 @@ impl ModuleConfig {
             is_strict,
             step_tracing,
             dynamic_paging,
-            allow_sbrk,
             is_per_instruction_metering,
             // Deliberately ignored.
             cost_model: _,
@@ -661,7 +646,6 @@ impl ModuleConfig {
             u32::from(is_strict),
             u32::from(step_tracing),
             u32::from(dynamic_paging),
-            u32::from(allow_sbrk),
             u32::from(is_per_instruction_metering),
         ]);
 

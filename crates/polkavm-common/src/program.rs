@@ -795,77 +795,49 @@ pub trait OpcodeVisitor: Copy {
     fn dispatch(self, state: &mut Self::State, opcode: usize, chunk: u128, offset: u32, skip: u32) -> Self::ReturnTy;
 }
 
-macro_rules! define_opcodes {
-    (@impl_instruction_set $instruction_set:ident [$($instruction_set_tag:tt),+] $([$($tag:tt),+] $name:ident = $value:expr,)+) => {
-        impl $instruction_set {
-            #[doc(hidden)]
-            pub const IS_INSTRUCTION_VALID_CONST: [bool; 256] = {
-                let mut is_valid = [false; 256];
-                let b = [$($instruction_set_tag),+];
-                $(
-                    is_valid[$value] = {
-                        let a = [$($tag),+];
-                        let mut found = false;
-                        let mut i = 0;
-                        'outer: while i < a.len() {
-                            let mut j = 0;
-                            while j < b.len() {
-                                if a[i] == b[j] {
-                                    found = true;
-                                    break 'outer;
-                                }
-                                j += 1;
-                            }
-                            i += 1;
-                        }
-                        found
-                    };
-                )+
-                is_valid
-            };
-        }
-
-        impl InstructionSet for $instruction_set {
-            #[cfg_attr(feature = "alloc", inline)]
-            fn opcode_from_u8(self, byte: u8) -> Option<Opcode> {
-                static IS_INSTRUCTION_VALID: [bool; 256] = $instruction_set::IS_INSTRUCTION_VALID_CONST;
-
-                if !IS_INSTRUCTION_VALID[byte as usize] {
-                    return None;
-                }
-
-                #[allow(unsafe_code)]
-                // SAFETY: We already checked that this opcode is valid, so this is safe.
-                unsafe {
-                    Some(core::mem::transmute::<u8, Opcode>(byte))
-                }
-            }
-        }
-    };
-
-    (@impl_shared $([$($tag:tt),+] $name:ident = $value:expr,)+) => {
+macro_rules! define_all_instructions {
+    (@impl_shared $($name:ident,)+) => {
         #[allow(non_camel_case_types)]
         #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
         #[repr(u8)]
         pub enum Opcode {
             $(
-                $name = $value,
+                $name,
             )+
+
+            // This is here to prevent `as` casts.
+            #[doc(hidden)]
+            _NonExhaustive(()),
         }
 
         impl Opcode {
-            pub fn from_u8_any(byte: u8) -> Option<Opcode> {
-                match byte {
-                    $($value => Some(Opcode::$name),)+
-                    _ => None
-                }
-            }
+            pub const ALL: &[Opcode] = &[
+                $(Opcode::$name,)+
+            ];
 
             pub fn name(self) -> &'static str {
                 match self {
                     $(
                         Opcode::$name => stringify!($name),
                     )+
+
+                    Opcode::_NonExhaustive(()) => {
+                        #[cfg(debug_assertions)]
+                        unreachable!();
+
+                        #[cfg(not(debug_assertions))]
+                        ""
+                    },
+                }
+            }
+
+            #[inline]
+            const fn discriminant(&self) -> u8 {
+                #[allow(unsafe_code)]
+                // SAFETY: Reading a discriminant into a primitive when we have a #[repr] on the enum is safe,
+                //         since Rust guarantees it has a union-like layout.
+                unsafe {
+                    *(self as *const Opcode).cast::<u8>()
                 }
             }
         }
@@ -887,48 +859,65 @@ macro_rules! define_opcodes {
                 })
             }
         }
-
-        define_opcodes!(@impl_instruction_set ISA32_V1         [I_32, I_SBRK]  $([$($tag),+] $name = $value,)+);
-        define_opcodes!(@impl_instruction_set ISA32_V1_NoSbrk  [I_32]          $([$($tag),+] $name = $value,)+);
-        define_opcodes!(@impl_instruction_set ISA64_V1         [I_64, I_SBRK]  $([$($tag),+] $name = $value,)+);
-        define_opcodes!(@impl_instruction_set ISA64_V1_NoSbrk  [I_64]          $([$($tag),+] $name = $value,)+);
-
-        #[test]
-        fn test_opcode_from_u8() {
-            for byte in 0..=255 {
-                if let Some(opcode) = Opcode::from_u8_any(byte) {
-                    assert_eq!(ISA32_V1.opcode_from_u8(byte).unwrap_or(opcode), opcode);
-                    assert_eq!(ISA32_V1_NoSbrk.opcode_from_u8(byte).unwrap_or(opcode), opcode);
-                    assert_eq!(ISA64_V1.opcode_from_u8(byte).unwrap_or(opcode), opcode);
-                } else {
-                    assert_eq!(ISA32_V1.opcode_from_u8(byte), None);
-                    assert_eq!(ISA32_V1_NoSbrk.opcode_from_u8(byte), None);
-                    assert_eq!(ISA64_V1.opcode_from_u8(byte), None);
-                }
-            }
-
-            assert!(ISA32_V1.opcode_from_u8(Opcode::sbrk as u8).is_some());
-            assert!(ISA32_V1_NoSbrk.opcode_from_u8(Opcode::sbrk as u8).is_none());
-        }
     };
 
     (
-        $d:tt
-
-        [$([$($tag_argless:tt),+] $name_argless:ident = $value_argless:expr,)+]
-        [$([$($tag_reg_imm:tt),+] $name_reg_imm:ident = $value_reg_imm:expr,)+]
-        [$([$($tag_reg_imm_offset:tt),+] $name_reg_imm_offset:ident = $value_reg_imm_offset:expr,)+]
-        [$([$($tag_reg_imm_imm:tt),+] $name_reg_imm_imm:ident = $value_reg_imm_imm:expr,)+]
-        [$([$($tag_reg_reg_imm:tt),+] $name_reg_reg_imm:ident = $value_reg_reg_imm:expr,)+]
-        [$([$($tag_reg_reg_offset:tt),+] $name_reg_reg_offset:ident = $value_reg_reg_offset:expr,)+]
-        [$([$($tag_reg_reg_reg:tt),+] $name_reg_reg_reg:ident = $value_reg_reg_reg:expr,)+]
-        [$([$($tag_offset:tt),+] $name_offset:ident = $value_offset:expr,)+]
-        [$([$($tag_imm:tt),+] $name_imm:ident = $value_imm:expr,)+]
-        [$([$($tag_imm_imm:tt),+] $name_imm_imm:ident = $value_imm_imm:expr,)+]
-        [$([$($tag_reg_reg:tt),+] $name_reg_reg:ident = $value_reg_reg:expr,)+]
-        [$([$($tag_reg_reg_imm_imm:tt),+] $name_reg_reg_imm_imm:ident = $value_reg_reg_imm_imm:expr,)+]
-        [$([$($tag_reg_imm64:tt),+] $name_reg_imm64:ident = $value_reg_imm64:expr,)+]
+        [$($name_argless:ident,)+]
+        [$($name_reg_imm:ident,)+]
+        [$($name_reg_imm_offset:ident,)+]
+        [$($name_reg_imm_imm:ident,)+]
+        [$($name_reg_reg_imm:ident,)+]
+        [$($name_reg_reg_offset:ident,)+]
+        [$($name_reg_reg_reg:ident,)+]
+        [$($name_offset:ident,)+]
+        [$($name_imm:ident,)+]
+        [$($name_imm_imm:ident,)+]
+        [$($name_reg_reg:ident,)+]
+        [$($name_reg_reg_imm_imm:ident,)+]
+        [$($name_reg_imm64:ident,)+]
     ) => {
+        define_all_instructions!(
+            @impl_shared
+            $($name_argless,)+
+            $($name_reg_imm,)+
+            $($name_reg_imm_offset,)+
+            $($name_reg_imm_imm,)+
+            $($name_reg_reg_imm,)+
+            $($name_reg_reg_offset,)+
+            $($name_reg_reg_reg,)+
+            $($name_offset,)+
+            $($name_imm,)+
+            $($name_imm_imm,)+
+            $($name_reg_reg,)+
+            $($name_reg_reg_imm_imm,)+
+            $($name_reg_imm64,)+
+        );
+
+        #[macro_export]
+        macro_rules! impl_parsing_visitor_for_instruction_visitor {
+            ($visitor_ty:ident) => {
+                impl ParsingVisitor for $visitor_ty {
+                    type ReturnTy = <$visitor_ty as $crate::program::InstructionVisitor>::ReturnTy;
+
+                    $(fn $name_argless(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_argless(self) })+
+                    $(fn $name_reg_imm(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm(self, reg, imm) })+
+                    $(fn $name_reg_imm_offset(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm_offset(self, reg, imm1, imm2) })+
+                    $(fn $name_reg_imm_imm(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm_imm(self, reg, imm1, imm2) })+
+                    $(fn $name_reg_reg_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm(self, reg1, reg2, imm) })+
+                    $(fn $name_reg_reg_offset(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_offset(self, reg1, reg2, imm) })+
+                    $(fn $name_reg_reg_reg(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_reg(self, reg1, reg2, reg3) })+
+                    $(fn $name_offset(&mut self, _offset: u32, _args_length: u32, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_offset(self, imm) })+
+                    $(fn $name_imm(&mut self, _offset: u32, _args_length: u32, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm(self, imm) })+
+                    $(fn $name_imm_imm(&mut self, _offset: u32, _args_length: u32, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm_imm(self, imm1, imm2) })+
+                    $(fn $name_reg_reg(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg(self, reg1, reg2) })+
+                    $(fn $name_reg_reg_imm_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm_imm(self, reg1, reg2, imm1, imm2) })+
+                    $(fn $name_reg_imm64(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm: u64) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm64(self, reg, imm) })+
+
+                    fn invalid(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::invalid(self) }
+                }
+            };
+        }
+
         pub trait ParsingVisitor {
             type ReturnTy;
 
@@ -969,49 +958,24 @@ macro_rules! define_opcodes {
             fn invalid(&mut self) -> Self::ReturnTy;
         }
 
-        #[macro_export]
-        macro_rules! impl_parsing_visitor_for_instruction_visitor {
-            ($visitor_ty:ident) => {
-                impl ParsingVisitor for $visitor_ty {
-                    type ReturnTy = <$visitor_ty as $crate::program::InstructionVisitor>::ReturnTy;
-
-                    $(fn $name_argless(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_argless(self) })+
-                    $(fn $name_reg_imm(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm(self, reg, imm) })+
-                    $(fn $name_reg_imm_offset(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm_offset(self, reg, imm1, imm2) })+
-                    $(fn $name_reg_imm_imm(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm_imm(self, reg, imm1, imm2) })+
-                    $(fn $name_reg_reg_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm(self, reg1, reg2, imm) })+
-                    $(fn $name_reg_reg_offset(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_offset(self, reg1, reg2, imm) })+
-                    $(fn $name_reg_reg_reg(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_reg(self, reg1, reg2, reg3) })+
-                    $(fn $name_offset(&mut self, _offset: u32, _args_length: u32, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_offset(self, imm) })+
-                    $(fn $name_imm(&mut self, _offset: u32, _args_length: u32, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm(self, imm) })+
-                    $(fn $name_imm_imm(&mut self, _offset: u32, _args_length: u32, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm_imm(self, imm1, imm2) })+
-                    $(fn $name_reg_reg(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg(self, reg1, reg2) })+
-                    $(fn $name_reg_reg_imm_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm_imm(self, reg1, reg2, imm1, imm2) })+
-                    $(fn $name_reg_imm64(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm: u64) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm64(self, reg, imm) })+
-
-                    fn invalid(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::invalid(self) }
-                }
-            };
-        }
-
         #[derive(Copy, Clone, PartialEq, Eq, Debug)]
         #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
         #[allow(non_camel_case_types)]
         #[repr(u32)]
         pub enum Instruction {
-            $($name_argless = $value_argless,)+
-            $($name_reg_imm(RawReg, u32) = $value_reg_imm,)+
-            $($name_reg_imm_offset(RawReg, u32, u32) = $value_reg_imm_offset,)+
-            $($name_reg_imm_imm(RawReg, u32, u32) = $value_reg_imm_imm,)+
-            $($name_reg_reg_imm(RawReg, RawReg, u32) = $value_reg_reg_imm,)+
-            $($name_reg_reg_offset(RawReg, RawReg, u32) = $value_reg_reg_offset,)+
-            $($name_reg_reg_reg(RawReg, RawReg, RawReg) = $value_reg_reg_reg,)+
-            $($name_offset(u32) = $value_offset,)+
-            $($name_imm(u32) = $value_imm,)+
-            $($name_imm_imm(u32, u32) = $value_imm_imm,)+
-            $($name_reg_reg(RawReg, RawReg) = $value_reg_reg,)+
-            $($name_reg_reg_imm_imm(RawReg, RawReg, u32, u32) = $value_reg_reg_imm_imm,)+
-            $($name_reg_imm64(RawReg, u64) = $value_reg_imm64,)+
+            $($name_argless,)+
+            $($name_reg_imm(RawReg, u32),)+
+            $($name_reg_imm_offset(RawReg, u32, u32),)+
+            $($name_reg_imm_imm(RawReg, u32, u32),)+
+            $($name_reg_reg_imm(RawReg, RawReg, u32),)+
+            $($name_reg_reg_offset(RawReg, RawReg, u32),)+
+            $($name_reg_reg_reg(RawReg, RawReg, RawReg),)+
+            $($name_offset(u32),)+
+            $($name_imm(u32),)+
+            $($name_imm_imm(u32, u32),)+
+            $($name_reg_reg(RawReg, RawReg),)+
+            $($name_reg_reg_imm_imm(RawReg, RawReg, u32, u32),)+
+            $($name_reg_imm64(RawReg, u64),)+
             invalid = INVALID_INSTRUCTION_INDEX as u32,
         }
 
@@ -1054,22 +1018,22 @@ macro_rules! define_opcodes {
                 }
             }
 
-            pub fn serialize_into(self, position: u32, buffer: &mut [u8]) -> usize {
+            pub fn serialize_into<I>(self, isa: I, position: u32, buffer: &mut [u8]) -> usize where I: InstructionSet {
                 match self {
-                    $(Self::$name_argless => Self::serialize_argless(buffer, Opcode::$name_argless),)+
-                    $(Self::$name_reg_imm(reg, imm) => Self::serialize_reg_imm(buffer, Opcode::$name_reg_imm, reg, imm),)+
-                    $(Self::$name_reg_imm_offset(reg, imm1, imm2) => Self::serialize_reg_imm_offset(buffer, position, Opcode::$name_reg_imm_offset, reg, imm1, imm2),)+
-                    $(Self::$name_reg_imm_imm(reg, imm1, imm2) => Self::serialize_reg_imm_imm(buffer, Opcode::$name_reg_imm_imm, reg, imm1, imm2),)+
-                    $(Self::$name_reg_reg_imm(reg1, reg2, imm) => Self::serialize_reg_reg_imm(buffer, Opcode::$name_reg_reg_imm, reg1, reg2, imm),)+
-                    $(Self::$name_reg_reg_offset(reg1, reg2, imm) => Self::serialize_reg_reg_offset(buffer, position, Opcode::$name_reg_reg_offset, reg1, reg2, imm),)+
-                    $(Self::$name_reg_reg_reg(reg1, reg2, reg3) => Self::serialize_reg_reg_reg(buffer, Opcode::$name_reg_reg_reg, reg1, reg2, reg3),)+
-                    $(Self::$name_offset(imm) => Self::serialize_offset(buffer, position, Opcode::$name_offset, imm),)+
-                    $(Self::$name_imm(imm) => Self::serialize_imm(buffer, Opcode::$name_imm, imm),)+
-                    $(Self::$name_imm_imm(imm1, imm2) => Self::serialize_imm_imm(buffer, Opcode::$name_imm_imm, imm1, imm2),)+
-                    $(Self::$name_reg_reg(reg1, reg2) => Self::serialize_reg_reg(buffer, Opcode::$name_reg_reg, reg1, reg2),)+
-                    $(Self::$name_reg_reg_imm_imm(reg1, reg2, imm1, imm2) => Self::serialize_reg_reg_imm_imm(buffer, Opcode::$name_reg_reg_imm_imm, reg1, reg2, imm1, imm2),)+
-                    $(Self::$name_reg_imm64(reg, imm) => Self::serialize_reg_imm64(buffer, Opcode::$name_reg_imm64, reg, imm),)+
-                    Self::invalid => Self::serialize_argless(buffer, Opcode::trap),
+                    $(Self::$name_argless => Self::serialize_argless(buffer, isa.opcode_to_u8(Opcode::$name_argless).unwrap_or(UNUSED_RAW_OPCODE)),)+
+                    $(Self::$name_reg_imm(reg, imm) => Self::serialize_reg_imm(buffer, isa.opcode_to_u8(Opcode::$name_reg_imm).unwrap_or(UNUSED_RAW_OPCODE), reg, imm),)+
+                    $(Self::$name_reg_imm_offset(reg, imm1, imm2) => Self::serialize_reg_imm_offset(buffer, position, isa.opcode_to_u8(Opcode::$name_reg_imm_offset).unwrap_or(UNUSED_RAW_OPCODE), reg, imm1, imm2),)+
+                    $(Self::$name_reg_imm_imm(reg, imm1, imm2) => Self::serialize_reg_imm_imm(buffer, isa.opcode_to_u8(Opcode::$name_reg_imm_imm).unwrap_or(UNUSED_RAW_OPCODE), reg, imm1, imm2),)+
+                    $(Self::$name_reg_reg_imm(reg1, reg2, imm) => Self::serialize_reg_reg_imm(buffer, isa.opcode_to_u8(Opcode::$name_reg_reg_imm).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, imm),)+
+                    $(Self::$name_reg_reg_offset(reg1, reg2, imm) => Self::serialize_reg_reg_offset(buffer, position, isa.opcode_to_u8(Opcode::$name_reg_reg_offset).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, imm),)+
+                    $(Self::$name_reg_reg_reg(reg1, reg2, reg3) => Self::serialize_reg_reg_reg(buffer, isa.opcode_to_u8(Opcode::$name_reg_reg_reg).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, reg3),)+
+                    $(Self::$name_offset(imm) => Self::serialize_offset(buffer, position, isa.opcode_to_u8(Opcode::$name_offset).unwrap_or(UNUSED_RAW_OPCODE), imm),)+
+                    $(Self::$name_imm(imm) => Self::serialize_imm(buffer, isa.opcode_to_u8(Opcode::$name_imm).unwrap_or(UNUSED_RAW_OPCODE), imm),)+
+                    $(Self::$name_imm_imm(imm1, imm2) => Self::serialize_imm_imm(buffer, isa.opcode_to_u8(Opcode::$name_imm_imm).unwrap_or(UNUSED_RAW_OPCODE), imm1, imm2),)+
+                    $(Self::$name_reg_reg(reg1, reg2) => Self::serialize_reg_reg(buffer, isa.opcode_to_u8(Opcode::$name_reg_reg).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2),)+
+                    $(Self::$name_reg_reg_imm_imm(reg1, reg2, imm1, imm2) => Self::serialize_reg_reg_imm_imm(buffer, isa.opcode_to_u8(Opcode::$name_reg_reg_imm_imm).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, imm1, imm2),)+
+                    $(Self::$name_reg_imm64(reg, imm) => Self::serialize_reg_imm64(buffer, isa.opcode_to_u8(Opcode::$name_reg_imm64).unwrap_or(UNUSED_RAW_OPCODE), reg, imm),)+
+                    Self::invalid => Self::serialize_argless(buffer, isa.opcode_to_u8(Opcode::trap).unwrap_or(UNUSED_RAW_OPCODE)),
 
                 }
             }
@@ -1180,219 +1144,6 @@ macro_rules! define_opcodes {
             }
         }
 
-        #[macro_export]
-        macro_rules! build_static_dispatch_table {
-            ($table_name:ident, $instruction_set:tt, $visitor_ty:ident<$d($visitor_ty_params:tt),*>) => {{
-                use $crate::program::{
-                    ParsingVisitor
-                };
-
-                type ReturnTy<$d($visitor_ty_params),*> = <$visitor_ty<$d($visitor_ty_params),*> as ParsingVisitor>::ReturnTy;
-                type VisitFn<$d($visitor_ty_params),*> = fn(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, args_length: u32);
-
-                #[derive(Copy, Clone)]
-                struct DispatchTable<'a>(&'a [VisitFn<'a>; 257]);
-
-                impl<'a> $crate::program::OpcodeVisitor for DispatchTable<'a> {
-                    type State = $visitor_ty<'a>;
-                    type ReturnTy = ();
-                    type InstructionSet = $instruction_set;
-
-                    #[inline]
-                    fn instruction_set(self) -> Self::InstructionSet {
-                        $instruction_set
-                    }
-
-                    #[inline]
-                    fn dispatch(self, state: &mut $visitor_ty<'a>, opcode: usize, chunk: u128, offset: u32, skip: u32) {
-                        self.0[opcode](state, chunk, offset, skip)
-                    }
-                }
-
-                static $table_name: [VisitFn; 257] = {
-                    let mut table = [invalid_instruction as VisitFn; 257];
-
-                    $({
-                        // Putting all of the handlers in a single link section can make a big difference
-                        // when it comes to performance, even up to 10% in some cases. This will force the
-                        // compiler and the linker to put all of this code near each other, minimizing
-                        // instruction cache misses.
-                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_argless<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, _chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            state.$name_argless(instruction_offset, skip)
-                        }
-
-                        if $instruction_set::IS_INSTRUCTION_VALID_CONST[$value_argless] {
-                            table[$value_argless] = $name_argless;
-                        }
-                    })*
-
-                    $({
-                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg, imm) = $crate::program::read_args_reg_imm(chunk, skip);
-                            state.$name_reg_imm(instruction_offset, skip, reg, imm)
-                        }
-
-                        if $instruction_set::IS_INSTRUCTION_VALID_CONST[$value_reg_imm] {
-                            table[$value_reg_imm] = $name_reg_imm;
-                        }
-                    })*
-
-                    $({
-                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_imm_offset<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg, imm1, imm2) = $crate::program::read_args_reg_imm_offset(chunk, instruction_offset, skip);
-                            state.$name_reg_imm_offset(instruction_offset, skip, reg, imm1, imm2)
-                        }
-
-                        if $instruction_set::IS_INSTRUCTION_VALID_CONST[$value_reg_imm_offset] {
-                            table[$value_reg_imm_offset] = $name_reg_imm_offset;
-                        }
-                    })*
-
-                    $({
-                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_imm_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg, imm1, imm2) = $crate::program::read_args_reg_imm2(chunk, skip);
-                            state.$name_reg_imm_imm(instruction_offset, skip, reg, imm1, imm2)
-                        }
-
-                        if $instruction_set::IS_INSTRUCTION_VALID_CONST[$value_reg_imm_imm] {
-                            table[$value_reg_imm_imm] = $name_reg_imm_imm;
-                        }
-                    })*
-
-                    $({
-                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_reg_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg1, reg2, imm) = $crate::program::read_args_regs2_imm(chunk, skip);
-                            state.$name_reg_reg_imm(instruction_offset, skip, reg1, reg2, imm)
-                        }
-
-                        if $instruction_set::IS_INSTRUCTION_VALID_CONST[$value_reg_reg_imm] {
-                            table[$value_reg_reg_imm] = $name_reg_reg_imm;
-                        }
-                    })*
-
-                    $({
-                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_reg_offset<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg1, reg2, imm) = $crate::program::read_args_regs2_offset(chunk, instruction_offset, skip);
-                            state.$name_reg_reg_offset(instruction_offset, skip, reg1, reg2, imm)
-                        }
-
-                        if $instruction_set::IS_INSTRUCTION_VALID_CONST[$value_reg_reg_offset] {
-                            table[$value_reg_reg_offset] = $name_reg_reg_offset;
-                        }
-                    })*
-
-                    $({
-                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_reg_reg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg1, reg2, reg3) = $crate::program::read_args_regs3(chunk);
-                            state.$name_reg_reg_reg(instruction_offset, skip, reg1, reg2, reg3)
-                        }
-
-                        if $instruction_set::IS_INSTRUCTION_VALID_CONST[$value_reg_reg_reg] {
-                            table[$value_reg_reg_reg] = $name_reg_reg_reg;
-                        }
-                    })*
-
-                    $({
-                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_offset<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let imm = $crate::program::read_args_offset(chunk, instruction_offset, skip);
-                            state.$name_offset(instruction_offset, skip, imm)
-                        }
-
-                        if $instruction_set::IS_INSTRUCTION_VALID_CONST[$value_offset] {
-                            table[$value_offset] = $name_offset;
-                        }
-                    })*
-
-                    $({
-                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let imm = $crate::program::read_args_imm(chunk, skip);
-                            state.$name_imm(instruction_offset, skip, imm)
-                        }
-
-                        if $instruction_set::IS_INSTRUCTION_VALID_CONST[$value_imm] {
-                            table[$value_imm] = $name_imm;
-                        }
-                    })*
-
-                    $({
-                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_imm_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (imm1, imm2) = $crate::program::read_args_imm2(chunk, skip);
-                            state.$name_imm_imm(instruction_offset, skip, imm1, imm2)
-                        }
-
-                        if $instruction_set::IS_INSTRUCTION_VALID_CONST[$value_imm_imm] {
-                            table[$value_imm_imm] = $name_imm_imm;
-                        }
-                    })*
-
-                    $({
-                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_reg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg1, reg2) = $crate::program::read_args_regs2(chunk);
-                            state.$name_reg_reg(instruction_offset, skip, reg1, reg2)
-                        }
-
-                        if $instruction_set::IS_INSTRUCTION_VALID_CONST[$value_reg_reg] {
-                            table[$value_reg_reg] = $name_reg_reg;
-                        }
-                    })*
-
-                    $({
-                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_reg_imm_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg1, reg2, imm1, imm2) = $crate::program::read_args_regs2_imm2(chunk, skip);
-                            state.$name_reg_reg_imm_imm(instruction_offset, skip, reg1, reg2, imm1, imm2)
-                        }
-
-                        if $instruction_set::IS_INSTRUCTION_VALID_CONST[$value_reg_reg_imm_imm] {
-                            table[$value_reg_reg_imm_imm] = $name_reg_reg_imm_imm;
-                        }
-                    })*
-
-                    $({
-                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_imm64<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg, imm) = $crate::program::read_args_reg_imm64(chunk, skip);
-                            state.$name_reg_imm64(instruction_offset, skip, reg, imm)
-                        }
-
-                        if $instruction_set::IS_INSTRUCTION_VALID_CONST[$value_reg_imm64] {
-                            table[$value_reg_imm64] = $name_reg_imm64;
-                        }
-                    })*
-
-                    #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                    #[cold]
-                    fn invalid_instruction<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, _chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                        state.invalid(instruction_offset, skip)
-                    }
-
-                    table
-                };
-
-                #[inline]
-                #[allow(unsafe_code)]
-                // SAFETY: Here we transmute the lifetimes which were unnecessarily extended to be 'static due to the table here being a `static`.
-                fn transmute_lifetime<'a>(table: DispatchTable<'static>) -> DispatchTable<'a> {
-                    unsafe { core::mem::transmute(&$table_name) }
-                }
-
-                transmute_lifetime(DispatchTable(&$table_name))
-            }};
-        }
-
-        pub use build_static_dispatch_table;
-
         #[derive(Copy, Clone)]
         struct EnumVisitor<I> {
             instruction_set: I
@@ -1408,10 +1159,120 @@ macro_rules! define_opcodes {
             }
 
             fn dispatch(self, _state: &mut (), opcode: usize, chunk: u128, offset: u32, skip: u32) -> Instruction {
-                if self.instruction_set().opcode_from_u8(opcode as u8).is_none() {
-                    return Instruction::invalid
-                }
+                self.instruction_set().parse_instruction(opcode, chunk, offset, skip)
+            }
+        }
+    };
+}
 
+pub(crate) const UNUSED_RAW_OPCODE: u8 = 255;
+
+macro_rules! define_instruction_set {
+    (@impl_shared $isa_name:ident, $($name:ident = $value:expr,)+) => {
+        #[allow(non_camel_case_types)]
+        #[derive(Copy, Clone, Debug, Default)]
+        pub struct $isa_name;
+
+        impl $isa_name {
+            #[doc(hidden)]
+            pub const RAW_OPCODE_TO_ENUM_CONST: [Option<Opcode>; 256] = {
+                let mut map = [None; 256];
+                $(
+                    map[$value] = Some(Opcode::$name);
+                )+
+                map
+            };
+
+            pub const OPCODE_DISCRIMINANT_TO_RAW_OPCODE_CONST: [u8; 256] = {
+                let mut map = [u8::MAX; 256];
+                assert!($isa_name::RAW_OPCODE_TO_ENUM_CONST[UNUSED_RAW_OPCODE as usize].is_none());
+
+                $({
+                    let discriminant = Opcode::$name.discriminant() as usize;
+                    assert!(map[discriminant] == UNUSED_RAW_OPCODE);
+                    map[discriminant] = $value;
+                })+
+
+                map
+            };
+        }
+    };
+
+    (
+        ($d:tt)
+        $isa_name:ident,
+        $build_static_dispatch_table:ident,
+        [$($name_argless:ident = $value_argless:expr,)+]
+        [$($name_reg_imm:ident = $value_reg_imm:expr,)+]
+        [$($name_reg_imm_offset:ident = $value_reg_imm_offset:expr,)+]
+        [$($name_reg_imm_imm:ident = $value_reg_imm_imm:expr,)+]
+        [$($name_reg_reg_imm:ident = $value_reg_reg_imm:expr,)+]
+        [$($name_reg_reg_offset:ident = $value_reg_reg_offset:expr,)+]
+        [$($name_reg_reg_reg:ident = $value_reg_reg_reg:expr,)+]
+        [$($name_offset:ident = $value_offset:expr,)+]
+        [$($name_imm:ident = $value_imm:expr,)+]
+        [$($name_imm_imm:ident = $value_imm_imm:expr,)+]
+        [$($name_reg_reg:ident = $value_reg_reg:expr,)+]
+        [$($name_reg_reg_imm_imm:ident = $value_reg_reg_imm_imm:expr,)+]
+        [$($name_reg_imm64:ident = $value_reg_imm64:expr,)*]
+    ) => {
+        define_instruction_set!(
+            @impl_shared
+            $isa_name,
+            $($name_argless = $value_argless,)+
+            $($name_reg_imm = $value_reg_imm,)+
+            $($name_reg_imm_offset = $value_reg_imm_offset,)+
+            $($name_reg_imm_imm = $value_reg_imm_imm,)+
+            $($name_reg_reg_imm = $value_reg_reg_imm,)+
+            $($name_reg_reg_offset = $value_reg_reg_offset,)+
+            $($name_reg_reg_reg = $value_reg_reg_reg,)+
+            $($name_offset = $value_offset,)+
+            $($name_imm = $value_imm,)+
+            $($name_imm_imm = $value_imm_imm,)+
+            $($name_reg_reg = $value_reg_reg,)+
+            $($name_reg_reg_imm_imm = $value_reg_reg_imm_imm,)+
+            $($name_reg_imm64 = $value_reg_imm64,)*
+        );
+
+        impl InstructionSet for $isa_name {
+            #[cfg_attr(feature = "alloc", inline)]
+            fn opcode_from_u8(self, byte: u8) -> Option<Opcode> {
+                static RAW_OPCODE_TO_ENUM: [Option<Opcode>; 256] = $isa_name::RAW_OPCODE_TO_ENUM_CONST;
+                RAW_OPCODE_TO_ENUM[byte as usize]
+            }
+
+            #[cfg_attr(feature = "alloc", inline)]
+            fn opcode_to_u8(self, opcode: Opcode) -> Option<u8> {
+                static OPCODE_DISCRIMINANT_TO_RAW_OPCODE: [u8; 256] = $isa_name::OPCODE_DISCRIMINANT_TO_RAW_OPCODE_CONST;
+                let raw_opcode = OPCODE_DISCRIMINANT_TO_RAW_OPCODE[opcode.discriminant() as usize];
+                if raw_opcode == UNUSED_RAW_OPCODE {
+                    None
+                } else {
+                    Some(raw_opcode)
+                }
+            }
+
+            fn supports_opcode(self, opcode: Opcode) -> bool {
+                match opcode {
+                    $(Opcode::$name_argless => true,)+
+                    $(Opcode::$name_reg_imm => true,)+
+                    $(Opcode::$name_reg_imm_offset => true,)+
+                    $(Opcode::$name_reg_imm_imm => true,)+
+                    $(Opcode::$name_reg_reg_imm => true,)+
+                    $(Opcode::$name_reg_reg_offset => true,)+
+                    $(Opcode::$name_reg_reg_reg => true,)+
+                    $(Opcode::$name_offset => true,)+
+                    $(Opcode::$name_imm => true,)+
+                    $(Opcode::$name_imm_imm => true,)+
+                    $(Opcode::$name_reg_reg => true,)+
+                    $(Opcode::$name_reg_reg_imm_imm => true,)+
+                    $(Opcode::$name_reg_imm64 => true,)*
+                    #[allow(unreachable_patterns)]
+                    _ => false,
+                }
+            }
+
+            fn parse_instruction(self, opcode: usize, chunk: u128, offset: u32, skip: u32) -> Instruction {
                 match opcode {
                     $(
                         $value_argless => Instruction::$name_argless,
@@ -1487,29 +1348,225 @@ macro_rules! define_opcodes {
                             let (reg, imm) = $crate::program::read_args_reg_imm64(chunk, skip);
                             Instruction::$name_reg_imm64(reg, imm)
                         }
-                    )+
+                    )*
                     _ => Instruction::invalid,
                 }
             }
         }
 
-        define_opcodes!(
-            @impl_shared
-            $([$($tag_argless),+] $name_argless = $value_argless,)+
-            $([$($tag_reg_imm),+] $name_reg_imm = $value_reg_imm,)+
-            $([$($tag_reg_imm_offset),+] $name_reg_imm_offset = $value_reg_imm_offset,)+
-            $([$($tag_reg_imm_imm),+] $name_reg_imm_imm = $value_reg_imm_imm,)+
-            $([$($tag_reg_reg_imm),+] $name_reg_reg_imm = $value_reg_reg_imm,)+
-            $([$($tag_reg_reg_offset),+] $name_reg_reg_offset = $value_reg_reg_offset,)+
-            $([$($tag_reg_reg_reg),+] $name_reg_reg_reg = $value_reg_reg_reg,)+
-            $([$($tag_offset),+] $name_offset = $value_offset,)+
-            $([$($tag_imm),+] $name_imm = $value_imm,)+
-            $([$($tag_imm_imm),+] $name_imm_imm = $value_imm_imm,)+
-            $([$($tag_reg_reg),+] $name_reg_reg = $value_reg_reg,)+
-            $([$($tag_reg_reg_imm_imm),+] $name_reg_reg_imm_imm = $value_reg_reg_imm_imm,)+
-            $([$($tag_reg_imm64),+] $name_reg_imm64 = $value_reg_imm64,)+
-        );
-    }
+        #[macro_export]
+        macro_rules! $build_static_dispatch_table {
+            ($table_name:ident, $visitor_ty:ident<$d($visitor_ty_params:tt),*>) => {{
+                use $crate::program::{
+                    ParsingVisitor
+                };
+
+                type ReturnTy<$d($visitor_ty_params),*> = <$visitor_ty<$d($visitor_ty_params),*> as ParsingVisitor>::ReturnTy;
+                type VisitFn<$d($visitor_ty_params),*> = fn(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, args_length: u32);
+
+                #[derive(Copy, Clone)]
+                struct DispatchTable<'a>(&'a [VisitFn<'a>; 257]);
+
+                impl<'a> $crate::program::OpcodeVisitor for DispatchTable<'a> {
+                    type State = $visitor_ty<'a>;
+                    type ReturnTy = ();
+                    type InstructionSet = $crate::program::$isa_name;
+
+                    #[inline]
+                    fn instruction_set(self) -> Self::InstructionSet {
+                        $crate::program::$isa_name
+                    }
+
+                    #[inline]
+                    fn dispatch(self, state: &mut $visitor_ty<'a>, opcode: usize, chunk: u128, offset: u32, skip: u32) {
+                        self.0[opcode](state, chunk, offset, skip)
+                    }
+                }
+
+                static $table_name: [VisitFn; 257] = {
+                    let mut table = [invalid_instruction as VisitFn; 257];
+
+                    $({
+                        // Putting all of the handlers in a single link section can make a big difference
+                        // when it comes to performance, even up to 10% in some cases. This will force the
+                        // compiler and the linker to put all of this code near each other, minimizing
+                        // instruction cache misses.
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_argless<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, _chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            state.$name_argless(instruction_offset, skip)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_argless].is_some() {
+                            table[$value_argless] = $name_argless;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg, imm) = $crate::program::read_args_reg_imm(chunk, skip);
+                            state.$name_reg_imm(instruction_offset, skip, reg, imm)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_imm].is_some() {
+                            table[$value_reg_imm] = $name_reg_imm;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_imm_offset<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg, imm1, imm2) = $crate::program::read_args_reg_imm_offset(chunk, instruction_offset, skip);
+                            state.$name_reg_imm_offset(instruction_offset, skip, reg, imm1, imm2)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_imm_offset].is_some() {
+                            table[$value_reg_imm_offset] = $name_reg_imm_offset;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_imm_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg, imm1, imm2) = $crate::program::read_args_reg_imm2(chunk, skip);
+                            state.$name_reg_imm_imm(instruction_offset, skip, reg, imm1, imm2)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_imm_imm].is_some() {
+                            table[$value_reg_imm_imm] = $name_reg_imm_imm;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_reg_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, imm) = $crate::program::read_args_regs2_imm(chunk, skip);
+                            state.$name_reg_reg_imm(instruction_offset, skip, reg1, reg2, imm)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_reg_imm].is_some() {
+                            table[$value_reg_reg_imm] = $name_reg_reg_imm;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_reg_offset<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, imm) = $crate::program::read_args_regs2_offset(chunk, instruction_offset, skip);
+                            state.$name_reg_reg_offset(instruction_offset, skip, reg1, reg2, imm)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_reg_offset].is_some() {
+                            table[$value_reg_reg_offset] = $name_reg_reg_offset;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_reg_reg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, reg3) = $crate::program::read_args_regs3(chunk);
+                            state.$name_reg_reg_reg(instruction_offset, skip, reg1, reg2, reg3)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_reg_reg].is_some() {
+                            table[$value_reg_reg_reg] = $name_reg_reg_reg;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_offset<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let imm = $crate::program::read_args_offset(chunk, instruction_offset, skip);
+                            state.$name_offset(instruction_offset, skip, imm)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_offset].is_some() {
+                            table[$value_offset] = $name_offset;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let imm = $crate::program::read_args_imm(chunk, skip);
+                            state.$name_imm(instruction_offset, skip, imm)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_imm].is_some() {
+                            table[$value_imm] = $name_imm;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_imm_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (imm1, imm2) = $crate::program::read_args_imm2(chunk, skip);
+                            state.$name_imm_imm(instruction_offset, skip, imm1, imm2)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_imm_imm].is_some() {
+                            table[$value_imm_imm] = $name_imm_imm;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_reg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2) = $crate::program::read_args_regs2(chunk);
+                            state.$name_reg_reg(instruction_offset, skip, reg1, reg2)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_reg].is_some() {
+                            table[$value_reg_reg] = $name_reg_reg;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_reg_imm_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, imm1, imm2) = $crate::program::read_args_regs2_imm2(chunk, skip);
+                            state.$name_reg_reg_imm_imm(instruction_offset, skip, reg1, reg2, imm1, imm2)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_reg_imm_imm].is_some() {
+                            table[$value_reg_reg_imm_imm] = $name_reg_reg_imm_imm;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_imm64<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg, imm) = $crate::program::read_args_reg_imm64(chunk, skip);
+                            state.$name_reg_imm64(instruction_offset, skip, reg, imm)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_imm64].is_some() {
+                            table[$value_reg_imm64] = $name_reg_imm64;
+                        }
+                    })*
+
+                    #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                    #[cold]
+                    fn invalid_instruction<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, _chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                        state.invalid(instruction_offset, skip)
+                    }
+
+                    table
+                };
+
+                #[inline]
+                #[allow(unsafe_code)]
+                // SAFETY: Here we transmute the lifetimes which were unnecessarily extended to be 'static due to the table here being a `static`.
+                fn transmute_lifetime<'a>(table: DispatchTable<'static>) -> DispatchTable<'a> {
+                    unsafe { core::mem::transmute(&$table_name) }
+                }
+
+                transmute_lifetime(DispatchTable(&$table_name))
+            }};
+        }
+
+        pub use $build_static_dispatch_table;
+    };
 }
 
 #[inline]
@@ -1527,210 +1584,759 @@ where
 
 const INVALID_INSTRUCTION_INDEX: u32 = 256;
 
-// Constants so that `define_opcodes` works. The exact values don't matter.
-const I_32: usize = 0;
-const I_64: usize = 1;
-const I_SBRK: usize = 2;
-
-define_opcodes! {
-    $
-
+define_all_instructions! {
     // Instructions with args: none
     [
-        [I_64, I_32] trap                                     = 0,
-        [I_64, I_32] fallthrough                              = 1,
-        [I_64, I_32] memset                                   = 2,
-        [I_64, I_32] unlikely                                 = 3,
+        trap,
+        fallthrough,
+        memset,
+        unlikely,
     ]
 
     // Instructions with args: reg, imm
     [
-        [I_64, I_32] jump_indirect                            = 50,
-        [I_64, I_32] load_imm                                 = 51,
-        [I_64, I_32] load_u8                                  = 52,
-        [I_64, I_32] load_i8                                  = 53,
-        [I_64, I_32] load_u16                                 = 54,
-        [I_64, I_32] load_i16                                 = 55,
-        [I_64, I_32] load_i32                                 = 57,
-        [I_64]       load_u32                                 = 56,
-        [I_64]       load_u64                                 = 58,
-        [I_64, I_32] store_u8                                 = 59,
-        [I_64, I_32] store_u16                                = 60,
-        [I_64, I_32] store_u32                                = 61,
-        [I_64]       store_u64                                = 62,
+        jump_indirect,
+        load_imm,
+        load_u8,
+        load_i8,
+        load_u16,
+        load_i16,
+        load_i32,
+        load_u32,
+        load_u64,
+        store_u8,
+        store_u16,
+        store_u32,
+        store_u64,
     ]
 
     // Instructions with args: reg, imm, offset
     [
-        [I_64, I_32] load_imm_and_jump                        = 80,
-        [I_64, I_32] branch_eq_imm                            = 81,
-        [I_64, I_32] branch_not_eq_imm                        = 82,
-        [I_64, I_32] branch_less_unsigned_imm                 = 83,
-        [I_64, I_32] branch_less_signed_imm                   = 87,
-        [I_64, I_32] branch_greater_or_equal_unsigned_imm     = 85,
-        [I_64, I_32] branch_greater_or_equal_signed_imm       = 89,
-        [I_64, I_32] branch_less_or_equal_signed_imm          = 88,
-        [I_64, I_32] branch_less_or_equal_unsigned_imm        = 84,
-        [I_64, I_32] branch_greater_signed_imm                = 90,
-        [I_64, I_32] branch_greater_unsigned_imm              = 86,
+        load_imm_and_jump,
+        branch_eq_imm,
+        branch_not_eq_imm,
+        branch_less_unsigned_imm,
+        branch_less_signed_imm,
+        branch_greater_or_equal_unsigned_imm,
+        branch_greater_or_equal_signed_imm,
+        branch_less_or_equal_signed_imm,
+        branch_less_or_equal_unsigned_imm,
+        branch_greater_signed_imm,
+        branch_greater_unsigned_imm,
     ]
 
     // Instructions with args: reg, imm, imm
     [
-        [I_64, I_32] store_imm_indirect_u8                    = 70,
-        [I_64, I_32] store_imm_indirect_u16                   = 71,
-        [I_64, I_32] store_imm_indirect_u32                   = 72,
-        [I_64]       store_imm_indirect_u64                   = 73,
+        store_imm_indirect_u8,
+        store_imm_indirect_u16,
+        store_imm_indirect_u32,
+        store_imm_indirect_u64,
     ]
 
     // Instructions with args: reg, reg, imm
     [
-        [I_64, I_32] store_indirect_u8                        = 120,
-        [I_64, I_32] store_indirect_u16                       = 121,
-        [I_64, I_32] store_indirect_u32                       = 122,
-        [I_64]       store_indirect_u64                       = 123,
-        [I_64, I_32] load_indirect_u8                         = 124,
-        [I_64, I_32] load_indirect_i8                         = 125,
-        [I_64, I_32] load_indirect_u16                        = 126,
-        [I_64, I_32] load_indirect_i16                        = 127,
-        [I_64, I_32] load_indirect_i32                        = 129,
-        [I_64]       load_indirect_u32                        = 128,
-        [I_64]       load_indirect_u64                        = 130,
-        [I_64, I_32] add_imm_32                               = 131,
-        [I_64]       add_imm_64                               = 149,
-        [I_64, I_32] and_imm                                  = 132,
-        [I_64, I_32] xor_imm                                  = 133,
-        [I_64, I_32] or_imm                                   = 134,
-        [I_64, I_32] mul_imm_32                               = 135,
-        [I_64]       mul_imm_64                               = 150,
-        [I_64, I_32] set_less_than_unsigned_imm               = 136,
-        [I_64, I_32] set_less_than_signed_imm                 = 137,
-        [I_64, I_32] shift_logical_left_imm_32                = 138,
-        [I_64]       shift_logical_left_imm_64                = 151,
-        [I_64, I_32] shift_logical_right_imm_32               = 139,
-        [I_64]       shift_logical_right_imm_64               = 152,
-        [I_64, I_32] shift_arithmetic_right_imm_32            = 140,
-        [I_64]       shift_arithmetic_right_imm_64            = 153,
-        [I_64, I_32] negate_and_add_imm_32                    = 141,
-        [I_64]       negate_and_add_imm_64                    = 154,
-        [I_64, I_32] set_greater_than_unsigned_imm            = 142,
-        [I_64, I_32] set_greater_than_signed_imm              = 143,
-        [I_64, I_32] shift_logical_right_imm_alt_32           = 145,
-        [I_64]       shift_logical_right_imm_alt_64           = 156,
-        [I_64, I_32] shift_arithmetic_right_imm_alt_32        = 146,
-        [I_64]       shift_arithmetic_right_imm_alt_64        = 157,
-        [I_64, I_32] shift_logical_left_imm_alt_32            = 144,
-        [I_64]       shift_logical_left_imm_alt_64            = 155,
+        store_indirect_u8,
+        store_indirect_u16,
+        store_indirect_u32,
+        store_indirect_u64,
+        load_indirect_u8,
+        load_indirect_i8,
+        load_indirect_u16,
+        load_indirect_i16,
+        load_indirect_i32,
+        load_indirect_u32,
+        load_indirect_u64,
+        add_imm_32,
+        add_imm_64,
+        and_imm,
+        xor_imm,
+        or_imm,
+        mul_imm_32,
+        mul_imm_64,
+        set_less_than_unsigned_imm,
+        set_less_than_signed_imm,
+        shift_logical_left_imm_32,
+        shift_logical_left_imm_64,
+        shift_logical_right_imm_32,
+        shift_logical_right_imm_64,
+        shift_arithmetic_right_imm_32,
+        shift_arithmetic_right_imm_64,
+        negate_and_add_imm_32,
+        negate_and_add_imm_64,
+        set_greater_than_unsigned_imm,
+        set_greater_than_signed_imm,
+        shift_logical_right_imm_alt_32,
+        shift_logical_right_imm_alt_64,
+        shift_arithmetic_right_imm_alt_32,
+        shift_arithmetic_right_imm_alt_64,
+        shift_logical_left_imm_alt_32,
+        shift_logical_left_imm_alt_64,
 
-        [I_64, I_32] cmov_if_zero_imm                         = 147,
-        [I_64, I_32] cmov_if_not_zero_imm                     = 148,
+        cmov_if_zero_imm,
+        cmov_if_not_zero_imm,
 
-        [I_64, I_32] rotate_right_imm_32                      = 160,
-        [I_64, I_32] rotate_right_imm_alt_32                  = 161,
-        [I_64]       rotate_right_imm_64                      = 158,
-        [I_64]       rotate_right_imm_alt_64                  = 159,
+        rotate_right_imm_32,
+        rotate_right_imm_alt_32,
+        rotate_right_imm_64,
+        rotate_right_imm_alt_64,
     ]
 
     // Instructions with args: reg, reg, offset
     [
-        [I_64, I_32] branch_eq                                = 170,
-        [I_64, I_32] branch_not_eq                            = 171,
-        [I_64, I_32] branch_less_unsigned                     = 172,
-        [I_64, I_32] branch_less_signed                       = 173,
-        [I_64, I_32] branch_greater_or_equal_unsigned         = 174,
-        [I_64, I_32] branch_greater_or_equal_signed           = 175,
+        branch_eq,
+        branch_not_eq,
+        branch_less_unsigned,
+        branch_less_signed,
+        branch_greater_or_equal_unsigned,
+        branch_greater_or_equal_signed,
     ]
 
     // Instructions with args: reg, reg, reg
     [
-        [I_64, I_32] add_32                                   = 190,
-        [I_64]       add_64                                   = 200,
-        [I_64, I_32] sub_32                                   = 191,
-        [I_64]       sub_64                                   = 201,
-        [I_64, I_32] and                                      = 210,
-        [I_64, I_32] xor                                      = 211,
-        [I_64, I_32] or                                       = 212,
-        [I_64, I_32] mul_32                                   = 192,
-        [I_64]       mul_64                                   = 202,
-        [I_32, I_64] mul_upper_signed_signed                  = 213,
-        [I_32, I_64] mul_upper_unsigned_unsigned              = 214,
-        [I_32, I_64] mul_upper_signed_unsigned                = 215,
-        [I_64, I_32] set_less_than_unsigned                   = 216,
-        [I_64, I_32] set_less_than_signed                     = 217,
-        [I_64, I_32] shift_logical_left_32                    = 197,
-        [I_64]       shift_logical_left_64                    = 207,
-        [I_64, I_32] shift_logical_right_32                   = 198,
-        [I_64]       shift_logical_right_64                   = 208,
-        [I_64, I_32] shift_arithmetic_right_32                = 199,
-        [I_64]       shift_arithmetic_right_64                = 209,
-        [I_64, I_32] div_unsigned_32                          = 193,
-        [I_64]       div_unsigned_64                          = 203,
-        [I_64, I_32] div_signed_32                            = 194,
-        [I_64]       div_signed_64                            = 204,
-        [I_64, I_32] rem_unsigned_32                          = 195,
-        [I_64]       rem_unsigned_64                          = 205,
-        [I_64, I_32] rem_signed_32                            = 196,
-        [I_64]       rem_signed_64                            = 206,
+        add_32,
+        add_64,
+        sub_32,
+        sub_64,
+        and,
+        xor,
+        or,
+        mul_32,
+        mul_64,
+        mul_upper_signed_signed,
+        mul_upper_unsigned_unsigned,
+        mul_upper_signed_unsigned,
+        set_less_than_unsigned,
+        set_less_than_signed,
+        shift_logical_left_32,
+        shift_logical_left_64,
+        shift_logical_right_32,
+        shift_logical_right_64,
+        shift_arithmetic_right_32,
+        shift_arithmetic_right_64,
+        div_unsigned_32,
+        div_unsigned_64,
+        div_signed_32,
+        div_signed_64,
+        rem_unsigned_32,
+        rem_unsigned_64,
+        rem_signed_32,
+        rem_signed_64,
 
-        [I_64, I_32] cmov_if_zero                             = 218,
-        [I_64, I_32] cmov_if_not_zero                         = 219,
+        cmov_if_zero,
+        cmov_if_not_zero,
 
-        [I_64, I_32] and_inverted                             = 224,
-        [I_64, I_32] or_inverted                              = 225,
-        [I_64, I_32] xnor                                     = 226,
-        [I_64, I_32] maximum                                  = 227,
-        [I_64, I_32] maximum_unsigned                         = 228,
-        [I_64, I_32] minimum                                  = 229,
-        [I_64, I_32] minimum_unsigned                         = 230,
-        [I_64, I_32] rotate_left_32                           = 221,
-        [I_64]       rotate_left_64                           = 220,
-        [I_64, I_32] rotate_right_32                          = 223,
-        [I_64]       rotate_right_64                          = 222,
+        and_inverted,
+        or_inverted,
+        xnor,
+        maximum,
+        maximum_unsigned,
+        minimum,
+        minimum_unsigned,
+        rotate_left_32,
+        rotate_left_64,
+        rotate_right_32,
+        rotate_right_64,
     ]
 
     // Instructions with args: offset
     [
-        [I_64, I_32] jump                                     = 40,
+        jump,
     ]
 
     // Instructions with args: imm
     [
-        [I_64, I_32] ecalli                                   = 10,
+        ecalli,
     ]
 
     // Instructions with args: imm, imm
     [
-        [I_64, I_32] store_imm_u8                             = 30,
-        [I_64, I_32] store_imm_u16                            = 31,
-        [I_64, I_32] store_imm_u32                            = 32,
-        [I_64]       store_imm_u64                            = 33,
+        store_imm_u8,
+        store_imm_u16,
+        store_imm_u32,
+        store_imm_u64,
     ]
 
     // Instructions with args: reg, reg
     [
-        [I_64, I_32] move_reg                                 = 100,
-        [I_SBRK]     sbrk                                     = 101,
-        [I_64, I_32] count_leading_zero_bits_32               = 105,
-        [I_64]       count_leading_zero_bits_64               = 104,
-        [I_64, I_32] count_trailing_zero_bits_32              = 107,
-        [I_64]       count_trailing_zero_bits_64              = 106,
-        [I_64, I_32] count_set_bits_32                        = 103,
-        [I_64]       count_set_bits_64                        = 102,
-        [I_64, I_32] sign_extend_8                            = 108,
-        [I_64, I_32] sign_extend_16                           = 109,
-        [I_64, I_32] zero_extend_16                           = 110,
-        [I_64, I_32] reverse_byte                             = 111,
+        move_reg,
+        sbrk,
+        count_leading_zero_bits_32,
+        count_leading_zero_bits_64,
+        count_trailing_zero_bits_32,
+        count_trailing_zero_bits_64,
+        count_set_bits_32,
+        count_set_bits_64,
+        sign_extend_8,
+        sign_extend_16,
+        zero_extend_16,
+        reverse_byte,
     ]
 
     // Instructions with args: reg, reg, imm, imm
     [
-        [I_64, I_32] load_imm_and_jump_indirect               = 180,
+        load_imm_and_jump_indirect,
     ]
 
     // Instruction with args: reg, imm64
     [
-        [I_64] load_imm64                                     = 20,
+        load_imm64,
     ]
+}
+
+define_instruction_set! {
+    ($)
+
+    ISA_ReviveV1,
+    build_static_dispatch_table_revive_v1,
+
+    [
+        trap                                     = 0,
+        fallthrough                              = 1,
+        // MISSING: memset
+        // MISSING: unlikely
+    ]
+    [
+        jump_indirect                            = 50,
+        load_imm                                 = 51,
+        load_u8                                  = 52,
+        load_i8                                  = 53,
+        load_u16                                 = 54,
+        load_i16                                 = 55,
+        load_i32                                 = 57,
+        load_u32                                 = 56,
+        load_u64                                 = 58,
+        store_u8                                 = 59,
+        store_u16                                = 60,
+        store_u32                                = 61,
+        store_u64                                = 62,
+    ]
+    [
+        load_imm_and_jump                        = 80,
+        branch_eq_imm                            = 81,
+        branch_not_eq_imm                        = 82,
+        branch_less_unsigned_imm                 = 83,
+        branch_less_signed_imm                   = 87,
+        branch_greater_or_equal_unsigned_imm     = 85,
+        branch_greater_or_equal_signed_imm       = 89,
+        branch_less_or_equal_signed_imm          = 88,
+        branch_less_or_equal_unsigned_imm        = 84,
+        branch_greater_signed_imm                = 90,
+        branch_greater_unsigned_imm              = 86,
+    ]
+    [
+        store_imm_indirect_u8                    = 70,
+        store_imm_indirect_u16                   = 71,
+        store_imm_indirect_u32                   = 72,
+        store_imm_indirect_u64                   = 73,
+    ]
+    [
+        store_indirect_u8                        = 120,
+        store_indirect_u16                       = 121,
+        store_indirect_u32                       = 122,
+        store_indirect_u64                       = 123,
+        load_indirect_u8                         = 124,
+        load_indirect_i8                         = 125,
+        load_indirect_u16                        = 126,
+        load_indirect_i16                        = 127,
+        load_indirect_i32                        = 129,
+        load_indirect_u32                        = 128,
+        load_indirect_u64                        = 130,
+        add_imm_32                               = 131,
+        add_imm_64                               = 149,
+        and_imm                                  = 132,
+        xor_imm                                  = 133,
+        or_imm                                   = 134,
+        mul_imm_32                               = 135,
+        mul_imm_64                               = 150,
+        set_less_than_unsigned_imm               = 136,
+        set_less_than_signed_imm                 = 137,
+        shift_logical_left_imm_32                = 138,
+        shift_logical_left_imm_64                = 151,
+        shift_logical_right_imm_32               = 139,
+        shift_logical_right_imm_64               = 152,
+        shift_arithmetic_right_imm_32            = 140,
+        shift_arithmetic_right_imm_64            = 153,
+        negate_and_add_imm_32                    = 141,
+        negate_and_add_imm_64                    = 154,
+        set_greater_than_unsigned_imm            = 142,
+        set_greater_than_signed_imm              = 143,
+        shift_logical_right_imm_alt_32           = 145,
+        shift_logical_right_imm_alt_64           = 156,
+        shift_arithmetic_right_imm_alt_32        = 146,
+        shift_arithmetic_right_imm_alt_64        = 157,
+        shift_logical_left_imm_alt_32            = 144,
+        shift_logical_left_imm_alt_64            = 155,
+        cmov_if_zero_imm                         = 147,
+        cmov_if_not_zero_imm                     = 148,
+        rotate_right_imm_32                      = 160,
+        rotate_right_imm_alt_32                  = 161,
+        rotate_right_imm_64                      = 158,
+        rotate_right_imm_alt_64                  = 159,
+    ]
+    [
+        branch_eq                                = 170,
+        branch_not_eq                            = 171,
+        branch_less_unsigned                     = 172,
+        branch_less_signed                       = 173,
+        branch_greater_or_equal_unsigned         = 174,
+        branch_greater_or_equal_signed           = 175,
+    ]
+    [
+        add_32                                   = 190,
+        add_64                                   = 200,
+        sub_32                                   = 191,
+        sub_64                                   = 201,
+        and                                      = 210,
+        xor                                      = 211,
+        or                                       = 212,
+        mul_32                                   = 192,
+        mul_64                                   = 202,
+        mul_upper_signed_signed                  = 213,
+        mul_upper_unsigned_unsigned              = 214,
+        mul_upper_signed_unsigned                = 215,
+        set_less_than_unsigned                   = 216,
+        set_less_than_signed                     = 217,
+        shift_logical_left_32                    = 197,
+        shift_logical_left_64                    = 207,
+        shift_logical_right_32                   = 198,
+        shift_logical_right_64                   = 208,
+        shift_arithmetic_right_32                = 199,
+        shift_arithmetic_right_64                = 209,
+        div_unsigned_32                          = 193,
+        div_unsigned_64                          = 203,
+        div_signed_32                            = 194,
+        div_signed_64                            = 204,
+        rem_unsigned_32                          = 195,
+        rem_unsigned_64                          = 205,
+        rem_signed_32                            = 196,
+        rem_signed_64                            = 206,
+        cmov_if_zero                             = 218,
+        cmov_if_not_zero                         = 219,
+        and_inverted                             = 224,
+        or_inverted                              = 225,
+        xnor                                     = 226,
+        maximum                                  = 227,
+        maximum_unsigned                         = 228,
+        minimum                                  = 229,
+        minimum_unsigned                         = 230,
+        rotate_left_32                           = 221,
+        rotate_left_64                           = 220,
+        rotate_right_32                          = 223,
+        rotate_right_64                          = 222,
+    ]
+    [
+        jump                                     = 40,
+    ]
+    [
+        ecalli                                   = 10,
+    ]
+    [
+        store_imm_u8                             = 30,
+        store_imm_u16                            = 31,
+        store_imm_u32                            = 32,
+        store_imm_u64                            = 33,
+    ]
+    [
+        move_reg                                 = 100,
+        count_leading_zero_bits_32               = 105,
+        count_leading_zero_bits_64               = 104,
+        count_trailing_zero_bits_32              = 107,
+        count_trailing_zero_bits_64              = 106,
+        count_set_bits_32                        = 103,
+        count_set_bits_64                        = 102,
+        sign_extend_8                            = 108,
+        sign_extend_16                           = 109,
+        zero_extend_16                           = 110,
+        reverse_byte                             = 111,
+    ]
+    [
+        load_imm_and_jump_indirect               = 180,
+    ]
+    [
+        load_imm64                               = 20,
+    ]
+}
+
+define_instruction_set! {
+    ($)
+
+    ISA_Latest32,
+    build_static_dispatch_table_latest32,
+
+    [
+        trap                                     = 0,
+        fallthrough                              = 1,
+        memset                                   = 2,
+        unlikely                                 = 3,
+    ]
+    [
+        jump_indirect                            = 50,
+        load_imm                                 = 51,
+        load_u8                                  = 52,
+        load_i8                                  = 53,
+        load_u16                                 = 54,
+        load_i16                                 = 55,
+        load_i32                                 = 57,
+        store_u8                                 = 59,
+        store_u16                                = 60,
+        store_u32                                = 61,
+    ]
+    [
+        load_imm_and_jump                        = 80,
+        branch_eq_imm                            = 81,
+        branch_not_eq_imm                        = 82,
+        branch_less_unsigned_imm                 = 83,
+        branch_less_signed_imm                   = 87,
+        branch_greater_or_equal_unsigned_imm     = 85,
+        branch_greater_or_equal_signed_imm       = 89,
+        branch_less_or_equal_signed_imm          = 88,
+        branch_less_or_equal_unsigned_imm        = 84,
+        branch_greater_signed_imm                = 90,
+        branch_greater_unsigned_imm              = 86,
+    ]
+    [
+        store_imm_indirect_u8                    = 70,
+        store_imm_indirect_u16                   = 71,
+        store_imm_indirect_u32                   = 72,
+    ]
+    [
+        store_indirect_u8                        = 120,
+        store_indirect_u16                       = 121,
+        store_indirect_u32                       = 122,
+        load_indirect_u8                         = 124,
+        load_indirect_i8                         = 125,
+        load_indirect_u16                        = 126,
+        load_indirect_i16                        = 127,
+        load_indirect_i32                        = 129,
+        add_imm_32                               = 131,
+        and_imm                                  = 132,
+        xor_imm                                  = 133,
+        or_imm                                   = 134,
+        mul_imm_32                               = 135,
+        set_less_than_unsigned_imm               = 136,
+        set_less_than_signed_imm                 = 137,
+        shift_logical_left_imm_32                = 138,
+        shift_logical_right_imm_32               = 139,
+        shift_arithmetic_right_imm_32            = 140,
+        negate_and_add_imm_32                    = 141,
+        set_greater_than_unsigned_imm            = 142,
+        set_greater_than_signed_imm              = 143,
+        shift_logical_right_imm_alt_32           = 145,
+        shift_arithmetic_right_imm_alt_32        = 146,
+        shift_logical_left_imm_alt_32            = 144,
+        cmov_if_zero_imm                         = 147,
+        cmov_if_not_zero_imm                     = 148,
+        rotate_right_imm_32                      = 160,
+        rotate_right_imm_alt_32                  = 161,
+    ]
+    [
+        branch_eq                                = 170,
+        branch_not_eq                            = 171,
+        branch_less_unsigned                     = 172,
+        branch_less_signed                       = 173,
+        branch_greater_or_equal_unsigned         = 174,
+        branch_greater_or_equal_signed           = 175,
+    ]
+    [
+        add_32                                   = 190,
+        sub_32                                   = 191,
+        and                                      = 210,
+        xor                                      = 211,
+        or                                       = 212,
+        mul_32                                   = 192,
+        mul_upper_signed_signed                  = 213,
+        mul_upper_unsigned_unsigned              = 214,
+        mul_upper_signed_unsigned                = 215,
+        set_less_than_unsigned                   = 216,
+        set_less_than_signed                     = 217,
+        shift_logical_left_32                    = 197,
+        shift_logical_right_32                   = 198,
+        shift_arithmetic_right_32                = 199,
+        div_unsigned_32                          = 193,
+        div_signed_32                            = 194,
+        rem_unsigned_32                          = 195,
+        rem_signed_32                            = 196,
+        cmov_if_zero                             = 218,
+        cmov_if_not_zero                         = 219,
+        and_inverted                             = 224,
+        or_inverted                              = 225,
+        xnor                                     = 226,
+        maximum                                  = 227,
+        maximum_unsigned                         = 228,
+        minimum                                  = 229,
+        minimum_unsigned                         = 230,
+        rotate_left_32                           = 221,
+        rotate_right_32                          = 223,
+    ]
+    [
+        jump                                     = 40,
+    ]
+    [
+        ecalli                                   = 10,
+    ]
+    [
+        store_imm_u8                             = 30,
+        store_imm_u16                            = 31,
+        store_imm_u32                            = 32,
+    ]
+    [
+        move_reg                                 = 100,
+        sbrk                                     = 101,
+        count_leading_zero_bits_32               = 105,
+        count_trailing_zero_bits_32              = 107,
+        count_set_bits_32                        = 103,
+        sign_extend_8                            = 108,
+        sign_extend_16                           = 109,
+        zero_extend_16                           = 110,
+        reverse_byte                             = 111,
+    ]
+    [
+        load_imm_and_jump_indirect               = 180,
+    ]
+    [
+    ]
+}
+
+define_instruction_set! {
+    ($)
+
+    ISA_Latest64,
+    build_static_dispatch_table_latest64,
+
+    [
+        trap                                     = 0,
+        fallthrough                              = 1,
+        memset                                   = 2,
+        unlikely                                 = 3,
+    ]
+    [
+        jump_indirect                            = 50,
+        load_imm                                 = 51,
+        load_u8                                  = 52,
+        load_i8                                  = 53,
+        load_u16                                 = 54,
+        load_i16                                 = 55,
+        load_i32                                 = 57,
+        load_u32                                 = 56,
+        load_u64                                 = 58,
+        store_u8                                 = 59,
+        store_u16                                = 60,
+        store_u32                                = 61,
+        store_u64                                = 62,
+    ]
+    [
+        load_imm_and_jump                        = 80,
+        branch_eq_imm                            = 81,
+        branch_not_eq_imm                        = 82,
+        branch_less_unsigned_imm                 = 83,
+        branch_less_signed_imm                   = 87,
+        branch_greater_or_equal_unsigned_imm     = 85,
+        branch_greater_or_equal_signed_imm       = 89,
+        branch_less_or_equal_signed_imm          = 88,
+        branch_less_or_equal_unsigned_imm        = 84,
+        branch_greater_signed_imm                = 90,
+        branch_greater_unsigned_imm              = 86,
+    ]
+    [
+        store_imm_indirect_u8                    = 70,
+        store_imm_indirect_u16                   = 71,
+        store_imm_indirect_u32                   = 72,
+        store_imm_indirect_u64                   = 73,
+    ]
+    [
+        store_indirect_u8                        = 120,
+        store_indirect_u16                       = 121,
+        store_indirect_u32                       = 122,
+        store_indirect_u64                       = 123,
+        load_indirect_u8                         = 124,
+        load_indirect_i8                         = 125,
+        load_indirect_u16                        = 126,
+        load_indirect_i16                        = 127,
+        load_indirect_i32                        = 129,
+        load_indirect_u32                        = 128,
+        load_indirect_u64                        = 130,
+        add_imm_32                               = 131,
+        add_imm_64                               = 149,
+        and_imm                                  = 132,
+        xor_imm                                  = 133,
+        or_imm                                   = 134,
+        mul_imm_32                               = 135,
+        mul_imm_64                               = 150,
+        set_less_than_unsigned_imm               = 136,
+        set_less_than_signed_imm                 = 137,
+        shift_logical_left_imm_32                = 138,
+        shift_logical_left_imm_64                = 151,
+        shift_logical_right_imm_32               = 139,
+        shift_logical_right_imm_64               = 152,
+        shift_arithmetic_right_imm_32            = 140,
+        shift_arithmetic_right_imm_64            = 153,
+        negate_and_add_imm_32                    = 141,
+        negate_and_add_imm_64                    = 154,
+        set_greater_than_unsigned_imm            = 142,
+        set_greater_than_signed_imm              = 143,
+        shift_logical_right_imm_alt_32           = 145,
+        shift_logical_right_imm_alt_64           = 156,
+        shift_arithmetic_right_imm_alt_32        = 146,
+        shift_arithmetic_right_imm_alt_64        = 157,
+        shift_logical_left_imm_alt_32            = 144,
+        shift_logical_left_imm_alt_64            = 155,
+        cmov_if_zero_imm                         = 147,
+        cmov_if_not_zero_imm                     = 148,
+        rotate_right_imm_32                      = 160,
+        rotate_right_imm_alt_32                  = 161,
+        rotate_right_imm_64                      = 158,
+        rotate_right_imm_alt_64                  = 159,
+    ]
+    [
+        branch_eq                                = 170,
+        branch_not_eq                            = 171,
+        branch_less_unsigned                     = 172,
+        branch_less_signed                       = 173,
+        branch_greater_or_equal_unsigned         = 174,
+        branch_greater_or_equal_signed           = 175,
+    ]
+    [
+        add_32                                   = 190,
+        add_64                                   = 200,
+        sub_32                                   = 191,
+        sub_64                                   = 201,
+        and                                      = 210,
+        xor                                      = 211,
+        or                                       = 212,
+        mul_32                                   = 192,
+        mul_64                                   = 202,
+        mul_upper_signed_signed                  = 213,
+        mul_upper_unsigned_unsigned              = 214,
+        mul_upper_signed_unsigned                = 215,
+        set_less_than_unsigned                   = 216,
+        set_less_than_signed                     = 217,
+        shift_logical_left_32                    = 197,
+        shift_logical_left_64                    = 207,
+        shift_logical_right_32                   = 198,
+        shift_logical_right_64                   = 208,
+        shift_arithmetic_right_32                = 199,
+        shift_arithmetic_right_64                = 209,
+        div_unsigned_32                          = 193,
+        div_unsigned_64                          = 203,
+        div_signed_32                            = 194,
+        div_signed_64                            = 204,
+        rem_unsigned_32                          = 195,
+        rem_unsigned_64                          = 205,
+        rem_signed_32                            = 196,
+        rem_signed_64                            = 206,
+        cmov_if_zero                             = 218,
+        cmov_if_not_zero                         = 219,
+        and_inverted                             = 224,
+        or_inverted                              = 225,
+        xnor                                     = 226,
+        maximum                                  = 227,
+        maximum_unsigned                         = 228,
+        minimum                                  = 229,
+        minimum_unsigned                         = 230,
+        rotate_left_32                           = 221,
+        rotate_left_64                           = 220,
+        rotate_right_32                          = 223,
+        rotate_right_64                          = 222,
+    ]
+    [
+        jump                                     = 40,
+    ]
+    [
+        ecalli                                   = 10,
+    ]
+    [
+        store_imm_u8                             = 30,
+        store_imm_u16                            = 31,
+        store_imm_u32                            = 32,
+        store_imm_u64                            = 33,
+    ]
+    [
+        move_reg                                 = 100,
+        sbrk                                     = 101,
+        count_leading_zero_bits_32               = 105,
+        count_leading_zero_bits_64               = 104,
+        count_trailing_zero_bits_32              = 107,
+        count_trailing_zero_bits_64              = 106,
+        count_set_bits_32                        = 103,
+        count_set_bits_64                        = 102,
+        sign_extend_8                            = 108,
+        sign_extend_16                           = 109,
+        zero_extend_16                           = 110,
+        reverse_byte                             = 111,
+    ]
+    [
+        load_imm_and_jump_indirect               = 180,
+    ]
+    [
+        load_imm64                               = 20,
+    ]
+}
+
+#[test]
+fn test_opcode_from_u8() {
+    assert_eq!(ISA_Latest64.opcode_from_u8(3), Some(Opcode::unlikely));
+    assert_eq!(ISA_ReviveV1.opcode_from_u8(3), None);
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum InstructionSetKind {
+    ReviveV1,
+    Latest32,
+    Latest64,
+}
+
+impl InstructionSetKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ReviveV1 => "revive_v1",
+            Self::Latest32 => "latest32",
+            Self::Latest64 => "latest64",
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    pub(crate) fn blob_version(self) -> u8 {
+        match self {
+            Self::ReviveV1 => 0,
+            Self::Latest32 => 1,
+            Self::Latest64 => 2,
+        }
+    }
+
+    pub(crate) fn from_blob_version(version: u8) -> Option<Self> {
+        match version {
+            0 => Some(Self::ReviveV1),
+            1 => Some(Self::Latest32),
+            2 => Some(Self::Latest64),
+            _ => None,
+        }
+    }
+}
+
+impl InstructionSet for InstructionSetKind {
+    fn opcode_from_u8(self, byte: u8) -> Option<Opcode> {
+        match self {
+            Self::ReviveV1 => ISA_ReviveV1.opcode_from_u8(byte),
+            Self::Latest32 => ISA_Latest32.opcode_from_u8(byte),
+            Self::Latest64 => ISA_Latest64.opcode_from_u8(byte),
+        }
+    }
+
+    fn opcode_to_u8(self, opcode: Opcode) -> Option<u8> {
+        match self {
+            Self::ReviveV1 => ISA_ReviveV1.opcode_to_u8(opcode),
+            Self::Latest32 => ISA_Latest32.opcode_to_u8(opcode),
+            Self::Latest64 => ISA_Latest64.opcode_to_u8(opcode),
+        }
+    }
+
+    fn parse_instruction(self, opcode: usize, chunk: u128, offset: u32, skip: u32) -> Instruction {
+        match self {
+            Self::ReviveV1 => ISA_ReviveV1.parse_instruction(opcode, chunk, offset, skip),
+            Self::Latest32 => ISA_Latest32.parse_instruction(opcode, chunk, offset, skip),
+            Self::Latest64 => ISA_Latest64.parse_instruction(opcode, chunk, offset, skip),
+        }
+    }
 }
 
 impl Opcode {
@@ -1799,14 +2405,14 @@ impl Instruction {
         self.opcode().starts_new_basic_block()
     }
 
-    fn serialize_argless(buffer: &mut [u8], opcode: Opcode) -> usize {
-        buffer[0] = opcode as u8;
+    fn serialize_argless(buffer: &mut [u8], opcode: u8) -> usize {
+        buffer[0] = opcode;
         1
     }
 
-    fn serialize_reg_imm_offset(buffer: &mut [u8], position: u32, opcode: Opcode, reg: RawReg, imm1: u32, imm2: u32) -> usize {
+    fn serialize_reg_imm_offset(buffer: &mut [u8], position: u32, opcode: u8, reg: RawReg, imm1: u32, imm2: u32) -> usize {
         let imm2 = imm2.wrapping_sub(position);
-        buffer[0] = opcode as u8;
+        buffer[0] = opcode;
         let mut position = 2;
         let imm1_length = write_simple_varint(imm1, &mut buffer[position..]);
         position += imm1_length;
@@ -1815,8 +2421,8 @@ impl Instruction {
         position
     }
 
-    fn serialize_reg_imm_imm(buffer: &mut [u8], opcode: Opcode, reg: RawReg, imm1: u32, imm2: u32) -> usize {
-        buffer[0] = opcode as u8;
+    fn serialize_reg_imm_imm(buffer: &mut [u8], opcode: u8, reg: RawReg, imm1: u32, imm2: u32) -> usize {
+        buffer[0] = opcode;
         let mut position = 2;
         let imm1_length = write_simple_varint(imm1, &mut buffer[position..]);
         position += imm1_length;
@@ -1824,8 +2430,8 @@ impl Instruction {
         position += write_simple_varint(imm2, &mut buffer[position..]);
         position
     }
-    fn serialize_reg_reg_imm_imm(buffer: &mut [u8], opcode: Opcode, reg1: RawReg, reg2: RawReg, imm1: u32, imm2: u32) -> usize {
-        buffer[0] = opcode as u8;
+    fn serialize_reg_reg_imm_imm(buffer: &mut [u8], opcode: u8, reg1: RawReg, reg2: RawReg, imm1: u32, imm2: u32) -> usize {
+        buffer[0] = opcode;
         buffer[1] = reg1.0 as u8 | (reg2.0 as u8) << 4;
         let mut position = 3;
         let imm1_length = write_simple_varint(imm1, &mut buffer[position..]);
@@ -1835,52 +2441,52 @@ impl Instruction {
         position
     }
 
-    fn serialize_reg_imm64(buffer: &mut [u8], opcode: Opcode, reg: RawReg, imm: u64) -> usize {
-        buffer[0] = opcode as u8;
+    fn serialize_reg_imm64(buffer: &mut [u8], opcode: u8, reg: RawReg, imm: u64) -> usize {
+        buffer[0] = opcode;
         buffer[1] = reg.0 as u8;
         buffer[2..10].copy_from_slice(&imm.to_le_bytes());
         10
     }
 
-    fn serialize_reg_reg_reg(buffer: &mut [u8], opcode: Opcode, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> usize {
-        buffer[0] = opcode as u8;
+    fn serialize_reg_reg_reg(buffer: &mut [u8], opcode: u8, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> usize {
+        buffer[0] = opcode;
         buffer[1] = reg2.0 as u8 | (reg3.0 as u8) << 4;
         buffer[2] = reg1.0 as u8;
         3
     }
 
-    fn serialize_reg_reg_imm(buffer: &mut [u8], opcode: Opcode, reg1: RawReg, reg2: RawReg, imm: u32) -> usize {
-        buffer[0] = opcode as u8;
+    fn serialize_reg_reg_imm(buffer: &mut [u8], opcode: u8, reg1: RawReg, reg2: RawReg, imm: u32) -> usize {
+        buffer[0] = opcode;
         buffer[1] = reg1.0 as u8 | (reg2.0 as u8) << 4;
         write_simple_varint(imm, &mut buffer[2..]) + 2
     }
 
-    fn serialize_reg_reg_offset(buffer: &mut [u8], position: u32, opcode: Opcode, reg1: RawReg, reg2: RawReg, imm: u32) -> usize {
+    fn serialize_reg_reg_offset(buffer: &mut [u8], position: u32, opcode: u8, reg1: RawReg, reg2: RawReg, imm: u32) -> usize {
         let imm = imm.wrapping_sub(position);
-        buffer[0] = opcode as u8;
+        buffer[0] = opcode;
         buffer[1] = reg1.0 as u8 | (reg2.0 as u8) << 4;
         write_simple_varint(imm, &mut buffer[2..]) + 2
     }
 
-    fn serialize_reg_imm(buffer: &mut [u8], opcode: Opcode, reg: RawReg, imm: u32) -> usize {
-        buffer[0] = opcode as u8;
+    fn serialize_reg_imm(buffer: &mut [u8], opcode: u8, reg: RawReg, imm: u32) -> usize {
+        buffer[0] = opcode;
         buffer[1] = reg.0 as u8;
         write_simple_varint(imm, &mut buffer[2..]) + 2
     }
 
-    fn serialize_offset(buffer: &mut [u8], position: u32, opcode: Opcode, imm: u32) -> usize {
+    fn serialize_offset(buffer: &mut [u8], position: u32, opcode: u8, imm: u32) -> usize {
         let imm = imm.wrapping_sub(position);
-        buffer[0] = opcode as u8;
+        buffer[0] = opcode;
         write_simple_varint(imm, &mut buffer[1..]) + 1
     }
 
-    fn serialize_imm(buffer: &mut [u8], opcode: Opcode, imm: u32) -> usize {
-        buffer[0] = opcode as u8;
+    fn serialize_imm(buffer: &mut [u8], opcode: u8, imm: u32) -> usize {
+        buffer[0] = opcode;
         write_simple_varint(imm, &mut buffer[1..]) + 1
     }
 
-    fn serialize_imm_imm(buffer: &mut [u8], opcode: Opcode, imm1: u32, imm2: u32) -> usize {
-        buffer[0] = opcode as u8;
+    fn serialize_imm_imm(buffer: &mut [u8], opcode: u8, imm1: u32, imm2: u32) -> usize {
+        buffer[0] = opcode;
         let mut position = 2;
         let imm1_length = write_simple_varint(imm1, &mut buffer[position..]);
         buffer[1] = imm1_length as u8;
@@ -1889,8 +2495,8 @@ impl Instruction {
         position
     }
 
-    fn serialize_reg_reg(buffer: &mut [u8], opcode: Opcode, reg1: RawReg, reg2: RawReg) -> usize {
-        buffer[0] = opcode as u8;
+    fn serialize_reg_reg(buffer: &mut [u8], opcode: u8, reg1: RawReg, reg2: RawReg) -> usize {
+        buffer[0] = opcode;
         buffer[1] = reg1.0 as u8 | (reg2.0 as u8) << 4;
         2
     }
@@ -3284,12 +3890,12 @@ where
 }
 
 /// A partially deserialized PolkaVM program.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ProgramBlob {
     #[cfg(feature = "unique-id")]
     unique_id: u64,
 
-    is_64_bit: bool,
+    isa: InstructionSetKind,
 
     ro_data_size: u32,
     rw_data_size: u32,
@@ -3623,25 +4229,14 @@ fn test_get_previous_instruction_skip() {
 
 pub trait InstructionSet: Copy {
     fn opcode_from_u8(self, byte: u8) -> Option<Opcode>;
+    fn opcode_to_u8(self, opcode: Opcode) -> Option<u8>;
+    fn parse_instruction(self, opcode: usize, chunk: u128, offset: u32, skip: u32) -> Instruction;
+
+    #[inline]
+    fn supports_opcode(self, opcode: Opcode) -> bool {
+        self.opcode_to_u8(opcode).is_some()
+    }
 }
-
-#[allow(non_camel_case_types)]
-#[derive(Copy, Clone, Debug, Default)]
-pub struct ISA32_V1;
-
-#[allow(non_camel_case_types)]
-#[derive(Copy, Clone, Debug, Default)]
-pub struct ISA32_V1_NoSbrk;
-
-#[allow(non_camel_case_types)]
-#[derive(Copy, Clone, Debug, Default)]
-pub struct ISA64_V1;
-
-#[allow(non_camel_case_types)]
-#[derive(Copy, Clone, Debug, Default)]
-pub struct ISA64_V1_NoSbrk;
-
-pub type DefaultInstructionSet = ISA32_V1;
 
 /// Returns whether a jump to a given `offset` is allowed.
 #[inline]
@@ -3711,6 +4306,9 @@ where
     }
 }
 
+#[cfg(test)]
+type DefaultInstructionSet = ISA_Latest32;
+
 #[test]
 fn test_is_jump_target_valid() {
     fn assert_get_previous_instruction_skip_matches_instruction_parser(code: &[u8], bitmask: &[u8]) {
@@ -3751,6 +4349,9 @@ fn test_is_jump_target_valid() {
         }
     }
 
+    let opcode_load_imm = ISA_Latest64.opcode_to_u8(Opcode::load_imm).unwrap();
+    let opcode_trap = ISA_Latest64.opcode_to_u8(Opcode::trap).unwrap();
+
     macro_rules! g {
         ($code_length:expr, $bits:expr) => {{
             let mut bitmask = [0; {
@@ -3763,7 +4364,7 @@ fn test_is_jump_target_valid() {
                 bitmask[bit / 8] |= (1 << (bit % 8));
             }
 
-            let code = [Opcode::trap as u8; $code_length];
+            let code = [opcode_trap; $code_length];
             assert_get_previous_instruction_skip_matches_instruction_parser(&code, &bitmask);
             (code, bitmask)
         }};
@@ -3803,21 +4404,21 @@ fn test_is_jump_target_valid() {
 
     assert!(is_jump_target_valid(
         DefaultInstructionSet::default(),
-        &[Opcode::load_imm as u8],
+        &[opcode_load_imm],
         &[0b00000001],
         0
     ));
 
     assert!(!is_jump_target_valid(
         DefaultInstructionSet::default(),
-        &[Opcode::load_imm as u8, Opcode::load_imm as u8],
+        &[opcode_load_imm, opcode_load_imm],
         &[0b00000011],
         1
     ));
 
     assert!(is_jump_target_valid(
         DefaultInstructionSet::default(),
-        &[Opcode::trap as u8, Opcode::load_imm as u8],
+        &[opcode_trap, opcode_load_imm],
         &[0b00000011],
         1
     ));
@@ -4076,14 +4677,10 @@ where
 
 #[test]
 fn test_instructions_iterator_with_implicit_trap() {
+    let opcode_fallthrough = ISA_Latest64.opcode_to_u8(Opcode::fallthrough).unwrap();
+    let code = [opcode_fallthrough];
     for is_bounded in [false, true] {
-        let mut i = Instructions::new(
-            DefaultInstructionSet::default(),
-            &[Opcode::fallthrough as u8],
-            &[0b00000001],
-            0,
-            is_bounded,
-        );
+        let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &[0b00000001], 0, is_bounded);
         assert_eq!(
             i.next(),
             Some(ParsedInstruction {
@@ -4108,14 +4705,10 @@ fn test_instructions_iterator_with_implicit_trap() {
 
 #[test]
 fn test_instructions_iterator_without_implicit_trap() {
+    let opcode_trap = ISA_Latest64.opcode_to_u8(Opcode::trap).unwrap();
+    let code = [opcode_trap];
     for is_bounded in [false, true] {
-        let mut i = Instructions::new(
-            DefaultInstructionSet::default(),
-            &[Opcode::trap as u8],
-            &[0b00000001],
-            0,
-            is_bounded,
-        );
+        let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &[0b00000001], 0, is_bounded);
         assert_eq!(
             i.next(),
             Some(ParsedInstruction {
@@ -4132,7 +4725,7 @@ fn test_instructions_iterator_without_implicit_trap() {
 #[test]
 fn test_instructions_iterator_very_long_bitmask_bounded() {
     let mut code = [0_u8; 64];
-    code[0] = Opcode::fallthrough as u8;
+    code[0] = ISA_Latest64.opcode_to_u8(Opcode::fallthrough).unwrap();
     let mut bitmask = [0_u8; 8];
     bitmask[0] = 0b00000001;
     bitmask[7] = 0b10000000;
@@ -4162,7 +4755,7 @@ fn test_instructions_iterator_very_long_bitmask_bounded() {
 #[test]
 fn test_instructions_iterator_very_long_bitmask_unbounded() {
     let mut code = [0_u8; 64];
-    code[0] = Opcode::fallthrough as u8;
+    code[0] = ISA_Latest64.opcode_to_u8(Opcode::fallthrough).unwrap();
     let mut bitmask = [0_u8; 8];
     bitmask[0] = 0b00000001;
     bitmask[7] = 0b10000000;
@@ -4200,7 +4793,9 @@ fn test_instructions_iterator_very_long_bitmask_unbounded() {
 
 #[test]
 fn test_instructions_iterator_start_at_invalid_offset_bounded() {
-    let mut i = Instructions::new(DefaultInstructionSet::default(), &[Opcode::trap as u8; 8], &[0b10000001], 1, true);
+    let opcode_trap = ISA_Latest64.opcode_to_u8(Opcode::trap).unwrap();
+    let code = [opcode_trap; 8];
+    let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &[0b10000001], 1, true);
     assert_eq!(
         i.next(),
         Some(ParsedInstruction {
@@ -4216,7 +4811,9 @@ fn test_instructions_iterator_start_at_invalid_offset_bounded() {
 
 #[test]
 fn test_instructions_iterator_start_at_invalid_offset_unbounded() {
-    let mut i = Instructions::new(DefaultInstructionSet::default(), &[Opcode::trap as u8; 8], &[0b10000001], 1, false);
+    let opcode_trap = ISA_Latest64.opcode_to_u8(Opcode::trap).unwrap();
+    let code = [opcode_trap; 8];
+    let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &[0b10000001], 1, false);
     assert_eq!(
         i.next(),
         Some(ParsedInstruction {
@@ -4240,7 +4837,8 @@ fn test_instructions_iterator_start_at_invalid_offset_unbounded() {
 
 #[test]
 fn test_instructions_iterator_does_not_emit_unnecessary_invalid_instructions_if_bounded_and_ends_with_a_trap() {
-    let code = [Opcode::trap as u8; 32];
+    let opcode_trap = ISA_Latest64.opcode_to_u8(Opcode::trap).unwrap();
+    let code = [opcode_trap; 32];
     let bitmask = [0b00000001, 0b00000000, 0b00000000, 0b00000100];
     let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &bitmask, 0, true);
     assert_eq!(i.offset(), 0);
@@ -4258,7 +4856,8 @@ fn test_instructions_iterator_does_not_emit_unnecessary_invalid_instructions_if_
 
 #[test]
 fn test_instructions_iterator_does_not_emit_unnecessary_invalid_instructions_if_unbounded_and_ends_with_a_trap() {
-    let code = [Opcode::trap as u8; 32];
+    let opcode_trap = ISA_Latest64.opcode_to_u8(Opcode::trap).unwrap();
+    let code = [opcode_trap; 32];
     let bitmask = [0b00000001, 0b00000000, 0b00000000, 0b00000100];
     let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &bitmask, 0, false);
     assert_eq!(i.offset(), 0);
@@ -4304,10 +4903,10 @@ pub struct ProgramMemoryInfo {
     pub purgeable_ram_consumption: u32,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct ProgramParts {
-    pub is_64_bit: bool,
+    pub isa: InstructionSetKind,
     pub ro_data_size: u32,
     pub rw_data_size: u32,
     pub stack_size: u32,
@@ -4325,6 +4924,26 @@ pub struct ProgramParts {
 }
 
 impl ProgramParts {
+    pub fn empty(isa: InstructionSetKind) -> Self {
+        Self {
+            isa,
+            ro_data_size: 0,
+            rw_data_size: 0,
+            stack_size: 0,
+
+            ro_data: Default::default(),
+            rw_data: Default::default(),
+            code_and_jump_table: Default::default(),
+            import_offsets: Default::default(),
+            import_symbols: Default::default(),
+            exports: Default::default(),
+
+            debug_strings: Default::default(),
+            debug_line_program_ranges: Default::default(),
+            debug_line_programs: Default::default(),
+        }
+    }
+
     pub fn from_bytes(blob: ArcBytes) -> Result<Self, ProgramParseError> {
         if !blob.starts_with(&BLOB_MAGIC) {
             return Err(ProgramParseError(ProgramParseErrorKind::Other(
@@ -4338,11 +4957,7 @@ impl ProgramParts {
         };
 
         let blob_version = reader.read_byte()?;
-        let is_64_bit = if blob_version == BLOB_VERSION_V1_32 {
-            false
-        } else if blob_version == BLOB_VERSION_V1_64 {
-            true
-        } else {
+        let Some(isa) = InstructionSetKind::from_blob_version(blob_version) else {
             return Err(ProgramParseError(ProgramParseErrorKind::UnsupportedVersion {
                 version: blob_version,
             }));
@@ -4355,11 +4970,7 @@ impl ProgramParts {
             )));
         }
 
-        let mut parts = ProgramParts {
-            is_64_bit,
-            ..ProgramParts::default()
-        };
-
+        let mut parts = ProgramParts::empty(isa);
         let mut section = reader.read_byte()?;
         if section == SECTION_MEMORY_CONFIG {
             let section_length = reader.read_varint()?;
@@ -4449,7 +5060,7 @@ impl ProgramBlob {
             #[cfg(feature = "unique-id")]
             unique_id: 0,
 
-            is_64_bit: parts.is_64_bit,
+            isa: parts.isa,
 
             ro_data_size: parts.ro_data_size,
             rw_data_size: parts.rw_data_size,
@@ -4560,9 +5171,17 @@ impl ProgramBlob {
         self.unique_id
     }
 
+    /// Returns the instruction set of this program blob.
+    pub fn isa(&self) -> InstructionSetKind {
+        self.isa
+    }
+
     /// Returns whether the blob contains a 64-bit program.
     pub fn is_64_bit(&self) -> bool {
-        self.is_64_bit
+        match self.isa {
+            InstructionSetKind::Latest32 => false,
+            InstructionSetKind::ReviveV1 | InstructionSetKind::Latest64 => true,
+        }
     }
 
     /// Calculates an unique hash of the program blob.
@@ -4570,7 +5189,7 @@ impl ProgramBlob {
         let ProgramBlob {
             #[cfg(feature = "unique-id")]
                 unique_id: _,
-            is_64_bit,
+            isa,
             ro_data_size,
             rw_data_size,
             stack_size,
@@ -4592,7 +5211,7 @@ impl ProgramBlob {
 
         hasher.update_u32_array([
             1_u32, // VERSION
-            u32::from(*is_64_bit),
+            *isa as u32,
             *ro_data_size,
             *rw_data_size,
             *stack_size,
@@ -4749,11 +5368,21 @@ impl ProgramBlob {
         visitor_run(visitor, self, dispatch_table);
     }
 
+    #[inline]
+    pub fn instructions(&self) -> Instructions<InstructionSetKind> {
+        self.instructions_with_isa(self.isa)
+    }
+
+    #[inline]
+    pub fn instructions_bounded_at(&self, offset: ProgramCounter) -> Instructions<InstructionSetKind> {
+        self.instructions_bounded_at_with_isa(self.isa, offset)
+    }
+
     /// Returns an iterator over all of the instructions in the program.
     ///
     /// WARNING: this is unbounded and has O(n) complexity; just creating this iterator can iterate over the whole program, even if `next` is never called!
     #[inline]
-    pub fn instructions<I>(&self, instruction_set: I) -> Instructions<I>
+    pub fn instructions_with_isa<I>(&self, instruction_set: I) -> Instructions<I>
     where
         I: InstructionSet,
     {
@@ -4764,7 +5393,7 @@ impl ProgramBlob {
     ///
     /// This iterator is bounded and has O(1) complexity.
     #[inline]
-    pub fn instructions_bounded_at<I>(&self, instruction_set: I, offset: ProgramCounter) -> Instructions<I>
+    pub fn instructions_bounded_at_with_isa<I>(&self, instruction_set: I, offset: ProgramCounter) -> Instructions<I>
     where
         I: InstructionSet,
     {
@@ -4871,7 +5500,7 @@ impl ProgramBlob {
         let ProgramBlob {
             #[cfg(feature = "unique-id")]
                 unique_id: _,
-            is_64_bit: _,
+            isa: _,
             ro_data_size: _,
             rw_data_size: _,
             stack_size: _,
@@ -4991,7 +5620,7 @@ impl ProgramBlob {
 #[cfg(feature = "alloc")]
 #[test]
 fn test_calculate_blob_length() {
-    let mut builder = crate::writer::ProgramBlobBuilder::new_64bit();
+    let mut builder = crate::writer::ProgramBlobBuilder::new(InstructionSetKind::Latest64);
     builder.set_code(&[Instruction::trap], &[]);
     let blob = builder.into_vec().unwrap();
     let parts = ProgramParts::from_bytes(blob.into()).unwrap();
@@ -5005,7 +5634,14 @@ fn test_calculate_blob_length() {
         rw_data_size: 4,
         code_and_jump_table: small_blob.clone(),
         debug_strings: small_blob.clone(),
-        ..ProgramParts::default()
+
+        isa: InstructionSetKind::Latest64,
+        stack_size: 0,
+        import_offsets: Default::default(),
+        import_symbols: Default::default(),
+        exports: Default::default(),
+        debug_line_program_ranges: Default::default(),
+        debug_line_programs: Default::default(),
     };
 
     let blob = ProgramBlob::from_parts(parts).unwrap();
@@ -5499,9 +6135,6 @@ pub const SECTION_OPT_DEBUG_STRINGS: u8 = 128;
 pub const SECTION_OPT_DEBUG_LINE_PROGRAMS: u8 = 129;
 pub const SECTION_OPT_DEBUG_LINE_PROGRAM_RANGES: u8 = 130;
 pub const SECTION_END_OF_FILE: u8 = 0;
-
-pub const BLOB_VERSION_V1_64: u8 = 0;
-pub const BLOB_VERSION_V1_32: u8 = 1;
 
 pub const VERSION_DEBUG_LINE_PROGRAM_V1: u8 = 1;
 

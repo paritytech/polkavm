@@ -16,8 +16,9 @@ use polkavm_assembler::amd64::Reg::rsp;
 use polkavm_assembler::amd64::RegIndex::*;
 use polkavm_assembler::amd64::{Condition, LoadKind, RegSize, Size};
 use polkavm_assembler::{Assembler, Label};
-use polkavm_common::program::InstructionFormat;
+use polkavm_common::program::{InstructionFormat, InstructionSetKind};
 use polkavm_common::writer::ProgramBlobBuilder;
+use polkavm_linker::TargetInstructionSet;
 use polkavm_linux_raw as linux_raw;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -1190,7 +1191,7 @@ impl<'a, C> BenchmarkBuilder<'a, C> {
         code.push(ecalli(ECALLI_BENCHMARK_ON_FINISH));
         code.push(ret());
 
-        let mut builder = ProgramBlobBuilder::new_64bit();
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
         builder.add_export_by_basic_block(0, b"main");
         builder.set_stack_size(4096 + stack_space_used);
         builder.set_rw_data_size(self.rw_data_size);
@@ -2989,6 +2990,8 @@ impl Category {
             xor => Compute,
             xor_imm => Compute,
             zero_extend_16 => Compute,
+
+            _NonExhaustive(()) => unreachable!(),
         }
     }
 }
@@ -3053,7 +3056,7 @@ fn main_test_cost_model(
                 let mut config = polkavm_linker::Config::default();
                 config.set_optimize(true);
                 config.set_strip(true);
-                let blob = polkavm_linker::program_from_elf(config, &elf)?;
+                let blob = polkavm_linker::program_from_elf(config, TargetInstructionSet::Latest, &elf)?;
                 std::fs::write(&doom_blob_path, &blob)
                     .map_err(|error| format!("failed to write {}: {}", doom_blob_path.display(), error))?;
                 log::info!("Blob linked!");
@@ -3078,7 +3081,7 @@ fn main_test_cost_model(
                 let mut config = polkavm_linker::Config::default();
                 config.set_optimize(true);
                 config.set_strip(true);
-                let blob = polkavm_linker::program_from_elf(config, &elf)?;
+                let blob = polkavm_linker::program_from_elf(config, TargetInstructionSet::Latest, &elf)?;
                 std::fs::write(&cached_blob_path, &blob)
                     .map_err(|error| format!("failed to write {}: {}", cached_blob_path.display(), error))?;
                 log::info!("Blob linked!");
@@ -3114,7 +3117,7 @@ fn main_test_cost_model(
         let mut is_new_block = true;
         let mut blocks = Vec::new();
         let mut block = Vec::new();
-        for instruction in blob.instructions_bounded_at(polkavm::program::ISA64_V1, ProgramCounter(0)) {
+        for instruction in blob.instructions_bounded_at(ProgramCounter(0)) {
             if is_new_block {
                 if !block.is_empty() {
                     blocks.push(core::mem::take(&mut block));
@@ -3144,7 +3147,7 @@ fn main_test_cost_model(
 
         for block in blocks {
             let (timeline, block_cycles) =
-                polkavm_common::simulator::timeline_for_instructions(blob.code(), cache_model, &block, timeline_config.clone());
+                polkavm_common::simulator::timeline_for_instructions(blob.code(), blob.isa(), cache_model, &block, timeline_config.clone());
             timelines.push((timeline, block[0].offset.0, block_cycles));
         }
 
@@ -3197,7 +3200,7 @@ fn main_test_cost_model(
 
     if analyze {
         basic_block_to_offset.push(ProgramCounter(0));
-        for instruction in blob.instructions(polkavm::program::ISA64_V1) {
+        for instruction in blob.instructions() {
             offset_to_opcode.insert(instruction.offset, instruction.opcode());
             offset_to_basic_block_number.insert(instruction.offset, basic_block_to_offset.len() - 1);
             if instruction.opcode().starts_new_basic_block() {
@@ -3467,10 +3470,7 @@ fn main_test_cost_model(
                     pretty_print(cost as i64),
                     pretty_print(count as i64),
                     pretty_print(u64::from(cost_model.cost_for_opcode(*opcode)) as i64),
-                    blob.instructions_bounded_at(polkavm::program::ISA64_V1, pc)
-                        .next()
-                        .unwrap()
-                        .display(&format),
+                    blob.instructions_bounded_at(pc).next().unwrap().display(&format),
                 );
             }
 
@@ -3488,7 +3488,7 @@ fn main_test_cost_model(
                     pc_counts.get(&pc).unwrap(),
                 );
 
-                for instruction in blob.instructions_bounded_at(polkavm::program::ISA64_V1, pc) {
+                for instruction in blob.instructions_bounded_at(pc) {
                     log::info!(
                         "    {:>6}: {:>15}: {}",
                         instruction.offset,
@@ -3527,7 +3527,7 @@ fn main_test_cost_model(
                 );
 
                 let mut block_instructions = Vec::new();
-                for instruction in blob.instructions_bounded_at(polkavm::program::ISA64_V1, pc) {
+                for instruction in blob.instructions_bounded_at(pc) {
                     block_instructions.push(instruction);
 
                     log::info!("    {:>6}: {}", instruction.offset, instruction.display(&format));
@@ -3539,6 +3539,7 @@ fn main_test_cost_model(
                 if let CostModelKind::Full(cost_model) = cost_model {
                     let (timeline, cycles) = polkavm_common::simulator::timeline_for_instructions(
                         blob.code(),
+                        blob.isa(),
                         cost_model,
                         &block_instructions,
                         polkavm_common::simulator::TimelineConfig::default(),

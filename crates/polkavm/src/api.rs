@@ -5,17 +5,8 @@ use alloc::vec::Vec;
 
 use polkavm_common::abi::{MemoryMap, MemoryMapBuilder, VM_ADDR_RETURN_TO_HOST};
 use polkavm_common::cast::cast;
-use polkavm_common::program::{
-    FrameKind, ISA32_V1_NoSbrk, ISA64_V1_NoSbrk, Imports, InstructionSet, Instructions, JumpTable, Opcode, ProgramBlob, Reg, ISA32_V1,
-    ISA64_V1,
-};
+use polkavm_common::program::{FrameKind, Imports, InstructionSetKind, Instructions, JumpTable, ProgramBlob, Reg};
 use polkavm_common::utils::{ArcBytes, AsUninitSliceMut, B32, B64};
-
-if_compiler_is_supported! {
-    use polkavm_common::program::{
-        build_static_dispatch_table
-    };
-}
 
 use crate::config::{BackendKind, Config, GasMeteringKind, ModuleConfig, SandboxKind};
 use crate::error::{bail, bail_static, Error};
@@ -97,31 +88,6 @@ pub type RegValue = u64;
 pub struct SetCacheSizeLimitArgs {
     pub max_block_size: u32,
     pub max_cache_size_bytes: usize,
-}
-
-#[derive(Copy, Clone)]
-pub struct RuntimeInstructionSet {
-    allow_sbrk: bool,
-    is_64_bit: bool,
-}
-
-impl InstructionSet for RuntimeInstructionSet {
-    #[allow(clippy::collapsible_else_if)]
-    fn opcode_from_u8(self, byte: u8) -> Option<Opcode> {
-        if !self.is_64_bit {
-            if self.allow_sbrk {
-                ISA32_V1.opcode_from_u8(byte)
-            } else {
-                ISA32_V1_NoSbrk.opcode_from_u8(byte)
-            }
-        } else {
-            if self.allow_sbrk {
-                ISA64_V1.opcode_from_u8(byte)
-            } else {
-                ISA64_V1_NoSbrk.opcode_from_u8(byte)
-            }
-        }
-    }
 }
 
 pub struct Engine {
@@ -312,7 +278,6 @@ pub(crate) struct ModulePrivate {
     dynamic_paging: bool,
     page_size_mask: u32,
     page_shift: u32,
-    instruction_set: RuntimeInstructionSet,
     cost_model: CostModelKind,
     #[cfg(feature = "module-cache")]
     pub(crate) module_key: Option<ModuleKey>,
@@ -376,17 +341,17 @@ impl Module {
         cast(self.state().blob.code().len()).assert_always_fits_in_u32()
     }
 
-    pub(crate) fn instructions_bounded_at(&self, offset: ProgramCounter) -> Instructions<RuntimeInstructionSet> {
-        self.state().blob.instructions_bounded_at(self.state().instruction_set, offset)
+    pub(crate) fn instructions_bounded_at(&self, offset: ProgramCounter) -> Instructions<InstructionSetKind> {
+        self.state().blob.instructions_bounded_at(offset)
     }
 
     pub(crate) fn is_jump_target_valid(&self, offset: ProgramCounter) -> bool {
-        self.state().blob.is_jump_target_valid(self.state().instruction_set, offset)
+        self.state().blob.is_jump_target_valid(self.state().blob.isa(), offset)
     }
 
     pub(crate) fn find_start_of_basic_block(&self, offset: ProgramCounter) -> Option<ProgramCounter> {
         polkavm_common::program::find_start_of_basic_block(
-            self.state().instruction_set,
+            self.state().blob.isa(),
             self.state().blob.code(),
             self.state().blob.bitmask(),
             offset.0,
@@ -422,7 +387,7 @@ impl Module {
         if self.gas_metering().is_some() {
             match self.cost_model() {
                 CostModelKind::Simple(cost_model) => crate::gas::trap_cost(GasVisitor::new(cost_model.clone())),
-                CostModelKind::Full(cost_model) => polkavm_common::simulator::trap_cost(*cost_model),
+                CostModelKind::Full(cost_model) => polkavm_common::simulator::trap_cost(self.blob().isa(), *cost_model),
             }
         } else {
             0
@@ -558,21 +523,15 @@ impl Module {
             aux_data_size: config.aux_data_size(),
         };
 
-        let instruction_set = RuntimeInstructionSet {
-            allow_sbrk: config.allow_sbrk,
-            is_64_bit: blob.is_64_bit(),
-        };
-
         #[allow(unused_macros)]
         macro_rules! compile_module {
-            ($sandbox_kind:ident, $bitness_kind:ident, $isa:ident, $isa_no_sbrk:ident, $visitor_name:ident, $module_kind:ident) => {
+            ($sandbox_kind:ident, $bitness_kind:ident, $build_static_dispatch_table:ident, $visitor_name:ident, $module_kind:ident) => {
                 match cost_model {
                     CostModelKind::Simple(ref cost_model) => {
                         compile_module!(
                             $sandbox_kind,
                             $bitness_kind,
-                            $isa,
-                            $isa_no_sbrk,
+                            $build_static_dispatch_table,
                             $visitor_name,
                             $module_kind,
                             GasVisitor,
@@ -582,12 +541,11 @@ impl Module {
                     }
                     CostModelKind::Full(cost_model) => {
                         use polkavm_common::simulator::Simulator;
-                        let gas_visitor = Simulator::<$bitness_kind, ()>::new(blob.code(), cost_model, ());
+                        let gas_visitor = Simulator::<$bitness_kind, ()>::new(blob.code(), blob.isa(), cost_model, ());
                         compile_module!(
                             $sandbox_kind,
                             $bitness_kind,
-                            $isa,
-                            $isa_no_sbrk,
+                            $build_static_dispatch_table,
                             $visitor_name,
                             $module_kind,
                             Simulator::<'a, $bitness_kind, ()>,
@@ -598,12 +556,12 @@ impl Module {
                 }
             };
 
-            ($sandbox_kind:ident, $bitness_kind:ident, $isa:ident, $isa_no_sbrk:ident, $visitor_name:ident, $module_kind:ident, $gas_kind:ty, $gas_kind_no_lifetime:ty, $gas_visitor:expr) => {{
+            ($sandbox_kind:ident, $bitness_kind:ident, $build_static_dispatch_table:ident, $visitor_name:ident, $module_kind:ident, $gas_kind:ty, $gas_kind_no_lifetime:ty, $gas_visitor:expr) => {{
                 type VisitorTy<'a> = crate::compiler::CompilerVisitor<'a, $sandbox_kind, $bitness_kind, $gas_kind>;
                 let (mut visitor, aux) = crate::compiler::CompilerVisitor::<$sandbox_kind, $bitness_kind, $gas_kind_no_lifetime>::new(
                     &engine.state.compiler_cache,
                     config,
-                    instruction_set,
+                    blob.isa(),
                     blob.jump_table(),
                     blob.code(),
                     blob.bitmask(),
@@ -614,14 +572,10 @@ impl Module {
                     $gas_visitor,
                 )?;
 
-                if config.allow_sbrk {
-                    blob.visit(build_static_dispatch_table!($visitor_name, $isa, VisitorTy<'a>), &mut visitor);
-                } else {
-                    blob.visit(
-                        build_static_dispatch_table!($visitor_name, $isa_no_sbrk, VisitorTy<'a>),
-                        &mut visitor,
-                    );
-                }
+                blob.visit(
+                    polkavm_common::program::$build_static_dispatch_table!($visitor_name, VisitorTy<'a>),
+                    &mut visitor,
+                );
 
                 let global = $sandbox_kind::downcast_global_state(engine.state.sandbox_global.as_ref().unwrap());
                 let module = visitor.finish_compilation(global, &engine.state.compiler_cache, aux)?;
@@ -636,12 +590,10 @@ impl Module {
                         match selected_sandbox {
                             SandboxKind::Linux => {
                                 #[cfg(target_os = "linux")]
-                                {
-                                    if blob.is_64_bit() {
-                                        compile_module!(SandboxLinux, B64, ISA64_V1, ISA64_V1_NoSbrk, COMPILER_VISITOR_LINUX, Linux)
-                                    } else {
-                                        compile_module!(SandboxLinux, B32, ISA32_V1, ISA32_V1_NoSbrk, COMPILER_VISITOR_LINUX, Linux)
-                                    }
+                                match blob.isa() {
+                                    InstructionSetKind::ReviveV1 => compile_module!(SandboxLinux, B64, build_static_dispatch_table_revive_v1, COMPILER_VISITOR_LINUX, Linux),
+                                    InstructionSetKind::Latest32 => compile_module!(SandboxLinux, B32, build_static_dispatch_table_latest32, COMPILER_VISITOR_LINUX, Linux),
+                                    InstructionSetKind::Latest64 => compile_module!(SandboxLinux, B64, build_static_dispatch_table_latest64, COMPILER_VISITOR_LINUX, Linux),
                                 }
 
                                 #[cfg(not(target_os = "linux"))]
@@ -652,12 +604,10 @@ impl Module {
                             },
                             SandboxKind::Generic => {
                                 #[cfg(feature = "generic-sandbox")]
-                                {
-                                    if blob.is_64_bit() {
-                                        compile_module!(SandboxGeneric, B64, ISA64_V1, ISA64_V1_NoSbrk, COMPILER_VISITOR_GENERIC, Generic)
-                                    } else {
-                                        compile_module!(SandboxGeneric, B32, ISA32_V1, ISA32_V1_NoSbrk, COMPILER_VISITOR_GENERIC, Generic)
-                                    }
+                                match blob.isa() {
+                                    InstructionSetKind::ReviveV1 => compile_module!(SandboxGeneric, B64, build_static_dispatch_table_revive_v1, COMPILER_VISITOR_GENERIC, Generic),
+                                    InstructionSetKind::Latest32 => compile_module!(SandboxGeneric, B32, build_static_dispatch_table_latest32, COMPILER_VISITOR_GENERIC, Generic),
+                                    InstructionSetKind::Latest64 => compile_module!(SandboxGeneric, B64, build_static_dispatch_table_latest64, COMPILER_VISITOR_GENERIC, Generic),
                                 }
 
                                 #[cfg(not(feature = "generic-sandbox"))]
@@ -733,7 +683,6 @@ impl Module {
             is_strict: config.is_strict,
             step_tracing: config.step_tracing,
             dynamic_paging: config.dynamic_paging,
-            instruction_set,
             crosscheck: engine.crosscheck,
             page_size_mask,
             page_shift,
@@ -931,10 +880,10 @@ impl Module {
                 use polkavm_common::simulator::Simulator;
                 let instructions = self.instructions_bounded_at(code_offset);
                 if self.is_64_bit() {
-                    let gas_visitor = Simulator::<B64, ()>::new(self.blob().code(), cost_model, ());
+                    let gas_visitor = Simulator::<B64, ()>::new(self.blob().code(), self.blob().isa(), cost_model, ());
                     crate::gas::calculate_for_block(gas_visitor, instructions)
                 } else {
-                    let gas_visitor = Simulator::<B32, ()>::new(self.blob().code(), cost_model, ());
+                    let gas_visitor = Simulator::<B32, ()>::new(self.blob().code(), self.blob().isa(), cost_model, ());
                     crate::gas::calculate_for_block(gas_visitor, instructions)
                 }
             }
@@ -947,7 +896,7 @@ impl Module {
     fn display_instruction_at(&self, program_counter: ProgramCounter) -> impl core::fmt::Display {
         let state = self.state();
         Self::display_instruction_at_impl(
-            state.instruction_set,
+            state.blob.isa(),
             state.blob.code(),
             state.blob.bitmask(),
             state.blob.is_64_bit(),
@@ -957,7 +906,7 @@ impl Module {
 
     #[cold]
     pub(crate) fn display_instruction_at_impl(
-        instruction_set: RuntimeInstructionSet,
+        instruction_set: InstructionSetKind,
         code: &[u8],
         bitmask: &[u8],
         is_64_bit: bool,

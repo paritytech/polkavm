@@ -7,8 +7,9 @@ use clap::Parser;
 use core::fmt::Write;
 use polkavm::{CacheModel, CostModelKind, Engine, InterruptKind, MemoryProtection, Module, ModuleConfig, ProgramBlob, Reg};
 use polkavm_common::assembler::assemble;
-use polkavm_common::program::{asm, ProgramCounter, ProgramParts, ISA64_V1};
+use polkavm_common::program::{asm, InstructionSetKind, ProgramCounter, ProgramParts};
 use polkavm_common::utils::parse_slice;
+use polkavm_linker::TargetInstructionSet;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -332,7 +333,7 @@ fn main_generate() {
         }
 
         let input = input_lines.join("\n");
-        let blob = match assemble(&input) {
+        let blob = match assemble(Some(InstructionSetKind::Latest64), &input) {
             Ok(blob) => blob,
             Err(error) => {
                 eprintln!("Failed to assemble {path:?}: {error}");
@@ -373,17 +374,13 @@ fn main_generate() {
         linker_config.set_opt_level(polkavm_linker::OptLevel::O1);
         linker_config.set_strip(true);
         linker_config.set_min_stack_size(0);
-        let blob = polkavm_linker::program_from_elf(linker_config, &elf).unwrap();
+        let blob = polkavm_linker::program_from_elf(linker_config, TargetInstructionSet::Latest, &elf).unwrap();
 
         let mut post = PrePost::default();
 
         let program_blob = ProgramBlob::parse(blob.clone().into()).unwrap();
         post.pc = Some(ProgramCounterRef::Preset(
-            program_blob
-                .instructions(ISA64_V1)
-                .find(|inst| inst.kind == asm::ret())
-                .unwrap()
-                .offset,
+            program_blob.instructions().find(|inst| inst.kind == asm::ret()).unwrap().offset,
         ));
 
         testcases.push(RawTestcase {
@@ -491,7 +488,7 @@ fn main_generate() {
                 panic!("label specified in 'post: pc = ...' is missing: @{label}");
             };
 
-            let instructions: Vec<_> = blob.instructions(ISA64_V1).collect();
+            let instructions: Vec<_> = blob.instructions().collect();
             let index = instructions
                 .iter()
                 .position(|inst| inst.offset == export.program_counter())
@@ -838,7 +835,7 @@ fn main_generate() {
 
         let mut blocks = Vec::new();
         let mut buffer = Vec::new();
-        for instruction in blob.instructions_bounded_at(polkavm::program::ISA64_V1, ProgramCounter(0)) {
+        for instruction in blob.instructions_bounded_at(ProgramCounter(0)) {
             buffer.push(instruction);
             if instruction.starts_new_basic_block() {
                 blocks.push(core::mem::take(&mut buffer));
@@ -881,7 +878,7 @@ fn main_generate() {
         timeline_config.instruction_format.jump_target_formatter = Some(&jump_target_formatter);
         for block in blocks {
             let (timeline, block_cycles) =
-                polkavm_common::simulator::timeline_for_instructions(blob.code(), cache_model, &block, timeline_config.clone());
+                polkavm_common::simulator::timeline_for_instructions(blob.code(), blob.isa(), cache_model, &block, timeline_config.clone());
             timelines.push((timeline, block[0].offset.0, block_cycles));
 
             block_gas_costs.insert(block[0].offset.0, block_cycles);
@@ -893,7 +890,7 @@ fn main_generate() {
             let mut timeline_config_clone = timeline_config.clone();
             timeline_config_clone.should_enable_fast_forward = true;
             let (_, block_cycles_fast_forward) =
-                polkavm_common::simulator::timeline_for_instructions(blob.code(), cache_model, &block, timeline_config.clone());
+                polkavm_common::simulator::timeline_for_instructions(blob.code(), blob.isa(), cache_model, &block, timeline_config.clone());
             assert_eq!(block_cycles, block_cycles_fast_forward);
         }
 

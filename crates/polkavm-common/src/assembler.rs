@@ -1,4 +1,4 @@
-use crate::program::{Instruction, RawReg, Reg};
+use crate::program::{Instruction, InstructionSetKind, RawReg, Reg};
 use crate::utils::{parse_imm, parse_immediate, parse_reg, parse_slice, ParsedImmediate};
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
@@ -163,7 +163,7 @@ fn parse_condition(text: &str) -> Option<Condition> {
     Some(Condition { kind, lhs, rhs })
 }
 
-pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
+pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u8>, String> {
     enum MaybeInstruction {
         Instruction(Instruction),
         Jump(String),
@@ -272,6 +272,16 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
             };
 
             rw_data = value;
+            continue;
+        }
+
+        if let Some(line) = line.strip_prefix("%isa = ") {
+            isa = Some(match line.trim() {
+                "revive_v1" => InstructionSetKind::ReviveV1,
+                "latest32" => InstructionSetKind::Latest32,
+                "latest64" => InstructionSetKind::Latest64,
+                _ => return Err(format!("cannot parse line {nth_line}")),
+            });
             continue;
         }
 
@@ -1062,7 +1072,11 @@ pub fn assemble(code: &str) -> Result<Vec<u8>, String> {
         };
     }
 
-    let mut builder = crate::writer::ProgramBlobBuilder::new_64bit();
+    let Some(isa) = isa else {
+        return Err("no ISA was declared in the program".into());
+    };
+
+    let mut builder = crate::writer::ProgramBlobBuilder::new(isa);
     builder.set_ro_data(ro_data);
     builder.set_ro_data_size(ro_data_size);
     builder.set_rw_data(rw_data);
@@ -1088,10 +1102,10 @@ fn assert_assembler(input: &str, expected_output: &str) {
     let expected_output_clean: Vec<_> = expected_output.trim().split('\n').map(|line| line.trim()).collect();
     let expected_output_clean = expected_output_clean.join("\n");
 
-    let blob = assemble(input).expect("failed to assemble");
+    let blob = assemble(Some(InstructionSetKind::Latest64), input).expect("failed to assemble");
     let program = crate::program::ProgramBlob::parse(blob.into()).unwrap();
     let output: Vec<_> = program
-        .instructions(crate::program::ISA64_V1)
+        .instructions()
         .take_while(|inst| (inst.offset.0 as usize) < program.code().len())
         .map(|inst| inst.kind.display(&InstructionFormat::default()).to_string())
         .collect();

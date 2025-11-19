@@ -9,10 +9,7 @@ use polkavm::ModuleConfig;
 use polkavm::ProgramCounter;
 use polkavm::SetCacheSizeLimitArgs;
 
-use polkavm_common::program::asm;
-use polkavm_common::program::Instruction;
-use polkavm_common::program::ProgramBlob;
-use polkavm_common::program::Reg;
+use polkavm_common::program::{asm, Instruction, InstructionSetKind, ProgramBlob, Reg};
 use polkavm_common::writer::ProgramBlobBuilder;
 
 use polkavm::RETURN_TO_HOST;
@@ -517,7 +514,7 @@ fn transform_code(data: Vec<OperationKind>) -> Vec<Instruction> {
 fn build_program_blob(data: Vec<OperationKind>) -> ProgramBlob {
     let code = transform_code(data);
 
-    let mut builder = ProgramBlobBuilder::new_64bit();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&code, &[]);
     ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap()

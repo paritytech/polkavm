@@ -3,8 +3,9 @@
 #![allow(clippy::exit)]
 
 use clap::Parser;
-use polkavm_common::program::{Opcode, ProgramBlob, ISA32_V1, ISA64_V1};
+use polkavm_common::program::{InstructionSetKind, Opcode, ProgramBlob};
 use polkavm_disassembler::DisassemblyFormat;
+use polkavm_linker::TargetInstructionSet;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -30,6 +31,32 @@ enum OptLevel {
     O2,
     #[clap(name = "experimental")]
     Oexperimental,
+}
+
+#[derive(Copy, Clone, Debug, clap::ValueEnum)]
+enum Isa {
+    #[clap(name = "revive_v1")]
+    ReviveV1,
+    #[clap(name = "latest32")]
+    Latest32,
+    #[clap(name = "latest64")]
+    Latest64,
+}
+
+impl Isa {
+    fn convert(self) -> InstructionSetKind {
+        match self {
+            Isa::ReviveV1 => InstructionSetKind::ReviveV1,
+            Isa::Latest32 => InstructionSetKind::Latest32,
+            Isa::Latest64 => InstructionSetKind::Latest64,
+        }
+    }
+}
+
+impl core::fmt::Display for Isa {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        fmt.write_str(self.convert().name())
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -102,6 +129,10 @@ enum Args {
         #[clap(short = 'o', long)]
         output: PathBuf,
 
+        /// The target instruction set.
+        #[clap(short = 'i', long, default_value_t = Isa::Latest64)]
+        instruction_set: Isa,
+
         /// The input file.
         input: PathBuf,
     },
@@ -168,7 +199,11 @@ fn main() {
             !no_show_native_offsets,
             output,
         ),
-        Args::Assemble { input, output } => main_assemble(input, output),
+        Args::Assemble {
+            input,
+            output,
+            instruction_set,
+        } => main_assemble(input, output, instruction_set),
         Args::Stats { inputs } => main_stats(inputs),
         Args::GetTargetJsonPath { bitness } => {
             let mut args = polkavm_linker::TargetJsonArgs::default();
@@ -237,7 +272,7 @@ fn main_link(
         }
     };
 
-    let blob = match polkavm_linker::program_from_elf(config, &data) {
+    let blob = match polkavm_linker::program_from_elf(config, TargetInstructionSet::Latest, &data) {
         Ok(blob) => blob,
         Err(error) => {
             bail!("failed to link {input:?}: {error}");
@@ -271,19 +306,13 @@ fn load_blob(input: &Path) -> Result<ProgramBlob, String> {
 
 fn main_stats(inputs: Vec<PathBuf>) -> Result<(), String> {
     let mut map = HashMap::new();
-    for opcode in 0..=255 {
-        if let Some(opcode) = Opcode::from_u8_any(opcode) {
-            map.insert(opcode, 0);
-        }
+    for opcode in Opcode::ALL {
+        map.insert(opcode, 0);
     }
 
     for input in inputs {
         let blob = load_blob(&input)?;
-        let instructions: Vec<_> = if blob.is_64_bit() {
-            blob.instructions(ISA64_V1).collect()
-        } else {
-            blob.instructions(ISA32_V1).collect()
-        };
+        let instructions: Vec<_> = blob.instructions().collect();
         for instruction in instructions {
             *map.get_mut(&instruction.opcode()).unwrap() += 1;
         }
@@ -347,7 +376,7 @@ fn main_disassemble(
     .map_err(|error| error.to_string())
 }
 
-fn main_assemble(input_path: PathBuf, output_path: PathBuf) -> Result<(), String> {
+fn main_assemble(input_path: PathBuf, output_path: PathBuf, instruction_set: Isa) -> Result<(), String> {
     let input = match std::fs::read_to_string(&input_path) {
         Ok(input) => input,
         Err(error) => {
@@ -355,7 +384,8 @@ fn main_assemble(input_path: PathBuf, output_path: PathBuf) -> Result<(), String
         }
     };
 
-    let blob = match polkavm_common::assembler::assemble(&input) {
+    let instruction_set = instruction_set.convert();
+    let blob = match polkavm_common::assembler::assemble(Some(instruction_set), &input) {
         Ok(blob) => blob,
         Err(error) => {
             bail!("failed to assemble {input_path:?}: {error}");

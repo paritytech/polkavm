@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use polkavm_common::program::{EstimateInterpreterMemoryUsageArgs, ProgramBlob, ProgramParts};
+use polkavm_common::program::{EstimateInterpreterMemoryUsageArgs, InstructionSetKind, ProgramBlob, ProgramParts};
 use polkavm_common::utils::ArcBytes;
 
 #[derive(Debug, Arbitrary)]
@@ -26,8 +26,7 @@ fuzz_target!(|input: FuzzParams| {
     let alloc_rw_data_size = core::cmp::min(input.rw_data_size, 1024 * 1024) as usize;
     let alloc_code_size = core::cmp::min(input.code_size, 1024 * 1024) as usize;
 
-    let mut parts = ProgramParts::default();
-    parts.is_64_bit = true;
+    let mut parts = ProgramParts::empty(InstructionSetKind::Latest64);
     parts.ro_data_size = input.ro_data_size;
     parts.rw_data_size = input.rw_data_size;
     parts.stack_size = input.stack_size;

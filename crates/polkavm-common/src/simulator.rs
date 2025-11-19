@@ -2,7 +2,7 @@
 #![allow(unsafe_code)]
 
 use crate::cast::cast;
-use crate::program::{InstructionFormat, Opcode, ParsingVisitor, RawReg};
+use crate::program::{InstructionFormat, InstructionSet, InstructionSetKind, Opcode, ParsingVisitor, RawReg, UNUSED_RAW_OPCODE};
 use crate::utils::{Bitness, BitnessT, GasVisitorT, B64};
 use alloc::string::String;
 use alloc::vec;
@@ -356,6 +356,9 @@ pub struct Simulator<'a, B, T: Tracer = ()> {
     /// When set this overrides the branch costs to be always either cheap (== brach hit) or expensive (==branch miss).
     force_branch_is_cheap: Option<bool>,
 
+    opcode_trap: u8,
+    opcode_unlikely: u8,
+
     tracer: T,
     _phantom: core::marker::PhantomData<B>,
 }
@@ -365,7 +368,7 @@ where
     T: Tracer,
     B: BitnessT,
 {
-    pub fn new(code: &'a [u8], cache_model: CacheModel, tracer: T) -> Self {
+    pub fn new(code: &'a [u8], isa: InstructionSetKind, cache_model: CacheModel, tracer: T) -> Self {
         unsafe_avx2! {
             let mut simulator = Simulator {
                 code,
@@ -388,6 +391,8 @@ where
                 force_branch_is_cheap: None,
                 instructions_in_flight: 0,
                 reorder_buffer_head: 0,
+                opcode_trap: isa.opcode_to_u8(Opcode::trap).unwrap_or(UNUSED_RAW_OPCODE),
+                opcode_unlikely: isa.opcode_to_u8(Opcode::unlikely).unwrap_or(UNUSED_RAW_OPCODE),
                 _phantom: core::marker::PhantomData,
             };
 
@@ -951,7 +956,7 @@ where
         if self
             .code
             .get(cast(offset).to_usize() + cast(args_length).to_usize())
-            .map(|&opcode| opcode == Opcode::unlikely as u8 || opcode == Opcode::trap as u8)
+            .map(|&opcode| opcode == self.opcode_unlikely || opcode == self.opcode_trap)
             .unwrap_or(true)
         {
             return BRANCH_PREDICTION_HIT_COST;
@@ -960,7 +965,7 @@ where
         if self
             .code
             .get(cast(jump_offset).to_usize())
-            .map(|&opcode| opcode == Opcode::unlikely as u8 || opcode == Opcode::trap as u8)
+            .map(|&opcode| opcode == self.opcode_unlikely || opcode == self.opcode_trap)
             .unwrap_or(true)
         {
             return BRANCH_PREDICTION_HIT_COST;
@@ -2244,6 +2249,7 @@ impl<'a> Default for TimelineConfig<'a> {
 
 pub fn timeline_for_instructions(
     code: &[u8],
+    isa: InstructionSetKind,
     cache_model: CacheModel,
     instructions: &[crate::program::ParsedInstruction],
     config: TimelineConfig,
@@ -2304,6 +2310,7 @@ pub fn timeline_for_instructions(
     let mut timeline_map = BTreeMap::new();
     let mut sim = Simulator::<B64, _>::new(
         code,
+        isa,
         cache_model,
         TimelineTracer {
             should_enable_fast_forward: config.should_enable_fast_forward,
@@ -2365,8 +2372,8 @@ pub fn timeline_for_instructions(
     (timeline_s, block_cost)
 }
 
-pub fn trap_cost(cache_model: CacheModel) -> u32 {
-    let mut sim = Simulator::<B64, _>::new(&[], cache_model, ());
+pub fn trap_cost(isa: InstructionSetKind, cache_model: CacheModel) -> u32 {
+    let mut sim = Simulator::<B64, _>::new(&[], isa, cache_model, ());
     crate::program::ParsedInstruction {
         kind: crate::program::Instruction::trap,
         offset: crate::program::ProgramCounter(0),
@@ -2383,7 +2390,7 @@ mod tests {
 
     use super::{timeline_for_instructions, CacheModel, TimelineConfig};
     use crate::assembler::assemble;
-    use crate::program::{ProgramBlob, ISA64_V1};
+    use crate::program::{InstructionSetKind, ProgramBlob};
 
     #[cfg(test)]
     fn test_config() -> CacheModel {
@@ -2396,11 +2403,17 @@ mod tests {
 
         let _ = env_logger::try_init();
 
-        let program = assemble(program).unwrap();
+        let program = assemble(Some(InstructionSetKind::Latest64), program).unwrap();
         let blob = ProgramBlob::parse(program.into()).unwrap();
-        let instructions: Vec<_> = blob.instructions(ISA64_V1).collect();
+        let instructions: Vec<_> = blob.instructions().collect();
 
-        let (timeline_s, cycles) = timeline_for_instructions(blob.code(), config, &instructions, TimelineConfig::default());
+        let (timeline_s, cycles) = timeline_for_instructions(
+            blob.code(),
+            InstructionSetKind::Latest64,
+            config,
+            &instructions,
+            TimelineConfig::default(),
+        );
         let mut expected_timeline_s = String::new();
         let mut expected_cycles = 0;
         for line in expected_timeline.lines() {
@@ -2428,7 +2441,8 @@ mod tests {
             should_enable_fast_forward: true,
             ..TimelineConfig::default()
         };
-        let (timeline_ff_s, cycles_ff) = timeline_for_instructions(blob.code(), config, &instructions, timeline_config);
+        let (timeline_ff_s, cycles_ff) =
+            timeline_for_instructions(blob.code(), InstructionSetKind::Latest64, config, &instructions, timeline_config);
         assert_eq!(cycles_ff, cycles);
         if timeline_ff_s != expected_timeline_s {
             panic!("Timeline mismatch for fast-forward!\n\nExpected timeline:\n{expected_timeline_s}\nActual timeline:\n{timeline_ff_s}");

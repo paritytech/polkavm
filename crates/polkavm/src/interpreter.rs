@@ -1075,10 +1075,10 @@ impl InterpretedInstance {
                 let code = blob.code();
 
                 if self.module.blob().is_64_bit() {
-                    let gas_visitor = Simulator::<B64, ()>::new(code, *cost_model, ());
+                    let gas_visitor = Simulator::<B64, ()>::new(code, blob.isa(), *cost_model, ());
                     self.compile_block_impl::<_, DEBUG, false>(program_counter, gas_visitor)
                 } else {
-                    let gas_visitor = Simulator::<B32, ()>::new(code, *cost_model, ());
+                    let gas_visitor = Simulator::<B32, ()>::new(code, blob.isa(), *cost_model, ());
                     self.compile_block_impl::<_, DEBUG, false>(program_counter, gas_visitor)
                 }
             }

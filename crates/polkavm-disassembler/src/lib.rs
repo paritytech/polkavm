@@ -1,7 +1,7 @@
 use std::{collections::HashMap, io::Write};
 
 use polkavm::CostModelKind;
-use polkavm_common::program::{ParsedInstruction, ProgramBlob, ProgramCounter, ISA32_V1, ISA64_V1};
+use polkavm_common::program::{ParsedInstruction, ProgramBlob, ProgramCounter};
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
 pub enum DisassemblyFormat {
@@ -202,11 +202,7 @@ impl<'a> Disassembler<'a> {
     }
 
     fn instructions(&self) -> Vec<ParsedInstruction> {
-        if self.blob.is_64_bit() {
-            self.blob.instructions(ISA64_V1).collect()
-        } else {
-            self.blob.instructions(ISA32_V1).collect()
-        }
+        self.blob.instructions().collect()
     }
 
     pub fn display_gas(&mut self) -> Result<(), polkavm::Error> {
@@ -516,7 +512,7 @@ impl<'a> Disassembler<'a> {
 mod tests {
     use polkavm::Reg::*;
     use polkavm_common::abi::MemoryMapBuilder;
-    use polkavm_common::program::asm;
+    use polkavm_common::program::{asm, InstructionSetKind};
     use polkavm_common::writer::ProgramBlobBuilder;
 
     use super::*;
@@ -546,7 +542,7 @@ mod tests {
     #[test]
     fn simple() {
         let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(0x4000).build().unwrap();
-        let mut builder = ProgramBlobBuilder::new();
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
         builder.set_rw_data_size(0x4000);
         builder.add_export_by_basic_block(0, b"main");
         builder.add_import(b"hostcall");

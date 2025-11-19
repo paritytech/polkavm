@@ -11,10 +11,11 @@ use alloc::vec::Vec;
 
 use polkavm_common::abi::MemoryMapBuilder;
 use polkavm_common::cast::cast;
-use polkavm_common::program::{asm, DefaultInstructionSet};
+use polkavm_common::program::{asm, InstructionSetKind};
 use polkavm_common::program::{BlobLen, Reg::*, INTERPRETER_CACHE_ENTRY_SIZE, INTERPRETER_CACHE_RESERVED_ENTRIES};
 use polkavm_common::utils::align_to_next_page_u32;
 use polkavm_common::writer::ProgramBlobBuilder;
+use polkavm_linker::TargetInstructionSet;
 
 use paste::paste;
 
@@ -310,7 +311,7 @@ macro_rules! run_asm_tests {
 
 fn basic_test_blob() -> ProgramBlob {
     let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(0x4000).build().unwrap();
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.set_rw_data_size(0x4000);
     builder.add_export_by_basic_block(0, b"main");
     builder.add_import(b"hostcall");
@@ -414,7 +415,7 @@ fn step_tracing_basic(engine_config: Config) {
     let entry_point = module.exports().find(|export| export == "main").unwrap().program_counter();
     assert_eq!(entry_point.0, 0);
 
-    let list: Vec<_> = module.blob().instructions(DefaultInstructionSet::default()).collect();
+    let list: Vec<_> = module.blob().instructions().collect();
     let address = module.memory_map().rw_data_address();
 
     instance.prepare_call_typed(entry_point, (1, 10));
@@ -492,7 +493,7 @@ fn step_tracing_basic(engine_config: Config) {
 fn reclaim_cache_memory(config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -507,7 +508,7 @@ fn reclaim_cache_memory(config: Config) {
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
-    let list: Vec<_> = module.blob().instructions(DefaultInstructionSet::default()).collect();
+    let list: Vec<_> = module.blob().instructions().collect();
 
     let mut instance = module.instantiate().unwrap();
 
@@ -541,7 +542,7 @@ fn bounded_interpreter_cache(config: Config) {
 
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"entry_0");
     builder.add_export_by_basic_block(1, b"entry_1");
     builder.add_export_by_basic_block(2, b"entry_2");
@@ -678,7 +679,7 @@ fn step_tracing_invalid_store(engine_config: Config) {
     let mut config = ModuleConfig::new();
     config.set_step_tracing(true);
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::fallthrough(), asm::store_imm_u32(0, 0x12345678), asm::ret()], &[]);
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
@@ -698,7 +699,7 @@ fn step_tracing_invalid_load(engine_config: Config) {
     let mut config = ModuleConfig::new();
     config.set_step_tracing(true);
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::fallthrough(), asm::load_i32(Reg::A0, 0), asm::ret()], &[]);
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
@@ -719,7 +720,7 @@ fn step_tracing_out_of_gas(engine_config: Config) {
     config.set_step_tracing(true);
     config.set_gas_metering(Some(GasMeteringKind::Sync));
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -739,11 +740,7 @@ fn step_tracing_out_of_gas(engine_config: Config) {
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let module = Module::from_blob(&engine, &config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
     let mut instance = module.instantiate().unwrap();
 
     instance.set_gas(4);
@@ -810,7 +807,7 @@ fn zero_memory(engine_config: Config) {
     let engine = Engine::new(&engine_config).unwrap();
 
     let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(0x4000).build().unwrap();
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.set_rw_data_size(0x4000);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
@@ -825,11 +822,7 @@ fn zero_memory(engine_config: Config) {
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     assert_out_of_range_access(
@@ -866,17 +859,13 @@ fn dynamic_jump_to_null(engine_config: Config) {
 
     for code in programs {
         log::info!("Testing program...");
-        let mut builder = ProgramBlobBuilder::new();
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
         builder.add_export_by_basic_block(0, b"main");
         builder.set_code(&code, &[]);
 
         let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
         let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
-        let offsets: Vec<_> = module
-            .blob()
-            .instructions(DefaultInstructionSet::default())
-            .map(|inst| inst.offset)
-            .collect();
+        let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
         let mut instance = module.instantiate().unwrap();
         instance.set_next_program_counter(offsets[0]);
@@ -889,17 +878,13 @@ fn dynamic_jump_to_null(engine_config: Config) {
 fn simple_test(engine_config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_imm(A0, 0x1234), asm::add_imm_32(A1, A1, 100), asm::ret()], &[]);
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -913,17 +898,13 @@ fn simple_test(engine_config: Config) {
 fn out_of_range_execution(engine_config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_imm(A0, 1), asm::load_imm(A0, 2), asm::branch_eq_imm(RA, 0, 0)], &[]);
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
-    let next_offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.next_offset)
-        .collect();
+    let next_offsets: Vec<_> = module.blob().instructions().map(|inst| inst.next_offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -935,7 +916,7 @@ fn out_of_range_execution(engine_config: Config) {
 fn jump_into_middle_of_basic_block_from_outside(engine_config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -953,11 +934,7 @@ fn jump_into_middle_of_basic_block_from_outside(engine_config: Config) {
     module_config.set_page_size(get_native_page_size().try_into().unwrap());
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -997,7 +974,7 @@ fn jump_into_middle_of_basic_block_from_outside(engine_config: Config) {
 fn jump_into_middle_of_basic_block_from_within(engine_config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::jump(1), asm::add_imm_32(A0, A0, 100), asm::ret()], &[]);
 
@@ -1009,7 +986,7 @@ fn jump_into_middle_of_basic_block_from_within(engine_config: Config) {
         module_config.set_page_size(get_native_page_size().try_into().unwrap());
         module_config.set_gas_metering(Some(GasMeteringKind::Sync));
         let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
-        let instructions: Vec<_> = module.blob().instructions(DefaultInstructionSet::default()).collect();
+        let instructions: Vec<_> = module.blob().instructions().collect();
 
         let mut instance = module.instantiate().unwrap();
         instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1040,7 +1017,7 @@ fn jump_into_middle_of_basic_block_from_within(engine_config: Config) {
     raw_code[1] = (instructions[2].offset.0 - instructions[0].offset.0) as u8;
 
     blob.set_code(raw_code.into());
-    let new_instructions: Vec<_> = blob.instructions(DefaultInstructionSet::default()).collect();
+    let new_instructions: Vec<_> = blob.instructions().collect();
     assert_eq!(&instructions[1..], &new_instructions[1..]);
     assert_eq!(new_instructions[0].kind, asm::jump(new_instructions[2].offset.0));
 
@@ -1048,7 +1025,7 @@ fn jump_into_middle_of_basic_block_from_within(engine_config: Config) {
     module_config.set_page_size(get_native_page_size().try_into().unwrap());
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
     let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
-    let instructions: Vec<_> = module.blob().instructions(DefaultInstructionSet::default()).collect();
+    let instructions: Vec<_> = module.blob().instructions().collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1062,7 +1039,7 @@ fn jump_into_middle_of_basic_block_from_within(engine_config: Config) {
 fn jump_after_invalid_instruction_from_within(engine_config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::trap(), asm::add_imm_32(A0, A0, 100), asm::jump(1)], &[]);
 
@@ -1070,7 +1047,7 @@ fn jump_after_invalid_instruction_from_within(engine_config: Config) {
     let mut raw_code = blob.code().to_vec();
     raw_code[0] = 255;
     blob.set_code(raw_code.into());
-    let instructions: Vec<_> = blob.instructions(DefaultInstructionSet::default()).collect();
+    let instructions: Vec<_> = blob.instructions().collect();
     assert_eq!(
         instructions[0],
         polkavm_common::program::ParsedInstruction {
@@ -1097,7 +1074,7 @@ fn jump_after_invalid_instruction_from_within(engine_config: Config) {
 fn jump_indirect_simple(engine_config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new_64bit();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -1140,7 +1117,7 @@ fn jump_indirect_simple(engine_config: Config) {
 fn jump_indirect_big_table(engine_config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new_64bit();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[asm::jump_indirect(A0, 1024 * 1024), asm::trap(), asm::ret()],
@@ -1163,7 +1140,7 @@ fn dynamic_paging_basic(mut engine_config: Config) {
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -1182,11 +1159,7 @@ fn dynamic_paging_basic(mut engine_config: Config) {
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1281,7 +1254,7 @@ fn dynamic_paging_freeing_pages(mut engine_config: Config) {
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_i32(Reg::A0, 0x10000), asm::ret()], &[]);
 
@@ -1290,11 +1263,7 @@ fn dynamic_paging_freeing_pages(mut engine_config: Config) {
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1326,7 +1295,7 @@ fn dynamic_paging_protect_memory(mut engine_config: Config) {
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[asm::load_i32(Reg::A0, 0x10000), asm::store_imm_u32(0x10000, 0x12345678), asm::ret()],
@@ -1338,11 +1307,7 @@ fn dynamic_paging_protect_memory(mut engine_config: Config) {
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     #[allow(clippy::match_wildcard_for_single_variants)]
@@ -1390,7 +1355,7 @@ fn dynamic_paging_stress_test(mut engine_config: Config) {
     engine_config.set_allow_dynamic_paging(true);
     engine_config.set_worker_count(0);
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_i32(Reg::A0, 0x10000), asm::ret()], &[]);
 
@@ -1407,11 +1372,7 @@ fn dynamic_paging_stress_test(mut engine_config: Config) {
                 module_config.set_page_size(page_size);
                 module_config.set_dynamic_paging(true);
                 let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-                let offsets: Vec<_> = module
-                    .blob()
-                    .instructions(DefaultInstructionSet::default())
-                    .map(|inst| inst.offset)
-                    .collect();
+                let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
                 let mut instance = module.instantiate().unwrap();
                 instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1438,7 +1399,7 @@ fn dynamic_paging_initialize_multiple_pages(mut engine_config: Config) {
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -1454,11 +1415,7 @@ fn dynamic_paging_initialize_multiple_pages(mut engine_config: Config) {
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1479,7 +1436,7 @@ fn dynamic_paging_preinitialize_pages(mut engine_config: Config) {
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -1495,11 +1452,7 @@ fn dynamic_paging_preinitialize_pages(mut engine_config: Config) {
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1517,7 +1470,7 @@ fn dynamic_paging_reading_does_not_resolve_segfaults(mut engine_config: Config) 
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_i32(Reg::A0, 0x10000), asm::ret()], &[]);
 
@@ -1526,11 +1479,7 @@ fn dynamic_paging_reading_does_not_resolve_segfaults(mut engine_config: Config) 
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1550,7 +1499,7 @@ fn dynamic_paging_read_at_page_boundary(mut engine_config: Config) {
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_i32(Reg::A0, 0x10ffe), asm::ret()], &[]);
 
@@ -1559,11 +1508,7 @@ fn dynamic_paging_read_at_page_boundary(mut engine_config: Config) {
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1592,7 +1537,7 @@ fn dynamic_paging_read_at_top_of_address_space(mut engine_config: Config) {
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_i32(Reg::A0, 0xffffffff), asm::ret()], &[]);
 
@@ -1601,11 +1546,7 @@ fn dynamic_paging_read_at_top_of_address_space(mut engine_config: Config) {
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1621,7 +1562,7 @@ fn dynamic_paging_read_with_upper_bits_set(mut engine_config: Config) {
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new_64bit();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -1637,11 +1578,7 @@ fn dynamic_paging_read_with_upper_bits_set(mut engine_config: Config) {
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1657,7 +1594,7 @@ fn dynamic_paging_read_at_bottom_of_address_space(mut engine_config: Config) {
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_i32(Reg::A0, 1), asm::ret()], &[]);
 
@@ -1666,11 +1603,7 @@ fn dynamic_paging_read_at_bottom_of_address_space(mut engine_config: Config) {
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1685,7 +1618,7 @@ fn dynamic_paging_read_memory_which_is_not_paged_in(mut engine_config: Config) {
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::ret()], &[]);
 
@@ -1713,7 +1646,7 @@ fn dynamic_paging_write_at_page_boundary_with_no_pages(mut engine_config: Config
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::store_imm_u32(0x10ffe, 0x12345678), asm::ret()], &[]);
 
@@ -1722,11 +1655,7 @@ fn dynamic_paging_write_at_page_boundary_with_no_pages(mut engine_config: Config
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1755,7 +1684,7 @@ fn dynamic_paging_write_at_page_boundary_with_first_page(mut engine_config: Conf
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::store_imm_u32(0x10ffe, 0x12345678), asm::ret()], &[]);
 
@@ -1764,11 +1693,7 @@ fn dynamic_paging_write_at_page_boundary_with_first_page(mut engine_config: Conf
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1795,7 +1720,7 @@ fn dynamic_paging_write_at_page_boundary_with_second_page(mut engine_config: Con
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::store_imm_u32(0x10ffe, 0x12345678), asm::ret()], &[]);
 
@@ -1804,11 +1729,7 @@ fn dynamic_paging_write_at_page_boundary_with_second_page(mut engine_config: Con
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1835,7 +1756,7 @@ fn dynamic_paging_change_written_value_and_address_during_segfault(mut engine_co
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::store_indirect_u32(Reg::A0, Reg::A1, 0), asm::ret()], &[]);
 
@@ -1844,11 +1765,7 @@ fn dynamic_paging_change_written_value_and_address_during_segfault(mut engine_co
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1873,7 +1790,7 @@ fn dynamic_paging_cancel_segfault_by_changing_address(mut engine_config: Config)
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::store_imm_indirect_u32(Reg::A0, 0, 0x12345678), asm::ret()], &[]);
 
@@ -1882,11 +1799,7 @@ fn dynamic_paging_cancel_segfault_by_changing_address(mut engine_config: Config)
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance
@@ -1910,7 +1823,7 @@ fn dynamic_paging_worker_recycle_turn_dynamic_paging_on_and_off(mut engine_confi
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_rw_data_size(1);
     builder.set_code(&[asm::store_imm_u32(0x20000, 0x12345678), asm::ret()], &[]);
@@ -1971,7 +1884,7 @@ fn dynamic_paging_worker_recycle_during_segfault(mut engine_config: Config) {
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
     let blob_1 = {
-        let mut builder = ProgramBlobBuilder::new();
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
         builder.add_export_by_basic_block(0, b"main");
         builder.set_rw_data_size(1);
         builder.set_code(&[asm::store_imm_u32(0x20000, 0x12345678), asm::ret()], &[]);
@@ -1980,7 +1893,7 @@ fn dynamic_paging_worker_recycle_during_segfault(mut engine_config: Config) {
     };
 
     let blob_2 = {
-        let mut builder = ProgramBlobBuilder::new();
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
         builder.add_export_by_basic_block(0, b"main");
         builder.set_rw_data_size(1);
         builder.set_code(&[asm::store_imm_u32(0x20000, 0x11223344), asm::ret()], &[]);
@@ -2022,7 +1935,7 @@ fn dynamic_paging_change_program_counter_during_segfault(mut engine_config: Conf
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -2039,11 +1952,7 @@ fn dynamic_paging_change_program_counter_during_segfault(mut engine_config: Conf
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -2068,7 +1977,7 @@ fn dynamic_paging_run_out_of_gas(mut engine_config: Config) {
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[asm::load_imm(Reg::A0, 1), asm::fallthrough(), asm::load_imm(Reg::A0, 2), asm::ret()],
@@ -2081,11 +1990,7 @@ fn dynamic_paging_run_out_of_gas(mut engine_config: Config) {
     module_config.set_dynamic_paging(true);
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -2108,7 +2013,7 @@ fn dynamic_paging_receive_from_another_thread_and_run(mut engine_config: Config)
     let mut instance = std::thread::spawn(move || {
         let engine = Engine::new(&engine_config).unwrap();
         let page_size = get_native_page_size() as u32;
-        let mut builder = ProgramBlobBuilder::new_64bit();
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
         builder.add_export_by_basic_block(0, b"main");
         builder.set_code(
             &[
@@ -2127,11 +2032,7 @@ fn dynamic_paging_receive_from_another_thread_and_run(mut engine_config: Config)
         module_config.set_dynamic_paging(true);
         module_config.set_gas_metering(Some(GasMeteringKind::Sync));
         let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-        let offsets: Vec<_> = module
-            .blob()
-            .instructions(DefaultInstructionSet::default())
-            .map(|inst| inst.offset)
-            .collect();
+        let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
         let mut instance = module.instantiate().unwrap();
         instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -2157,7 +2058,7 @@ fn dynamic_paging_instantiate_on_another_thread(mut engine_config: Config) {
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new_64bit();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -2176,11 +2077,7 @@ fn dynamic_paging_instantiate_on_another_thread(mut engine_config: Config) {
     module_config.set_dynamic_paging(true);
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     {
         let module = module.clone();
@@ -2229,7 +2126,7 @@ fn dynamic_paging_parallel_page_fault_stress_test(mut engine_config: Config) {
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new_64bit();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -2248,11 +2145,7 @@ fn dynamic_paging_parallel_page_fault_stress_test(mut engine_config: Config) {
     module_config.set_dynamic_paging(true);
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
     let initial_offset = offsets[0];
 
     use core::sync::atomic::{AtomicBool, Ordering};
@@ -2360,7 +2253,7 @@ fn get_blob_impl(optimize: bool, strip: bool, elf: &'static [u8]) -> ProgramBlob
             config.set_optimize(optimize);
             config.set_strip(strip);
 
-            let bytes = polkavm_linker::program_from_elf(config, &elf).unwrap();
+            let bytes = polkavm_linker::program_from_elf(config, TargetInstructionSet::Latest, &elf).unwrap();
             ProgramBlob::parse(bytes.into()).unwrap()
         })
         .clone()
@@ -2565,7 +2458,7 @@ fn dispatch_table(config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"block_0");
     builder.add_export_by_basic_block(1, b"block_1");
     builder.add_export_by_basic_block(2, b"block_2");
@@ -2587,11 +2480,7 @@ fn dispatch_table(config: Config) {
     let mut module_config = ModuleConfig::new();
     module_config.set_page_size(page_size);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
     assert_eq!(offsets[0], ProgramCounter(0));
     assert_eq!(offsets[1], ProgramCounter(5));
     assert_eq!(offsets[2], ProgramCounter(10));
@@ -2616,7 +2505,7 @@ fn fallthrough_into_already_compiled_block(config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -2630,10 +2519,7 @@ fn fallthrough_into_already_compiled_block(config: Config) {
     );
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-    let offsets: Vec<_> = blob
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = blob.instructions().map(|inst| inst.offset).collect();
 
     let mut module_config = ModuleConfig::new();
     module_config.set_page_size(page_size);
@@ -2666,7 +2552,7 @@ fn implicit_trap_after_fallthrough(config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::fallthrough()], &[]);
 
@@ -2685,18 +2571,18 @@ fn implicit_trap_after_fallthrough(config: Config) {
 fn invalid_instruction_after_fallthrough(engine_config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::fallthrough(), asm::fallthrough(), asm::ret()], &[]);
 
     let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-    let instructions: Vec<_> = blob.instructions(DefaultInstructionSet::default()).collect();
+    let instructions: Vec<_> = blob.instructions().collect();
 
     let mut raw_code = blob.code().to_vec();
     raw_code[instructions[1].offset.0 as usize] = 255;
     blob.set_code(raw_code.into());
 
-    let instructions: Vec<_> = blob.instructions(DefaultInstructionSet::default()).collect();
+    let instructions: Vec<_> = blob.instructions().collect();
     assert_eq!(
         instructions[1],
         polkavm_common::program::ParsedInstruction {
@@ -2725,7 +2611,7 @@ fn invalid_instruction_after_fallthrough(engine_config: Config) {
 fn invalid_branch_target(engine_config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -2747,7 +2633,7 @@ fn invalid_branch_target(engine_config: Config) {
     // Valid branch.
     {
         let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
-        instructions = blob.instructions(DefaultInstructionSet::default()).collect();
+        instructions = blob.instructions().collect();
 
         let module = Module::from_blob(&engine, &module_config, blob).unwrap();
 
@@ -2809,7 +2695,7 @@ fn aux_data_works(config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -2825,11 +2711,7 @@ fn aux_data_works(config: Config) {
     module_config.set_page_size(page_size);
     module_config.set_aux_data_size(1);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.write_u32(module.memory_map().aux_data_address(), 0x12345678).unwrap();
@@ -2852,7 +2734,7 @@ fn aux_data_accessible_area(config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_indirect_i32(Reg::A1, Reg::A0, 0), asm::ret()], &[]);
 
@@ -2861,11 +2743,7 @@ fn aux_data_accessible_area(config: Config) {
     module_config.set_page_size(page_size);
     module_config.set_aux_data_size(2_u32.pow(24));
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_accessible_aux_size(1).unwrap();
@@ -3032,7 +2910,7 @@ fn access_memory_from_host(config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::trap()], &[]);
     builder.set_ro_data_size(1);
@@ -3112,16 +2990,22 @@ fn sbrk_knob_works(config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new();
-    builder.add_export_by_basic_block(0, b"main");
-    builder.set_code(&[asm::sbrk(Reg::A0, Reg::A0), asm::ret()], &[]);
-
-    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-
     for sbrk_allowed in [true, false] {
+        let isa = if sbrk_allowed {
+            InstructionSetKind::Latest64
+        } else {
+            InstructionSetKind::ReviveV1
+        };
+
+        let mut builder = ProgramBlobBuilder::new(isa);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::sbrk(Reg::A0, Reg::A0), asm::ret()], &[]);
+        builder.set_ignore_instruction_set_incompatibility(true);
+
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
         let mut module_config: ModuleConfig = ModuleConfig::new();
         module_config.set_page_size(page_size);
-        module_config.set_allow_sbrk(sbrk_allowed);
         module_config.set_gas_metering(Some(GasMeteringKind::Sync));
         let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
 
@@ -3607,7 +3491,7 @@ fn test_asm_reloc_hi_lo(config: Config, optimize: bool) {
 fn basic_gas_metering(config: Config, gas_metering_kind: GasMeteringKind) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::fallthrough(), asm::add_imm_32(A0, A0, 666), asm::ret()], &[]);
 
@@ -3741,7 +3625,7 @@ fn basic_gas_metering_async(config: Config) {
 fn per_instruction_gas_metering() {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -3756,10 +3640,7 @@ fn per_instruction_gas_metering() {
     );
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-    let offsets: Vec<_> = blob
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = blob.instructions().map(|inst| inst.offset).collect();
 
     let mut config = Config::default();
     config.set_backend(Some(crate::BackendKind::Interpreter));
@@ -3802,7 +3683,7 @@ fn per_instruction_gas_metering() {
 fn consume_gas_in_host_function(config: Config, gas_metering_kind: GasMeteringKind) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.add_import(b"hostfn");
     builder.set_code(&[asm::ecalli(0), asm::ret()], &[]);
@@ -3858,7 +3739,7 @@ fn consume_gas_in_host_function_async(config: Config) {
 fn gas_metering_with_more_than_one_basic_block(config: Config) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"export_1");
     builder.add_export_by_basic_block(1, b"export_2");
     builder.set_code(
@@ -3900,7 +3781,7 @@ fn gas_metering_with_more_than_one_basic_block(config: Config) {
 fn gas_metering_with_implicit_trap(config: Config) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::add_imm_32(A0, A0, 666)], &[]);
 
@@ -3923,7 +3804,7 @@ fn gas_metering_with_implicit_trap(config: Config) {
 fn gas_gets_charged_when_jumping_in_the_middle_of_a_basic_block(config: Config) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -3938,10 +3819,7 @@ fn gas_gets_charged_when_jumping_in_the_middle_of_a_basic_block(config: Config) 
     );
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-    let offsets: Vec<_> = blob
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = blob.instructions().map(|inst| inst.offset).collect();
 
     let engine = Engine::new(&config).unwrap();
     let mut module_config = ModuleConfig::default();
@@ -4017,7 +3895,7 @@ fn gas_gets_charged_when_jumping_in_the_middle_of_a_basic_block(config: Config) 
 fn trapping_preserves_all_registers_normal_trap(config: Config) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::trap()], &[]);
 
@@ -4038,7 +3916,7 @@ fn trapping_preserves_all_registers_normal_trap(config: Config) {
 fn trapping_preserves_all_registers_segfault(config: Config) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::store_imm_u32(0, 0x12345678), asm::ret()], &[]);
 
@@ -4059,7 +3937,7 @@ fn trapping_preserves_all_registers_segfault(config: Config) {
 fn memset_basic(config: Config) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.set_ro_data_size(1);
     builder.set_rw_data_size(1);
     builder.set_ro_data(vec![0x00]);
@@ -4072,11 +3950,7 @@ fn memset_basic(config: Config) {
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
 
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let memory_map = module.memory_map();
     let linker: Linker = Linker::new();
@@ -4193,7 +4067,7 @@ fn memset_with_dynamic_paging(mut config: Config) {
 
     config.set_allow_dynamic_paging(true);
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::memset(), asm::ret()], &[]);
 
@@ -4206,11 +4080,7 @@ fn memset_with_dynamic_paging(mut config: Config) {
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
 
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module
-        .blob()
-        .instructions(DefaultInstructionSet::default())
-        .map(|inst| inst.offset)
-        .collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let memory_map = module.memory_map();
 
@@ -4322,7 +4192,7 @@ fn spawn_stress_test(_config: Config) {}
 fn spawn_stress_test(mut config: Config) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_ro_data_size(1);
     builder.set_rw_data_size(1);
@@ -4427,7 +4297,7 @@ fn run_riscv_test(engine_config: Config, elf: &[u8], testnum_reg: Reg, optimize:
     linker_config.set_optimize(optimize);
     linker_config.set_strip(true);
     linker_config.set_min_stack_size(0);
-    let raw_blob = polkavm_linker::program_from_elf(linker_config, elf).unwrap();
+    let raw_blob = polkavm_linker::program_from_elf(linker_config, TargetInstructionSet::Latest, elf).unwrap();
 
     let _ = env_logger::try_init();
     let blob = ProgramBlob::parse(raw_blob.into()).unwrap();
