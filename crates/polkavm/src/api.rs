@@ -592,6 +592,7 @@ impl Module {
                                 #[cfg(target_os = "linux")]
                                 match blob.isa() {
                                     InstructionSetKind::ReviveV1 => compile_module!(SandboxLinux, B64, build_static_dispatch_table_revive_v1, COMPILER_VISITOR_LINUX, Linux),
+                                    InstructionSetKind::JamV1 => compile_module!(SandboxLinux, B64, build_static_dispatch_table_jam_v1, COMPILER_VISITOR_LINUX, Linux),
                                     InstructionSetKind::Latest32 => compile_module!(SandboxLinux, B32, build_static_dispatch_table_latest32, COMPILER_VISITOR_LINUX, Linux),
                                     InstructionSetKind::Latest64 => compile_module!(SandboxLinux, B64, build_static_dispatch_table_latest64, COMPILER_VISITOR_LINUX, Linux),
                                 }
@@ -606,6 +607,7 @@ impl Module {
                                 #[cfg(feature = "generic-sandbox")]
                                 match blob.isa() {
                                     InstructionSetKind::ReviveV1 => compile_module!(SandboxGeneric, B64, build_static_dispatch_table_revive_v1, COMPILER_VISITOR_GENERIC, Generic),
+                                    InstructionSetKind::JamV1 => compile_module!(SandboxGeneric, B64, build_static_dispatch_table_jam_v1, COMPILER_VISITOR_GENERIC, Generic),
                                     InstructionSetKind::Latest32 => compile_module!(SandboxGeneric, B32, build_static_dispatch_table_latest32, COMPILER_VISITOR_GENERIC, Generic),
                                     InstructionSetKind::Latest64 => compile_module!(SandboxGeneric, B64, build_static_dispatch_table_latest64, COMPILER_VISITOR_GENERIC, Generic),
                                 }

@@ -2272,6 +2272,179 @@ define_instruction_set! {
     ]
 }
 
+define_instruction_set! {
+    ($)
+
+    ISA_JamV1,
+    build_static_dispatch_table_jam_v1,
+
+    [
+        trap                                     = 0,
+        fallthrough                              = 1,
+    ]
+    [
+        jump_indirect                            = 50,
+        load_imm                                 = 51,
+        load_u8                                  = 52,
+        load_i8                                  = 53,
+        load_u16                                 = 54,
+        load_i16                                 = 55,
+        load_i32                                 = 57,
+        load_u32                                 = 56,
+        load_u64                                 = 58,
+        store_u8                                 = 59,
+        store_u16                                = 60,
+        store_u32                                = 61,
+        store_u64                                = 62,
+    ]
+    [
+        load_imm_and_jump                        = 80,
+        branch_eq_imm                            = 81,
+        branch_not_eq_imm                        = 82,
+        branch_less_unsigned_imm                 = 83,
+        branch_less_signed_imm                   = 87,
+        branch_greater_or_equal_unsigned_imm     = 85,
+        branch_greater_or_equal_signed_imm       = 89,
+        branch_less_or_equal_signed_imm          = 88,
+        branch_less_or_equal_unsigned_imm        = 84,
+        branch_greater_signed_imm                = 90,
+        branch_greater_unsigned_imm              = 86,
+    ]
+    [
+        store_imm_indirect_u8                    = 70,
+        store_imm_indirect_u16                   = 71,
+        store_imm_indirect_u32                   = 72,
+        store_imm_indirect_u64                   = 73,
+    ]
+    [
+        store_indirect_u8                        = 120,
+        store_indirect_u16                       = 121,
+        store_indirect_u32                       = 122,
+        store_indirect_u64                       = 123,
+        load_indirect_u8                         = 124,
+        load_indirect_i8                         = 125,
+        load_indirect_u16                        = 126,
+        load_indirect_i16                        = 127,
+        load_indirect_i32                        = 129,
+        load_indirect_u32                        = 128,
+        load_indirect_u64                        = 130,
+        add_imm_32                               = 131,
+        add_imm_64                               = 149,
+        and_imm                                  = 132,
+        xor_imm                                  = 133,
+        or_imm                                   = 134,
+        mul_imm_32                               = 135,
+        mul_imm_64                               = 150,
+        set_less_than_unsigned_imm               = 136,
+        set_less_than_signed_imm                 = 137,
+        shift_logical_left_imm_32                = 138,
+        shift_logical_left_imm_64                = 151,
+        shift_logical_right_imm_32               = 139,
+        shift_logical_right_imm_64               = 152,
+        shift_arithmetic_right_imm_32            = 140,
+        shift_arithmetic_right_imm_64            = 153,
+        negate_and_add_imm_32                    = 141,
+        negate_and_add_imm_64                    = 154,
+        set_greater_than_unsigned_imm            = 142,
+        set_greater_than_signed_imm              = 143,
+        shift_logical_right_imm_alt_32           = 145,
+        shift_logical_right_imm_alt_64           = 156,
+        shift_arithmetic_right_imm_alt_32        = 146,
+        shift_arithmetic_right_imm_alt_64        = 157,
+        shift_logical_left_imm_alt_32            = 144,
+        shift_logical_left_imm_alt_64            = 155,
+        cmov_if_zero_imm                         = 147,
+        cmov_if_not_zero_imm                     = 148,
+        rotate_right_imm_32                      = 160,
+        rotate_right_imm_alt_32                  = 161,
+        rotate_right_imm_64                      = 158,
+        rotate_right_imm_alt_64                  = 159,
+    ]
+    [
+        branch_eq                                = 170,
+        branch_not_eq                            = 171,
+        branch_less_unsigned                     = 172,
+        branch_less_signed                       = 173,
+        branch_greater_or_equal_unsigned         = 174,
+        branch_greater_or_equal_signed           = 175,
+    ]
+    [
+        add_32                                   = 190,
+        add_64                                   = 200,
+        sub_32                                   = 191,
+        sub_64                                   = 201,
+        and                                      = 210,
+        xor                                      = 211,
+        or                                       = 212,
+        mul_32                                   = 192,
+        mul_64                                   = 202,
+        mul_upper_signed_signed                  = 213,
+        mul_upper_unsigned_unsigned              = 214,
+        mul_upper_signed_unsigned                = 215,
+        set_less_than_unsigned                   = 216,
+        set_less_than_signed                     = 217,
+        shift_logical_left_32                    = 197,
+        shift_logical_left_64                    = 207,
+        shift_logical_right_32                   = 198,
+        shift_logical_right_64                   = 208,
+        shift_arithmetic_right_32                = 199,
+        shift_arithmetic_right_64                = 209,
+        div_unsigned_32                          = 193,
+        div_unsigned_64                          = 203,
+        div_signed_32                            = 194,
+        div_signed_64                            = 204,
+        rem_unsigned_32                          = 195,
+        rem_unsigned_64                          = 205,
+        rem_signed_32                            = 196,
+        rem_signed_64                            = 206,
+        cmov_if_zero                             = 218,
+        cmov_if_not_zero                         = 219,
+        and_inverted                             = 224,
+        or_inverted                              = 225,
+        xnor                                     = 226,
+        maximum                                  = 227,
+        maximum_unsigned                         = 228,
+        minimum                                  = 229,
+        minimum_unsigned                         = 230,
+        rotate_left_32                           = 221,
+        rotate_left_64                           = 220,
+        rotate_right_32                          = 223,
+        rotate_right_64                          = 222,
+    ]
+    [
+        jump                                     = 40,
+    ]
+    [
+        ecalli                                   = 10,
+    ]
+    [
+        store_imm_u8                             = 30,
+        store_imm_u16                            = 31,
+        store_imm_u32                            = 32,
+        store_imm_u64                            = 33,
+    ]
+    [
+        move_reg                                 = 100,
+        sbrk                                     = 101,
+        count_leading_zero_bits_32               = 105,
+        count_leading_zero_bits_64               = 104,
+        count_trailing_zero_bits_32              = 107,
+        count_trailing_zero_bits_64              = 106,
+        count_set_bits_32                        = 103,
+        count_set_bits_64                        = 102,
+        sign_extend_8                            = 108,
+        sign_extend_16                           = 109,
+        zero_extend_16                           = 110,
+        reverse_byte                             = 111,
+    ]
+    [
+        load_imm_and_jump_indirect               = 180,
+    ]
+    [
+        load_imm64                               = 20,
+    ]
+}
+
 #[test]
 fn test_opcode_from_u8() {
     assert_eq!(ISA_Latest64.opcode_from_u8(3), Some(Opcode::unlikely));
@@ -2281,6 +2454,7 @@ fn test_opcode_from_u8() {
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum InstructionSetKind {
     ReviveV1,
+    JamV1,
     Latest32,
     Latest64,
 }
@@ -2289,6 +2463,7 @@ impl InstructionSetKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::ReviveV1 => "revive_v1",
+            Self::JamV1 => "jam_v1",
             Self::Latest32 => "latest32",
             Self::Latest64 => "latest64",
         }
@@ -2300,6 +2475,7 @@ impl InstructionSetKind {
             Self::ReviveV1 => 0,
             Self::Latest32 => 1,
             Self::Latest64 => 2,
+            Self::JamV1 => 3,
         }
     }
 
@@ -2308,6 +2484,7 @@ impl InstructionSetKind {
             0 => Some(Self::ReviveV1),
             1 => Some(Self::Latest32),
             2 => Some(Self::Latest64),
+            3 => Some(Self::JamV1),
             _ => None,
         }
     }
@@ -2319,6 +2496,7 @@ impl InstructionSet for InstructionSetKind {
             Self::ReviveV1 => ISA_ReviveV1.opcode_from_u8(byte),
             Self::Latest32 => ISA_Latest32.opcode_from_u8(byte),
             Self::Latest64 => ISA_Latest64.opcode_from_u8(byte),
+            Self::JamV1 => ISA_JamV1.opcode_from_u8(byte),
         }
     }
 
@@ -2327,6 +2505,7 @@ impl InstructionSet for InstructionSetKind {
             Self::ReviveV1 => ISA_ReviveV1.opcode_to_u8(opcode),
             Self::Latest32 => ISA_Latest32.opcode_to_u8(opcode),
             Self::Latest64 => ISA_Latest64.opcode_to_u8(opcode),
+            Self::JamV1 => ISA_JamV1.opcode_to_u8(opcode),
         }
     }
 
@@ -2335,6 +2514,7 @@ impl InstructionSet for InstructionSetKind {
             Self::ReviveV1 => ISA_ReviveV1.parse_instruction(opcode, chunk, offset, skip),
             Self::Latest32 => ISA_Latest32.parse_instruction(opcode, chunk, offset, skip),
             Self::Latest64 => ISA_Latest64.parse_instruction(opcode, chunk, offset, skip),
+            Self::JamV1 => ISA_JamV1.parse_instruction(opcode, chunk, offset, skip),
         }
     }
 }
@@ -5180,7 +5360,7 @@ impl ProgramBlob {
     pub fn is_64_bit(&self) -> bool {
         match self.isa {
             InstructionSetKind::Latest32 => false,
-            InstructionSetKind::ReviveV1 | InstructionSetKind::Latest64 => true,
+            InstructionSetKind::ReviveV1 | InstructionSetKind::JamV1 | InstructionSetKind::Latest64 => true,
         }
     }
 

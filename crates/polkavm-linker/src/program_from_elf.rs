@@ -9968,6 +9968,7 @@ impl Config {
 #[non_exhaustive]
 pub enum TargetInstructionSet {
     ReviveV1,
+    JamV1,
     Latest,
 }
 
@@ -9993,6 +9994,13 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
             }
 
             InstructionSetKind::ReviveV1
+        }
+        TargetInstructionSet::JamV1 => {
+            if !is_rv64 {
+                return Err(ProgramFromElfError::other("the JamV1 ISA only supports 64-bit"));
+            }
+
+            InstructionSetKind::JamV1
         }
         TargetInstructionSet::Latest => {
             if is_rv64 {

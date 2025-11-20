@@ -37,6 +37,8 @@ enum OptLevel {
 enum Isa {
     #[clap(name = "revive_v1")]
     ReviveV1,
+    #[clap(name = "jam_v1")]
+    JamV1,
     #[clap(name = "latest32")]
     Latest32,
     #[clap(name = "latest64")]
@@ -47,6 +49,7 @@ impl Isa {
     fn convert(self) -> InstructionSetKind {
         match self {
             Isa::ReviveV1 => InstructionSetKind::ReviveV1,
+            Isa::JamV1 => InstructionSetKind::JamV1,
             Isa::Latest32 => InstructionSetKind::Latest32,
             Isa::Latest64 => InstructionSetKind::Latest64,
         }
