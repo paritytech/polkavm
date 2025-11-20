@@ -76,19 +76,23 @@ fn are_regs_empty(regs: &[Option<u64>; 13]) -> bool {
 #[serde(tag = "kind")]
 enum TestcaseStep {
     Run,
+    #[serde(rename_all = "kebab-case")]
     Map {
         address: u32,
         length: u32,
         is_writable: bool,
     },
+    #[serde(rename_all = "kebab-case")]
     Write {
         address: u32,
         contents: Vec<u8>,
     },
+    #[serde(rename_all = "kebab-case")]
     SetReg {
         reg: u32,
         value: u64,
     },
+    #[serde(rename_all = "kebab-case")]
     Assert {
         #[serde(skip_serializing_if = "Option::is_none")]
         status: Option<String>,
