@@ -73,9 +73,8 @@ fn are_regs_empty(regs: &[Option<u64>; 13]) -> bool {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
-#[serde(tag = "kind")]
 enum TestcaseStep {
-    Run,
+    Run {},
     #[serde(rename_all = "kebab-case")]
     Map {
         address: u32,
@@ -224,7 +223,7 @@ fn parse_u64(text: &str) -> Option<u64> {
 fn parse_step(line: &str, steps: &mut Vec<TestcaseStep>) {
     let line = line.trim();
     if line == "run" {
-        steps.push(TestcaseStep::Run);
+        steps.push(TestcaseStep::Run {});
         return;
     } else if let Some(line) = line.strip_prefix("map ") {
         let error = "invalid 'step': failed to parse 'map'";
@@ -340,7 +339,7 @@ fn main_generate() {
         }
 
         if steps.is_empty() {
-            steps.push(TestcaseStep::Run);
+            steps.push(TestcaseStep::Run {});
         }
 
         let input = input_lines.join("\n");
@@ -400,7 +399,7 @@ fn main_generate() {
             blob,
             pre: PrePost::default(),
             post,
-            steps: vec![TestcaseStep::Run],
+            steps: vec![TestcaseStep::Run {}],
             expected_status: Some("halt"),
         });
     }
@@ -681,7 +680,7 @@ fn main_generate() {
                     nth_step += 1;
                     continue;
                 }
-                TestcaseStep::Run => {
+                TestcaseStep::Run {} => {
                     nth_step += 1;
                 }
             }
@@ -948,7 +947,7 @@ fn main_generate() {
 
         writeln!(&mut index_md, "## {}\n", test.json.name).unwrap();
 
-        if test.json.steps.iter().filter(|step| matches!(step, TestcaseStep::Run)).count() > 1 {
+        if test.json.steps.iter().filter(|step| matches!(step, TestcaseStep::Run {})).count() > 1 {
             writeln!(&mut index_md, "Execution steps:").unwrap();
             let mut started = false;
             for step in test.json.steps.iter().skip_while(|step| {
@@ -1022,7 +1021,7 @@ fn main_generate() {
                         )
                         .unwrap();
                     }
-                    TestcaseStep::Run => {
+                    TestcaseStep::Run {} => {
                         if started {
                             writeln!(&mut index_md, "   * Resume execution",).unwrap();
                         } else {
