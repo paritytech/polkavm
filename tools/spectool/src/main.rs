@@ -113,13 +113,20 @@ enum TestcaseStep {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
+struct BlockGasCost {
+    pc: u32,
+    cost: u32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 struct TestcaseJson {
     name: String,
     initial_pc: u32,
     initial_gas: i64,
     program: Vec<u8>,
     steps: Vec<TestcaseStep>,
-    block_gas_costs: BTreeMap<u32, u32>,
+    block_gas_costs: Vec<BlockGasCost>,
 }
 
 fn extract_chunks(base_address: u32, slice: &[u8]) -> Vec<MemoryChunk> {
@@ -913,7 +920,7 @@ fn main_generate() {
                 initial_gas,
                 program: parts.code_and_jump_table.to_vec(),
                 steps,
-                block_gas_costs,
+                block_gas_costs: block_gas_costs.into_iter().map(|(pc, cost)| BlockGasCost { pc, cost }).collect(),
             },
         });
     }
