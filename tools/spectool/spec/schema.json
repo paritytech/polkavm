@@ -5,29 +5,7 @@
     "name": {
       "type": "string"
     },
-    "initial-regs": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/u64" },
-      "minItems": 13,
-      "maxItems": 13
-    },
     "initial-pc": { "$ref": "#/$defs/u32" },
-    "initial-page-map": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "address": { "$ref": "#/$defs/u32" },
-          "length": { "$ref": "#/$defs/u32" },
-          "is-writable": { "type": "boolean" }
-        },
-        "required": ["address", "length", "is-writable"],
-        "additionalProperties": false
-      }
-    },
-    "initial-memory": {
-      "$ref": "#/$defs/memory-chunk"
-    },
     "initial-gas": {
       "$ref": "#/$defs/i64"
     },
@@ -35,37 +13,16 @@
       "type": "array",
       "items": { "$ref": "#/$defs/u8" }
     },
-    "expected-status": {
-      "type": "string",
-      "enum": ["panic", "halt", "page-fault", "out-of-gas"]
-    },
-    "expected-regs": {
-      "type": "array",
-      "items": { "$ref": "#/$defs/u64" },
-      "minItems": 13,
-      "maxItems": 13
-    },
-    "expected-pc": { "$ref": "#/$defs/u32" },
-    "expected-memory": {
-        "$ref": "#/$defs/memory-chunk"
-    },
-    "expected-gas": {
-      "$ref": "#/$defs/i64"
-    },
-    "expected-page-fault-address": {
-      "$ref": "#/$defs/u32"
-    },
     "block-gas-costs": {
-      "type": "object",
-      "propertyNames": {
-        "pattern": "^-?[0-9]+$"
-      },
-      "additionalProperties": {
-        "type": "number"
-      }
+      "type": "array",
+      "items": { "$ref": "#/$defs/block-gas-cost" }
+    },
+    "steps": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/step" }
     }
   },
-  "required": ["name", "initial-regs", "initial-pc", "initial-page-map", "initial-memory", "initial-gas", "program", "expected-status", "expected-regs", "expected-pc", "expected-memory", "expected-gas"],
+  "required": ["name", "initial-pc", "initial-gas", "program", "steps", "block-gas-costs"],
   "additionalProperties": false,
   "$defs": {
     "u8": {
@@ -88,6 +45,11 @@
       "minimum": -9223372036854775808,
       "maximum": 9223372036854775807
     },
+    "reg": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 12
+    },
     "memory-chunk": {
       "type": "array",
       "items": {
@@ -102,6 +64,122 @@
         "required": ["address", "contents"],
         "additionalProperties": false
       }
+    },
+    "block-gas-cost": {
+      "type": "object",
+      "properties": {
+        "pc": { "$ref": "#/$defs/u32" },
+        "cost": { "$ref": "#/$defs/u32" }
+      },
+      "required": ["pc", "cost"],
+      "additionalProperties": false
+    },
+    "step": {
+      "type": "object",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "run": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": ["run"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "assert": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": ["panic", "halt", "page-fault", "out-of-gas", "ecalli"]
+                },
+                "regs": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/u64" },
+                  "minItems": 13,
+                  "maxItems": 13
+                },
+                "pc": { "$ref": "#/$defs/u32" },
+                "memory": {
+                  "$ref": "#/$defs/memory-chunk"
+                },
+                "gas": {
+                  "$ref": "#/$defs/i64"
+                },
+                "page-fault-address": {
+                  "$ref": "#/$defs/u32"
+                },
+                "hostcall": {
+                  "$ref": "#/$defs/u32"
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": ["assert"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "map": {
+              "type": "object",
+              "properties": {
+                "address": { "$ref": "#/$defs/u32" },
+                "length": { "$ref": "#/$defs/u32" },
+                "is-writable": { "type": "boolean" }
+              },
+              "required": ["address", "length", "is-writable"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["map"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "write": {
+              "type": "object",
+              "properties": {
+                "address": { "$ref": "#/$defs/u32" },
+                "contents": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/u8" }
+                }
+              },
+              "required": ["address", "contents"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["write"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "set-reg": {
+              "type": "object",
+              "properties": {
+                "reg": { "$ref": "#/$defs/reg" },
+                "value": { "$ref": "#/$defs/u64" }
+              },
+              "required": ["reg", "value"],
+              "additionalProperties": false
+            }
+          },
+          "required": ["set-reg"],
+          "additionalProperties": false
+        }
+      ]
     }
   }
 }
