@@ -12,35 +12,105 @@ U32 ::= INTEGER(0..4294967295)
 -- an 8-bit unsigned integer (a byte)
 U8 ::= INTEGER(0..255)
 
+-- a register number (0-12)
+Reg ::= INTEGER(0..12)
+
 -- a blob of bytes at a given memory address
-MemoryChunk ::= SEQUENCE OF SEQUENCE {
+MemoryChunk ::= SEQUENCE {
     address U32,
     contents SEQUENCE OF U8
+}
+
+-- start or resume the execution of the program
+RunStep ::= SEQUENCE {
+}
+
+-- verify the current state of the VM
+AssertStep ::= SEQUENCE {
+    -- (the "ζ" from the paper)
+    -- the expected status code of the last interruption
+    status ENUMERATED {
+        -- the execution ended with a panic (the `trap` instruction was executed, the execution went "out of bounds", an invalid jump was made, or an invalid instruction was executed)
+        panic,
+
+        -- the execution finished gracefully (a dynamic jump to address `0xffff0000` was made)
+        halt,
+
+        -- the execution was interrupted with a page fault
+        page-fault,
+
+        -- we've ran out of gas
+        out-of-gas,
+
+        -- a hostcall was triggered
+        ecalli
+    },
+
+    -- (the "ω′" from the paper)
+    -- the expected values of each of the 13 registers
+    regs SEQUENCE (SIZE(13..13)) OF U64 OPTIONAL,
+
+    -- (the "ı′" from the paper)
+    -- the value of the program counter
+    pc U32 OPTIONAL,
+
+    -- (part of the "µ′" from the paper)
+    -- a list of memory regions and their expected contents
+    memory SEQUENCE OF MemoryChunk OPTIONAL,
+
+    -- (the "ξ′" from the paper)
+    -- the amount of gas remaining after the interruption
+    gas I64 OPTIONAL,
+
+    -- the address of a page fault (only if the program was interrupted with a page fault)
+    page-fault-address U32 OPTIONAL,
+
+    -- the hostcall number (only if the program was interrupted with an ecalli instruction)
+    hostcall U32 OPTIONAL
+}
+
+-- map one or more pages
+MapStep ::= SEQUENCE {
+    -- a page-aligned address of the memory region to be mapped
+    address U32,
+
+    -- the length of the memory to be mapped, in bytes (but always a multiple of the page size)
+    length U32,
+
+    -- whether the mapped region of memory should be writable by the guest program
+    is-writable BOOLEAN
+}
+
+-- write into the guest's memory
+WriteStep ::= SEQUENCE {
+    -- the address of where to write
+    address U32,
+
+    -- the raw bytes of what to write
+    contents SEQUENCE OF U8
+}
+
+-- set a register to a given value
+SetRegStep ::= SEQUENCE {
+    reg Reg,
+    value U64
+}
+
+Step ::= CHOICE {
+    run RunStep,
+    assert AssertStep,
+    map MapStep,
+    write WriteStep,
+    set-reg SetRegStep
 }
 
 Testcase ::= SEQUENCE {
     -- a unique identifier for the test
     name UTF8String,
 
-    -- (the "ω" from the paper)
-    -- the initial value of each of the 13 registers; these need to be set *before* the test program is executed
-    initial-regs SEQUENCE (SIZE(13..13)) OF U64,
-
     -- (the "ı" from the paper)
     -- the initial program counter from which to start the execution
     initial-pc U32,
-
-    -- (part of the "µ" from the paper)
-    -- lists regions of memory which should be accessible, initialized with zeros by default; any address not on this list should be inaccessible
-    initial-page-map SEQUENCE OF SEQUENCE {
-        address U32,
-        length U32,
-        is-writable BOOLEAN
-    },
-
-    -- (part of the "µ" from the paper)
-    -- lists all non-zero values to put in memory before execution
-    initial-memory MemoryChunk,
 
     -- (the "ξ" from the paper)
     -- the initial amount of gas
@@ -50,41 +120,14 @@ Testcase ::= SEQUENCE {
     -- the program blob to be executed as part of the test
     program SEQUENCE OF U8,
 
-    -- (the "ζ" from the paper)
-    -- the status code of the execution, i.e. the way the program is supposed to end
-    expected-status ENUMERATED {
-        -- (called "panic" in the Graypaper)
-        -- the execution ended with a panic (the `trap` instruction was executed, the execution went "out of bounds", an invalid jump was made, or an invalid instruction was executed)
-        panic,
-
-        -- the execution finished gracefully (a dynamic jump to address `0xffff0000` was made)
-        halt,
-
-        -- the execution finished with a page fault
-        page-fault,
-
-        -- we've ran out of gas
-        out-of-gas
+    -- block gas costs, for each basic block in the program
+    block-gas-costs SEQUENCE OF SEQUENCE {
+        pc INTEGER,
+        cost INTEGER
     },
 
-    -- (the "ω′" from the paper)
-    -- the expected values of each of the 13 registers *after* the test program is executed
-    expected-regs SEQUENCE (SIZE(13..13)) OF U64,
-
-    -- (the "ı′" from the paper)
-    -- the final value of the program counter, after the execution finishes
-    expected-pc U32,
-
-    -- (part of the "µ′" from the paper)
-    -- lists all non-zero values after the execution finishes; all accessible addresses not on this list must be filled with zeroes
-    expected-memory MemoryChunk,
-
-    -- (the "ξ′" from the paper)
-    -- the final amount of gas remaining after the execution finishes
-    expected-gas I64,
-
-    -- the address of a page fault (only if the program finishes with a page fault)
-    expected-page-fault-address U32 OPTIONAL
+    -- a list of steps to execute the test
+    steps SEQUENCE OF Step
 }
 
 END
