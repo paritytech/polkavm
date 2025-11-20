@@ -9965,6 +9965,7 @@ impl Config {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum TargetInstructionSet {
     ReviveV1,
     Latest,
