@@ -133,9 +133,9 @@ pub mod debug_info {
 /// Miscellaneous types related to program blobs.
 pub mod program {
     pub use polkavm_common::program::{
-        EstimateInterpreterMemoryUsageArgs, ISA_Latest32, ISA_Latest64, ISA_ReviveV1, Imports, ImportsIter, Instruction, InstructionSet,
-        InstructionSetKind, Instructions, JumpTable, JumpTableIter, Opcode, ParsedInstruction, ProgramExport, ProgramMemoryInfo,
-        ProgramParseError, ProgramSymbol, RawReg,
+        EstimateInterpreterMemoryUsageArgs, ISA_JamV1, ISA_Latest32, ISA_Latest64, ISA_ReviveV1, Imports, ImportsIter, Instruction,
+        InstructionSet, InstructionSetKind, Instructions, JumpTable, JumpTableIter, Opcode, ParsedInstruction, ProgramExport,
+        ProgramMemoryInfo, ProgramParseError, ProgramSymbol, RawReg,
     };
 }
 
