@@ -137,6 +137,11 @@ pub mod program {
         InstructionSet, InstructionSetKind, Instructions, JumpTable, JumpTableIter, Opcode, ParsedInstruction, ProgramExport,
         ProgramMemoryInfo, ProgramParseError, ProgramSymbol, RawReg,
     };
+
+    // This is meant to be public *eventually*, but since it's still a work-in-progress
+    // let's hide it for now so that only those who know what they're doing use it.
+    #[doc(hidden)]
+    pub use polkavm_common::assembler::assemble;
 }
 
 pub type Gas = i64;
