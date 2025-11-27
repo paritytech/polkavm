@@ -5143,10 +5143,11 @@ impl ProgramParts {
             }));
         };
 
+        // The blob can be larger than what's in the header (for example with CBOR data).
         let blob_len = BlobLen::from_le_bytes(reader.read_slice(BLOB_LEN_SIZE)?.try_into().unwrap());
-        if blob_len != blob.len() as u64 {
+        if blob_len > blob.len() as u64 {
             return Err(ProgramParseError(ProgramParseErrorKind::Other(
-                "blob size doesn't match the blob length metadata",
+                "blob size is smaller than the blob length metadata",
             )));
         }
 
