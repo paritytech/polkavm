@@ -343,7 +343,7 @@ fn main_generate() {
         }
 
         let input = input_lines.join("\n");
-        let blob = match assemble(Some(InstructionSetKind::Latest64), &input) {
+        let blob = match assemble(Some(InstructionSetKind::JamV1), &input) {
             Ok(blob) => blob,
             Err(error) => {
                 eprintln!("Failed to assemble {path:?}: {error}");
@@ -384,7 +384,7 @@ fn main_generate() {
         linker_config.set_opt_level(polkavm_linker::OptLevel::O1);
         linker_config.set_strip(true);
         linker_config.set_min_stack_size(0);
-        let blob = polkavm_linker::program_from_elf(linker_config, TargetInstructionSet::Latest, &elf).unwrap();
+        let blob = polkavm_linker::program_from_elf(linker_config, TargetInstructionSet::JamV1, &elf).unwrap();
 
         let mut post = PrePost::default();
 
