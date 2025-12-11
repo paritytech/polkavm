@@ -16,14 +16,14 @@ checksum = "af35c838647fef3d6d052e27006ef88ea162336eee33063c50a63f163c18cdeb"
 
 [[package]]
 name = "polkavm-assembler"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "polkavm-common"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "picosimd",
  "polkavm-assembler",
@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-linux-raw"
-version = "0.30.0"
+version = "0.31.0"
 
 [[package]]
 name = "polkavm-zygote"
