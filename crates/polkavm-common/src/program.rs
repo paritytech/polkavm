@@ -2281,6 +2281,7 @@ define_instruction_set! {
     [
         trap                                     = 0,
         fallthrough                              = 1,
+        unlikely                                 = 2,
     ]
     [
         jump_indirect                            = 50,
@@ -2425,17 +2426,16 @@ define_instruction_set! {
     ]
     [
         move_reg                                 = 100,
-        sbrk                                     = 101,
-        count_leading_zero_bits_32               = 105,
-        count_leading_zero_bits_64               = 104,
-        count_trailing_zero_bits_32              = 107,
-        count_trailing_zero_bits_64              = 106,
-        count_set_bits_32                        = 103,
-        count_set_bits_64                        = 102,
-        sign_extend_8                            = 108,
-        sign_extend_16                           = 109,
-        zero_extend_16                           = 110,
-        reverse_byte                             = 111,
+        count_leading_zero_bits_32               = 104,
+        count_leading_zero_bits_64               = 103,
+        count_trailing_zero_bits_32              = 106,
+        count_trailing_zero_bits_64              = 105,
+        count_set_bits_32                        = 102,
+        count_set_bits_64                        = 101,
+        sign_extend_8                            = 107,
+        sign_extend_16                           = 108,
+        zero_extend_16                           = 109,
+        reverse_byte                             = 110,
     ]
     [
         load_imm_and_jump_indirect               = 180,
