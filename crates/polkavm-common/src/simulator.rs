@@ -28,11 +28,24 @@ macro_rules! unsafe_avx2 {
 }
 
 #[derive(Copy, Clone, Debug, Hash)]
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-pub enum CacheModel {
-    L1Hit,
-    L2Hit,
-    L3Hit,
+pub struct CacheModel {
+    pub memory_access_cost: i8,
+}
+
+#[allow(non_upper_case_globals)]
+impl CacheModel {
+    pub const L1Hit: Self = CacheModel { memory_access_cost: 4 };
+    pub const L2Hit: Self = CacheModel { memory_access_cost: 25 };
+    pub const L3Hit: Self = CacheModel { memory_access_cost: 37 };
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for CacheModel {
+    fn arbitrary(u: &mut arbitrary::Unstructured) -> arbitrary::Result<Self> {
+        Ok(Self {
+            memory_access_cost: <i8 as arbitrary::Arbitrary>::arbitrary(u)?.abs().max(1),
+        })
+    }
 }
 
 /// The maximum number of instructions slots available per cycle.
@@ -887,18 +900,8 @@ where
     }
 
     fn load_cost(&self) -> InstCost {
-        const L1_HIT: i8 = 4;
-        const L2_HIT: i8 = 25;
-        const L3_HIT: i8 = 37;
-
-        let latency = match self.cache_model {
-            CacheModel::L1Hit => L1_HIT,
-            CacheModel::L2Hit => L2_HIT,
-            CacheModel::L3Hit => L3_HIT,
-        };
-
         InstCost {
-            latency,
+            latency: self.cache_model.memory_access_cost,
             decode_slots: 1,
             alu_slots: 1,
             load_slots: 1,
