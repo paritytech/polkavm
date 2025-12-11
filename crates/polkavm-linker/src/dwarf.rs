@@ -827,13 +827,9 @@ where
                 | LineInstruction::UnknownStandard0(..)
                 | LineInstruction::UnknownStandard1(..)
                 | LineInstruction::UnknownStandardN(..)
-                | LineInstruction::UnknownExtended(..) => {}
-
-                LineInstruction::AdvancePc(..) | LineInstruction::ConstAddPc => {
-                    return Err(ProgramFromElfError::other(
-                        "failed to process DWARF: unsupported line program instruction: {instruction:?}",
-                    ));
-                }
+                | LineInstruction::UnknownExtended(..)
+                | LineInstruction::AdvancePc(..)
+                | LineInstruction::ConstAddPc => {}
 
                 LineInstruction::SetAddress(..) => {
                     let relocation_target = SectionTarget {
