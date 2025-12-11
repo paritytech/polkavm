@@ -1802,14 +1802,15 @@ impl super::Sandbox for Sandbox {
                 self.vmctx().program_counter.store(pc.0, Ordering::Relaxed);
             }
 
-            log::trace!("Jumping into: {pc} (0x{address:x})");
+            log::trace!("Jumping into: {pc} (0x{address:x}), gas remaining = {}", self.gas());
             self.vmctx().next_program_counter.store(pc.0, Ordering::Relaxed);
             self.vmctx().next_native_program_counter.store(address, Ordering::Relaxed);
         } else {
             log::trace!(
-                "Resuming into: {} (0x{:x})",
+                "Resuming into: {} (0x{:x}), gas remaining = {}",
                 self.vmctx().next_program_counter.load(Ordering::Relaxed),
-                self.vmctx().next_native_program_counter.load(Ordering::Relaxed)
+                self.vmctx().next_native_program_counter.load(Ordering::Relaxed),
+                self.gas(),
             );
         };
 
