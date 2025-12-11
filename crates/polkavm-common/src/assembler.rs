@@ -278,6 +278,7 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
         if let Some(line) = line.strip_prefix("%isa = ") {
             isa = Some(match line.trim() {
                 "revive_v1" => InstructionSetKind::ReviveV1,
+                "jam_v1" => InstructionSetKind::JamV1,
                 "latest32" => InstructionSetKind::Latest32,
                 "latest64" => InstructionSetKind::Latest64,
                 _ => return Err(format!("cannot parse line {nth_line}")),
