@@ -839,8 +839,7 @@ where
                     // while others may emit a direct absolute relocation. Try the size
                     // relocation first (as used for `FixedAddPc`) and fall back to the
                     // simple address relocation if no size relocation is present.
-                    if let Some((target_section_index, target_range)) =
-                        try_fetch_size_relocation(relocations, relocation_target, is_64bit)?
+                    if let Some((target_section_index, target_range)) = try_fetch_size_relocation(relocations, relocation_target, is_64bit)?
                     {
                         target = Some(SectionTarget {
                             section_index: target_section_index,
