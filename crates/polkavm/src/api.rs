@@ -126,7 +126,7 @@ impl Engine {
             }
         }
 
-        if config.default_cost_model.is_some() && !config.allow_experimental {
+        if !matches!(config.default_cost_model, None | Some(CostModelKind::Full(..))) && !config.allow_experimental {
             bail!("cannot override the default gas cost model: `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` is not enabled");
         }
 

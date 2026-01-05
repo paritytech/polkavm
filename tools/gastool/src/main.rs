@@ -3010,6 +3010,7 @@ fn main_test_cost_model(
     benchmark: Benchmark,
     analyze: bool,
     output_testcase: Option<PathBuf>,
+    use_latest_isa: bool,
 ) -> Result<(), String> {
     std::fs::create_dir_all(&cache_path).map_err(|error| format!("failed to create '{}': {error}", cache_path.display()))?;
 
@@ -3045,9 +3046,15 @@ fn main_test_cost_model(
         }
     }
 
+    let (isa, isa_suffix) = if use_latest_isa {
+        (TargetInstructionSet::Latest, "latest")
+    } else {
+        (TargetInstructionSet::JamV1, "jam_v1")
+    };
+
     let blob_path = match benchmark {
         Benchmark::Doom => {
-            let doom_blob_path = cache_path.join("doom64.polkavm");
+            let doom_blob_path = cache_path.join(format!("doom64_{isa_suffix}.polkavm"));
             if !doom_blob_path.exists() {
                 std::fs::create_dir_all(&cache_path).map_err(|error| format!("failed to create {}: {}", cache_path.display(), error))?;
                 log::info!("Decompressing ELF file...");
@@ -3056,7 +3063,7 @@ fn main_test_cost_model(
                 let mut config = polkavm_linker::Config::default();
                 config.set_optimize(true);
                 config.set_strip(true);
-                let blob = polkavm_linker::program_from_elf(config, TargetInstructionSet::Latest, &elf)?;
+                let blob = polkavm_linker::program_from_elf(config, isa, &elf)?;
                 std::fs::write(&doom_blob_path, &blob)
                     .map_err(|error| format!("failed to write {}: {}", doom_blob_path.display(), error))?;
                 log::info!("Blob linked!");
@@ -3065,7 +3072,7 @@ fn main_test_cost_model(
             doom_blob_path
         }
         Benchmark::Pinky | Benchmark::PrimeSieve => {
-            let cached_blob_path = cache_path.join(format!("{}.polkavm", benchmark.name()));
+            let cached_blob_path = cache_path.join(format!("{}_{isa_suffix}.polkavm", benchmark.name()));
             if !cached_blob_path.exists() {
                 let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("..")
@@ -3081,7 +3088,7 @@ fn main_test_cost_model(
                 let mut config = polkavm_linker::Config::default();
                 config.set_optimize(true);
                 config.set_strip(true);
-                let blob = polkavm_linker::program_from_elf(config, TargetInstructionSet::Latest, &elf)?;
+                let blob = polkavm_linker::program_from_elf(config, isa, &elf)?;
                 std::fs::write(&cached_blob_path, &blob)
                     .map_err(|error| format!("failed to write {}: {}", cached_blob_path.display(), error))?;
                 log::info!("Blob linked!");
@@ -3646,6 +3653,9 @@ enum Args {
 
         #[clap(long)]
         output_testcase: Option<PathBuf>,
+
+        #[clap(long)]
+        use_latest_isa: bool,
     },
 }
 
@@ -3694,7 +3704,8 @@ fn main() {
             benchmark,
             do_not_analyze,
             output_testcase,
-        } => main_test_cost_model(cost_model, cache_path, benchmark, !do_not_analyze, output_testcase),
+            use_latest_isa,
+        } => main_test_cost_model(cost_model, cache_path, benchmark, !do_not_analyze, output_testcase, use_latest_isa),
     };
 
     if let Err(error) = result {

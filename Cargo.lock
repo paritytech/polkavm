@@ -115,7 +115,7 @@ checksum = "d468802bab17cbc0cc575e9b053f41e72aa36bfa6b7f55e3529ffa43161b97fa"
 
 [[package]]
 name = "benches"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "criterion",
  "oorandom",
@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "gastool"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "clap",
  "env_logger",
@@ -1089,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "polkatool"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "clap",
  "env_logger",
@@ -1103,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "env_logger",
  "image",
@@ -1122,7 +1122,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-assembler"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "iced-x86",
  "log",
@@ -1130,7 +1130,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-common"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -1143,14 +1143,14 @@ dependencies = [
 
 [[package]]
 name = "polkavm-derive"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "polkavm-derive-impl-macro",
 ]
 
 [[package]]
 name = "polkavm-derive-impl"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "polkavm-common",
  "proc-macro2",
@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-derive-impl-macro"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "polkavm-derive-impl",
  "syn",
@@ -1168,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-disassembler"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "clap",
  "iced-x86",
@@ -1180,7 +1180,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-linker"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "diff",
  "dirs",
@@ -1200,7 +1200,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-linux-raw"
-version = "0.30.0"
+version = "0.31.0"
 
 [[package]]
 name = "polkavm-linux-raw-generate"
