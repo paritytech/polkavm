@@ -3135,18 +3135,23 @@ fn parse_code_section(
                                     .wrapping_add(value)
                                     .wrapping_add(value_upper as i32);
                                 if offset >= 0 && offset < section.data().len() as i32 {
-                                    output.push((
-                                        source,
-                                        InstExt::Control(ControlInst::Call {
-                                            ra,
-                                            target: SectionTarget {
-                                                section_index,
-                                                offset: u64::from(cast(offset).to_unsigned()),
-                                            },
-                                            target_return: current_location.add(inst_size + next_inst_size),
-                                        }),
-                                    ));
+                                    let target = SectionTarget {
+                                        section_index,
+                                        offset: u64::from(cast(offset).to_unsigned()),
+                                    };
 
+                                    let inst = if target == current_location {
+                                        // Infinite loop, in which case the return location might not be valid.
+                                        ControlInst::Jump { target }
+                                    } else {
+                                        ControlInst::Call {
+                                            ra,
+                                            target,
+                                            target_return: current_location.add(inst_size + next_inst_size),
+                                        }
+                                    };
+
+                                    output.push((source, InstExt::Control(inst)));
                                     relative_offset += next_inst_size as usize;
                                     continue;
                                 }
