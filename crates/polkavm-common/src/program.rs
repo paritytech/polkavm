@@ -5143,11 +5143,10 @@ impl ProgramParts {
             }));
         };
 
-        // The blob can be larger than what's in the header (for example with CBOR data).
         let blob_len = BlobLen::from_le_bytes(reader.read_slice(BLOB_LEN_SIZE)?.try_into().unwrap());
-        if blob_len > blob.len() as u64 {
+        if blob_len != blob.len() as u64 {
             return Err(ProgramParseError(ProgramParseErrorKind::Other(
-                "blob size is smaller than the blob length metadata",
+                "blob size doesn't match the blob length metadata",
             )));
         }
 
@@ -5231,6 +5230,10 @@ impl ProgramBlob {
 
     /// Parses the given bytes into a program blob.
     pub fn parse(bytes: ArcBytes) -> Result<Self, ProgramParseError> {
+        let blob_length = Self::blob_length(&bytes).ok_or(ProgramParseError(ProgramParseErrorKind::Other(
+            "blob does not contain the blob length",
+        )))?;
+        let bytes = bytes.subslice(0..blob_length as usize);
         let parts = ProgramParts::from_bytes(bytes)?;
         Self::from_parts(parts)
     }
