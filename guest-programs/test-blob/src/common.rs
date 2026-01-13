@@ -455,3 +455,19 @@ fn get_self_address_naked() -> u32 {
     assert_eq!(get_self_address_naked_impl as usize, address);
     address as u32
 }
+
+#[unsafe(naked)]
+extern "C" fn infinite_loop_without_relocation() {
+    core::arch::naked_asm!(
+        ".option norvc",
+        "auipc ra, 0",
+        "jalr ra",
+        ".option rvc"
+    )
+}
+
+#[polkavm_derive::polkavm_export]
+fn get_address_dummy() -> usize {
+    // To make sure it's not removed as dead code.
+    infinite_loop_without_relocation as usize
+}
