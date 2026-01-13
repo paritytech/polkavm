@@ -835,18 +835,16 @@ where
                         offset: *tracker.list().last().unwrap(),
                     };
 
-                    // Some toolchains emit a size-style relocation (pair/origin..target),
-                    // while others may emit a direct absolute relocation. Try the size
-                    // relocation first (as used for `FixedAddPc`) and fall back to the
-                    // simple address relocation if no size relocation is present.
-                    if let Some((target_section_index, target_range)) = try_fetch_size_relocation(relocations, relocation_target, is_64bit)?
-                    {
-                        target = Some(SectionTarget {
-                            section_index: target_section_index,
-                            offset: target_range.end,
-                        });
+                    if let Ok(None) = try_fetch_size_relocation(relocations, relocation_target, is_64bit) {
+                        target = None;
                     } else {
-                        target = try_fetch_relocation(relocations, relocation_target, is_64bit)?;
+                        // TODO: Some toolchains emit a size-style relocation (pair/origin..target),
+                        // while others may emit a direct absolute relocation. Try the size
+                        // relocation first (as used for `FixedAddPc`) and fall back to the
+                        // simple address relocation if no size relocation is present.
+                        return Err(ProgramFromElfError::other(
+                            "Unhandled relocation target for line program instruction: {instruction:?}",
+                        ));
                     }
                 }
 
