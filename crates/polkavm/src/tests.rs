@@ -4180,6 +4180,17 @@ fn test_basic_debug_info_64() {
 }
 
 #[test]
+fn test_advance_pc_and_const_add_pc_debug_info_64() {
+    const EXAMPLE_BLOB: &[u8] =
+        include_bytes!("../../../guest-programs/target/riscv64emac-unknown-none-polkavm/no-lto/test_blob_with_advance_pc.elf");
+    let mut config = polkavm_linker::Config::default();
+    config.set_optimize(false);
+    config.set_strip(true);
+    let bytes = polkavm_linker::program_from_elf(config, TargetInstructionSet::ReviveV1, EXAMPLE_BLOB);
+    assert!(bytes.is_ok());
+}
+
+#[test]
 fn blob_len_works() {
     const EXAMPLE_BLOB: &[u8] = include_bytes!("../../../guest-programs/output/example-hello-world.polkavm");
     assert_eq!(Some(EXAMPLE_BLOB.len() as BlobLen), ProgramBlob::blob_length(EXAMPLE_BLOB));
