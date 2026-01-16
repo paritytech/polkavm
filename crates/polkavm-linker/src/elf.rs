@@ -127,9 +127,13 @@ impl Symbol {
                 "found undefined symbol: '{}'",
                 self.name().unwrap_or("")
             ))),
-            section => Err(ProgramFromElfError::other(format!(
-                "found symbol in an unhandled section: {:?}",
-                section
+            SymbolSection::None => Err(ProgramFromElfError::other(format!(
+                "found symbol '{}' with no associated section",
+                self.name().unwrap_or("")
+            ))),
+            SymbolSection::Absolute => Err(ProgramFromElfError::other(format!(
+                "found symbol '{}' in absolute section",
+                self.name().unwrap_or("")
             ))),
         }
     }
@@ -444,7 +448,8 @@ impl<'data> Elf<'data> {
                 }
                 section => {
                     return Err(ProgramFromElfError::other(format!(
-                        "failed to parse ELF file: found symbol in an unhandled section: {:?}",
+                        "failed to parse ELF file: found symbol '{}' in an unhandled section: {:?}",
+                        name.unwrap_or(""),
                         section
                     )));
                 }
