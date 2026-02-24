@@ -10955,13 +10955,13 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
             }
         }
 
+        let source_address = {
+            elf.section_by_index(source_stack.top().section_index)
+                .original_address()
+                .wrapping_add(source_stack.top().offset_range.start)
+        };
         log::trace!(
             "Code: 0x{source_address:x} [{function_name}] -> {source_stack} -> #{nth_inst}: {inst}",
-            source_address = {
-                elf.section_by_index(source_stack.top().section_index)
-                    .original_address()
-                    .wrapping_add(source_stack.top().offset_range.start)
-            },
             function_name = function_name.unwrap_or("")
         );
     }

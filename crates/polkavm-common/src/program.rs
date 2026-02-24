@@ -5691,7 +5691,7 @@ impl ProgramBlob {
 
         reader.skip(info_offset as usize)?;
 
-        Ok(Some(LineProgram {
+        let mut lp = LineProgram {
             entry_index: offset / ENTRY_SIZE,
             region_counter: 0,
             blob: self,
@@ -5701,7 +5701,53 @@ impl ProgramBlob {
             stack: Default::default(),
             stack_depth: 0,
             mutation_depth: 0,
-        }))
+        };
+
+        // Advance the line program to the region containing the queried PC.
+        // Each group's line program encodes multiple regions (one per instruction
+        // state change). Without seeking, the first run() call always returns the
+        // first region regardless of which PC was queried.
+        loop {
+            // Save state so we can rewind if the next region contains our PC.
+            let saved_reader = lp.reader.clone();
+            let saved_pc = lp.program_counter;
+            let saved_stack = lp.stack;
+            let saved_stack_depth = lp.stack_depth;
+            let saved_mutation_depth = lp.mutation_depth;
+            let saved_region_counter = lp.region_counter;
+            let saved_is_finished = lp.is_finished;
+
+            match lp.run() {
+                Ok(Some(region)) => {
+                    if region.instruction_range().contains(&ProgramCounter(program_counter)) {
+                        // Found the region containing our PC. Restore state so the
+                        // caller's next run() call returns this same region.
+                        lp.reader = saved_reader;
+                        lp.program_counter = saved_pc;
+                        lp.stack = saved_stack;
+                        lp.stack_depth = saved_stack_depth;
+                        lp.mutation_depth = saved_mutation_depth;
+                        lp.region_counter = saved_region_counter;
+                        lp.is_finished = saved_is_finished;
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    // Reached end without finding the PC. Restore to start.
+                    lp.reader = saved_reader;
+                    lp.program_counter = saved_pc;
+                    lp.stack = saved_stack;
+                    lp.stack_depth = saved_stack_depth;
+                    lp.mutation_depth = saved_mutation_depth;
+                    lp.region_counter = saved_region_counter;
+                    lp.is_finished = saved_is_finished;
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(Some(lp))
     }
 
     #[cfg(feature = "alloc")]
@@ -6031,7 +6077,7 @@ impl<'a> RegionInfo<'a> {
     }
 }
 
-#[derive(Default)]
+#[derive(Copy, Clone, Default)]
 struct LineProgramFrame {
     kind: Option<FrameKind>,
     namespace_offset: u32,
