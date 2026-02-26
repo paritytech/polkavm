@@ -263,6 +263,24 @@ impl<R: gimli::Reader> AttributeParser<R> {
         value: AttributeValue<R>,
     ) -> Result<(), ProgramFromElfError> {
         log::trace!("{:->depth$}{name}", ">", depth = self.depth);
+        let mut handle_data_form = |value: u64, offset: Option<<R as Reader>::Offset>, form_size| {
+            if let Some(size) = offset.and_then(|offset| {
+                try_fetch_size_from_offset_relocation(
+                    relocations,
+                    SectionTarget {
+                        section_index: sections.debug_info.index(),
+                        offset: offset.into_u64(),
+                    },
+                )
+            }) {
+                log::trace!("  = DW_AT_low_pc + {size} (size/data{form_size}+reloc)");
+                self.size = Some(size);
+            } else {
+                log::trace!("  = DW_AT_low_pc + {value} (size/data{form_size})");
+                self.size = Some(value);
+            }
+            Ok(())
+        };
 
         struct UnsupportedValue<R>(AttributeValue<R>)
         where
@@ -342,70 +360,18 @@ impl<R: gimli::Reader> AttributeParser<R> {
                     self.size = Some(value);
                     Ok(())
                 }
-                // DW_FORM_data2/4/8: size relative to low_pc. Try ADD/SUB relocation first.
                 AttributeValue {
                     value: gimli::AttributeValue::Data2(value),
                     offset,
-                } => {
-                    if let Some(size) = offset.and_then(|offset| {
-                        try_fetch_size_from_offset_relocation(
-                            relocations,
-                            SectionTarget {
-                                section_index: sections.debug_info.index(),
-                                offset: offset.into_u64(),
-                            },
-                        )
-                    }) {
-                        log::trace!("  = DW_AT_low_pc + {size} (size/data2+reloc)");
-                        self.size = Some(size);
-                    } else {
-                        log::trace!("  = DW_AT_low_pc + {value} (size/data2)");
-                        self.size = Some(u64::from(value));
-                    }
-                    Ok(())
-                }
+                } => handle_data_form(value.into(), offset, 2),
                 AttributeValue {
                     value: gimli::AttributeValue::Data4(value),
                     offset,
-                } => {
-                    if let Some(size) = offset.and_then(|offset| {
-                        try_fetch_size_from_offset_relocation(
-                            relocations,
-                            SectionTarget {
-                                section_index: sections.debug_info.index(),
-                                offset: offset.into_u64(),
-                            },
-                        )
-                    }) {
-                        log::trace!("  = DW_AT_low_pc + {size} (size/data4+reloc)");
-                        self.size = Some(size);
-                    } else {
-                        log::trace!("  = DW_AT_low_pc + {value} (size/data4)");
-                        self.size = Some(u64::from(value));
-                    }
-                    Ok(())
-                }
+                } => handle_data_form(value.into(), offset, 4),
                 AttributeValue {
                     value: gimli::AttributeValue::Data8(value),
                     offset,
-                } => {
-                    if let Some(size) = offset.and_then(|offset| {
-                        try_fetch_size_from_offset_relocation(
-                            relocations,
-                            SectionTarget {
-                                section_index: sections.debug_info.index(),
-                                offset: offset.into_u64(),
-                            },
-                        )
-                    }) {
-                        log::trace!("  = DW_AT_low_pc + {size} (size/data8+reloc)");
-                        self.size = Some(size);
-                    } else {
-                        log::trace!("  = DW_AT_low_pc + {value} (size/data8)");
-                        self.size = Some(value);
-                    }
-                    Ok(())
-                }
+                } => handle_data_form(value, offset, 8),
                 _ => Err(UnsupportedValue(value)),
             },
             gimli::DW_AT_ranges => match value {
@@ -849,7 +815,12 @@ where
 
         let input = program.header().raw_program_buf();
         let mut target: Option<SectionTarget> = None;
+        let mut reset_row = false;
         loop {
+            if reset_row {
+                reset_row = false;
+                row.reset(program.header());
+            }
             let tracker = input.start_tracking();
             let Some(instruction) = iter.next_instruction(program.header())? else {
                 break;
@@ -857,10 +828,15 @@ where
 
             match instruction {
                 // Special opcodes advance address and line; update `target` accordingly.
-                LineInstruction::Special(opcode) => {
+                LineInstruction::Special(..) | LineInstruction::ConstAddPc => {
                     if let Some(ref mut t) = target {
                         let header = program.header();
-                        let adjusted_opcode = u64::from(opcode) - u64::from(header.opcode_base());
+                        let offset = if let LineInstruction::Special(opcode) = instruction {
+                            u64::from(opcode)
+                        } else {
+                            255u64
+                        };
+                        let adjusted_opcode = offset - u64::from(header.opcode_base());
                         let operation_advance = adjusted_opcode / u64::from(header.line_range());
                         let address_advance = operation_advance * u64::from(header.minimum_instruction_length());
                         t.offset += address_advance;
@@ -904,17 +880,6 @@ where
                     }
                 }
 
-                // ConstAddPc: like Special(255) but without emitting a row.
-                LineInstruction::ConstAddPc => {
-                    if let Some(ref mut t) = target {
-                        let header = program.header();
-                        let adjusted_opcode = 255u64 - u64::from(header.opcode_base());
-                        let operation_advance = adjusted_opcode / u64::from(header.line_range());
-                        let address_advance = operation_advance * u64::from(header.minimum_instruction_length());
-                        t.offset += address_advance;
-                    }
-                }
-
                 LineInstruction::SetAddress(..) => {
                     let relocation_target = SectionTarget {
                         section_index,
@@ -944,13 +909,10 @@ where
                 continue;
             }
 
-            let is_end_sequence = row.end_sequence();
+            reset_row = row.end_sequence();
 
             let tombstone_address = !0 >> (64 - program.header().encoding().address_size * 8);
             if row.address() == tombstone_address {
-                if is_end_sequence {
-                    row.reset(program.header());
-                }
                 continue;
             }
 
@@ -1042,9 +1004,6 @@ where
                 //   0x00000000  [ 263, 5] NS PE
                 //   0x00000000  [ 263, 5] NS ET
                 log::trace!("Line entry without a relocation: {row:?}");
-                if is_end_sequence {
-                    row.reset(program.header());
-                }
                 continue;
             };
 
@@ -1056,11 +1015,6 @@ where
             );
             let entry = LineEntry { target, location };
             lines.push(entry);
-
-            // Reset state machine only after EndSequence (not every iteration).
-            if is_end_sequence {
-                row.reset(program.header());
-            }
         }
     }
 
@@ -2088,7 +2042,6 @@ where
                 let data = input.read_u8()?;
                 AttributeValue::Data1(data)
             }
-            // Record byte offset for DW_FORM_data2/4/8 to enable relocation lookup.
             gimli::constants::DW_FORM_data2 => {
                 let offset = input.offset_from(input_base);
                 let data = input.read_u16()?;

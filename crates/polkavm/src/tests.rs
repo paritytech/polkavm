@@ -4672,12 +4672,11 @@ fn test_advance_pc_and_const_add_pc_debug_info_64() {
     let bytes = polkavm_linker::program_from_elf(config, TargetInstructionSet::ReviveV1, elf.as_slice());
     assert!(bytes.is_ok());
     let program = ProgramBlob::parse(bytes.unwrap().into()).unwrap();
-    let code_length = program.code().len() as u32;
 
     let pc = ProgramCounter(0x222);
     let mut line_program = program.get_debug_line_program_at(pc).unwrap().unwrap();
     let info = line_program.run().unwrap().unwrap();
-    let mut frame = info
+    let frame = info
         .frames()
         .find(|frame| frame.kind() == polkavm_common::program::FrameKind::Line)
         .unwrap();
