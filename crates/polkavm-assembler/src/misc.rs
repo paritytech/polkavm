@@ -101,6 +101,22 @@ impl FixupKind {
         let opcode = opcode[0] | (opcode[1] << 8) | (opcode[2] << 16);
         FixupKind((3 << 24) | (length << 28) | opcode)
     }
+
+    /// AArch64 fixup: offset=0, length=4. The instruction template is already in the code bytes.
+    /// During finalize, the branch offset is encoded into the instruction word's bit fields
+    /// based on the instruction type detected from the encoding.
+    #[inline]
+    pub const fn new_aarch64() -> Self {
+        // offset=0, length=4: impossible in x86 (offset is always >= 1), so this is a safe marker.
+        FixupKind(4 << 28)
+    }
+
+    /// Returns true if this is an AArch64 bit-field fixup (offset=0, length=4).
+    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    #[inline]
+    pub const fn is_aarch64(self) -> bool {
+        self.offset() == 0 && self.length() == 4
+    }
 }
 
 const MAXIMUM_INSTRUCTION_SIZE: usize = 16;

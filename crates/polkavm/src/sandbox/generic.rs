@@ -119,8 +119,15 @@ use sys::{c_int, size_t, MADV_DONTNEED, MADV_FREE, MAP_ANONYMOUS, MAP_FIXED, MAP
 
 pub(crate) const GUEST_MEMORY_TO_VMCTX_OFFSET: isize = -4096;
 
+#[cfg(target_arch = "x86_64")]
 const GAS_METERING_TRAP_OFFSET: u64 = 3;
+#[cfg(target_arch = "x86_64")]
 const GAS_COST_GENERIC_SANDBOX_OFFSET: usize = 7;
+
+#[cfg(target_arch = "aarch64")]
+const GAS_METERING_TRAP_OFFSET: u64 = 24;
+#[cfg(target_arch = "aarch64")]
+const GAS_COST_GENERIC_SANDBOX_OFFSET: usize = 8;
 
 fn get_guest_memory_offset() -> usize {
     get_native_page_size()
@@ -257,6 +264,22 @@ impl Mmap {
         if protection != PROT_READ | PROT_WRITE {
             self.mprotect(offset, length, protection)?;
         }
+
+        // On AArch64, the instruction and data caches are not coherent.
+        // After writing code and switching to RX, we must invalidate the icache.
+        #[cfg(target_arch = "aarch64")]
+        if protection & PROT_EXEC != 0 {
+            extern "C" {
+                fn sys_icache_invalidate(start: *mut c_void, size: usize);
+            }
+            unsafe {
+                sys_icache_invalidate(
+                    self.pointer.cast::<u8>().add(offset).cast(),
+                    length,
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -314,178 +337,210 @@ static mut OLD_SIGILL: sys::sigaction = unsafe { core::mem::zeroed() };
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 static mut OLD_SIGBUS: sys::sigaction = unsafe { core::mem::zeroed() };
 
+#[cfg(target_arch = "aarch64")]
+static mut OLD_SIGTRAP: sys::sigaction = unsafe { core::mem::zeroed() };
+
 unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, context: &sys::ucontext_t) {
     let old = match signal {
         sys::SIGSEGV => core::ptr::addr_of!(OLD_SIGSEGV),
         sys::SIGILL => core::ptr::addr_of!(OLD_SIGILL),
         #[cfg(any(target_os = "macos", target_os = "freebsd"))]
         sys::SIGBUS => core::ptr::addr_of!(OLD_SIGBUS),
+        #[cfg(target_arch = "aarch64")]
+        sys::SIGTRAP => core::ptr::addr_of!(OLD_SIGTRAP),
         _ => unreachable!("received unknown signal"),
     };
 
     let vmctx = THREAD_VMCTX.with(|thread_ctx| *thread_ctx.get());
     if !vmctx.is_null() {
-        #[cfg(target_os = "macos")]
-        macro_rules! macos_reg_field {
-            (rax) => {
-                (*context.uc_mcontext).__ss.__rax
-            };
-            (rbx) => {
-                (*context.uc_mcontext).__ss.__rbx
-            };
-            (rcx) => {
-                (*context.uc_mcontext).__ss.__rcx
-            };
-            (rdx) => {
-                (*context.uc_mcontext).__ss.__rdx
-            };
-            (rdi) => {
-                (*context.uc_mcontext).__ss.__rdi
-            };
-            (rsi) => {
-                (*context.uc_mcontext).__ss.__rsi
-            };
-            (rbp) => {
-                (*context.uc_mcontext).__ss.__rbp
-            };
-            (rsp) => {
-                (*context.uc_mcontext).__ss.__rsp
-            };
-            (r8) => {
-                (*context.uc_mcontext).__ss.__r8
-            };
-            (r9) => {
-                (*context.uc_mcontext).__ss.__r9
-            };
-            (r10) => {
-                (*context.uc_mcontext).__ss.__r10
-            };
-            (r11) => {
-                (*context.uc_mcontext).__ss.__r11
-            };
-            (r12) => {
-                (*context.uc_mcontext).__ss.__r12
-            };
-            (r13) => {
-                (*context.uc_mcontext).__ss.__r13
-            };
-            (r14) => {
-                (*context.uc_mcontext).__ss.__r14
-            };
-            (r15) => {
-                (*context.uc_mcontext).__ss.__r15
-            };
-            (rip) => {
-                (*context.uc_mcontext).__ss.__rip
-            };
-        }
-
-        macro_rules! fetch_reg {
-            ($reg:ident) => {{
-                #[cfg(target_os = "linux")]
-                {
-                    context.uc_mcontext.$reg as u64
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    macos_reg_field!($reg) as u64
-                }
-                #[cfg(target_os = "freebsd")]
-                {
-                    context.uc_mcontext.mc_($reg) as u64
-                }
-            }};
-        }
-
-        const X86_TRAP_PF: u64 = 14;
-        let is_page_fault = {
-            #[cfg(target_os = "linux")]
-            {
-                signal == sys::SIGSEGV && context.uc_mcontext.trapno == X86_TRAP_PF
+        #[cfg(target_arch = "x86_64")]
+        {
+            #[cfg(target_os = "macos")]
+            macro_rules! macos_reg_field {
+                (rax) => { (*context.uc_mcontext).__ss.__rax };
+                (rbx) => { (*context.uc_mcontext).__ss.__rbx };
+                (rcx) => { (*context.uc_mcontext).__ss.__rcx };
+                (rdx) => { (*context.uc_mcontext).__ss.__rdx };
+                (rdi) => { (*context.uc_mcontext).__ss.__rdi };
+                (rsi) => { (*context.uc_mcontext).__ss.__rsi };
+                (rbp) => { (*context.uc_mcontext).__ss.__rbp };
+                (rsp) => { (*context.uc_mcontext).__ss.__rsp };
+                (r8)  => { (*context.uc_mcontext).__ss.__r8 };
+                (r9)  => { (*context.uc_mcontext).__ss.__r9 };
+                (r10) => { (*context.uc_mcontext).__ss.__r10 };
+                (r11) => { (*context.uc_mcontext).__ss.__r11 };
+                (r12) => { (*context.uc_mcontext).__ss.__r12 };
+                (r13) => { (*context.uc_mcontext).__ss.__r13 };
+                (r14) => { (*context.uc_mcontext).__ss.__r14 };
+                (r15) => { (*context.uc_mcontext).__ss.__r15 };
+                (rip) => { (*context.uc_mcontext).__ss.__rip };
             }
+
+            macro_rules! fetch_reg {
+                ($reg:ident) => {{
+                    #[cfg(target_os = "linux")]
+                    { context.uc_mcontext.$reg as u64 }
+                    #[cfg(target_os = "macos")]
+                    { macos_reg_field!($reg) as u64 }
+                    #[cfg(target_os = "freebsd")]
+                    { context.uc_mcontext.mc_($reg) as u64 }
+                }};
+            }
+
+            const X86_TRAP_PF: u64 = 14;
+            let is_page_fault = {
+                #[cfg(target_os = "linux")]
+                { signal == sys::SIGSEGV && context.uc_mcontext.trapno == X86_TRAP_PF }
+                #[cfg(target_os = "macos")]
+                { signal == sys::SIGBUS && (*context.uc_mcontext).__es.__trapno as u64 == X86_TRAP_PF }
+                #[cfg(target_os = "freebsd")]
+                { signal == sys::SIGBUS && context.uc_mcontext.mc_trapno == X86_TRAP_PF }
+            };
+
+            let rip = fetch_reg!(rip);
+            let vmctx = &mut *vmctx;
+
+            // On Rosetta 2, the JMP emulation logic doesn't work same as on x64.
+            // Instead of triggering a GPF immdiately, it jumps to that address and then trigger a PF.
+            // Therefore the original program counter is lost.
             #[cfg(target_os = "macos")]
             {
-                signal == sys::SIGBUS && (*context.uc_mcontext).__es.__trapno as u64 == X86_TRAP_PF
+                let is_invalid_rip = (rip >> 48) != 0;
+                if is_invalid_rip {
+                    log::trace!("Jump table invalid address hit, returning to host");
+                    trigger_exit(vmctx, ExitReason::Signal);
+                }
             }
-            #[cfg(target_os = "freebsd")]
-            {
-                signal == sys::SIGBUS && context.uc_mcontext.mc_trapno == X86_TRAP_PF
-            }
-        };
 
-        let rip = fetch_reg!(rip);
-        let vmctx = &mut *vmctx;
+            if vmctx.program_range.contains(&rip) {
+                use polkavm_common::regmap::NativeReg;
+                for reg in polkavm_common::program::Reg::ALL {
+                    let value = match polkavm_common::regmap::to_native_reg(reg) {
+                        NativeReg::rax => fetch_reg!(rax),
+                        NativeReg::rcx => fetch_reg!(rcx),
+                        NativeReg::rdx => fetch_reg!(rdx),
+                        NativeReg::rbx => fetch_reg!(rbx),
+                        NativeReg::rbp => fetch_reg!(rbp),
+                        NativeReg::rsi => fetch_reg!(rsi),
+                        NativeReg::rdi => fetch_reg!(rdi),
+                        NativeReg::r8 => fetch_reg!(r8),
+                        NativeReg::r9 => fetch_reg!(r9),
+                        NativeReg::r10 => fetch_reg!(r10),
+                        NativeReg::r11 => fetch_reg!(r11),
+                        NativeReg::r12 => fetch_reg!(r12),
+                        NativeReg::r13 => fetch_reg!(r13),
+                        NativeReg::r14 => fetch_reg!(r14),
+                        NativeReg::r15 => fetch_reg!(r15),
+                    };
+                    vmctx.regs[reg as usize] = value;
+                }
 
-        // On Rosetta 2, the JMP emulation logic doesn't work same as on x64.
-        // Instead of triggering a GPF immdiately, it jumps to that address and then trigger a PF.
-        // Therefore the original program counter is lost.
-        // We fix this problem by storing the program counter in vmctx before jumping.
-        // See jump_indirect_impl for more details.
-        #[cfg(target_os = "macos")]
-        {
-            let is_invalid_rip = (rip >> 48) != 0;
-            if is_invalid_rip {
-                log::trace!("Jump table invalid address hit, returning to host");
-                trigger_exit(vmctx, ExitReason::Signal);
+                polkavm_common::static_assert!(polkavm_common::regmap::TMP_REG.equals(NativeReg::rcx));
+                vmctx.tmp_reg.store(fetch_reg!(rcx), Ordering::Relaxed);
+
+                vmctx.next_native_program_counter.store(rip, Ordering::Relaxed);
+
+                if is_page_fault {
+                    let fault_address = {
+                        #[cfg(target_os = "linux")]
+                        { info.__bindgen_anon_1.__bindgen_anon_1._sifields._sigfault._addr as u64 }
+                        #[cfg(target_os = "macos")]
+                        { info.si_addr as u64 }
+                        #[cfg(target_os = "freebsd")]
+                        { info.si_addr as u64 }
+                    };
+
+                    log::trace!("Page fault at 0x{fault_address:x} (rip: 0x{rip:x})");
+                    trigger_exit(vmctx, ExitReason::Segfault(fault_address));
+                } else {
+                    log::trace!("Signal received at 0x{rip:x}");
+                    trigger_exit(vmctx, ExitReason::Signal);
+                }
             }
         }
 
-        if vmctx.program_range.contains(&rip) {
-            use polkavm_common::regmap::NativeReg;
-            for reg in polkavm_common::program::Reg::ALL {
-                let value = match polkavm_common::regmap::to_native_reg(reg) {
-                    NativeReg::rax => fetch_reg!(rax),
-                    NativeReg::rcx => fetch_reg!(rcx),
-                    NativeReg::rdx => fetch_reg!(rdx),
-                    NativeReg::rbx => fetch_reg!(rbx),
-                    NativeReg::rbp => fetch_reg!(rbp),
-                    NativeReg::rsi => fetch_reg!(rsi),
-                    NativeReg::rdi => fetch_reg!(rdi),
-                    NativeReg::r8 => fetch_reg!(r8),
-                    NativeReg::r9 => fetch_reg!(r9),
-                    NativeReg::r10 => fetch_reg!(r10),
-                    NativeReg::r11 => fetch_reg!(r11),
-                    NativeReg::r12 => fetch_reg!(r12),
-                    NativeReg::r13 => fetch_reg!(r13),
-                    NativeReg::r14 => fetch_reg!(r14),
-                    NativeReg::r15 => fetch_reg!(r15),
-                };
-                vmctx.regs[reg as usize] = value;
+        #[cfg(target_arch = "aarch64")]
+        {
+            // On AArch64 macOS, read registers from __darwin_arm_thread_state64.
+            // __x is an array of u64 for x0-x28, plus __fp (x29), __lr (x30), __sp, __pc.
+            #[cfg(target_os = "macos")]
+            macro_rules! fetch_aarch64_reg {
+                (pc) => { (*context.uc_mcontext).__ss.__pc as u64 };
+                ($n:literal) => { (*context.uc_mcontext).__ss.__x[$n] as u64 };
             }
 
-            //
-            // RCX is TMP_REG, which is not mapped to any guest register.
-            // therefore we store it separately here.
-            //
-            // N.B Even though it's a volatile register, we still need to
-            // restore it to handle page faults correctly.
-            //
-            polkavm_common::static_assert!(polkavm_common::regmap::TMP_REG.equals(NativeReg::rcx));
-            vmctx.tmp_reg.store(fetch_reg!(rcx), Ordering::Relaxed);
+            #[cfg(target_os = "freebsd")]
+            macro_rules! fetch_aarch64_reg {
+                (pc) => { context.uc_mcontext.mc_gpregs.gp_elr as u64 };
+                ($n:literal) => { context.uc_mcontext.mc_gpregs.gp_x[$n] as u64 };
+            }
 
-            vmctx.next_native_program_counter.store(rip, Ordering::Relaxed);
+            let is_page_fault = {
+                // On AArch64, page faults are signaled as SIGBUS on macOS/FreeBSD.
+                #[cfg(target_os = "macos")]
+                { signal == sys::SIGBUS }
+                #[cfg(target_os = "freebsd")]
+                { signal == sys::SIGBUS }
+            };
 
-            if is_page_fault {
-                let fault_address = {
-                    #[cfg(target_os = "linux")]
-                    {
-                        info.__bindgen_anon_1.__bindgen_anon_1._sifields._sigfault._addr as u64
-                    }
-                    #[cfg(target_os = "macos")]
-                    {
-                        info.si_addr as u64
-                    }
-                    #[cfg(target_os = "freebsd")]
-                    {
-                        info.si_addr as u64
-                    }
-                };
+            let pc = fetch_aarch64_reg!(pc);
+            let vmctx = &mut *vmctx;
 
-                log::trace!("Page fault at 0x{fault_address:x} (rip: 0x{rip:x})");
-                trigger_exit(vmctx, ExitReason::Segfault(fault_address));
-            } else {
-                log::trace!("Signal received at 0x{rip:x}");
+            // On AArch64, a branch to an unmapped address (e.g. null from jump table)
+            // raises SIGBUS with PC at the invalid address (outside program_range).
+            // Catch this and treat it as a signal exit, similar to x86 Rosetta 2 handling.
+            if !vmctx.program_range.contains(&pc) {
+                log::trace!("AArch64 jump to invalid address 0x{pc:x}, returning to host");
                 trigger_exit(vmctx, ExitReason::Signal);
+            }
+
+            {
+                use polkavm_common::regmap::NativeReg;
+                for reg in polkavm_common::program::Reg::ALL {
+                    let value = match polkavm_common::regmap::to_native_reg(reg) {
+                        NativeReg::x0  => fetch_aarch64_reg!(0),
+                        NativeReg::x1  => fetch_aarch64_reg!(1),
+                        NativeReg::x2  => fetch_aarch64_reg!(2),
+                        NativeReg::x3  => fetch_aarch64_reg!(3),
+                        NativeReg::x4  => fetch_aarch64_reg!(4),
+                        NativeReg::x5  => fetch_aarch64_reg!(5),
+                        NativeReg::x19 => fetch_aarch64_reg!(19),
+                        NativeReg::x20 => fetch_aarch64_reg!(20),
+                        NativeReg::x21 => fetch_aarch64_reg!(21),
+                        NativeReg::x22 => fetch_aarch64_reg!(22),
+                        NativeReg::x23 => fetch_aarch64_reg!(23),
+                        NativeReg::x24 => fetch_aarch64_reg!(24),
+                        NativeReg::x25 => fetch_aarch64_reg!(25),
+                        _ => 0,
+                    };
+                    vmctx.regs[reg as usize] = value;
+                }
+
+                // x16 is TMP_REG on AArch64
+                polkavm_common::static_assert!(polkavm_common::regmap::TMP_REG as u32 == NativeReg::x16 as u32);
+                vmctx.tmp_reg.store(fetch_aarch64_reg!(16), Ordering::Relaxed);
+
+                // During a memset (arg != 0), next_native_program_counter already
+                // points to the inline repeat label (set by the memset instruction).
+                // Don't overwrite it with the faulting PC (which may be in a trampoline).
+                if vmctx.arg.load(Ordering::Relaxed) == 0 {
+                    vmctx.next_native_program_counter.store(pc, Ordering::Relaxed);
+                }
+
+                if is_page_fault {
+                    let fault_address = {
+                        #[cfg(target_os = "macos")]
+                        { info.si_addr as u64 }
+                        #[cfg(target_os = "freebsd")]
+                        { info.si_addr as u64 }
+                    };
+
+                    log::trace!("Page fault at 0x{fault_address:x} (pc: 0x{pc:x})");
+                    trigger_exit(vmctx, ExitReason::Segfault(fault_address));
+                } else {
+                    log::trace!("Signal received at 0x{pc:x}");
+                    trigger_exit(vmctx, ExitReason::Signal);
+                }
             }
         }
     }
@@ -526,6 +581,8 @@ unsafe fn register_signal_handlers() -> Result<(), Error> {
     register_signal_handler_for_signal(sys::SIGILL, core::ptr::addr_of_mut!(OLD_SIGILL))?;
     #[cfg(any(target_os = "macos", target_os = "freebsd"))]
     register_signal_handler_for_signal(sys::SIGBUS, core::ptr::addr_of_mut!(OLD_SIGBUS))?;
+    #[cfg(target_arch = "aarch64")]
+    register_signal_handler_for_signal(sys::SIGTRAP, core::ptr::addr_of_mut!(OLD_SIGTRAP))?;
     Ok(())
 }
 
@@ -573,6 +630,7 @@ unsafe fn sysreturn(vmctx: &mut VmCtx) -> ! {
 
     // SAFETY: This function can only be called while we're executing guest code.
     unsafe {
+        #[cfg(target_arch = "x86_64")]
         core::arch::asm!(r#"
             // Restore the stack pointer to its original value.
             mov rsp, [{vmctx} + 8]
@@ -580,6 +638,18 @@ unsafe fn sysreturn(vmctx: &mut VmCtx) -> ! {
             // Jump back
             jmp [{vmctx}]
         "#,
+            vmctx = in(reg) vmctx,
+            options(noreturn)
+        );
+
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!(
+            // Restore the stack pointer to its original value.
+            "ldr x16, [{vmctx}, #8]",
+            "mov sp, x16",
+            // Jump back to the return address.
+            "ldr x16, [{vmctx}]",
+            "br x16",
             vmctx = in(reg) vmctx,
             options(noreturn)
         );
@@ -1105,7 +1175,15 @@ impl Sandbox {
                 ));
             };
 
+            // On x86, the gas cost is stored as a raw u32 in the machine code.
+            // On aarch64, it's encoded in the sub_imm instruction's immediate field (bits [21:10]).
+            #[cfg(target_arch = "x86_64")]
             let gas_cost = u32::from_le_bytes([gas_cost[0], gas_cost[1], gas_cost[2], gas_cost[3]]);
+            #[cfg(target_arch = "aarch64")]
+            let gas_cost = {
+                let inst_word = u32::from_le_bytes([gas_cost[0], gas_cost[1], gas_cost[2], gas_cost[3]]);
+                (inst_word >> 10) & 0xFFF
+            };
             let gas = self.vmctx().gas.fetch_add(i64::from(gas_cost), Ordering::Relaxed);
             log::trace!(
                 "Out of gas; program counter = {program_counter}, reverting gas: {gas} -> {new_gas} (gas cost: {gas_cost})",
@@ -1200,6 +1278,32 @@ impl Sandbox {
                 is_write_protected,
             }))
         } else {
+            // On AArch64, if a page fault occurs during a gas-metered memset,
+            // the gas was pre-charged by the full count. Refund the remaining
+            // bytes since the loop was interrupted partway through.
+            // arg=1: inline memset (A2 is the loop counter, already correct)
+            // arg=2: trampoline memset (A2 = pre-computed remainder, tmp_reg = loop remaining; total = A2 + tmp_reg)
+            #[cfg(target_arch = "aarch64")]
+            if self.gas_metering.is_some() {
+                let vmctx = self.vmctx_mut();
+                let memset_flag = vmctx.arg.load(Ordering::Relaxed);
+                if memset_flag == 1 {
+                    // Inline memset: A2 is the remaining count (loop counter)
+                    let remaining = vmctx.regs.0[polkavm_common::program::Reg::A2 as usize];
+                    vmctx.gas.fetch_add(remaining as i64, Ordering::Relaxed);
+                    vmctx.arg.store(0, Ordering::Relaxed);
+                } else if memset_flag == 2 {
+                    // Trampoline memset: A2 has pre-computed remainder (gas-unaffordable bytes),
+                    // tmp_reg has loop remaining (bytes that were affordable but not yet written).
+                    // Update A2 = A2 + tmp_reg (total unwritten bytes) for the caller.
+                    // Refund gas only by tmp_reg (the affordable-but-unwritten portion).
+                    let loop_remaining = vmctx.tmp_reg.load(Ordering::Relaxed);
+                    vmctx.regs.0[polkavm_common::program::Reg::A2 as usize] += loop_remaining;
+                    vmctx.gas.fetch_add(loop_remaining as i64, Ordering::Relaxed);
+                    vmctx.arg.store(0, Ordering::Relaxed);
+                }
+            }
+
             self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
             Ok(InterruptKind::Trap)
         }
@@ -1663,6 +1767,7 @@ impl super::Sandbox for Sandbox {
         let entry_point = compiled_module.sandbox_program.0.sysenter_address;
 
         log::trace!("Jumping into guest program: 0x{:x}", entry_point);
+
         self.set_aux_data_permission_for_guest().map_err(Error::from)?;
 
         #[allow(clippy::undocumented_unsafe_blocks)]
@@ -1673,6 +1778,7 @@ impl super::Sandbox for Sandbox {
             let guest_memory = self.memory.as_ptr().cast::<u8>().add(self.guest_memory_offset);
             let tmp_reg = self.vmctx().tmp_reg.load(Ordering::Relaxed);
 
+            #[cfg(target_arch = "x86_64")]
             core::arch::asm!(r#"
                 push rbp
                 push rbx
@@ -1715,6 +1821,54 @@ impl super::Sandbox for Sandbox {
                 inlateout("rcx") tmp_reg => _,
                 inlateout("r14") vmctx => _,
                 in("r13") guest_memory,
+            );
+
+            #[cfg(target_arch = "aarch64")]
+            core::arch::asm!(
+                // Save callee-saved registers that guest code will clobber.
+                // We manually save x19-x26 because the JIT uses them for guest registers.
+                "stp x29, x30, [sp, #-16]!",
+                "stp x19, x20, [sp, #-16]!",
+                "stp x21, x22, [sp, #-16]!",
+                "stp x23, x24, [sp, #-16]!",
+                "stp x25, x26, [sp, #-16]!",
+
+                // Fill in the return address.
+                "adr x9, 2f",
+                "str x9, [x10]",
+
+                // Fill in the return stack pointer.
+                "mov x9, sp",
+                "str x9, [x10, #8]",
+
+                // Set up guest memory base in x17 (GENERIC_SANDBOX_MEMORY_REG).
+                "mov x17, x11",
+
+                // Set up TMP_REG (x16).
+                "mov x16, x12",
+
+                // Call into the guest program.
+                "br x13",
+
+                // We will jump here on exit (sysreturn branches here).
+                "2:",
+
+                // Restore callee-saved registers.
+                "ldp x25, x26, [sp], #16",
+                "ldp x23, x24, [sp], #16",
+                "ldp x21, x22, [sp], #16",
+                "ldp x19, x20, [sp], #16",
+                "ldp x29, x30, [sp], #16",
+
+                // Use explicit caller-saved registers for inputs. LLVM's in(reg)
+                // may allocate to callee-saved regs (x19-x28) which our stp/ldp
+                // sequence clobbers from LLVM's perspective.
+                in("x10") vmctx,
+                in("x11") guest_memory,
+                in("x12") tmp_reg,
+                in("x13") entry_point,
+                clobber_abi("C"),
+                lateout("x9") _,
             );
 
             THREAD_VMCTX.with(|thread_ctx| core::ptr::write(thread_ctx.get(), core::ptr::null_mut()));

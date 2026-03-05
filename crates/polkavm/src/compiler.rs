@@ -26,6 +26,12 @@ pub use crate::compiler::amd64::{extract_gas_cost, on_page_fault, on_signal_trap
 #[cfg(all(target_arch = "x86_64", feature = "generic-sandbox"))]
 pub(crate) use crate::compiler::amd64::{are_we_executing_memset, indirect_memory_operand, MemsetKind};
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+
+#[cfg(target_arch = "aarch64")]
+pub use crate::compiler::aarch64::{extract_gas_cost, on_page_fault, on_signal_trap, step_prelude_length};
+
 /// The address to which to jump to for invalid dynamic jumps.
 ///
 /// This needs to be at least 0x800000000000 on modern CPUs, but ideally should have
@@ -425,6 +431,17 @@ where
                 self.asm.resize(padded_length, ArchVisitor::<S, B, G>::PADDING_BYTE);
                 self.asm.define_label(self.jump_table_label);
             }
+        }
+
+        // On AArch64, undefined branch labels would leave b.cond with offset 0,
+        // causing infinite self-branch loops. Define all remaining undefined labels
+        // to point at the trap trampoline so branches to undefined targets trap
+        // cleanly without consuming extra gas. This matches x86 behavior where
+        // undefined labels jump into invalid opcodes that immediately trap.
+        #[cfg(target_arch = "aarch64")]
+        {
+            let trap_offset = self.asm.get_label_origin_offset_or_panic(self.trap_label) as usize;
+            self.asm.define_all_undefined_labels(trap_offset);
         }
 
         let module = {
