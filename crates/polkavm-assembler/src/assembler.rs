@@ -200,6 +200,18 @@ impl Assembler {
         self
     }
 
+    /// Define all remaining undefined labels to point at `offset`.
+    /// This is used to make undefined branch targets jump to a trap handler
+    /// instead of leaving them unresolved (which on AArch64 would cause
+    /// infinite self-branch loops).
+    pub fn define_all_undefined_labels(&mut self, offset: usize) {
+        for label_offset in self.labels.iter_mut() {
+            if *label_offset == isize::MAX {
+                *label_offset = offset as isize;
+            }
+        }
+    }
+
     pub fn push_with_label<T>(&mut self, label: Label, instruction: T) -> &mut Self
     where
         T: InstructionT,
@@ -231,12 +243,12 @@ impl Assembler {
     fn add_fixup(&mut self, instruction_offset: usize, instruction_length: usize, target_label: Label, kind: FixupKind) {
         debug_assert!((target_label.raw() as usize) < self.labels.len());
         debug_assert!(
-            (kind.offset() as usize) < instruction_length,
+            kind.is_aarch64() || (kind.offset() as usize) < instruction_length,
             "instruction is {} bytes long and yet its target fixup starts at {}",
             instruction_length,
             kind.offset()
         );
-        debug_assert!((kind.length() as usize) < instruction_length);
+        debug_assert!(kind.is_aarch64() || (kind.length() as usize) < instruction_length);
         debug_assert!((kind.offset() as usize + kind.length() as usize) <= instruction_length);
         self.fixups.push(Fixup {
             target_label,
@@ -308,45 +320,107 @@ impl Assembler {
 
     pub fn finalize(&mut self) -> AssembledCode {
         for fixup in self.fixups.drain(..) {
-            let origin = fixup.instruction_offset + fixup.instruction_length as usize;
             let target_absolute = self.labels[fixup.target_label.raw() as usize];
             if target_absolute == isize::MAX {
                 log::trace!("Undefined label found: {}", fixup.target_label);
                 continue;
             }
 
-            let opcode = (fixup.kind.0 << 8) >> 8;
-            let fixup_offset = fixup.kind.offset();
-            let fixup_length = fixup.kind.length();
+            if fixup.kind.is_aarch64() {
+                // AArch64 fixup: PC-relative offset from the instruction itself.
+                let offset = target_absolute - fixup.instruction_offset as isize;
+                let p = fixup.instruction_offset;
+                let existing = u32::from_le_bytes([
+                    self.code[p], self.code[p + 1], self.code[p + 2], self.code[p + 3]
+                ]);
+                let patched = Self::patch_aarch64_branch(existing, offset);
+                self.code[p..p + 4].copy_from_slice(&patched.to_le_bytes());
+            } else {
+                // x86-style fixup: offset is from end of instruction.
+                let origin = fixup.instruction_offset + fixup.instruction_length as usize;
+                let opcode = (fixup.kind.0 << 8) >> 8;
+                let fixup_offset = fixup.kind.offset();
+                let fixup_length = fixup.kind.length();
 
-            if fixup_offset >= 1 {
-                self.code[fixup.instruction_offset] = opcode as u8;
-                if fixup_offset >= 2 {
-                    self.code[fixup.instruction_offset + 1] = (opcode >> 8) as u8;
-                    if fixup_offset >= 3 {
-                        self.code[fixup.instruction_offset + 2] = (opcode >> 16) as u8;
+                if fixup_offset >= 1 {
+                    self.code[fixup.instruction_offset] = opcode as u8;
+                    if fixup_offset >= 2 {
+                        self.code[fixup.instruction_offset + 1] = (opcode >> 8) as u8;
+                        if fixup_offset >= 3 {
+                            self.code[fixup.instruction_offset + 2] = (opcode >> 16) as u8;
+                        }
                     }
                 }
-            }
 
-            let offset = target_absolute - origin as isize;
-            let p = fixup.instruction_offset + fixup_offset as usize;
-            if fixup_length == 1 {
-                if offset > i8::MAX as isize || offset < i8::MIN as isize {
-                    panic!("out of range jump");
+                let offset = target_absolute - origin as isize;
+                let p = fixup.instruction_offset + fixup_offset as usize;
+                if fixup_length == 1 {
+                    if offset > i8::MAX as isize || offset < i8::MIN as isize {
+                        panic!("out of range jump");
+                    }
+                    self.code[p] = offset as i8 as u8;
+                } else if fixup_length == 4 {
+                    if offset > i32::MAX as isize || offset < i32::MIN as isize {
+                        panic!("out of range jump");
+                    }
+                    self.code[p..p + 4].copy_from_slice(&(offset as i32).to_le_bytes());
+                } else {
+                    unreachable!()
                 }
-                self.code[p] = offset as i8 as u8;
-            } else if fixup_length == 4 {
-                if offset > i32::MAX as isize || offset < i32::MIN as isize {
-                    panic!("out of range jump");
-                }
-                self.code[p..p + 4].copy_from_slice(&(offset as i32).to_le_bytes());
-            } else {
-                unreachable!()
             }
         }
 
         AssembledCode(self)
+    }
+
+    /// Patch an AArch64 instruction word with a PC-relative byte offset.
+    /// Detects the instruction type from its encoding and places the offset
+    /// in the correct bit fields.
+    fn patch_aarch64_branch(instruction: u32, byte_offset: isize) -> u32 {
+        debug_assert!(byte_offset & 3 == 0, "AArch64 branch offset must be 4-byte aligned: {}", byte_offset);
+        let inst_offset = byte_offset >> 2; // Convert to instruction offset
+
+        // Detect instruction type from top bits:
+        let op0 = (instruction >> 24) & 0xFF;
+
+        match op0 {
+            // B imm26: 000101xx
+            x if (x >> 2) == 0b000101 => {
+                // Unconditional branch: imm26 in bits [25:0]
+                assert!(inst_offset >= -(1 << 25) && inst_offset < (1 << 25), "B: out of range");
+                let imm26 = (inst_offset as u32) & 0x03FFFFFF;
+                (instruction & !0x03FFFFFF) | imm26
+            }
+            // BL imm26: 100101xx
+            x if (x >> 2) == 0b100101 => {
+                assert!(inst_offset >= -(1 << 25) && inst_offset < (1 << 25), "BL: out of range");
+                let imm26 = (inst_offset as u32) & 0x03FFFFFF;
+                (instruction & !0x03FFFFFF) | imm26
+            }
+            // B.cond imm19: 01010100
+            0b01010100 => {
+                assert!(inst_offset >= -(1 << 18) && inst_offset < (1 << 18), "B.cond: out of range");
+                let imm19 = (inst_offset as u32) & 0x7FFFF;
+                (instruction & !(0x7FFFF << 5)) | (imm19 << 5)
+            }
+            // CBZ/CBNZ imm19: x0110100 / x0110101
+            x if (x & 0x7E) == 0b0110100 => {
+                assert!(inst_offset >= -(1 << 18) && inst_offset < (1 << 18), "CBZ/CBNZ: out of range");
+                let imm19 = (inst_offset as u32) & 0x7FFFF;
+                (instruction & !(0x7FFFF << 5)) | (imm19 << 5)
+            }
+            // ADR: immlo in bits [30:29], immhi in bits [23:5]
+            x if (x & 0x9F) == 0b00010000 => {
+                // ADR uses byte offset directly, not instruction offset
+                let off = byte_offset;
+                assert!(off >= -(1 << 20) && off < (1 << 20), "ADR: out of range");
+                let off = off as u32;
+                let immlo = (off & 0x3) << 29;
+                let immhi = ((off >> 2) & 0x7FFFF) << 5;
+                (instruction & !(0x3 << 29) & !(0x7FFFF << 5)) | immlo | immhi
+            }
+            _ => panic!("unknown AArch64 instruction type for fixup: 0x{:08x}", instruction),
+        }
     }
 
     pub fn is_empty(&self) -> bool {

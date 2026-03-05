@@ -124,6 +124,12 @@ pub const VM_SHARED_MEMORY_SIZE: u64 = u32::MAX as u64;
 ///
 /// This does *not* affect the VM ABI and can be changed at will,
 /// but should be high enough that it's never hit.
+///
+/// AArch64 uses fixed 4-byte instructions, so it needs more headroom
+/// than x86-64 for complex instructions like memset with gas metering.
+#[cfg(target_arch = "aarch64")]
+pub const VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH: u32 = 144;
+#[cfg(not(target_arch = "aarch64"))]
 pub const VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH: u32 = 69;
 
 /// The maximum number of bytes the jump table can be.
@@ -136,6 +142,9 @@ pub const VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE: u64 = 0x100000000 * core::
 
 // TODO: Make this smaller.
 /// The maximum number of bytes the native code can be.
+#[cfg(target_arch = "aarch64")]
+pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = u32::MAX - 1;
+#[cfg(not(target_arch = "aarch64"))]
 pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = 2303 * 1024 * 1024 - 1;
 
 #[repr(C)]
@@ -434,6 +443,10 @@ static_assert!(VM_ADDR_JUMP_TABLE_RETURN_TO_HOST < VM_ADDR_JUMP_TABLE + VM_SANDB
 static_assert!(VM_ADDR_JUMP_TABLE.count_ones() == 1);
 static_assert!((1 << VM_ADDR_JUMP_TABLE.trailing_zeros()) == VM_ADDR_JUMP_TABLE);
 
+// On x86_64 only: verify the native code size fits the Linux sandbox layout.
+// On aarch64, VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH is larger (fixed 4-byte instructions),
+// and the generic sandbox doesn't use this fixed address layout.
+#[cfg(target_arch = "x86_64")]
 static_assert!(VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE >= crate::abi::VM_MAXIMUM_CODE_SIZE * VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH);
 static_assert!(VM_ADDR_NATIVE_CODE > 0xffffffff);
 static_assert!(VM_ADDR_VMCTX > 0xffffffff);

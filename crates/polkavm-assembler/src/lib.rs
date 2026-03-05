@@ -4,6 +4,7 @@
 // NOTE: The `#[inline(always)]` in this crate were put strategically and actually make a difference; do not remove them!
 
 pub mod amd64;
+pub mod aarch64;
 
 #[cfg(feature = "alloc")]
 mod assembler;
