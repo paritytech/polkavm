@@ -11,6 +11,7 @@ use polkavm_common::zygote::VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH;
 
 use crate::error::Error;
 
+use crate::api::CompileError;
 use crate::config::{CustomCodegen, GasMeteringKind, ModuleConfig, SandboxKind};
 use crate::mutex::Mutex;
 use crate::sandbox::{Sandbox, SandboxInit, SandboxProgram};
@@ -107,6 +108,7 @@ where
     memset_trampoline_start: usize,
     memset_trampoline_end: usize,
     custom_codegen: Option<Arc<dyn CustomCodegen>>,
+    first_invalid_offset: Option<ProgramCounter>,
 
     _phantom: PhantomData<(S, B)>,
 }
@@ -271,6 +273,7 @@ where
             memset_trampoline_start: 0,
             memset_trampoline_end: 0,
             custom_codegen: config.custom_codegen.clone(),
+            first_invalid_offset: None,
             _phantom: PhantomData,
         };
 
@@ -307,10 +310,16 @@ where
         global: &S::GlobalState,
         cache: &CompilerCache,
         address_space: S::AddressSpace,
-    ) -> Result<CompiledModule<S>, Error>
+    ) -> Result<CompiledModule<S>, CompileError>
     where
         S: Sandbox,
     {
+        if matches!(self.instruction_set, InstructionSetKind::JamV1) {
+            if let Some(pc) = self.first_invalid_offset {
+                return Err(CompileError::ValidationFailed(format!("validation failed at offset {pc}")));
+            }
+        }
+
         log::trace!("Finishing compilation...");
         let code_length = cast(
             self.program_counter_to_machine_code_offset_list
@@ -509,6 +518,10 @@ where
         let next_program_counter = program_counter + args_length + 1;
         self.program_counter_to_machine_code_offset_list
             .push((ProgramCounter(next_program_counter), self.asm.len() as u32));
+
+        if KIND == END_BASIC_BLOCK_INVALID && self.first_invalid_offset.is_none() {
+            self.first_invalid_offset = Some(ProgramCounter(program_counter));
+        }
 
         if KIND != CONTINUE_BASIC_BLOCK {
             if self.gas_metering.is_some() {

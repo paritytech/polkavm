@@ -1,7 +1,7 @@
 use crate::mutex::Mutex;
 use crate::{
-    BackendKind, CallError, Caller, Config, Engine, GasMeteringKind, InterruptKind, Linker, MemoryAccessError, MemoryProtection, Module,
-    ModuleConfig, ProgramBlob, ProgramCounter, Reg, Segfault, SetCacheSizeLimitArgs,
+    BackendKind, CallError, Caller, CompileError, Config, Engine, GasMeteringKind, InterruptKind, Linker, MemoryAccessError,
+    MemoryProtection, Module, ModuleConfig, ProgramBlob, ProgramCounter, Reg, Segfault, SetCacheSizeLimitArgs,
 };
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -4504,6 +4504,123 @@ fn rotate_right_imm_alt_64(config: Config) {
     assert_eq!(instance.reg(Reg::A0), 0xffffffff80000000);
 }
 
+fn jam_validate_ok(config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::JamV1);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_imm(Reg::A0, 0x12345678), asm::ret()], &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    assert!(blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1).is_ok());
+    Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+}
+
+fn jam_validate_invalid_opcode(config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::JamV1);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_imm(Reg::A0, 0x12345678), asm::ret()], &[]);
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut raw_code = blob.code().to_vec();
+    raw_code[0] = 255;
+    blob.set_code(raw_code.into());
+    assert!(blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1).is_err());
+    assert!(matches!(
+        Module::from_blob(&engine, &ModuleConfig::new(), blob),
+        Err(CompileError::ValidationFailed(..))
+    ));
+}
+
+fn jam_validate_invalid_fallthrough(config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::JamV1);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_imm(Reg::A0, 0x12345678), asm::fallthrough()], &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    assert!(blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1).is_err());
+    assert!(matches!(
+        Module::from_blob(&engine, &ModuleConfig::new(), blob),
+        Err(CompileError::ValidationFailed(..))
+    ));
+}
+
+fn jam_validate_invalid_branch(config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::JamV1);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::branch_eq_imm(Reg::A0, 33, 2),
+            asm::load_imm(Reg::A1, 1),
+            asm::trap(),
+            asm::load_imm(Reg::A1, 2),
+            asm::trap(),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 3),
+            asm::trap(),
+        ],
+        &[],
+    );
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let instructions: Vec<_> = blob.instructions().collect();
+    let mut raw_code = blob.code().to_vec();
+    raw_code[instructions[0].next_offset.0 as usize - 1] -= 1;
+    blob.set_code(raw_code.into());
+    assert!(blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1).is_ok());
+    Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+}
+
+fn jam_validate_invalid_skip(config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::JamV1);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::branch_eq_imm(Reg::A0, 33, 2),
+            asm::load_imm(Reg::A1, 1),
+            asm::trap(),
+            asm::load_imm(Reg::A1, 2),
+            asm::trap(),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 3),
+            asm::trap(),
+        ],
+        &[],
+    );
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut raw_bitmask = blob.bitmask().to_vec();
+    assert!(raw_bitmask.len() >= 5);
+    raw_bitmask[0..4].fill(0);
+    raw_bitmask[0] = 1;
+    blob.set_bitmask(raw_bitmask.into());
+    assert!(blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1).is_err());
+    assert!(matches!(
+        Module::from_blob(&engine, &ModuleConfig::new(), blob),
+        Err(CompileError::ValidationFailed(..))
+    ));
+}
+
 fn test_basic_debug_info(raw_blob: &'static [u8]) {
     let _ = env_logger::try_init();
     let program = get_blob(raw_blob);
@@ -4793,6 +4910,12 @@ run_tests! {
 
     memset_basic
     memset_with_dynamic_paging
+
+    jam_validate_ok
+    jam_validate_invalid_opcode
+    jam_validate_invalid_fallthrough
+    jam_validate_invalid_branch
+    jam_validate_invalid_skip
 
     spawn_stress_test
     module_cache
