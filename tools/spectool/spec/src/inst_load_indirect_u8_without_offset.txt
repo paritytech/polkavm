@@ -6,6 +6,8 @@ pre: gas = 10000
 
 pub @main:
     a1 = u8 [a0]
+    pub @expected_exit: %no_fallthrough
+        trap
 
 post: a1 = 0x81
 post: gas = 9975

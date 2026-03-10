@@ -432,7 +432,14 @@ fn main_generate() {
         module_config.set_dynamic_paging(true);
         module_config.set_cost_model(Some(CostModelKind::Full(cache_model)));
 
-        let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+        let module = match Module::from_blob(&engine, &module_config, blob.clone()) {
+            Ok(module) => module,
+            Err(error) => {
+                eprintln!("Failed to compile {internal_name}: {error}");
+                found_errors = true;
+                continue;
+            }
+        };
         let mut instance = module.instantiate().unwrap();
 
         let mut initial_steps = Vec::new();

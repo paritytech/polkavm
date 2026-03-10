@@ -6,6 +6,7 @@ pub @main:
     trap
 @target:
     a1 = 0xdeadbeef
+    trap
 
 post: a1 = 0
 post: gas = 9977
