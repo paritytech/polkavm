@@ -4,6 +4,7 @@ pre: gas = 10000
 pub @main:
 pub @expected_exit:
     a0 = u8 [0x20000]
+    trap
 
 post: a0 = 0
 post: gas = 9975

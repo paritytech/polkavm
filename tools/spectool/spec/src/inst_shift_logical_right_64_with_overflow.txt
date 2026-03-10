@@ -3,6 +3,8 @@ pre: a1 = 65
 
 pub @main:
     a2 = a0 >> a1
+    pub @expected_exit: %no_fallthrough
+        trap
 
 post: a2 = 0x400000000000003A
 post: gas = 9998

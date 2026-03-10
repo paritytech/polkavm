@@ -6,3 +6,4 @@ pub @expected_exit:
     trap
 @target:
     a0 = 0xdeadbeef
+    trap
