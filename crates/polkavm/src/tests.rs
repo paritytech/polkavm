@@ -3164,6 +3164,132 @@ fn access_memory_from_within(config: Config) {
     assert_eq!(instance.reg(Reg::A0), 0x00000023);
 }
 
+#[test]
+fn interpreter_max_allocation_size() {
+    let _ = env_logger::try_init();
+    let mut config = crate::Config::default();
+    config.set_backend(Some(crate::BackendKind::Interpreter));
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::store_imm_indirect_u32(Reg::A0, 0, 0x12345678), asm::ret()], &[]);
+    builder.set_rw_data_size(1024 * 1024 * 512);
+    builder.set_stack_size(128 * 1024);
+    let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+
+    let limit: usize = 1024 * 32;
+    let limit_u32 = cast(limit).assert_always_fits_in_u32();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_aux_data_size(128 * 1024);
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let memory_map = module.memory_map();
+    {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_max_allocation_size(Some(limit));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_address()));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    }
+    {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_max_allocation_size(Some(limit));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_address() + limit_u32 - 4));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    }
+
+    {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_max_allocation_size(Some(limit));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_address() + limit_u32 - 3));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+        assert!(instance.write_u32(memory_map.rw_data_address() + limit_u32 - 4, 0x77777777).is_ok());
+        assert!(matches!(
+            instance.write_u32(memory_map.rw_data_address() + limit_u32 - 3, 0x66666666),
+            Err(MemoryAccessError::MemoryLimitReached)
+        ));
+        assert_eq!(instance.read_u32(memory_map.rw_data_address() + limit_u32 - 3).unwrap(), 0x00777777);
+    }
+}
+
+#[test]
+fn interpreter_guest_memory_limit() {
+    let _ = env_logger::try_init();
+    let mut config = crate::Config::default();
+    config.set_backend(Some(crate::BackendKind::Interpreter));
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::store_imm_indirect_u32(Reg::A0, 0, 0x12345678), asm::ret()], &[]);
+    builder.set_rw_data_size(1024 * 1024 * 512);
+    builder.set_stack_size(1024 * 1024 * 512);
+    let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+
+    let limit: usize = 1024 * 32;
+    let limit_u32 = cast(limit).assert_always_fits_in_u32();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_aux_data_size(128 * 1024);
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let memory_map = module.memory_map();
+    {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_max_allocation_size(Some(limit));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_address() + limit_u32 - 4));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    }
+    {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_max_allocation_size(Some(limit));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_address() + limit_u32 - 3));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    }
+    {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_guest_memory_limit(Some(limit));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_address() + limit_u32 / 2 - 4));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.stack_address_high() - limit_u32 / 2));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_address() + limit_u32 / 2 - 3));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+        assert!(matches!(
+            instance.write_u32(memory_map.rw_data_range().end - 4, 0x66666666),
+            Err(MemoryAccessError::MemoryLimitReached)
+        ));
+        assert!(matches!(
+            instance.write_u32(memory_map.stack_range().start, 0x66666666),
+            Err(MemoryAccessError::MemoryLimitReached)
+        ));
+        assert!(matches!(
+            instance.write_u32(memory_map.aux_data_range().end - 4, 0x66666666),
+            Err(MemoryAccessError::MemoryLimitReached)
+        ));
+
+        assert_eq!(instance.read_u32(memory_map.rw_data_range().end - 4).unwrap(), 0);
+        assert_eq!(instance.read_u32(memory_map.stack_range().end - 4).unwrap(), 0);
+        assert_eq!(instance.read_u32(memory_map.aux_data_range().end - 4).unwrap(), 0);
+    }
+}
+
 fn sbrk_knob_works(config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();

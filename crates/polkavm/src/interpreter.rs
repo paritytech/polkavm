@@ -14,6 +14,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 use core::num::NonZeroU32;
+use core::ops::Range;
 use polkavm_common::abi::VM_ADDR_RETURN_TO_HOST;
 use polkavm_common::cast::cast;
 use polkavm_common::operation::*;
@@ -21,7 +22,7 @@ use polkavm_common::program::{
     asm, interpreter_calculate_cache_num_entries, InstructionVisitor, RawReg, Reg, INTERPRETER_CACHE_ENTRY_SIZE,
     INTERPRETER_CACHE_RESERVED_ENTRIES, INTERPRETER_FLATMAP_ENTRY_SIZE,
 };
-use polkavm_common::utils::{align_to_next_page_usize, byte_slice_init, slice_assume_init_mut, GasVisitorT};
+use polkavm_common::utils::{align_to_next_page_usize, slice_assume_init_mut, ArcBytes, GasVisitorT};
 
 type Target = u32;
 
@@ -72,124 +73,286 @@ trait Memory {
     fn store_impl<T: StoreTy, const DEBUG: bool>(instance: &mut InterpretedInstance, address: u32, value: u64) -> Option<Target>;
 }
 
-pub(crate) struct StandardMemory {
-    ro_data: Vec<u8>,
-    rw_data: Vec<u8>,
-    stack: Vec<u8>,
-    aux: Vec<u8>,
-    is_memory_dirty: bool,
+#[repr(align(64))]
+struct CacheAligned<T>(pub T);
+
+#[repr(C)]
+struct StandardMemory {
+    ro_data_size: usize,
+    rw_data_original: ArcBytes,
+    rw_data_size: usize,
     heap_size: u32,
+    stack_size: usize,
     accessible_aux_size: usize,
 
-    aux_data_address: u32,
+    max_allocation_size: usize,
+    guest_memory_limit: usize,
+
     stack_address_low: u32,
+    stack_address_high: u32,
+
+    _align: CacheAligned<()>,
+
+    aux_data_address: u32,
+    stack_address_low_resident: u32,
     rw_data_address: u32,
     ro_data_address: u32,
+
+    stack: Vec<u8>,
+    rw_data: Vec<u8>,
+    ro_data: ArcBytes,
+    aux: Vec<u8>,
 }
 
 impl StandardMemory {
     fn new() -> Self {
         Self {
-            ro_data: Vec::new(),
-            rw_data: Vec::new(),
-            stack: Vec::new(),
-            aux: Vec::new(),
-            is_memory_dirty: false,
+            ro_data: Default::default(),
+            ro_data_size: 0,
+            rw_data_original: Default::default(),
+            rw_data: Default::default(),
+            rw_data_size: 0,
             heap_size: 0,
+            stack: Default::default(),
+            stack_size: 0,
+            aux: Default::default(),
             accessible_aux_size: usize::MAX,
+
+            max_allocation_size: usize::MAX,
+            guest_memory_limit: usize::MAX,
+
             aux_data_address: 0,
             stack_address_low: 0,
+            stack_address_low_resident: 0,
+            stack_address_high: 0,
             rw_data_address: 0,
             ro_data_address: 0,
+            _align: CacheAligned(()),
+        }
+    }
+}
+
+#[allow(clippy::transmute_ptr_to_ptr)]
+#[inline]
+fn transmute_to_uninit(slice: &[u8]) -> &[MaybeUninit<u8>] {
+    // SAFETY: Transmuting `&[u8]` into `&[MaybeUninit<u8>]` is safe since the layout of `[MaybeUninit<u8>]` is guaranteed to be the same as `[u8]`.
+    unsafe { core::mem::transmute(slice) }
+}
+
+// Resize in chunks for efficiency.
+const RESIZE_GRANULARITY: usize = 4096;
+
+enum SliceOrLength<'a> {
+    Slice(&'a [u8]),
+    Length(usize),
+}
+
+impl<'a> SliceOrLength<'a> {
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            Self::Slice(slice) => slice.len(),
+            Self::Length(length) => *length,
         }
     }
 
-    fn heap_size(&self) -> u32 {
-        self.heap_size
-    }
-
-    fn mark_dirty(&mut self) {
-        self.is_memory_dirty = true;
-    }
-
-    fn reset_memory(&mut self, module: &Module) {
-        if self.is_memory_dirty {
-            self.force_reset(module);
+    #[inline]
+    fn copy_into(&self, target: &mut [u8]) {
+        match self {
+            Self::Slice(slice) => target.copy_from_slice(slice),
+            Self::Length(length) => {
+                debug_assert_eq!(target.len(), *length);
+                target.fill(0)
+            }
         }
     }
+}
 
-    fn force_reset(&mut self, module: &Module) {
-        self.ro_data.clear();
-        self.rw_data.clear();
-        self.stack.clear();
-        self.aux.clear();
-        self.heap_size = 0;
-        self.is_memory_dirty = false;
-        self.accessible_aux_size = 0;
-
-        let blob = module.blob();
-        self.rw_data.extend_from_slice(blob.rw_data());
-        self.rw_data.resize(cast(module.memory_map().rw_data_size()).to_usize(), 0);
-
-        self.ro_data.extend_from_slice(blob.ro_data());
-        self.ro_data.resize(cast(module.memory_map().ro_data_size()).to_usize(), 0);
-
-        self.stack.resize(cast(module.memory_map().stack_size()).to_usize(), 0);
-
-        // TODO: Do this lazily?
-        self.aux.resize(cast(module.memory_map().aux_data_size()).to_usize(), 0);
-        self.accessible_aux_size = cast(module.memory_map().aux_data_size()).to_usize();
-
-        self.aux_data_address = module.memory_map().aux_data_address();
-        self.stack_address_low = module.memory_map().stack_address_low();
-        self.rw_data_address = module.memory_map().rw_data_address();
-        self.ro_data_address = module.memory_map().ro_data_address();
+fn reserve_memory<T>(
+    vec: &mut Vec<T>,
+    minimum_length: usize,
+    maximum_allocation_size_in_bytes: usize,
+    memory_limit: usize,
+    memory_used: usize,
+) -> bool {
+    const {
+        assert!(core::mem::size_of::<T>() > 0);
+        assert!(RESIZE_GRANULARITY % core::mem::size_of::<T>() == 0);
     }
 
+    if vec.capacity() >= minimum_length {
+        return true;
+    }
+
+    let memory_used = memory_used + vec.capacity();
+    let minimum_bytes = minimum_length * core::mem::size_of::<T>();
+    if minimum_bytes > maximum_allocation_size_in_bytes || memory_used >= memory_limit {
+        return false;
+    }
+
+    let target_bytes = minimum_bytes
+        .next_power_of_two()
+        .max(RESIZE_GRANULARITY)
+        .min(maximum_allocation_size_in_bytes);
+
+    let extra_bytes = target_bytes - vec.capacity();
+    if extra_bytes > memory_limit - memory_used {
+        return false;
+    }
+
+    let target_elements = target_bytes / core::mem::size_of::<T>();
+    let current_elements = vec.len();
+    vec.reserve_exact(target_elements - current_elements);
+    vec.capacity() >= minimum_length
+}
+
+enum PrepareWriteResult {
+    Ok(Range<usize>),
+    OutOfRangeAccess,
+    MemoryLimitReached,
+}
+
+impl StandardMemory {
     fn accessible_aux_size(&self) -> u32 {
         cast(self.accessible_aux_size).assert_always_fits_in_u32()
     }
 
     fn set_accessible_aux_size(&mut self, size: u32) {
         self.accessible_aux_size = cast(size).to_usize();
+        self.aux.truncate(self.accessible_aux_size);
     }
 
-    #[inline]
-    fn get_memory_slice<'a>(&'a self, address: u32, length: u32) -> Option<&'a [u8]> {
-        let (start, memory_slice) = if address >= self.aux_data_address {
-            (self.aux_data_address, &self.aux[..self.accessible_aux_size])
+    fn read_memory_into<'slice>(
+        &mut self,
+        address: u32,
+        buffer: &'slice mut [MaybeUninit<u8>],
+    ) -> Result<&'slice mut [u8], MemoryAccessError> {
+        if address >= self.aux_data_address {
+            let offset = cast(address - self.aux_data_address).to_usize();
+            let offset_end = offset + buffer.len();
+
+            if offset_end <= self.accessible_aux_size {
+                let resident_range = offset.min(self.aux.len())..offset_end.min(self.aux.len());
+                buffer[..resident_range.len()].copy_from_slice(&transmute_to_uninit(&self.aux)[resident_range.clone()]);
+                buffer[resident_range.len()..].fill(MaybeUninit::new(0));
+
+                // SAFETY: The buffer was initialized.
+                return Ok(unsafe { slice_assume_init_mut(buffer) });
+            }
         } else if address >= self.stack_address_low {
-            (self.stack_address_low, &self.stack[..])
+            let offset = cast(address - self.stack_address_low).to_usize();
+            let offset_end = offset + buffer.len();
+
+            if offset_end <= self.stack_size {
+                let resident_offset = self.stack_size - self.stack.len();
+                let non_resident_range = offset.min(resident_offset)..offset_end.min(resident_offset);
+                let resident_range = offset.max(resident_offset) - resident_offset..offset_end.max(resident_offset) - resident_offset;
+                buffer[..non_resident_range.len()].fill(MaybeUninit::new(0));
+                buffer[non_resident_range.len()..].copy_from_slice(&transmute_to_uninit(&self.stack)[resident_range]);
+
+                // SAFETY: The buffer was initialized.
+                return Ok(unsafe { slice_assume_init_mut(buffer) });
+            }
         } else if address >= self.rw_data_address {
-            (self.rw_data_address, &self.rw_data[..])
+            let offset = cast(address - self.rw_data_address).to_usize();
+            let offset_end = offset + buffer.len();
+
+            if offset_end <= self.rw_data_size {
+                let resident_range = offset.min(self.rw_data.len())..offset_end.min(self.rw_data.len());
+                buffer[..resident_range.len()].copy_from_slice(&transmute_to_uninit(&self.rw_data)[resident_range.clone()]);
+
+                let non_resident_range =
+                    (offset + resident_range.len()).min(self.rw_data_original.len())..offset_end.min(self.rw_data_original.len());
+                buffer[resident_range.len()..resident_range.len() + non_resident_range.len()]
+                    .copy_from_slice(&transmute_to_uninit(&self.rw_data_original)[non_resident_range.clone()]);
+                buffer[resident_range.len() + non_resident_range.len()..].fill(MaybeUninit::new(0));
+
+                // SAFETY: The buffer was initialized.
+                return Ok(unsafe { slice_assume_init_mut(buffer) });
+            }
         } else if address >= self.ro_data_address {
-            (self.ro_data_address, &self.ro_data[..])
-        } else {
-            return None;
-        };
+            let offset = cast(address - self.ro_data_address).to_usize();
+            let offset_end = offset + buffer.len();
 
-        let offset = address - start;
-        let offset = cast(offset).to_usize();
-        let offset_end = offset + cast(length).to_usize();
-        memory_slice.get(offset..offset_end)
+            if offset_end <= self.ro_data_size {
+                let src_range = offset.min(self.ro_data.len())..offset_end.min(self.ro_data.len());
+                buffer[..src_range.len()].copy_from_slice(&transmute_to_uninit(&self.ro_data)[src_range.clone()]);
+                buffer[src_range.len()..].fill(MaybeUninit::new(0));
+
+                // SAFETY: The buffer was initialized.
+                return Ok(unsafe { slice_assume_init_mut(buffer) });
+            }
+        }
+
+        Err(MemoryAccessError::OutOfRangeAccess {
+            address,
+            length: cast(buffer.len()).to_u64(),
+        })
     }
 
-    #[inline]
-    fn get_memory_slice_mut<const IS_EXTERNAL: bool>(&mut self, address: u32, length: u32) -> Option<&mut [u8]> {
-        let (start, memory_slice) = if IS_EXTERNAL && address >= self.aux_data_address {
-            (self.aux_data_address, &mut self.aux[..self.accessible_aux_size])
-        } else if address >= self.stack_address_low {
-            (self.stack_address_low, &mut self.stack[..])
-        } else if address >= self.rw_data_address {
-            (self.rw_data_address, &mut self.rw_data[..])
-        } else {
-            return None;
-        };
+    fn zero_or_write_memory(&mut self, address: u32, contents: SliceOrLength) -> Result<(), MemoryAccessError> {
+        if address >= self.aux_data_address {
+            let range = {
+                let offset = cast(address - self.aux_data_address).to_usize();
+                offset..offset + contents.len()
+            };
 
-        self.is_memory_dirty = true;
-        let offset = cast(address - start).to_usize();
-        let offset_end = offset + cast(length).to_usize();
-        memory_slice.get_mut(offset..offset_end)
+            if range.end <= self.accessible_aux_size {
+                if !self.aux_resize(range.end) {
+                    return Err(MemoryAccessError::MemoryLimitReached);
+                }
+
+                if let Some(target) = self.aux.get_mut(range) {
+                    contents.copy_into(target);
+                    return Ok(());
+                }
+            }
+        } else if address >= self.stack_address_low {
+            match self.prepare_stack_write(cast(address).to_usize(), contents.len()) {
+                PrepareWriteResult::Ok(range) => {
+                    if let Some(target) = self.stack.get_mut(range) {
+                        contents.copy_into(target);
+                        return Ok(());
+                    }
+                }
+                PrepareWriteResult::MemoryLimitReached => {
+                    return Err(MemoryAccessError::MemoryLimitReached);
+                }
+                PrepareWriteResult::OutOfRangeAccess => {}
+            }
+        } else if address >= self.rw_data_address {
+            let range = {
+                let offset = cast(address - self.rw_data_address).to_usize();
+                offset..offset + contents.len()
+            };
+
+            if range.end <= self.rw_data_size {
+                if self.rw_data_resize(range.end) {
+                    contents.copy_into(&mut self.rw_data[range]);
+                    return Ok(());
+                } else {
+                    return Err(MemoryAccessError::MemoryLimitReached);
+                }
+            }
+        }
+
+        Err(MemoryAccessError::OutOfRangeAccess {
+            address,
+            length: cast(contents.len()).to_u64(),
+        })
+    }
+
+    fn write_memory(&mut self, address: u32, data: &[u8]) -> Result<(), MemoryAccessError> {
+        self.zero_or_write_memory(address, SliceOrLength::Slice(data))
+    }
+
+    fn zero_memory(&mut self, address: u32, length: u32, memory_protection: Option<MemoryProtection>) -> Result<(), MemoryAccessError> {
+        debug_assert!(memory_protection.is_none());
+        self.zero_or_write_memory(address, SliceOrLength::Length(cast(length).to_usize()))
+    }
+
+    fn heap_size(&self) -> u32 {
+        self.heap_size
     }
 
     fn sbrk(&mut self, module: &Module, size: u32) -> Option<u32> {
@@ -215,55 +378,320 @@ impl StandardMemory {
 
         self.heap_size = new_heap_size;
         let heap_top = memory_map.heap_base() + new_heap_size;
-        if cast(heap_top).to_usize() > cast(memory_map.rw_data_address()).to_usize() + self.rw_data.len() {
+        if cast(heap_top).to_usize() > cast(memory_map.rw_data_address()).to_usize() + self.rw_data_size {
             let new_size = align_to_next_page_usize(cast(memory_map.page_size()).to_usize(), cast(heap_top).to_usize()).unwrap()
                 - cast(memory_map.rw_data_address()).to_usize();
-            log::trace!("sbrk: growing memory: {} -> {}", self.rw_data.len(), new_size);
-            self.rw_data.resize(new_size, 0);
+
+            log::trace!("sbrk: growing memory: {} -> {}", self.rw_data_size, new_size);
+            self.rw_data_size = new_size;
         }
 
         Some(heap_top)
     }
 
-    fn read_memory_into<'slice>(&self, address: u32, buffer: &'slice mut [MaybeUninit<u8>]) -> Result<&'slice mut [u8], MemoryAccessError> {
-        let Some(slice) = self.get_memory_slice(address, cast(buffer.len()).assert_always_fits_in_u32()) else {
-            return Err(MemoryAccessError::OutOfRangeAccess {
-                address,
-                length: cast(buffer.len()).to_u64(),
-            });
-        };
+    fn mark_dirty(&mut self) {}
 
-        Ok(byte_slice_init(buffer, slice))
+    fn reset_memory(&mut self, module: &Module) {
+        let memory_map = module.memory_map();
+        self.ro_data = module.blob().ro_data_arc().clone();
+        self.ro_data_size = cast(memory_map.ro_data_size()).to_usize();
+        self.rw_data.clear();
+        self.rw_data_original = module.blob().rw_data_arc().clone();
+        self.rw_data_size = cast(memory_map.rw_data_size()).to_usize();
+        self.heap_size = 0;
+        self.stack.clear();
+        self.stack_size = cast(memory_map.stack_size()).to_usize();
+        self.aux.clear();
+        self.accessible_aux_size = cast(memory_map.aux_data_size()).to_usize();
+
+        self.aux_data_address = memory_map.aux_data_address();
+        self.stack_address_low = memory_map.stack_address_low();
+        self.stack_address_high = memory_map.stack_address_high();
+        self.stack_address_low_resident = self.stack_address_high;
+        self.rw_data_address = memory_map.rw_data_address();
+        self.ro_data_address = memory_map.ro_data_address();
     }
 
-    fn write_memory(&mut self, address: u32, data: &[u8]) -> Result<(), MemoryAccessError> {
-        let Some(slice) = self.get_memory_slice_mut::<true>(address, cast(data.len()).assert_always_fits_in_u32()) else {
-            return Err(MemoryAccessError::OutOfRangeAccess {
-                address,
-                length: cast(data.len()).to_u64(),
-            });
-        };
+    #[must_use]
+    #[cold]
+    fn rw_data_resize(&mut self, required_size: usize) -> bool {
+        if !reserve_memory(
+            &mut self.rw_data,
+            required_size,
+            self.max_allocation_size,
+            self.guest_memory_limit,
+            self.stack.capacity() + self.aux.capacity(),
+        ) {
+            return false;
+        }
 
-        slice.copy_from_slice(data);
-        Ok(())
+        debug_assert!(self.rw_data.capacity().is_power_of_two());
+        debug_assert!(self.rw_data.capacity() <= self.max_allocation_size);
+
+        let new_length = self.rw_data.capacity().min(required_size.next_multiple_of(RESIZE_GRANULARITY));
+        if self.rw_data.len() < self.rw_data_original.len() {
+            let new_length_partial = new_length.min(self.rw_data_original.len());
+            let old_length = self.rw_data.len();
+            let bytes_to_copy = new_length_partial - old_length;
+
+            // TODO: Use `write_copy_of_slice` once we switch to Rust 0.93.0.
+            self.rw_data.spare_capacity_mut()[..bytes_to_copy]
+                .copy_from_slice(transmute_to_uninit(&self.rw_data_original[old_length..old_length + bytes_to_copy]));
+
+            debug_assert_eq!(self.rw_data.len() + bytes_to_copy, new_length_partial);
+
+            // SAFETY: We've initialized the spare capacity, so calling `set_len` is safe.
+            unsafe {
+                self.rw_data.set_len(new_length_partial);
+            }
+        }
+
+        debug_assert!(new_length <= self.rw_data.capacity());
+        self.rw_data.resize(new_length, 0);
+
+        true
     }
 
-    fn zero_memory(&mut self, address: u32, length: u32, memory_protection: Option<MemoryProtection>) -> Result<(), MemoryAccessError> {
-        debug_assert!(memory_protection.is_none());
-        let Some(slice) = self.get_memory_slice_mut::<true>(address, length) else {
-            return Err(MemoryAccessError::OutOfRangeAccess {
-                address,
-                length: u64::from(length),
-            });
-        };
+    #[must_use]
+    #[cold]
+    fn stack_resize(&mut self, required_size: usize) -> bool {
+        let mut new_stack = Vec::new();
+        if !reserve_memory(
+            &mut new_stack,
+            required_size,
+            self.max_allocation_size,
+            self.guest_memory_limit,
+            self.rw_data.capacity() + self.aux.capacity(),
+        ) {
+            return false;
+        }
 
-        slice.fill(0);
+        debug_assert!(new_stack.capacity().is_power_of_two());
+        debug_assert!(new_stack.capacity() <= self.max_allocation_size);
 
-        Ok(())
+        let uninitialized = new_stack.spare_capacity_mut();
+        let new_size = uninitialized.len();
+        let new_space = new_size - self.stack.len();
+        uninitialized[..new_space].fill(MaybeUninit::new(0));
+        uninitialized[new_space..].copy_from_slice(transmute_to_uninit(&self.stack));
+
+        // SAFETY: The buffer is fully initialized.
+        unsafe {
+            new_stack.set_len(new_size);
+        }
+
+        self.stack = new_stack;
+        self.stack_address_low_resident = self.stack_address_high - cast(self.stack.len()).assert_always_fits_in_u32();
+        true
     }
 
+    #[must_use]
+    fn prepare_stack_write(&mut self, address: usize, length: usize) -> PrepareWriteResult {
+        let stack_hi = cast(self.stack_address_high).to_usize();
+        if address + length > stack_hi {
+            return PrepareWriteResult::OutOfRangeAccess;
+        }
+
+        let required_size = stack_hi - address;
+        if required_size > self.stack.len() {
+            if required_size > self.stack_size {
+                return PrepareWriteResult::OutOfRangeAccess;
+            }
+
+            if !self.stack_resize(required_size) {
+                return PrepareWriteResult::MemoryLimitReached;
+            }
+        }
+
+        let stack_lo = stack_hi - self.stack.len();
+        let offset = address - stack_lo;
+        PrepareWriteResult::Ok(offset..offset + length)
+    }
+
+    #[must_use]
+    #[cold]
+    fn aux_resize(&mut self, required_size: usize) -> bool {
+        if !reserve_memory(
+            &mut self.aux,
+            required_size,
+            self.max_allocation_size,
+            self.guest_memory_limit,
+            self.rw_data.capacity() + self.stack.capacity(),
+        ) {
+            return false;
+        }
+
+        debug_assert!(self.aux.capacity().is_power_of_two());
+        debug_assert!(self.aux.capacity() <= self.max_allocation_size);
+
+        let new_length = self.aux.capacity().min(required_size.next_multiple_of(RESIZE_GRANULARITY));
+        debug_assert!(new_length <= self.aux.capacity());
+        self.aux.resize(new_length, 0);
+        true
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn store_impl_slow<T: StoreTy, const DEBUG: bool>(instance: &mut InterpretedInstance, address: u32, value: u64) -> Option<Target> {
+        macro_rules! range {
+            ($base_address:expr) => {{
+                let offset = cast(address - $base_address).to_usize();
+                let offset_end = offset + core::mem::size_of::<T>();
+                offset..offset_end
+            }};
+        }
+
+        if address >= Self::memory_state(instance).stack_address_low {
+            match Self::memory_state_mut(instance).prepare_stack_write(cast(address).to_usize(), core::mem::size_of::<T>()) {
+                PrepareWriteResult::Ok(range) => {
+                    if let Some(subslice) = Self::memory_state_mut(instance).stack.get_mut(range) {
+                        let value = T::into_bytes(value);
+                        subslice.copy_from_slice(value.as_ref());
+                        instance.on_store_ok::<T, DEBUG>()
+                    } else {
+                        instance.on_store_trap::<T, DEBUG>(address)
+                    }
+                }
+                PrepareWriteResult::OutOfRangeAccess => instance.on_store_trap::<T, DEBUG>(address),
+                PrepareWriteResult::MemoryLimitReached => instance.on_store_trap_due_to_memory_limit::<T, DEBUG>(address),
+            }
+        } else if address >= Self::memory_state(instance).rw_data_address {
+            let range = range!(Self::memory_state(instance).rw_data_address);
+            if let Some(subslice) = Self::memory_state_mut(instance).rw_data.get_mut(range.clone()) {
+                let value = T::into_bytes(value);
+                subslice.copy_from_slice(value.as_ref());
+                return instance.on_store_ok::<T, DEBUG>();
+            }
+
+            if range.end > Self::memory_state(instance).rw_data_size {
+                return instance.on_store_trap::<T, DEBUG>(address);
+            }
+
+            if !Self::memory_state_mut(instance).rw_data_resize(range.end) {
+                return instance.on_store_trap_due_to_memory_limit::<T, DEBUG>(address);
+            }
+
+            if let Some(subslice) = Self::memory_state_mut(instance).rw_data.get_mut(range) {
+                let value = T::into_bytes(value);
+                subslice.copy_from_slice(value.as_ref());
+                instance.on_store_ok::<T, DEBUG>()
+            } else {
+                instance.on_store_trap::<T, DEBUG>(address)
+            }
+        } else {
+            instance.on_store_trap::<T, DEBUG>(address)
+        }
+    }
+
+    fn load_rw_data_slow<T: LoadTy, const DEBUG: bool>(
+        instance: &mut InterpretedInstance,
+        dst: Reg,
+        address: u32,
+        range: Range<usize>,
+    ) -> Option<Target> {
+        let state = Self::memory_state(instance);
+        if range.end > state.rw_data_size {
+            instance.on_load_trap::<T, DEBUG>(address)
+        } else {
+            let mut buffer = T::Slice::default();
+
+            let resident_range = range.start.min(state.rw_data.len())..range.end.min(state.rw_data.len());
+            buffer[..resident_range.len()].copy_from_slice(&state.rw_data[resident_range.clone()]);
+
+            let non_resident_range =
+                (range.start + resident_range.len()).min(state.rw_data_original.len())..range.end.min(state.rw_data_original.len());
+            buffer[resident_range.len()..resident_range.len() + non_resident_range.len()]
+                .copy_from_slice(&state.rw_data_original[non_resident_range]);
+
+            instance.on_load_ok::<T, DEBUG>(dst, address, T::from_slice(buffer.as_ref()))
+        }
+    }
+
+    fn load_ro_data_slow<T: LoadTy, const DEBUG: bool>(
+        instance: &mut InterpretedInstance,
+        dst: Reg,
+        address: u32,
+        range: Range<usize>,
+    ) -> Option<Target> {
+        let state = Self::memory_state(instance);
+        if range.end > state.ro_data_size {
+            instance.on_load_trap::<T, DEBUG>(address)
+        } else {
+            let mut buffer = T::Slice::default();
+            let src_range = range.start.min(state.ro_data.len())..range.end.min(state.ro_data.len());
+            buffer[..src_range.len()].copy_from_slice(&state.ro_data[src_range]);
+            instance.on_load_ok::<T, DEBUG>(dst, address, T::from_slice(buffer.as_ref()))
+        }
+    }
+
+    fn load_stack_slow<T: LoadTy, const DEBUG: bool>(
+        instance: &mut InterpretedInstance,
+        dst: Reg,
+        address: u32,
+        offset: usize,
+    ) -> Option<Target> {
+        let state = Self::memory_state(instance);
+        let offset_end = offset + core::mem::size_of::<T>();
+        if offset_end > state.stack_size {
+            instance.on_load_trap::<T, DEBUG>(address)
+        } else {
+            let resident_offset = state.stack_size - state.stack.len();
+            let non_resident_range = offset.min(resident_offset)..offset_end.min(resident_offset);
+            let resident_range = offset.max(resident_offset) - resident_offset..offset_end.max(resident_offset) - resident_offset;
+            let mut buffer = T::Slice::default();
+            buffer[non_resident_range.len()..].copy_from_slice(&state.stack[resident_range]);
+            instance.on_load_ok::<T, DEBUG>(dst, address, T::from_slice(buffer.as_ref()))
+        }
+    }
+
+    fn load_aux_slow<T: LoadTy, const DEBUG: bool>(
+        instance: &mut InterpretedInstance,
+        dst: Reg,
+        address: u32,
+        range: Range<usize>,
+    ) -> Option<Target> {
+        let state = Self::memory_state(instance);
+        if range.end > state.accessible_aux_size {
+            instance.on_load_trap::<T, DEBUG>(address)
+        } else {
+            let mut buffer = T::Slice::default();
+            let src_range = range.start.min(state.aux.len())..range.end.min(state.aux.len());
+            buffer[..src_range.len()].copy_from_slice(&state.aux[src_range]);
+            instance.on_load_ok::<T, DEBUG>(dst, address, T::from_slice(buffer.as_ref()))
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn load_impl_slow<T: LoadTy, const DEBUG: bool>(instance: &mut InterpretedInstance, dst: Reg, address: u32) -> Option<Target> {
+        macro_rules! range {
+            ($base_address:expr) => {{
+                let offset = cast(address - $base_address).to_usize();
+                let offset_end = offset + core::mem::size_of::<T>();
+                offset..offset_end
+            }};
+        }
+
+        let state = Self::memory_state(instance);
+        if address >= state.aux_data_address {
+            let range = range!(state.aux_data_address);
+            Self::load_aux_slow::<T, DEBUG>(instance, dst, address, range)
+        } else if address >= state.stack_address_low {
+            Self::load_stack_slow::<T, DEBUG>(instance, dst, address, cast(address - state.stack_address_low).to_usize())
+        } else if address >= state.rw_data_address {
+            let range = range!(state.rw_data_address);
+            Self::load_rw_data_slow::<T, DEBUG>(instance, dst, address, range)
+        } else if address >= state.ro_data_address {
+            let range = range!(state.ro_data_address);
+            Self::load_ro_data_slow::<T, DEBUG>(instance, dst, address, range)
+        } else {
+            instance.on_load_trap::<T, DEBUG>(address)
+        }
+    }
+
+    // Dynamic memory-only methods.
     fn is_memory_accessible(&self, _address: u32, _size: u32, _minimum_protection: MemoryProtection) -> bool {
-        unimplemented!();
+        unimplemented!()
     }
 
     fn change_memory_protection(&mut self, _address: u32, _length: u32, _protection: MemoryProtection) -> Result<(), MemoryAccessError> {
@@ -271,40 +699,67 @@ impl StandardMemory {
     }
 
     fn free_pages(&mut self, _address: u32, _length: u32) {
-        unimplemented!();
+        unimplemented!()
     }
 }
 
 impl Memory for StandardMemory {
+    #[inline(always)]
     fn memory_state(instance: &InterpretedInstance) -> &Self {
         &instance.standard_memory
     }
 
+    #[inline(always)]
     fn memory_state_mut(instance: &mut InterpretedInstance) -> &mut Self {
         &mut instance.standard_memory
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn load_impl<T: LoadTy, const DEBUG: bool>(instance: &mut InterpretedInstance, dst: Reg, address: u32) -> Option<Target> {
-        if let Some(slice) =
-            Self::memory_state(instance).get_memory_slice(address, cast(core::mem::size_of::<T>()).assert_always_fits_in_u32())
-        {
-            instance.on_load_ok::<T, DEBUG>(dst, address, T::from_slice(slice))
+        let state = Self::memory_state(instance);
+        let (offset, slice) = if address >= state.aux_data_address {
+            (cast(address - state.aux_data_address).to_usize(), &state.aux[..])
+        } else if address >= state.stack_address_low_resident {
+            (cast(address - state.stack_address_low_resident).to_usize(), &state.stack[..])
+        } else if address >= state.rw_data_address {
+            (cast(address - state.rw_data_address).to_usize(), &state.rw_data[..])
+        } else if address >= state.ro_data_address {
+            (cast(address - state.ro_data_address).to_usize(), &state.ro_data[..])
         } else {
-            instance.on_load_trap::<T, DEBUG>(address)
+            return Self::load_impl_slow::<T, DEBUG>(instance, dst, address);
+        };
+
+        let range = offset..offset + core::mem::size_of::<T>();
+        if let Some(subslice) = slice.get(range) {
+            instance.on_load_ok::<T, DEBUG>(dst, address, T::from_slice(subslice))
+        } else {
+            Self::load_impl_slow::<T, DEBUG>(instance, dst, address)
         }
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn store_impl<T: StoreTy, const DEBUG: bool>(instance: &mut InterpretedInstance, address: u32, value: u64) -> Option<Target> {
-        if let Some(slice) = Self::memory_state_mut(instance)
-            .get_memory_slice_mut::<false>(address, cast(core::mem::size_of::<T>()).assert_always_fits_in_u32())
-        {
+        let (offset, slice) = if address >= Self::memory_state(instance).stack_address_low_resident {
+            (
+                cast(address - Self::memory_state(instance).stack_address_low_resident).to_usize(),
+                &mut Self::memory_state_mut(instance).stack[..],
+            )
+        } else if address >= Self::memory_state(instance).rw_data_address {
+            (
+                cast(address - Self::memory_state(instance).rw_data_address).to_usize(),
+                &mut Self::memory_state_mut(instance).rw_data[..],
+            )
+        } else {
+            return Self::store_impl_slow::<T, DEBUG>(instance, address, value);
+        };
+
+        let range = offset..offset + core::mem::size_of::<T>();
+        if let Some(subslice) = slice.get_mut(range) {
             let value = T::into_bytes(value);
-            slice.copy_from_slice(value.as_ref());
+            subslice.copy_from_slice(value.as_ref());
             instance.on_store_ok::<T, DEBUG>()
         } else {
-            instance.on_store_trap::<T, DEBUG>(address)
+            Self::store_impl_slow::<T, DEBUG>(instance, address, value)
         }
     }
 }
@@ -1040,6 +1495,14 @@ impl InterpretedInstance {
         let compiled_handlers_soft_limit = compiled_handlers_hard_limit - (cast(max_block_size).to_usize() + 1);
         self.max_compiled_handlers = Some(compiled_handlers_soft_limit);
         Ok(())
+    }
+
+    pub fn set_interpreter_max_allocation_size(&mut self, value: Option<usize>) {
+        self.standard_memory.max_allocation_size = value.unwrap_or(usize::MAX);
+    }
+
+    pub fn set_interpreter_guest_memory_limit(&mut self, value: Option<usize>) {
+        self.standard_memory.guest_memory_limit = value.unwrap_or(usize::MAX);
     }
 
     pub fn program_counter(&self) -> Option<ProgramCounter> {
@@ -1797,6 +2260,21 @@ impl InterpretedInstance {
     }
 
     #[must_use]
+    #[cold]
+    #[inline(never)]
+    fn on_store_trap_due_to_memory_limit<T: StoreTy, const DEBUG: bool>(&mut self, address: u32) -> Option<Target> {
+        if DEBUG {
+            log::debug!(
+                "Store of {length} bytes to 0x{address:x} failed: trap due to memory limits! (pc = {program_counter}, cycle = {cycle})",
+                length = core::mem::size_of::<T>(),
+                program_counter = self.program_counter,
+                cycle = self.cycle_counter
+            );
+        }
+
+        trap_impl::<DEBUG>(self, self.program_counter)
+    }
+
     #[cold]
     #[inline(never)]
     fn on_store_segfault<T: StoreTy, const DEBUG: bool>(

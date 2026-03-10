@@ -989,6 +989,7 @@ if_compiler_is_supported! {
 #[derive(Debug)]
 pub enum MemoryAccessError {
     OutOfRangeAccess { address: u32, length: u64 },
+    MemoryLimitReached,
     Error(Error),
 }
 
@@ -1005,6 +1006,9 @@ impl core::fmt::Display for MemoryAccessError {
                     u64::from(*address) + length,
                     length
                 )
+            }
+            MemoryAccessError::MemoryLimitReached => {
+                write!(fmt, "memory limit reached")
             }
             MemoryAccessError::Error(error) => {
                 write!(fmt, "memory access failed: {error}")
@@ -1893,5 +1897,40 @@ impl RawInstance {
             backend.set_interpreter_cache_size_limit(cache_info)?
         }
         Ok(())
+    }
+
+    /// Sets the maximum size of a single non-read-only guest memory region.
+    ///
+    /// When set this will enforce a strict single-allocation size limit on the interpreter
+    /// for RW data, stack and aux data regions.
+    ///
+    /// For example, if you set this to 1MB then the guest will be allowed to access at most
+    /// 1MB of address space for stack and RW data, regardless of how much space the module
+    /// itself has declared that it wants, and any access over this 1MB limit will trap.
+    ///
+    /// Setting this is *not* retroactive and will only affect new allocations or reallocations.
+    ///
+    /// Only has an effect on the interpreter, and only for modules which don't use dynamic paging.
+    ///
+    /// Default: `None`
+    pub fn set_interpreter_max_allocation_size(&mut self, value: Option<usize>) {
+        #[allow(irrefutable_let_patterns)]
+        if let InstanceBackend::Interpreted(ref mut backend) = self.backend {
+            backend.set_interpreter_max_allocation_size(value);
+        }
+    }
+
+    /// Sets the total maximum amount of memory for all of the guest's non-read-only memory regions.
+    ///
+    /// Setting this is *not* retroactive and will only affect new allocations or reallocations.
+    ///
+    /// Only has an effect on the interpreter, and only for modules which don't use dynamic paging.
+    ///
+    /// Default: `None`
+    pub fn set_interpreter_guest_memory_limit(&mut self, value: Option<usize>) {
+        #[allow(irrefutable_let_patterns)]
+        if let InstanceBackend::Interpreted(ref mut backend) = self.backend {
+            backend.set_interpreter_guest_memory_limit(value);
+        }
     }
 }
