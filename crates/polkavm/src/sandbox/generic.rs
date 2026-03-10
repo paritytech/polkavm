@@ -1553,7 +1553,13 @@ impl super::Sandbox for Sandbox {
                 panic!("failed to run: next program counter is not set");
             };
 
-            let address = compiled_module.lookup_native_code_address(pc);
+            let Some(address) = compiled_module.lookup_native_code_address(pc) else {
+                log::debug!("Tried to call into {pc} which doesn't have any native code associated with it");
+                self.vmctx().program_counter.store(pc.0, Ordering::Relaxed);
+                self.is_program_counter_valid = true;
+                return Ok(InterruptKind::Trap);
+            };
+
             if self.charge_gas_on_entry {
                 match crate::sandbox::charge_gas_on_entry(module, pc, address, compiled_module, self.gas()) {
                     Some(Ok(new_gas)) => self.vmctx().gas.store(new_gas, Ordering::Relaxed),
@@ -1565,15 +1571,6 @@ impl super::Sandbox for Sandbox {
             self.next_program_counter_changed = false;
             self.next_program_counter = None;
             self.charge_gas_on_entry = false;
-
-            let address = address.unwrap_or_else(|| {
-                log::debug!("Tried to call into {pc} which doesn't have any native code associated with it");
-                compiled_module.invalid_code_offset_address
-            });
-
-            if address >= compiled_module.invalid_code_offset_address {
-                self.vmctx().program_counter.store(pc.0, Ordering::Relaxed);
-            }
 
             log::trace!("Jumping into: {pc} (0x{address:x})");
             self.vmctx_mut().next_program_counter.store(pc.0, Ordering::Relaxed);

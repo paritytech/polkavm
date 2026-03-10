@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use polkavm_common::abi::MemoryMapBuilder;
 use polkavm_common::cast::cast;
 use polkavm_common::program::{asm, InstructionSetKind};
-use polkavm_common::program::{BlobLen, Reg::*, INTERPRETER_CACHE_ENTRY_SIZE, INTERPRETER_CACHE_RESERVED_ENTRIES};
+use polkavm_common::program::{BlobLen, Reg::*, INTERPRETER_CACHE_ENTRY_SIZE};
 use polkavm_common::utils::align_to_next_page_u32;
 use polkavm_common::writer::ProgramBlobBuilder;
 use polkavm_linker::TargetInstructionSet;
@@ -479,14 +479,13 @@ fn step_tracing_basic(engine_config: Config) {
         log::trace!("Testing trap at: {}", offset);
         instance.set_next_program_counter(ProgramCounter(offset));
         assert!(instance.program_counter().is_none()); // Calling `set_next_program_counter` clears the program counter.
-        match_interrupt!(instance.run().unwrap(), InterruptKind::Step);
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
         assert_eq!(instance.program_counter(), Some(ProgramCounter(offset)));
         assert_eq!(instance.next_program_counter(), Some(ProgramCounter(offset)));
 
         match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
         assert_eq!(instance.program_counter(), Some(ProgramCounter(offset)));
-        assert_eq!(instance.next_program_counter(), None);
-        assert!(instance.next_native_program_counter().is_none());
+        assert_eq!(instance.next_program_counter(), Some(ProgramCounter(offset)));
     }
 }
 
@@ -598,9 +597,8 @@ fn bounded_interpreter_cache(config: Config) {
     let mut instance = module.instantiate().unwrap();
 
     assert_eq!(INTERPRETER_CACHE_ENTRY_SIZE, 24);
-    assert_eq!(INTERPRETER_CACHE_RESERVED_ENTRIES, 10);
 
-    let minimum_cache_size = 24 * (10 + 2);
+    let minimum_cache_size = 24 * 2;
 
     for max_cache_size_bytes in 0..minimum_cache_size {
         log::debug!("Testing with max_cache_size_bytes: {}", max_cache_size_bytes);
@@ -790,16 +788,12 @@ fn step_tracing_out_of_gas(engine_config: Config) {
     }
 
     instance.set_next_program_counter(ProgramCounter(cast(module.blob().code().len()).assert_always_fits_in_u32()));
-    match_interrupt!(instance.run().unwrap(), InterruptKind::Step);
-    assert_eq!(instance.gas(), 2);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
-    assert_eq!(instance.gas(), 1);
+    assert_eq!(instance.gas(), 2);
 
     instance.set_next_program_counter(ProgramCounter(10000));
-    match_interrupt!(instance.run().unwrap(), InterruptKind::Step);
-    assert_eq!(instance.gas(), 1);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
-    assert_eq!(instance.gas(), 0);
+    assert_eq!(instance.gas(), 2);
 }
 
 fn zero_memory(engine_config: Config) {
@@ -904,13 +898,13 @@ fn out_of_range_execution(engine_config: Config) {
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
-    let next_offsets: Vec<_> = module.blob().instructions().map(|inst| inst.next_offset).collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(ProgramCounter(0));
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
-    assert_eq!(instance.program_counter(), Some(next_offsets[2]));
+    assert_eq!(instance.program_counter(), Some(offsets[2]));
 }
 
 fn jump_into_middle_of_basic_block_from_outside(engine_config: Config) {
@@ -2564,7 +2558,7 @@ fn implicit_trap_after_fallthrough(config: Config) {
     let mut instance = module.instantiate().unwrap();
     instance.set_next_program_counter(ProgramCounter(0));
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
-    assert_eq!(instance.program_counter().unwrap().0, 1);
+    assert_eq!(instance.program_counter().unwrap().0, 0);
     assert_eq!(instance.next_program_counter(), None);
 }
 
@@ -2620,6 +2614,12 @@ fn invalid_branch_target(engine_config: Config) {
             asm::trap(),
             asm::load_imm(Reg::A1, 2),
             asm::trap(),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 3),
         ],
         &[],
     );
@@ -2659,7 +2659,7 @@ fn invalid_branch_target(engine_config: Config) {
         assert_eq!(instance.reg(Reg::A1), 2);
     }
 
-    // Invalid branch.
+    // Invalid branch (true case).
     {
         let mut blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
         let mut raw_code = blob.code().to_vec();
@@ -2668,26 +2668,63 @@ fn invalid_branch_target(engine_config: Config) {
 
         let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
 
-        // False branch.
-        let mut instance = module.instantiate().unwrap();
-        instance.set_gas(100);
-        instance.set_next_program_counter(instructions[0].offset);
-        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
-        assert_eq!(instance.gas(), 97);
-        assert_eq!(instance.program_counter().unwrap(), instructions[2].offset);
-        assert_eq!(instance.next_program_counter(), None);
-        assert_eq!(instance.reg(Reg::A1), 1);
+        for _ in 0..2 {
+            // False branch.
+            let mut instance = module.instantiate().unwrap();
+            instance.set_gas(100);
+            instance.set_next_program_counter(instructions[0].offset);
+            match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+            assert_eq!(instance.gas(), 99);
+            assert_eq!(instance.program_counter().unwrap(), instructions[0].offset);
+            assert_eq!(instance.next_program_counter(), None);
+            assert_eq!(instance.reg(Reg::A1), 0);
 
-        // True branch.
-        let mut instance = module.instantiate().unwrap();
-        instance.set_reg(Reg::A0, 33);
-        instance.set_gas(100);
-        instance.set_next_program_counter(instructions[0].offset);
-        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
-        assert_eq!(instance.gas(), 99);
-        assert_eq!(instance.program_counter().unwrap(), instructions[0].offset);
-        assert_eq!(instance.next_program_counter(), None);
-        assert_eq!(instance.reg(Reg::A1), 0);
+            // True branch.
+            let mut instance = module.instantiate().unwrap();
+            instance.set_reg(Reg::A0, 33);
+            instance.set_gas(100);
+            instance.set_next_program_counter(instructions[0].offset);
+            match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+            assert_eq!(instance.gas(), 99);
+            assert_eq!(instance.program_counter().unwrap(), instructions[0].offset);
+            assert_eq!(instance.next_program_counter(), None);
+            assert_eq!(instance.reg(Reg::A1), 0);
+        }
+    }
+
+    // Invalid branch (false case).
+    {
+        let mut blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+        let mut raw_bitmask = blob.bitmask().to_vec();
+        raw_bitmask.fill(0);
+        raw_bitmask[0] = 1;
+        blob.set_bitmask(raw_bitmask.into());
+
+        let instructions: Vec<_> = blob.instructions().collect();
+        let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+
+        for _ in 0..2 {
+            // False branch.
+            let mut instance = module.instantiate().unwrap();
+            instance.set_gas(100);
+            instance.set_next_program_counter(instructions[0].offset);
+            match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+            assert_eq!(instance.gas(), 99);
+            assert_eq!(instance.program_counter().unwrap(), instructions[0].offset);
+            assert_eq!(instance.next_program_counter(), None);
+            assert_eq!(instance.reg(Reg::A1), 0);
+
+            // True branch.
+            let mut instance = module.instantiate().unwrap();
+            instance.set_reg(Reg::A0, 33);
+            instance.set_gas(100);
+            instance.set_next_program_counter(instructions[0].offset);
+            match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+            assert_eq!(instance.gas(), 99);
+            assert_eq!(instance.program_counter().unwrap(), instructions[0].offset);
+            assert_eq!(instance.next_program_counter(), None);
+            assert_eq!(instance.reg(Reg::A1), 0);
+        }
     }
 }
 

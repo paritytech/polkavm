@@ -1123,12 +1123,3 @@ where
         (visitor.take_block_cost().unwrap(), started_out_of_bounds)
     }
 }
-
-pub fn trap_cost<G>(mut gas_visitor: G) -> u32
-where
-    G: GasVisitorT,
-{
-    debug_assert!(gas_visitor.is_at_start_of_basic_block());
-    gas_visitor.trap(0, 0); // TODO: Currently it doesn't matter, but pass correct offsets.
-    gas_visitor.take_block_cost().unwrap()
-}
