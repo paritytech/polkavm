@@ -194,15 +194,7 @@ where
             Err(offset) => asm.push(jcc_rel32(condition, offset)),
         }
     } else {
-        // For invalid jumps this will emit:
-        //   0f 84 fc ff ff ff    je near 2
-        // so if the branch triggers this will jump into itself:
-        //   fc                   cld
-        //   ff ff                invalid
-        // The `cld` here is harmless, and the 'ff' is the opcode shared by single register 'inc/dec/call/jmp/push' instructions,
-        // however the /7 opext it has here is currently undefined so this will trap. Same as for gas, this is technically
-        // a forward compatibility hazard.
-        asm.push(jcc_label32_default(condition, label, -4))
+        asm.push(jcc_label32(condition, label))
     }
 }
 
@@ -260,7 +252,8 @@ where
     S: Sandbox,
 {
     let Some(program_counter) = compiled_module.program_counter_by_native_code_offset(machine_code_offset, false) else {
-        return Err("internal error: failed to find the program counter based on the native program counter when handling a page fault");
+        log::warn!("internal error: failed to find the program counter based on the native program counter after an interruption: machine code offset=0x{machine_code_offset:x}");
+        return Err("internal error: failed to find the program counter based on the native program counter after an interruption");
     };
 
     vmctx.program_counter.store(program_counter.0, Ordering::Relaxed);
@@ -1038,14 +1031,6 @@ where
         let trap_label = self.trap_label;
         let asm = self.asm.reserve::<U2>();
         let asm = asm.push(mov_imm(Self::vmctx_field(S::offset_table().program_counter), imm32(code_offset)));
-        let asm = asm.push(call_label32(trap_label));
-        asm.assert_reserved_exactly_as_needed();
-    }
-
-    #[inline(always)]
-    pub fn trap_without_modifying_program_counter(&mut self) {
-        let trap_label = self.trap_label;
-        let asm = self.asm.reserve::<U1>();
         let asm = asm.push(call_label32(trap_label));
         asm.assert_reserved_exactly_as_needed();
     }

@@ -41,8 +41,9 @@ pub use crate::compiler::amd64::{extract_gas_cost, on_page_fault, on_signal_trap
 pub const JUMP_TABLE_INVALID_ADDRESS: usize = 0xfa6f29540376ba8a;
 
 const CONTINUE_BASIC_BLOCK: usize = 0;
-const END_BASIC_BLOCK: usize = 1;
-const END_BASIC_BLOCK_INVALID: usize = 2;
+const END_BASIC_BLOCK_UNCONDITIONAL: usize = 1;
+const END_BASIC_BLOCK_CONDITIONAL: usize = 2;
+const END_BASIC_BLOCK_INVALID: usize = 3;
 
 struct CachePerCompilation {
     assembler: Assembler,
@@ -89,7 +90,6 @@ where
     program_counter_to_machine_code_offset_map: HashMap<ProgramCounter, u32>,
     gas_metering_stub_offsets: Vec<u32>,
     gas_cost_for_basic_block: Vec<u32>,
-    code_length: u32,
     sbrk_label: Label,
     step_label: Label,
     trap_label: Label,
@@ -107,7 +107,6 @@ where
     memset_trampoline_start: usize,
     memset_trampoline_end: usize,
     custom_codegen: Option<Arc<dyn CustomCodegen>>,
-    last_basic_block_was_terminated: bool,
 
     _phantom: PhantomData<(S, B)>,
 }
@@ -268,12 +267,10 @@ where
             program_counter_to_machine_code_offset_map,
             gas_metering_stub_offsets,
             gas_cost_for_basic_block,
-            code_length,
             instruction_set,
             memset_trampoline_start: 0,
             memset_trampoline_end: 0,
             custom_codegen: config.custom_codegen.clone(),
-            last_basic_block_was_terminated: false,
             _phantom: PhantomData,
         };
 
@@ -315,8 +312,24 @@ where
         S: Sandbox,
     {
         log::trace!("Finishing compilation...");
-        let invalid_code_offset = self.emit_trap_epilogue();
-        let invalid_code_offset_address = self.asm.origin() + cast(invalid_code_offset).to_u64();
+        let code_length = cast(
+            self.program_counter_to_machine_code_offset_list
+                .last()
+                .map(|&(_, offset)| offset)
+                .unwrap(),
+        )
+        .to_usize();
+
+        if self.asm.len() > code_length {
+            // Revert the prologue we've already emitted.
+            log::trace!("Truncating code from 0x{:x} to 0x{code_length:x}...", self.asm.len());
+            self.asm.truncate(code_length);
+            if self.gas_metering.is_some() {
+                self.gas_metering_stub_offsets.pop();
+                self.gas_cost_for_basic_block.truncate(self.gas_metering_stub_offsets.len());
+            }
+        }
+
         self.program_counter_to_machine_code_offset_list.shrink_to_fit();
 
         let gas_metering_stub_offsets = core::mem::take(&mut self.gas_metering_stub_offsets);
@@ -417,7 +430,6 @@ where
                 program_counter_to_machine_code_offset_map: self.program_counter_to_machine_code_offset_map,
                 gas_metering_stub_offsets,
                 cache: cache.clone(),
-                invalid_code_offset_address,
                 bitness: B::BITNESS,
                 step_tracing: self.step_tracing,
                 memset_trampoline_start: polkavm_common::cast::cast(self.memset_trampoline_start).to_u64(),
@@ -477,7 +489,14 @@ where
     }
 
     fn after_instruction<const KIND: usize>(&mut self, program_counter: u32, args_length: u32) {
-        assert!(KIND == CONTINUE_BASIC_BLOCK || KIND == END_BASIC_BLOCK || KIND == END_BASIC_BLOCK_INVALID);
+        const {
+            assert!(
+                KIND == CONTINUE_BASIC_BLOCK
+                    || KIND == END_BASIC_BLOCK_CONDITIONAL
+                    || KIND == END_BASIC_BLOCK_UNCONDITIONAL
+                    || KIND == END_BASIC_BLOCK_INVALID
+            );
+        }
 
         if cfg!(debug_assertions) && !self.step_tracing && self.custom_codegen.is_none() {
             let offset = self.program_counter_to_machine_code_offset_list.last().unwrap().1 as usize;
@@ -491,22 +510,18 @@ where
         self.program_counter_to_machine_code_offset_list
             .push((ProgramCounter(next_program_counter), self.asm.len() as u32));
 
-        if KIND == END_BASIC_BLOCK || KIND == END_BASIC_BLOCK_INVALID {
-            self.last_basic_block_was_terminated = true;
+        if KIND != CONTINUE_BASIC_BLOCK {
             if self.gas_metering.is_some() {
                 let cost = self.gas_visitor.take_block_cost().unwrap();
                 self.gas_cost_for_basic_block.push(cost);
             }
 
-            let can_jump_into_new_basic_block = KIND != END_BASIC_BLOCK_INVALID && (next_program_counter as usize) < self.code.len();
-            debug_assert_eq!(self.is_jump_target_valid(next_program_counter), can_jump_into_new_basic_block);
-            self.force_start_new_basic_block(next_program_counter, can_jump_into_new_basic_block);
-        } else {
-            self.last_basic_block_was_terminated = false;
-
-            if self.step_tracing {
-                self.step(next_program_counter);
-            }
+            self.force_start_new_basic_block(
+                next_program_counter,
+                KIND != END_BASIC_BLOCK_INVALID && cast(next_program_counter).to_usize() < self.code.len(),
+            );
+        } else if self.step_tracing {
+            self.step(next_program_counter);
         }
     }
 
@@ -565,57 +580,21 @@ where
         self.asm.define_label(label);
     }
 
-    fn emit_trap_epilogue(&mut self) -> usize {
-        if !self.last_basic_block_was_terminated {
-            use polkavm_common::program::ParsingVisitor;
+    #[cold]
+    fn broken_fallthrough(&mut self, code_offset: u32, args_length: u32) {
+        ArchVisitor(self).trap(code_offset);
+        self.after_instruction::<END_BASIC_BLOCK_INVALID>(code_offset, args_length);
+    }
 
-            log::trace!("Last block was not terminated; emitting an extra trap...");
-            let implicit_trap_pc = self
-                .program_counter_to_machine_code_offset_list
-                .last()
-                .map(|&(pc, _)| pc)
-                .unwrap_or(ProgramCounter(0));
-            self.trap(implicit_trap_pc.0, 0);
+    #[inline]
+    fn with_possible_fallthrough(&mut self, code_offset: u32, args_length: u32, callback: impl FnOnce(&mut Self)) {
+        let next_program_counter = cast(code_offset + args_length + 1).to_usize();
+        if next_program_counter < self.code.len() {
+            callback(self);
+            self.after_instruction::<END_BASIC_BLOCK_CONDITIONAL>(code_offset, args_length);
+        } else {
+            self.broken_fallthrough(code_offset, args_length)
         }
-
-        // We already have a new basic block prologue generated by either the last instruction or the implicit trap, so let's grab its address.
-        let invalid_code_offset = cast(
-            self.program_counter_to_machine_code_offset_list
-                .last()
-                .map(|&(_, offset)| offset)
-                .unwrap(),
-        )
-        .to_usize();
-
-        // Revert the prologue we've already emitted.
-        self.asm.truncate(invalid_code_offset);
-        if self.gas_metering.is_some() {
-            self.gas_metering_stub_offsets.pop();
-        }
-
-        if self.step_tracing {
-            // Trace execution, but without modifying the program counter.
-            ArchVisitor(self).trace_execution(None);
-        }
-
-        if let Some(gas_metering) = self.gas_metering {
-            // Emit the gas metering stub again.
-            self.gas_metering_stub_offsets
-                .push(cast(self.asm.len()).assert_always_fits_in_u32());
-            ArchVisitor(self).emit_gas_metering_stub(gas_metering);
-        }
-
-        // Then emit the final trap that will stop the execution.
-        self.before_instruction(self.code_length + 1);
-        self.gas_visitor.trap(self.code_length + 1, 0);
-        ArchVisitor(self).trap_without_modifying_program_counter();
-
-        if self.gas_metering.is_some() {
-            let cost = self.gas_visitor.take_block_cost().unwrap();
-            self.gas_cost_for_basic_block.push(cost);
-        }
-
-        invalid_code_offset
     }
 }
 
@@ -717,15 +696,14 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor.trap(code_offset, args_length);
         ArchVisitor(self).trap(code_offset);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.after_instruction::<END_BASIC_BLOCK_UNCONDITIONAL>(code_offset, args_length);
     }
 
     #[inline(always)]
     fn fallthrough(&mut self, code_offset: u32, args_length: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.fallthrough(code_offset, args_length);
-        ArchVisitor(self).fallthrough();
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, |itself| ArchVisitor(itself).fallthrough());
     }
 
     #[inline(always)]
@@ -1602,16 +1580,18 @@ where
     fn branch_less_unsigned(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.branch_less_unsigned(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_less_unsigned(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_less_unsigned(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
     fn branch_less_signed(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.branch_less_signed(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_less_signed(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_less_signed(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
@@ -1619,8 +1599,9 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor
             .branch_greater_or_equal_unsigned(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_greater_or_equal_unsigned(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_greater_or_equal_unsigned(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
@@ -1628,56 +1609,61 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor
             .branch_greater_or_equal_signed(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_greater_or_equal_signed(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_greater_or_equal_signed(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
     fn branch_eq(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.branch_eq(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_eq(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| ArchVisitor(itself).branch_eq(s1, s2, imm));
     }
 
     #[inline(always)]
     fn branch_not_eq(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.branch_not_eq(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_not_eq(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_not_eq(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
     fn branch_eq_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.branch_eq_imm(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_eq_imm(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_eq_imm(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
     fn branch_not_eq_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.branch_not_eq_imm(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_not_eq_imm(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_not_eq_imm(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
     fn branch_less_unsigned_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.branch_less_unsigned_imm(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_less_unsigned_imm(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_less_unsigned_imm(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
     fn branch_less_signed_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.branch_less_signed_imm(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_less_signed_imm(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_less_signed_imm(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
@@ -1692,8 +1678,9 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor
             .branch_greater_or_equal_unsigned_imm(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_greater_or_equal_unsigned_imm(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_greater_or_equal_unsigned_imm(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
@@ -1701,8 +1688,9 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor
             .branch_greater_or_equal_signed_imm(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_greater_or_equal_signed_imm(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_greater_or_equal_signed_imm(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
@@ -1710,8 +1698,9 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor
             .branch_less_or_equal_unsigned_imm(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_less_or_equal_unsigned_imm(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_less_or_equal_unsigned_imm(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
@@ -1719,24 +1708,27 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor
             .branch_less_or_equal_signed_imm(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_less_or_equal_signed_imm(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_less_or_equal_signed_imm(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
     fn branch_greater_unsigned_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.branch_greater_unsigned_imm(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_greater_unsigned_imm(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_greater_unsigned_imm(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
     fn branch_greater_signed_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
         self.gas_visitor.branch_greater_signed_imm(code_offset, args_length, s1, s2, imm);
-        ArchVisitor(self).branch_greater_signed_imm(s1, s2, imm);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.with_possible_fallthrough(code_offset, args_length, move |itself| {
+            ArchVisitor(itself).branch_greater_signed_imm(s1, s2, imm)
+        });
     }
 
     #[inline(always)]
@@ -1760,7 +1752,7 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor.load_imm_and_jump(code_offset, args_length, ra, value, target);
         ArchVisitor(self).load_imm_and_jump(ra, value, target);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.after_instruction::<END_BASIC_BLOCK_UNCONDITIONAL>(code_offset, args_length);
     }
 
     #[inline(always)]
@@ -1777,7 +1769,7 @@ where
         self.gas_visitor
             .load_imm_and_jump_indirect(code_offset, args_length, ra, base, value, offset);
         ArchVisitor(self).load_imm_and_jump_indirect(ra, base, value, offset);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.after_instruction::<END_BASIC_BLOCK_UNCONDITIONAL>(code_offset, args_length);
     }
 
     #[inline(always)]
@@ -1785,7 +1777,7 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor.jump(code_offset, args_length, target);
         ArchVisitor(self).jump(target);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.after_instruction::<END_BASIC_BLOCK_UNCONDITIONAL>(code_offset, args_length);
     }
 
     #[inline(always)]
@@ -1793,7 +1785,7 @@ where
         self.before_instruction(code_offset);
         self.gas_visitor.jump_indirect(code_offset, args_length, base, offset);
         ArchVisitor(self).jump_indirect(base, offset);
-        self.after_instruction::<END_BASIC_BLOCK>(code_offset, args_length);
+        self.after_instruction::<END_BASIC_BLOCK_UNCONDITIONAL>(code_offset, args_length);
     }
 }
 
@@ -1812,7 +1804,6 @@ where
     gas_metering_stub_offsets: Vec<u32>,
     cache: CompilerCache,
     step_tracing: bool,
-    pub(crate) invalid_code_offset_address: u64,
     pub(crate) bitness: Bitness,
 
     pub(crate) memset_trampoline_start: u64,
@@ -1852,14 +1843,16 @@ where
                     Some(self.gas_metering_stub_offsets[index])
                 }
                 Err(index) => {
-                    let basic_block_boundary = cast(self.gas_metering_stub_offsets[index]).to_u64()
-                        - cast(step_prelude_length::<S>()).to_u64()
-                        + self.native_code_origin;
-                    if machine_code_address == basic_block_boundary {
-                        None
-                    } else {
-                        Some(self.gas_metering_stub_offsets[index.checked_sub(1)?])
+                    if let Some(next_stub_offset) = self.gas_metering_stub_offsets.get(index) {
+                        let basic_block_boundary =
+                            cast(*next_stub_offset).to_u64() - cast(step_prelude_length::<S>()).to_u64() + self.native_code_origin;
+
+                        if machine_code_address == basic_block_boundary {
+                            return None;
+                        }
                     }
+
+                    Some(self.gas_metering_stub_offsets[index.checked_sub(1)?])
                 }
             }
         }
@@ -1870,6 +1863,12 @@ where
     }
 
     pub fn lookup_native_code_address(&self, program_counter: ProgramCounter) -> Option<u64> {
+        if let Some((last_program_counter, _)) = self.program_counter_to_machine_code_offset_list.last() {
+            if program_counter.0 >= last_program_counter.0 {
+                return None;
+            }
+        }
+
         self.program_counter_to_machine_code_offset_map
             .get(&program_counter)
             .copied()

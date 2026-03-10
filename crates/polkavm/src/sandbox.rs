@@ -432,7 +432,7 @@ fn is_sandbox_logging_enabled() -> bool {
 pub(crate) fn charge_gas_on_entry<S>(
     module: &Module,
     pc: ProgramCounter,
-    native_address: Option<u64>,
+    native_address: u64,
     compiled_module: &CompiledModule<S>,
     gas: i64,
 ) -> Option<Result<i64, ()>>
@@ -443,7 +443,6 @@ where
 
     module.gas_metering()?;
 
-    let native_address = native_address?;
     let Some(origin) = compiled_module.lookup_gas_metering_offset_for_basic_block_if_address_is_in_the_middle(native_address) else {
         log::debug!("Will not charge gas on entry: native address 0x{native_address:x} already points at the start of a basic block");
         return None;
