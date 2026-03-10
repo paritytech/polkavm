@@ -146,9 +146,24 @@ extern "C" fn atomic_fetch_min_unsigned(value: usize) -> usize {
     }
 }
 
+#[cfg(any(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"), doc))]
+#[inline]
+fn sbrk(size: usize) -> *mut u8 {
+    // SAFETY: Allocating memory is always safe.
+    unsafe {
+        let address;
+        core::arch::asm!(
+            ".insn r 0xb, 1, 0, {dst}, {size}, zero",
+            size = in(reg) size,
+            dst = lateout(reg) address,
+        );
+        address
+    }
+}
+
 #[polkavm_derive::polkavm_export]
 extern "C" fn call_sbrk(size: usize) -> *mut u8 {
-    polkavm_derive::sbrk(size)
+    sbrk(size)
 }
 
 #[polkavm_derive::polkavm_import]
