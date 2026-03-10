@@ -360,6 +360,13 @@ impl Assembler {
 
     pub fn truncate(&mut self, length: usize) {
         self.code.truncate(length);
+        while let Some(fixup) = self.fixups.last() {
+            if fixup.instruction_offset >= length {
+                self.fixups.pop();
+            } else {
+                break;
+            }
+        }
     }
 
     pub fn spare_capacity(&self) -> usize {
