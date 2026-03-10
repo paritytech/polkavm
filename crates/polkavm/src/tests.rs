@@ -2984,6 +2984,184 @@ fn access_memory_from_host(config: Config) {
     assert!(instance.write_memory(0xffffffff, &[]).is_ok());
     assert!(instance.zero_memory(0, 0).is_ok());
     assert!(instance.zero_memory(0xffffffff, 0).is_ok());
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+    builder.set_ro_data_size(4);
+    builder.set_ro_data([1, 2, 3, 4].into());
+    builder.set_rw_data_size(4);
+    builder.set_rw_data([5, 6, 7, 8].into());
+    builder.set_stack_size(4096 + 1);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_aux_data_size(4096 + 1);
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let memory_map = module.memory_map();
+
+    let mut instance = module.instantiate().unwrap();
+    assert_eq!(
+        instance.read_memory(memory_map.ro_data_range().start + 2, 4).unwrap(),
+        vec![3, 4, 0, 0]
+    );
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_range().start + 2, 4).unwrap(),
+        vec![7, 8, 0, 0]
+    );
+    assert!(instance.write_memory(memory_map.aux_data_range().start, &[9, 10, 11, 12]).is_ok());
+    assert_eq!(
+        instance.read_memory(memory_map.aux_data_range().start + 2, 4).unwrap(),
+        vec![11, 12, 0, 0]
+    );
+
+    assert!(instance
+        .write_memory(memory_map.aux_data_range().start + 4096 - 2, &[13, 14])
+        .is_ok());
+    assert_eq!(
+        instance.read_memory(memory_map.aux_data_range().start + 4096 - 2, 4).unwrap(),
+        vec![13, 14, 0, 0]
+    );
+
+    assert!(instance.write_memory(memory_map.stack_range().start + 4096 - 2, &[15, 16]).is_ok());
+    assert_eq!(
+        instance.read_memory(memory_map.stack_range().start + 4096 - 2, 4).unwrap(),
+        vec![15, 16, 0, 0]
+    );
+}
+
+fn access_memory_from_within(config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::ret()], &[]);
+    builder.set_ro_data_size(page_size * 3);
+    builder.set_rw_data_size(page_size * 3);
+    builder.set_stack_size(page_size * 2);
+    builder.set_ro_data((0..page_size - 2).map(|_| 0x42_u8).collect());
+    builder.set_rw_data((0..page_size - 2).map(|_| 0x73_u8).collect());
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_aux_data_size(page_size * 2);
+
+    let memory_map = Module::from_blob(
+        &engine,
+        &module_config,
+        ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap(),
+    )
+    .unwrap()
+    .memory_map()
+    .clone();
+
+    let mut spawn = move |code: &[polkavm_common::program::Instruction]| -> crate::RawInstance {
+        builder.set_code(code, &[]);
+        let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance
+    };
+
+    // RO data
+    let mut instance = spawn(&[asm::load_u32(Reg::A0, memory_map.ro_data_address() + page_size * 3 - 3), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.ro_data_address() + page_size * 3 - 4), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0);
+
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.ro_data_address()), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x42424242);
+
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.ro_data_address() + page_size - 6), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x42424242);
+
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.ro_data_address() + page_size - 2), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0);
+
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.ro_data_address() + page_size - 4), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x00004242);
+
+    // RW data
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.rw_data_address() + page_size * 3 - 3), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.rw_data_address() + page_size * 3 - 4), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0);
+
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.rw_data_address()), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x73737373);
+
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.rw_data_address() + page_size - 6), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x73737373);
+
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.rw_data_address() + page_size - 2), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0);
+
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.rw_data_address() + page_size - 4), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x00007373);
+
+    instance = spawn(&[
+        asm::load_imm(Reg::A1, 0x12345678),
+        asm::store_u32(Reg::A1, memory_map.rw_data_address() + page_size - 4),
+        asm::load_u32(Reg::A0, memory_map.rw_data_address() + page_size - 3),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x00123456);
+
+    instance = spawn(&[asm::store_imm_u32(memory_map.rw_data_address() + page_size * 3 - 3, 0), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+    // Stack.
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.stack_address_high() - 4), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0);
+
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.stack_address_high() - 3), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.stack_address_low()), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0);
+
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.stack_address_low() - 1), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+    instance = spawn(&[
+        asm::load_imm(Reg::A1, 0x12345678),
+        asm::store_u32(Reg::A1, memory_map.stack_address_low() + page_size - 4),
+        asm::load_u32(Reg::A0, memory_map.stack_address_low() + page_size - 2),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x00001234);
+
+    instance = spawn(&[asm::store_imm_u32(memory_map.stack_address_low() - 1, 0), asm::ret()]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+    // Aux data.
+    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.aux_data_address() + page_size - 2), asm::ret()]);
+    instance
+        .write_memory(memory_map.aux_data_address(), &vec![0x23_u8; cast(page_size - 1).to_usize()])
+        .unwrap();
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x00000023);
 }
 
 fn sbrk_knob_works(config: Config) {
@@ -4431,6 +4609,7 @@ run_tests! {
     aux_data_works
     aux_data_accessible_area
     access_memory_from_host
+    access_memory_from_within
     sbrk_knob_works
 
     basic_gas_metering_sync
