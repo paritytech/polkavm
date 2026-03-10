@@ -10994,7 +10994,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
     if cfg!(debug_assertions) && !config.strip {
         'outer: for (nth_instruction, locations) in locations_for_instruction.iter().enumerate() {
             let (program_counter, _) = offsets[nth_instruction];
-            let line_program = blob.get_debug_line_program_at(program_counter).unwrap();
+            let line_program = blob.get_debug_line_program_at(program_counter, None).unwrap();
             let Some(locations) = locations else {
                 assert!(line_program.is_none());
                 continue;

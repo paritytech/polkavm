@@ -5636,7 +5636,11 @@ impl ProgramBlob {
     }
 
     /// Returns the line program for the given instruction.
-    pub fn get_debug_line_program_at(&self, program_counter: ProgramCounter) -> Result<Option<LineProgram>, ProgramParseError> {
+    pub fn get_debug_line_program_at(
+        &self,
+        program_counter: ProgramCounter,
+        region_search_limit: Option<u32>,
+    ) -> Result<Option<LineProgram>, ProgramParseError> {
         let program_counter = program_counter.0;
         if self.debug_line_program_ranges.is_empty() || self.debug_line_programs.is_empty() {
             return Ok(None);
@@ -5707,7 +5711,7 @@ impl ProgramBlob {
         // Each group's line program encodes multiple regions (one per instruction
         // state change). Without seeking, the first run() call always returns the
         // first region regardless of which PC was queried.
-        loop {
+        for _ in 0..region_search_limit.unwrap_or(128) {
             // Save state so we can rewind if the next region contains our PC.
             let saved_reader = lp.reader.clone();
             let saved_pc = lp.program_counter;
@@ -5729,7 +5733,7 @@ impl ProgramBlob {
                         lp.mutation_depth = saved_mutation_depth;
                         lp.region_counter = saved_region_counter;
                         lp.is_finished = saved_is_finished;
-                        break;
+                        return Ok(Some(lp));
                     }
                 }
                 Ok(None) => {
@@ -5741,13 +5745,17 @@ impl ProgramBlob {
                     lp.mutation_depth = saved_mutation_depth;
                     lp.region_counter = saved_region_counter;
                     lp.is_finished = saved_is_finished;
-                    break;
+                    return Ok(Some(lp));
                 }
                 Err(e) => return Err(e),
             }
         }
-
-        Ok(Some(lp))
+        #[cfg(feature = "logging")]
+        log::debug!(
+            "Cannot find LineProgram after {} iterations. Consider to increase number of iterations",
+            region_search_limit.unwrap_or(128)
+        );
+        Ok(None)
     }
 
     #[cfg(feature = "alloc")]

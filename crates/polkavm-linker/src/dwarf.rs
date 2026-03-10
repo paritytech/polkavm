@@ -1293,32 +1293,34 @@ where
                             }
                         };
 
-                        // Include path-only entries too — they still identify the source file.
-                        if let Some((target_position, namespace, function_name)) = target_position {
-                            let entry = LocationKindRef::Line {
-                                entry: line_entry,
-                                namespace,
-                                function_name,
-                            };
-                            list.insert(target_position, entry);
-                        } else {
-                            log::debug!("No matching DWARF subprogram found for line at {:?}", line_entry.location);
-                            fallback = true;
+                        // If there's no line number then these are useless, so skip them if that's the case.
+                        if !matches!(line_entry.location, SourceCodeLocation::Path { .. }) {
+                            if let Some((target_position, namespace, function_name)) = target_position {
+                                let entry = LocationKindRef::Line {
+                                    entry: line_entry,
+                                    namespace,
+                                    function_name,
+                                };
+                                list.insert(target_position, entry);
+                            } else {
+                                log::debug!("No matching DWARF subprogram found for line at {:?}", line_entry.location);
+                                fallback = true;
 
-                            let (namespace, function_name) = match list.last() {
-                                Some(LocationKindRef::InlineCall(inlined) | LocationKindRef::InlineDecl(inlined)) => {
-                                    (inlined.namespace.clone(), inlined.function_name.clone())
-                                }
-                                Some(LocationKindRef::Line { .. }) => unreachable!(),
-                                None => (subprogram.namespace.clone(), subprogram.function_name.clone()),
-                            };
+                                let (namespace, function_name) = match list.last() {
+                                    Some(LocationKindRef::InlineCall(inlined) | LocationKindRef::InlineDecl(inlined)) => {
+                                        (inlined.namespace.clone(), inlined.function_name.clone())
+                                    }
+                                    Some(LocationKindRef::Line { .. }) => unreachable!(),
+                                    None => (subprogram.namespace.clone(), subprogram.function_name.clone()),
+                                };
 
-                            let entry = LocationKindRef::Line {
-                                entry: line_entry,
-                                namespace,
-                                function_name,
-                            };
-                            list.push(entry);
+                                let entry = LocationKindRef::Line {
+                                    entry: line_entry,
+                                    namespace,
+                                    function_name,
+                                };
+                                list.push(entry);
+                            }
                         }
                     }
 

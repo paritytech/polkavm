@@ -932,7 +932,7 @@ impl Module {
     pub(crate) fn debug_print_location(&self, log_level: log::Level, pc: ProgramCounter) {
         log::log!(log_level, "  Location: #{pc}: {}", self.display_instruction_at(pc));
 
-        let Ok(Some(mut line_program)) = self.state().blob.get_debug_line_program_at(pc) else {
+        let Ok(Some(mut line_program)) = self.state().blob.get_debug_line_program_at(pc, None) else {
             return;
         };
 
