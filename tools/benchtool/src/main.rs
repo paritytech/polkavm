@@ -729,16 +729,29 @@ fn main() {
         Args::BenchMemset => {
             let config = polkavm::Config::from_env().unwrap();
             let engine = polkavm::Engine::new(&config).unwrap();
-            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest-programs/target/riscv64emac-unknown-none-polkavm/release/bench-memset.polkavm");
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../guest-programs/target/riscv64emac-unknown-none-polkavm/release/bench-memset.polkavm");
             let raw_blob = std::fs::read(path).unwrap();
             let blob = polkavm::ProgramBlob::parse(raw_blob.into()).unwrap();
             let mut config = polkavm::ModuleConfig::default();
             config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
             let module = polkavm::Module::from_blob(&engine, &config, blob).unwrap();
             let ext_initialize = module.exports().find(|export| export == "initialize").unwrap().program_counter();
-            let ext_run_accelerated = module.exports().find(|export| export == "benchmark_custom_accelerated").unwrap().program_counter();
-            let ext_run_naive = module.exports().find(|export| export == "benchmark_custom_naive").unwrap().program_counter();
-            let ext_run_compiler_builtins = module.exports().find(|export| export == "benchmark_custom_compiler_builtins").unwrap().program_counter();
+            let ext_run_accelerated = module
+                .exports()
+                .find(|export| export == "benchmark_custom_accelerated")
+                .unwrap()
+                .program_counter();
+            let ext_run_naive = module
+                .exports()
+                .find(|export| export == "benchmark_custom_naive")
+                .unwrap()
+                .program_counter();
+            let ext_run_compiler_builtins = module
+                .exports()
+                .find(|export| export == "benchmark_custom_compiler_builtins")
+                .unwrap()
+                .program_counter();
             let linker = polkavm::Linker::<()>::new();
             let instance_pre = linker.instantiate_pre(&module).unwrap();
             let mut instance = instance_pre.instantiate().unwrap();
@@ -755,13 +768,15 @@ fn main() {
 
             for (size, times) in sizes {
                 for (offset, offset_name) in [(0, "aligned"), (1, "unaligned")] {
-                    for (kind, kind_name) in [(ext_run_accelerated, "accelerated"), (ext_run_compiler_builtins, "compiler_builtins"), (ext_run_naive, "naive")] {
+                    for (kind, kind_name) in [
+                        (ext_run_accelerated, "accelerated"),
+                        (ext_run_compiler_builtins, "compiler_builtins"),
+                        (ext_run_naive, "naive"),
+                    ] {
                         instance.call_typed(&mut (), kind, (offset, size, times)).unwrap();
 
                         let timestamp = std::time::Instant::now();
-                        // for _ in 0..REPEAT_COUNT {
-                            instance.call_typed(&mut (), kind, (offset, size, times)).unwrap();
-                        // }
+                        instance.call_typed(&mut (), kind, (offset, size, times)).unwrap();
                         let elapsed = timestamp.elapsed() / times;
                         println!("{kind_name:<18} {size:<8} {offset_name:<10}: {}", format_time(elapsed));
                     }
