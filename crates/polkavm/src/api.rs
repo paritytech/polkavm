@@ -1407,7 +1407,7 @@ impl RawInstance {
     /// Reads the VM's memory.
     ///
     /// The whole memory region must be readable.
-    pub fn read_memory_into<'slice, B>(&self, address: u32, buffer: &'slice mut B) -> Result<&'slice mut [u8], MemoryAccessError>
+    pub fn read_memory_into<'slice, B>(&mut self, address: u32, buffer: &'slice mut B) -> Result<&'slice mut [u8], MemoryAccessError>
     where
         B: ?Sized + AsUninitSliceMut,
     {
@@ -1434,8 +1434,8 @@ impl RawInstance {
         }
 
         let length = slice.len();
-        let result = access_backend!(self.backend, |backend| backend.read_memory_into(address, slice));
-        if let Some(ref crosscheck) = self.crosscheck_instance {
+        let result = access_backend!(self.backend, |mut backend| backend.read_memory_into(address, slice));
+        if let Some(ref mut crosscheck) = self.crosscheck_instance {
             let mut expected_data: Vec<core::mem::MaybeUninit<u8>> = alloc::vec![core::mem::MaybeUninit::new(0xfa); length];
             let expected_result = crosscheck.read_memory_into(address, &mut expected_data);
             let expected_success = expected_result.is_ok();
@@ -1535,7 +1535,7 @@ impl RawInstance {
     /// Reads the VM's memory.
     ///
     /// The whole memory region must be readable.
-    pub fn read_memory(&self, address: u32, length: u32) -> Result<Vec<u8>, MemoryAccessError> {
+    pub fn read_memory(&mut self, address: u32, length: u32) -> Result<Vec<u8>, MemoryAccessError> {
         let mut buffer = Vec::new();
         buffer.reserve_exact(cast(length).to_usize());
 
@@ -1559,7 +1559,7 @@ impl RawInstance {
     /// A convenience function to read an `u64` from the VM's memory.
     ///
     /// This is equivalent to calling [`RawInstance::read_memory_into`].
-    pub fn read_u64(&self, address: u32) -> Result<u64, MemoryAccessError> {
+    pub fn read_u64(&mut self, address: u32) -> Result<u64, MemoryAccessError> {
         let mut buffer = [0; 8];
         self.read_memory_into(address, &mut buffer)?;
 
@@ -1576,7 +1576,7 @@ impl RawInstance {
     /// A convenience function to read an `u32` from the VM's memory.
     ///
     /// This is equivalent to calling [`RawInstance::read_memory_into`].
-    pub fn read_u32(&self, address: u32) -> Result<u32, MemoryAccessError> {
+    pub fn read_u32(&mut self, address: u32) -> Result<u32, MemoryAccessError> {
         let mut buffer = [0; 4];
         self.read_memory_into(address, &mut buffer)?;
 
@@ -1593,7 +1593,7 @@ impl RawInstance {
     /// A convenience function to read an `u16` from the VM's memory.
     ///
     /// This is equivalent to calling [`RawInstance::read_memory_into`].
-    pub fn read_u16(&self, address: u32) -> Result<u16, MemoryAccessError> {
+    pub fn read_u16(&mut self, address: u32) -> Result<u16, MemoryAccessError> {
         let mut buffer = [0; 2];
         self.read_memory_into(address, &mut buffer)?;
 
@@ -1610,7 +1610,7 @@ impl RawInstance {
     /// A convenience function to read an `u8` from the VM's memory.
     ///
     /// This is equivalent to calling [`RawInstance::read_memory_into`].
-    pub fn read_u8(&self, address: u32) -> Result<u8, MemoryAccessError> {
+    pub fn read_u8(&mut self, address: u32) -> Result<u8, MemoryAccessError> {
         let mut buffer = [0; 1];
         self.read_memory_into(address, &mut buffer)?;
 

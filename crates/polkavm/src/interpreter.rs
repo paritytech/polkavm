@@ -1,5 +1,7 @@
 #![allow(unknown_lints)] // Because of `non_local_definitions` on older rustc versions.
 #![allow(non_local_definitions)]
+#![allow(clippy::unused_self)]
+#![allow(clippy::needless_pass_by_ref_mut)]
 #![deny(clippy::as_conversions)]
 use crate::api::{MemoryAccessError, MemoryProtection, Module, RegValue, SetCacheSizeLimitArgs};
 use crate::error::Error;
@@ -62,7 +64,15 @@ impl IntoRegImm for u32 {
     }
 }
 
-pub(crate) struct BasicMemory {
+trait Memory {
+    fn memory_state(instance: &InterpretedInstance) -> &Self;
+    fn memory_state_mut(instance: &mut InterpretedInstance) -> &mut Self;
+
+    fn load_impl<T: LoadTy, const DEBUG: bool>(instance: &mut InterpretedInstance, dst: Reg, address: u32) -> Option<Target>;
+    fn store_impl<T: StoreTy, const DEBUG: bool>(instance: &mut InterpretedInstance, address: u32, value: u64) -> Option<Target>;
+}
+
+pub(crate) struct StandardMemory {
     ro_data: Vec<u8>,
     rw_data: Vec<u8>,
     stack: Vec<u8>,
@@ -70,9 +80,14 @@ pub(crate) struct BasicMemory {
     is_memory_dirty: bool,
     heap_size: u32,
     accessible_aux_size: usize,
+
+    aux_data_address: u32,
+    stack_address_low: u32,
+    rw_data_address: u32,
+    ro_data_address: u32,
 }
 
-impl BasicMemory {
+impl StandardMemory {
     fn new() -> Self {
         Self {
             ro_data: Vec::new(),
@@ -82,6 +97,10 @@ impl BasicMemory {
             is_memory_dirty: false,
             heap_size: 0,
             accessible_aux_size: usize::MAX,
+            aux_data_address: 0,
+            stack_address_low: 0,
+            rw_data_address: 0,
+            ro_data_address: 0,
         }
     }
 
@@ -93,7 +112,7 @@ impl BasicMemory {
         self.is_memory_dirty = true;
     }
 
-    fn reset(&mut self, module: &Module) {
+    fn reset_memory(&mut self, module: &Module) {
         if self.is_memory_dirty {
             self.force_reset(module);
         }
@@ -120,6 +139,11 @@ impl BasicMemory {
         // TODO: Do this lazily?
         self.aux.resize(cast(module.memory_map().aux_data_size()).to_usize(), 0);
         self.accessible_aux_size = cast(module.memory_map().aux_data_size()).to_usize();
+
+        self.aux_data_address = module.memory_map().aux_data_address();
+        self.stack_address_low = module.memory_map().stack_address_low();
+        self.rw_data_address = module.memory_map().rw_data_address();
+        self.ro_data_address = module.memory_map().ro_data_address();
     }
 
     fn accessible_aux_size(&self) -> u32 {
@@ -131,16 +155,15 @@ impl BasicMemory {
     }
 
     #[inline]
-    fn get_memory_slice<'a>(&'a self, module: &'a Module, address: u32, length: u32) -> Option<&'a [u8]> {
-        let memory_map = module.memory_map();
-        let (start, memory_slice) = if address >= memory_map.aux_data_address() {
-            (memory_map.aux_data_address(), &self.aux[..self.accessible_aux_size])
-        } else if address >= memory_map.stack_address_low() {
-            (memory_map.stack_address_low(), &self.stack[..])
-        } else if address >= memory_map.rw_data_address() {
-            (memory_map.rw_data_address(), &self.rw_data[..])
-        } else if address >= memory_map.ro_data_address() {
-            (memory_map.ro_data_address(), &self.ro_data[..])
+    fn get_memory_slice<'a>(&'a self, address: u32, length: u32) -> Option<&'a [u8]> {
+        let (start, memory_slice) = if address >= self.aux_data_address {
+            (self.aux_data_address, &self.aux[..self.accessible_aux_size])
+        } else if address >= self.stack_address_low {
+            (self.stack_address_low, &self.stack[..])
+        } else if address >= self.rw_data_address {
+            (self.rw_data_address, &self.rw_data[..])
+        } else if address >= self.ro_data_address {
+            (self.ro_data_address, &self.ro_data[..])
         } else {
             return None;
         };
@@ -152,14 +175,13 @@ impl BasicMemory {
     }
 
     #[inline]
-    fn get_memory_slice_mut<const IS_EXTERNAL: bool>(&mut self, module: &Module, address: u32, length: u32) -> Option<&mut [u8]> {
-        let memory_map = module.memory_map();
-        let (start, memory_slice) = if IS_EXTERNAL && address >= memory_map.aux_data_address() {
-            (memory_map.aux_data_address(), &mut self.aux[..self.accessible_aux_size])
-        } else if address >= memory_map.stack_address_low() {
-            (memory_map.stack_address_low(), &mut self.stack[..])
-        } else if address >= memory_map.rw_data_address() {
-            (memory_map.rw_data_address(), &mut self.rw_data[..])
+    fn get_memory_slice_mut<const IS_EXTERNAL: bool>(&mut self, address: u32, length: u32) -> Option<&mut [u8]> {
+        let (start, memory_slice) = if IS_EXTERNAL && address >= self.aux_data_address {
+            (self.aux_data_address, &mut self.aux[..self.accessible_aux_size])
+        } else if address >= self.stack_address_low {
+            (self.stack_address_low, &mut self.stack[..])
+        } else if address >= self.rw_data_address {
+            (self.rw_data_address, &mut self.rw_data[..])
         } else {
             return None;
         };
@@ -202,6 +224,89 @@ impl BasicMemory {
 
         Some(heap_top)
     }
+
+    fn read_memory_into<'slice>(&self, address: u32, buffer: &'slice mut [MaybeUninit<u8>]) -> Result<&'slice mut [u8], MemoryAccessError> {
+        let Some(slice) = self.get_memory_slice(address, cast(buffer.len()).assert_always_fits_in_u32()) else {
+            return Err(MemoryAccessError::OutOfRangeAccess {
+                address,
+                length: cast(buffer.len()).to_u64(),
+            });
+        };
+
+        Ok(byte_slice_init(buffer, slice))
+    }
+
+    fn write_memory(&mut self, address: u32, data: &[u8]) -> Result<(), MemoryAccessError> {
+        let Some(slice) = self.get_memory_slice_mut::<true>(address, cast(data.len()).assert_always_fits_in_u32()) else {
+            return Err(MemoryAccessError::OutOfRangeAccess {
+                address,
+                length: cast(data.len()).to_u64(),
+            });
+        };
+
+        slice.copy_from_slice(data);
+        Ok(())
+    }
+
+    fn zero_memory(&mut self, address: u32, length: u32, memory_protection: Option<MemoryProtection>) -> Result<(), MemoryAccessError> {
+        debug_assert!(memory_protection.is_none());
+        let Some(slice) = self.get_memory_slice_mut::<true>(address, length) else {
+            return Err(MemoryAccessError::OutOfRangeAccess {
+                address,
+                length: u64::from(length),
+            });
+        };
+
+        slice.fill(0);
+
+        Ok(())
+    }
+
+    fn is_memory_accessible(&self, _address: u32, _size: u32, _minimum_protection: MemoryProtection) -> bool {
+        unimplemented!();
+    }
+
+    fn change_memory_protection(&mut self, _address: u32, _length: u32, _protection: MemoryProtection) -> Result<(), MemoryAccessError> {
+        unimplemented!();
+    }
+
+    fn free_pages(&mut self, _address: u32, _length: u32) {
+        unimplemented!();
+    }
+}
+
+impl Memory for StandardMemory {
+    fn memory_state(instance: &InterpretedInstance) -> &Self {
+        &instance.standard_memory
+    }
+
+    fn memory_state_mut(instance: &mut InterpretedInstance) -> &mut Self {
+        &mut instance.standard_memory
+    }
+
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn load_impl<T: LoadTy, const DEBUG: bool>(instance: &mut InterpretedInstance, dst: Reg, address: u32) -> Option<Target> {
+        if let Some(slice) =
+            Self::memory_state(instance).get_memory_slice(address, cast(core::mem::size_of::<T>()).assert_always_fits_in_u32())
+        {
+            instance.on_load_ok::<T, DEBUG>(dst, address, T::from_slice(slice))
+        } else {
+            instance.on_load_trap::<T, DEBUG>(address)
+        }
+    }
+
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn store_impl<T: StoreTy, const DEBUG: bool>(instance: &mut InterpretedInstance, address: u32, value: u64) -> Option<Target> {
+        if let Some(slice) = Self::memory_state_mut(instance)
+            .get_memory_slice_mut::<false>(address, cast(core::mem::size_of::<T>()).assert_always_fits_in_u32())
+        {
+            let value = T::into_bytes(value);
+            slice.copy_from_slice(value.as_ref());
+            instance.on_store_ok::<T, DEBUG>()
+        } else {
+            instance.on_store_trap::<T, DEBUG>(address)
+        }
+    }
 }
 
 struct Page {
@@ -239,15 +344,354 @@ impl core::ops::DerefMut for Page {
 
 pub(crate) struct DynamicMemory {
     pages: BTreeMap<u32, Page>,
+    page_size: u32,
+    page_size_mask: u32,
 }
 
 impl DynamicMemory {
+    #[inline]
+    fn round_to_page_size_down(&self, value: u32) -> u32 {
+        value & !self.page_size_mask
+    }
+
+    #[inline]
+    fn is_multiple_of_page_size(&self, value: u32) -> bool {
+        (value & self.page_size_mask) == 0
+    }
+
+    #[inline]
+    fn to_page_address(&self, address: u32, length: u32) -> (u32, u32, u32) {
+        let page_address_lo = self.round_to_page_size_down(address);
+        let page_address_hi = self.round_to_page_size_down(address + (length - 1));
+        (self.page_size, page_address_lo, page_address_hi)
+    }
+
     fn new() -> Self {
-        Self { pages: BTreeMap::new() }
+        Self {
+            pages: BTreeMap::new(),
+            page_size: 0,
+            page_size_mask: 0,
+        }
     }
 
     fn clear(&mut self) {
         self.pages.clear()
+    }
+
+    fn is_memory_accessible(&self, address: u32, size: u32, minimum_protection: MemoryProtection) -> bool {
+        // TODO: This is very slow.
+        let result = each_page(self.to_page_address(address, size), address, size, |page_address, _, _, _| {
+            if let Some(page) = self.pages.get(&page_address) {
+                match minimum_protection {
+                    MemoryProtection::ReadWrite => {
+                        if page.is_read_only {
+                            Err(())
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    MemoryProtection::Read => Ok(()),
+                }
+            } else {
+                Err(())
+            }
+        });
+
+        result.is_ok()
+    }
+
+    fn read_memory_into<'slice>(&self, address: u32, buffer: &'slice mut [MaybeUninit<u8>]) -> Result<&'slice mut [u8], MemoryAccessError> {
+        each_page(
+            self.to_page_address(address, cast(buffer.len()).assert_always_fits_in_u32()),
+            address,
+            cast(buffer.len()).assert_always_fits_in_u32(),
+            |page_address, page_offset, buffer_offset, length| {
+                assert!(buffer_offset + length <= buffer.len());
+                assert!(page_offset + length <= cast(self.page_size).to_usize());
+                let page = self.pages.get(&page_address);
+
+                // SAFETY: Buffers are non-overlapping and the ranges are in-bounds.
+                unsafe {
+                    let dst = buffer.as_mut_ptr().cast::<u8>().add(buffer_offset);
+                    if let Some(page) = page {
+                        let src = page.as_ptr().add(page_offset);
+                        core::ptr::copy_nonoverlapping(src, dst, length);
+                        Ok(())
+                    } else {
+                        Err(MemoryAccessError::OutOfRangeAccess {
+                            address: page_address + cast(page_offset).assert_always_fits_in_u32(),
+                            length: cast(length).to_u64(),
+                        })
+                    }
+                }
+            },
+        )?;
+
+        // SAFETY: The buffer was initialized.
+        Ok(unsafe { slice_assume_init_mut(buffer) })
+    }
+
+    fn write_memory(&mut self, address: u32, data: &[u8]) -> Result<(), MemoryAccessError> {
+        if !self.is_memory_accessible(address, cast(data.len()).assert_always_fits_in_u32(), MemoryProtection::ReadWrite) {
+            return Err(MemoryAccessError::OutOfRangeAccess {
+                address,
+                length: cast(data.len()).to_u64(),
+            });
+        }
+
+        let dynamic_memory = self;
+        let page_size = dynamic_memory.page_size;
+        each_page::<()>(
+            dynamic_memory.to_page_address(address, cast(data.len()).assert_always_fits_in_u32()),
+            address,
+            cast(data.len()).assert_always_fits_in_u32(),
+            move |page_address, page_offset, buffer_offset, length| {
+                let page = dynamic_memory.pages.entry(page_address).or_insert_with(|| Page::empty(page_size));
+                page[page_offset..page_offset + length].copy_from_slice(&data[buffer_offset..buffer_offset + length]);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        Ok(())
+    }
+
+    fn zero_memory(&mut self, address: u32, length: u32, memory_protection: Option<MemoryProtection>) -> Result<(), MemoryAccessError> {
+        if memory_protection.is_some() {
+            debug_assert!(self.is_multiple_of_page_size(address));
+            debug_assert!(self.is_multiple_of_page_size(length));
+        } else if !self.is_memory_accessible(address, length, MemoryProtection::ReadWrite) {
+            return Err(MemoryAccessError::OutOfRangeAccess {
+                address,
+                length: u64::from(length),
+            });
+        }
+
+        let is_read_only = memory_protection.map(|prot| match prot {
+            MemoryProtection::Read => true,
+            MemoryProtection::ReadWrite => false,
+        });
+
+        let dynamic_memory = self;
+        let page_size = dynamic_memory.page_size;
+
+        each_page::<()>(
+            dynamic_memory.to_page_address(address, length),
+            address,
+            length,
+            move |page_address, page_offset, _, length| match dynamic_memory.pages.entry(page_address) {
+                Entry::Occupied(mut entry) => {
+                    let page = entry.get_mut();
+                    page[page_offset..page_offset + length].fill(0);
+                    if let Some(is_read_only) = is_read_only {
+                        page.is_read_only = is_read_only;
+                    }
+                    Ok(())
+                }
+                Entry::Vacant(entry) => {
+                    let mut page = Page::empty(page_size);
+                    if let Some(is_read_only) = is_read_only {
+                        page.is_read_only = is_read_only;
+                    }
+                    entry.insert(page);
+                    Ok(())
+                }
+            },
+        )
+        .unwrap();
+
+        Ok(())
+    }
+
+    fn change_memory_protection(&mut self, address: u32, length: u32, protection: MemoryProtection) -> Result<(), MemoryAccessError> {
+        each_page(
+            self.to_page_address(address, length),
+            address,
+            length,
+            |page_address, page_offset, _buffer_offset, length| {
+                if let Some(page) = self.pages.get_mut(&page_address) {
+                    page.is_read_only = match protection {
+                        MemoryProtection::Read => true,
+                        MemoryProtection::ReadWrite => false,
+                    };
+                    Ok(())
+                } else {
+                    Err(MemoryAccessError::OutOfRangeAccess {
+                        address: page_address + cast(page_offset).assert_always_fits_in_u32(),
+                        length: cast(length).to_u64(),
+                    })
+                }
+            },
+        )?;
+
+        Ok(())
+    }
+
+    fn free_pages(&mut self, address: u32, length: u32) {
+        debug_assert!(self.is_multiple_of_page_size(address));
+        debug_assert_ne!(length, 0);
+
+        let dynamic_memory = self;
+        each_page::<()>(
+            dynamic_memory.to_page_address(address, length),
+            address,
+            length,
+            move |page_address, _, _, _| {
+                dynamic_memory.pages.remove(&page_address);
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+
+    fn mark_dirty(&self) {}
+
+    fn reset_memory(&mut self, module: &Module) {
+        self.clear();
+        self.page_size = module.memory_map().page_size();
+
+        let page_shift = self.page_size.ilog2();
+        self.page_size_mask = (1 << page_shift) - 1;
+    }
+
+    fn accessible_aux_size(&self) -> u32 {
+        unimplemented!();
+    }
+
+    fn set_accessible_aux_size(&mut self, _size: u32) {
+        unimplemented!();
+    }
+
+    fn heap_size(&self) -> u32 {
+        unimplemented!();
+    }
+
+    fn sbrk(&mut self, _module: &Module, _size: u32) -> Option<u32> {
+        unimplemented!();
+    }
+}
+
+impl Memory for DynamicMemory {
+    fn memory_state(instance: &InterpretedInstance) -> &Self {
+        &instance.dynamic_memory
+    }
+
+    fn memory_state_mut(instance: &mut InterpretedInstance) -> &mut Self {
+        &mut instance.dynamic_memory
+    }
+
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn load_impl<T: LoadTy, const DEBUG: bool>(instance: &mut InterpretedInstance, dst: Reg, address: u32) -> Option<Target> {
+        let length = cast(core::mem::size_of::<T>()).assert_always_fits_in_u32();
+        let Some(address_end) = address.checked_add(length) else {
+            let page_address = Self::memory_state(instance).round_to_page_size_down(0xffffffff);
+            if Self::memory_state(instance).pages.contains_key(&page_address) {
+                return instance.on_load_trap::<T, DEBUG>(address);
+            } else {
+                return instance.on_load_segfault::<T, DEBUG>(address, page_address, false);
+            }
+        };
+
+        let page_address_lo = Self::memory_state(instance).round_to_page_size_down(address);
+        let page_address_hi = Self::memory_state(instance).round_to_page_size_down(address_end - 1);
+        if page_address_lo == page_address_hi {
+            if let Some(page) = Self::memory_state_mut(instance).pages.get_mut(&page_address_lo) {
+                let offset = cast(address).to_usize() - cast(page_address_lo).to_usize();
+                let value = T::from_slice(&page[offset..offset + core::mem::size_of::<T>()]);
+                instance.on_load_ok::<T, DEBUG>(dst, address, value)
+            } else {
+                instance.on_load_segfault::<T, DEBUG>(address, page_address_lo, false)
+            }
+        } else {
+            let mut iter = Self::memory_state(instance).pages.range(page_address_lo..=page_address_hi);
+            let lo = iter.next();
+            let hi = iter.next();
+
+            match (lo, hi) {
+                (Some((_, lo)), Some((_, hi))) => {
+                    let page_size = cast(Self::memory_state(instance).page_size).to_usize();
+                    let lo_len = cast(page_address_hi).to_usize() - cast(address).to_usize();
+                    let hi_len = core::mem::size_of::<T>() - lo_len;
+                    let mut buffer = [0; 8];
+                    let buffer = &mut buffer[..core::mem::size_of::<T>()];
+                    buffer[..lo_len].copy_from_slice(&lo[page_size - lo_len..]);
+                    buffer[lo_len..].copy_from_slice(&hi[..hi_len]);
+                    instance.on_load_ok::<T, DEBUG>(dst, address, T::from_slice(buffer))
+                }
+                (None, _) => instance.on_load_segfault::<T, DEBUG>(address, page_address_lo, false),
+                (Some((page_address, _)), _) => {
+                    let missing_page_address = if *page_address == page_address_lo {
+                        page_address_hi
+                    } else {
+                        page_address_lo
+                    };
+
+                    instance.on_load_segfault::<T, DEBUG>(address, missing_page_address, false)
+                }
+            }
+        }
+    }
+
+    fn store_impl<T: StoreTy, const DEBUG: bool>(instance: &mut InterpretedInstance, address: u32, value: u64) -> Option<Target> {
+        let length = cast(core::mem::size_of::<T>()).assert_always_fits_in_u32();
+        let Some(address_end) = address.checked_add(length) else {
+            let page_address = Self::memory_state(instance).round_to_page_size_down(0xffffffff);
+            if Self::memory_state(instance).pages.contains_key(&page_address) {
+                return instance.on_store_trap::<T, DEBUG>(address);
+            } else {
+                return instance.on_store_segfault::<T, DEBUG>(address, page_address, false);
+            }
+        };
+
+        let page_address_lo = Self::memory_state(instance).round_to_page_size_down(address);
+        let page_address_hi = Self::memory_state(instance).round_to_page_size_down(address_end - 1);
+        if page_address_lo == page_address_hi {
+            if let Some(page) = Self::memory_state_mut(instance).pages.get_mut(&page_address_lo) {
+                if page.is_read_only {
+                    return instance.on_store_segfault::<T, DEBUG>(address, page_address_lo, true);
+                }
+
+                let offset = cast(address).to_usize() - cast(page_address_lo).to_usize();
+                let value = T::into_bytes(value);
+                let value = value.as_ref();
+                page[offset..offset + value.len()].copy_from_slice(value);
+                instance.on_store_ok::<T, DEBUG>()
+            } else {
+                instance.on_store_segfault::<T, DEBUG>(address, page_address_lo, false)
+            }
+        } else {
+            let page_size = cast(Self::memory_state(instance).page_size).to_usize();
+            let mut iter = Self::memory_state_mut(instance).pages.range_mut(page_address_lo..=page_address_hi);
+            let lo = iter.next();
+            let hi = iter.next();
+
+            match (lo, hi) {
+                (Some((_, lo)), Some((_, hi))) => {
+                    if lo.is_read_only || hi.is_read_only {
+                        let page_address = if lo.is_read_only { page_address_lo } else { page_address_hi };
+                        return instance.on_store_segfault::<T, DEBUG>(address, page_address, true);
+                    }
+
+                    let value = T::into_bytes(value);
+                    let value = value.as_ref();
+                    let lo_len = cast(page_address_hi).to_usize() - cast(address).to_usize();
+                    let hi_len = value.len() - lo_len;
+                    lo[page_size - lo_len..].copy_from_slice(&value[..lo_len]);
+                    hi[..hi_len].copy_from_slice(&value[lo_len..]);
+                    instance.on_store_ok::<T, DEBUG>()
+                }
+                (None, _) => instance.on_store_segfault::<T, DEBUG>(address, page_address_lo, false),
+                (Some((page_address, _)), _) => {
+                    let missing_page_address = if *page_address == page_address_lo {
+                        page_address_hi
+                    } else {
+                        page_address_lo
+                    };
+
+                    instance.on_store_segfault::<T, DEBUG>(address, missing_page_address, false)
+                }
+            }
+        }
     }
 }
 
@@ -259,9 +703,29 @@ macro_rules! cast_handler {
     }};
 }
 
+macro_rules! emit_raw {
+    ($self:ident, $handler_name:ident::<$($generic:tt),+>($($args:tt)*)) => {
+        $self.compiled_handlers.push(cast_handler!(raw_handlers::$handler_name::<$($generic),+>));
+        $self.compiled_args.push(Args::$handler_name($($args)*));
+    };
+}
+
 macro_rules! emit {
     ($self:ident, $handler_name:ident($($args:tt)*)) => {
-        $self.compiled_handlers.push(cast_handler!(raw_handlers::$handler_name::<DEBUG>));
+        emit_raw!($self, $handler_name::<DEBUG>($($args)*));
+    };
+}
+
+macro_rules! emit_load_store {
+    ($self:ident, $handler_name:ident($($args:tt)*)) => {
+        let handler = if $self.memory_kind == MEMORY_STANDARD {
+            raw_handlers::$handler_name::<StandardMemory, DEBUG>
+        } else {
+            debug_assert_eq!($self.memory_kind, MEMORY_DYNAMIC);
+            raw_handlers::$handler_name::<DynamicMemory, DEBUG>
+        };
+
+        $self.compiled_handlers.push(cast_handler!(handler));
         $self.compiled_args.push(Args::$handler_name($($args)*));
     };
 }
@@ -282,14 +746,11 @@ macro_rules! emit_branch {
 }
 
 fn each_page<E>(
-    module: &Module,
+    (page_size, page_address_lo, page_address_hi): (u32, u32, u32),
     address: u32,
     length: u32,
     callback: impl FnMut(u32, usize, usize, usize) -> Result<(), E>,
 ) -> Result<(), E> {
-    let page_size = module.memory_map().page_size();
-    let page_address_lo = module.round_to_page_size_down(address);
-    let page_address_hi = module.round_to_page_size_down(address + (length - 1));
     each_page_impl(page_size, page_address_lo, page_address_hi, address, length, callback)
 }
 
@@ -405,9 +866,38 @@ struct Handlers {
     step: Handler,
 }
 
+const MEMORY_STANDARD: usize = 0;
+const MEMORY_DYNAMIC: usize = 1;
+
+macro_rules! access_memory {
+    ($self:expr, $kind:expr, |$memory:ident| $block:block) => {
+        if $kind == MEMORY_STANDARD {
+            let $memory = &$self.standard_memory;
+            $block
+        } else {
+            debug_assert_eq!($kind, MEMORY_DYNAMIC);
+            let $memory = &$self.dynamic_memory;
+            $block
+        }
+    };
+}
+
+macro_rules! access_memory_mut {
+    ($self:expr, $kind:expr, |$memory:ident| $block:block) => {
+        if $kind == MEMORY_STANDARD {
+            let $memory = &mut $self.standard_memory;
+            $block
+        } else {
+            debug_assert_eq!($kind, MEMORY_DYNAMIC);
+            let $memory = &mut $self.dynamic_memory;
+            $block
+        }
+    };
+}
+
 pub(crate) struct InterpretedInstance {
     module: Module,
-    basic_memory: BasicMemory,
+    standard_memory: StandardMemory,
     dynamic_memory: DynamicMemory,
     regs: [u64; Reg::ALL.len()],
     program_counter: ProgramCounter,
@@ -439,7 +929,7 @@ impl InterpretedInstance {
             compiled_handlers: Default::default(),
             compiled_args: Default::default(),
             module,
-            basic_memory: BasicMemory::new(),
+            standard_memory: StandardMemory::new(),
             dynamic_memory: DynamicMemory::new(),
             regs: [0; Reg::ALL.len()],
             program_counter: ProgramCounter(!0),
@@ -479,6 +969,15 @@ impl InterpretedInstance {
 
         instance.initialize_module();
         instance
+    }
+
+    #[inline]
+    fn memory_kind(&self) -> usize {
+        if self.module.is_dynamic_paging() {
+            MEMORY_DYNAMIC
+        } else {
+            MEMORY_STANDARD
+        }
     }
 
     pub fn reg(&self, reg: Reg) -> RegValue {
@@ -563,13 +1062,11 @@ impl InterpretedInstance {
     }
 
     pub fn accessible_aux_size(&self) -> u32 {
-        assert!(!self.module.is_dynamic_paging());
-        self.basic_memory.accessible_aux_size()
+        access_memory!(self, self.memory_kind(), |memory| { memory.accessible_aux_size() })
     }
 
     pub fn set_accessible_aux_size(&mut self, size: u32) {
-        assert!(!self.module.is_dynamic_paging());
-        self.basic_memory.set_accessible_aux_size(size);
+        access_memory_mut!(self, self.memory_kind(), |memory| { memory.set_accessible_aux_size(size) })
     }
 
     #[allow(clippy::unused_self)]
@@ -578,231 +1075,45 @@ impl InterpretedInstance {
     }
 
     pub fn is_memory_accessible(&self, address: u32, size: u32, minimum_protection: MemoryProtection) -> bool {
-        assert!(self.module.is_dynamic_paging());
-
-        // TODO: This is very slow.
-        let result = each_page(&self.module, address, size, |page_address, _, _, _| {
-            if let Some(page) = self.dynamic_memory.pages.get(&page_address) {
-                match minimum_protection {
-                    MemoryProtection::ReadWrite => {
-                        if page.is_read_only {
-                            Err(())
-                        } else {
-                            Ok(())
-                        }
-                    }
-                    MemoryProtection::Read => Ok(()),
-                }
-            } else {
-                Err(())
-            }
-        });
-
-        result.is_ok()
+        access_memory!(self, self.memory_kind(), |memory| {
+            memory.is_memory_accessible(address, size, minimum_protection)
+        })
     }
 
     pub fn read_memory_into<'slice>(
-        &self,
+        &mut self,
         address: u32,
         buffer: &'slice mut [MaybeUninit<u8>],
     ) -> Result<&'slice mut [u8], MemoryAccessError> {
-        if !self.module.is_dynamic_paging() {
-            let Some(slice) = self
-                .basic_memory
-                .get_memory_slice(&self.module, address, cast(buffer.len()).assert_always_fits_in_u32())
-            else {
-                return Err(MemoryAccessError::OutOfRangeAccess {
-                    address,
-                    length: cast(buffer.len()).to_u64(),
-                });
-            };
-
-            Ok(byte_slice_init(buffer, slice))
-        } else {
-            each_page(
-                &self.module,
-                address,
-                cast(buffer.len()).assert_always_fits_in_u32(),
-                |page_address, page_offset, buffer_offset, length| {
-                    assert!(buffer_offset + length <= buffer.len());
-                    assert!(page_offset + length <= cast(self.module.memory_map().page_size()).to_usize());
-                    let page = self.dynamic_memory.pages.get(&page_address);
-
-                    // SAFETY: Buffers are non-overlapping and the ranges are in-bounds.
-                    unsafe {
-                        let dst = buffer.as_mut_ptr().cast::<u8>().add(buffer_offset);
-                        if let Some(page) = page {
-                            let src = page.as_ptr().add(page_offset);
-                            core::ptr::copy_nonoverlapping(src, dst, length);
-                            Ok(())
-                        } else {
-                            Err(MemoryAccessError::OutOfRangeAccess {
-                                address: page_address + cast(page_offset).assert_always_fits_in_u32(),
-                                length: cast(length).to_u64(),
-                            })
-                        }
-                    }
-                },
-            )?;
-
-            // SAFETY: The buffer was initialized.
-            Ok(unsafe { slice_assume_init_mut(buffer) })
-        }
+        access_memory_mut!(self, self.memory_kind(), |memory| { memory.read_memory_into(address, buffer) })
     }
 
     pub fn write_memory(&mut self, address: u32, data: &[u8]) -> Result<(), MemoryAccessError> {
-        if !self.module.is_dynamic_paging() {
-            let Some(slice) =
-                self.basic_memory
-                    .get_memory_slice_mut::<true>(&self.module, address, cast(data.len()).assert_always_fits_in_u32())
-            else {
-                return Err(MemoryAccessError::OutOfRangeAccess {
-                    address,
-                    length: cast(data.len()).to_u64(),
-                });
-            };
-
-            slice.copy_from_slice(data);
-        } else {
-            if !self.is_memory_accessible(address, cast(data.len()).assert_always_fits_in_u32(), MemoryProtection::ReadWrite) {
-                return Err(MemoryAccessError::OutOfRangeAccess {
-                    address,
-                    length: cast(data.len()).to_u64(),
-                });
-            }
-
-            let dynamic_memory = &mut self.dynamic_memory;
-            let page_size = self.module.memory_map().page_size();
-            each_page::<()>(
-                &self.module,
-                address,
-                cast(data.len()).assert_always_fits_in_u32(),
-                move |page_address, page_offset, buffer_offset, length| {
-                    let page = dynamic_memory.pages.entry(page_address).or_insert_with(|| Page::empty(page_size));
-                    page[page_offset..page_offset + length].copy_from_slice(&data[buffer_offset..buffer_offset + length]);
-                    Ok(())
-                },
-            )
-            .unwrap();
-        }
-
-        Ok(())
+        access_memory_mut!(self, self.memory_kind(), |memory| { memory.write_memory(address, data) })
     }
 
     pub fn zero_memory(&mut self, address: u32, length: u32, memory_protection: Option<MemoryProtection>) -> Result<(), MemoryAccessError> {
-        if !self.module.is_dynamic_paging() {
-            debug_assert!(memory_protection.is_none());
-            let Some(slice) = self.basic_memory.get_memory_slice_mut::<true>(&self.module, address, length) else {
-                return Err(MemoryAccessError::OutOfRangeAccess {
-                    address,
-                    length: u64::from(length),
-                });
-            };
-
-            slice.fill(0);
-        } else {
-            if memory_protection.is_some() {
-                debug_assert!(self.module.is_multiple_of_page_size(address));
-                debug_assert!(self.module.is_multiple_of_page_size(length));
-            } else if !self.is_memory_accessible(address, length, MemoryProtection::ReadWrite) {
-                return Err(MemoryAccessError::OutOfRangeAccess {
-                    address,
-                    length: u64::from(length),
-                });
-            }
-
-            let is_read_only = memory_protection.map(|prot| match prot {
-                MemoryProtection::Read => true,
-                MemoryProtection::ReadWrite => false,
-            });
-
-            let dynamic_memory = &mut self.dynamic_memory;
-            let page_size = self.module.memory_map().page_size();
-            each_page::<()>(
-                &self.module,
-                address,
-                length,
-                move |page_address, page_offset, _, length| match dynamic_memory.pages.entry(page_address) {
-                    Entry::Occupied(mut entry) => {
-                        let page = entry.get_mut();
-                        page[page_offset..page_offset + length].fill(0);
-                        if let Some(is_read_only) = is_read_only {
-                            page.is_read_only = is_read_only;
-                        }
-                        Ok(())
-                    }
-                    Entry::Vacant(entry) => {
-                        let mut page = Page::empty(page_size);
-                        if let Some(is_read_only) = is_read_only {
-                            page.is_read_only = is_read_only;
-                        }
-                        entry.insert(page);
-                        Ok(())
-                    }
-                },
-            )
-            .unwrap();
-        }
-
-        Ok(())
+        access_memory_mut!(self, self.memory_kind(), |memory| {
+            memory.zero_memory(address, length, memory_protection)
+        })
     }
 
     pub fn change_memory_protection(&mut self, address: u32, length: u32, protection: MemoryProtection) -> Result<(), MemoryAccessError> {
-        assert!(self.module.is_dynamic_paging());
-
-        each_page(
-            &self.module,
-            address,
-            length,
-            |page_address, page_offset, _buffer_offset, length| {
-                if let Some(page) = self.dynamic_memory.pages.get_mut(&page_address) {
-                    page.is_read_only = match protection {
-                        MemoryProtection::Read => true,
-                        MemoryProtection::ReadWrite => false,
-                    };
-                    Ok(())
-                } else {
-                    Err(MemoryAccessError::OutOfRangeAccess {
-                        address: page_address + cast(page_offset).assert_always_fits_in_u32(),
-                        length: cast(length).to_u64(),
-                    })
-                }
-            },
-        )?;
-
-        Ok(())
+        access_memory_mut!(self, self.memory_kind(), |memory| {
+            memory.change_memory_protection(address, length, protection)
+        })
     }
 
     pub fn free_pages(&mut self, address: u32, length: u32) {
-        debug_assert!(self.module.is_multiple_of_page_size(address));
-        debug_assert_ne!(length, 0);
-
-        if !self.module.is_dynamic_paging() {
-            todo!()
-        } else {
-            let dynamic_memory = &mut self.dynamic_memory;
-            each_page::<()>(&self.module, address, length, move |page_address, _, _, _| {
-                dynamic_memory.pages.remove(&page_address);
-                Ok(())
-            })
-            .unwrap();
-        }
+        access_memory_mut!(self, self.memory_kind(), |memory| { memory.free_pages(address, length) })
     }
 
     pub fn heap_size(&self) -> u32 {
-        if !self.module.is_dynamic_paging() {
-            self.basic_memory.heap_size()
-        } else {
-            todo!()
-        }
+        access_memory!(self, self.memory_kind(), |memory| { memory.heap_size() })
     }
 
     pub fn sbrk(&mut self, size: u32) -> Option<u32> {
-        if !self.module.is_dynamic_paging() {
-            self.basic_memory.sbrk(&self.module, size)
-        } else {
-            todo!()
-        }
+        access_memory_mut!(self, self.memory_kind(), |memory| { memory.sbrk(&self.module, size) })
     }
 
     #[allow(clippy::unused_self)]
@@ -821,9 +1132,9 @@ impl InterpretedInstance {
 
     #[inline(never)]
     fn run_impl<const DEBUG: bool>(&mut self) -> InterruptKind {
-        if !self.module.is_dynamic_paging() {
-            self.basic_memory.mark_dirty();
-        }
+        access_memory_mut!(self, self.memory_kind(), |memory| {
+            memory.mark_dirty();
+        });
 
         if self.next_program_counter_changed {
             let Some(program_counter) = self.next_program_counter else {
@@ -877,8 +1188,7 @@ impl InterpretedInstance {
             }
 
             let handler = self.compiled_handlers[cast(offset).to_usize()];
-            let mut visitor = Visitor { inner: self };
-            if let Some(next_offset) = handler(&mut visitor) {
+            if let Some(next_offset) = handler(self) {
                 offset = next_offset;
                 self.compiled_offset = offset;
             } else {
@@ -888,11 +1198,9 @@ impl InterpretedInstance {
     }
 
     pub fn reset_memory(&mut self) {
-        if !self.module.is_dynamic_paging() {
-            self.basic_memory.reset(&self.module);
-        } else {
-            self.dynamic_memory.clear();
-        }
+        access_memory_mut!(self, self.memory_kind(), |memory| {
+            memory.reset_memory(&self.module);
+        });
     }
 
     pub fn reset_interpreter_cache(&mut self) {
@@ -913,11 +1221,10 @@ impl InterpretedInstance {
             self.gas = 0;
         }
 
-        if !self.module.is_dynamic_paging() {
-            self.basic_memory.force_reset(&self.module);
-        } else {
-            self.dynamic_memory.clear();
-        }
+        access_memory_mut!(self, self.memory_kind(), |memory| {
+            memory.mark_dirty();
+            memory.reset_memory(&self.module);
+        });
 
         self.compile_out_of_range_stub();
         self.min_compiled_handlers = self.compiled_handlers.len();
@@ -1140,6 +1447,7 @@ impl InterpretedInstance {
 
             #[cfg(debug_assertions)]
             let original_length = self.compiled_handlers.len();
+            let memory_kind = self.memory_kind();
 
             instruction.visit(&mut Compiler::<DEBUG> {
                 program_counter: instruction.offset,
@@ -1147,6 +1455,7 @@ impl InterpretedInstance {
                 compiled_handlers: &mut self.compiled_handlers,
                 compiled_args: &mut self.compiled_args,
                 module: &self.module,
+                memory_kind,
             });
 
             #[cfg(debug_assertions)]
@@ -1214,18 +1523,12 @@ impl InterpretedInstance {
         let gas_cost = self.module.get_trap_gas_cost();
         emit!(self, out_of_range(gas_cost));
     }
-}
 
-struct Visitor<'a> {
-    inner: &'a mut InterpretedInstance,
-}
-
-impl<'a> Visitor<'a> {
     #[inline(always)]
     fn get32<const DEBUG: bool>(&self, regimm: impl IntoRegImm) -> u32 {
         match regimm.into() {
             RegImm::Reg(reg) => {
-                let value = cast(self.inner.regs[reg.to_usize()]).truncate_to_u32();
+                let value = cast(self.regs[reg.to_usize()]).truncate_to_u32();
                 if DEBUG {
                     log::trace!("  get: {reg} = 0x{value:x}");
                 }
@@ -1239,7 +1542,7 @@ impl<'a> Visitor<'a> {
     fn get64<const DEBUG: bool>(&self, regimm: impl IntoRegImm) -> u64 {
         match regimm.into() {
             RegImm::Reg(reg) => {
-                let value = self.inner.regs[reg.to_usize()];
+                let value = self.regs[reg.to_usize()];
                 if DEBUG {
                     log::trace!("  get: {reg} = 0x{value:x}");
                 }
@@ -1255,7 +1558,7 @@ impl<'a> Visitor<'a> {
 
     #[inline(always)]
     fn go_to_next_instruction(&self) -> Option<Target> {
-        Some(self.inner.compiled_offset + 1)
+        Some(self.compiled_offset + 1)
     }
 
     #[inline(always)]
@@ -1265,14 +1568,14 @@ impl<'a> Visitor<'a> {
         let value = cast(value).to_unsigned();
 
         if DEBUG {
-            if self.inner.module.blob().is_64_bit() {
+            if self.module.blob().is_64_bit() {
                 log::trace!("  set: {dst} = 0x{value:x}");
             } else {
                 log::trace!("  set: {dst} = 0x{:x}", cast(value).truncate_to_u32());
             }
         }
 
-        self.inner.regs[dst.to_usize()] = value;
+        self.regs[dst.to_usize()] = value;
     }
 
     #[inline(always)]
@@ -1281,7 +1584,7 @@ impl<'a> Visitor<'a> {
             log::trace!("  set: {dst} = 0x{value:x}");
         }
 
-        self.inner.regs[dst.to_usize()] = value;
+        self.regs[dst.to_usize()] = value;
     }
 
     #[inline(always)]
@@ -1328,14 +1631,14 @@ impl<'a> Visitor<'a> {
             if IS_TARGET_TRUE_VALID {
                 target_true
             } else {
-                self.inner.unresolved_program_counter = Some(ProgramCounter(target_true));
+                self.unresolved_program_counter = Some(ProgramCounter(target_true));
                 TARGET_INVALID_BRANCH
             }
         } else {
             if IS_TARGET_FALSE_VALID {
                 target_false
             } else {
-                self.inner.unresolved_program_counter = Some(ProgramCounter(target_false));
+                self.unresolved_program_counter = Some(ProgramCounter(target_false));
                 TARGET_OUT_OF_RANGE
             }
         };
@@ -1348,126 +1651,109 @@ impl<'a> Visitor<'a> {
             return trap_impl::<false>(self, program_counter);
         }
 
-        self.inner.program_counter = program_counter;
-        self.inner.program_counter_valid = true;
-        self.inner.next_program_counter = Some(program_counter);
-        self.inner.interrupt = InterruptKind::Segfault(Segfault {
+        self.program_counter = program_counter;
+        self.program_counter_valid = true;
+        self.next_program_counter = Some(program_counter);
+        self.interrupt = InterruptKind::Segfault(Segfault {
             page_address,
-            page_size: self.inner.module.memory_map().page_size(),
+            page_size: self.module.memory_map().page_size(),
             is_write_protected,
         });
 
         None
     }
 
-    #[cold]
-    fn segfault_or_trap_at_top_of_address_space<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<Target> {
-        let page_address = self.inner.module.round_to_page_size_down(0xffffffff);
-        if self.inner.dynamic_memory.pages.contains_key(&page_address) {
-            trap_impl::<DEBUG>(self, program_counter)
-        } else {
-            self.segfault_impl(program_counter, page_address, false)
-        }
-    }
-
     #[cfg_attr(not(debug_assertions), inline(always))]
-    fn load<T: LoadTy, const DEBUG: bool, const IS_DYNAMIC: bool>(
+    fn load<M: Memory, T: LoadTy, const DEBUG: bool>(
         &mut self,
         program_counter: ProgramCounter,
         dst: Reg,
         base: Option<Reg>,
         offset: u32,
     ) -> Option<Target> {
-        debug_assert_eq!(IS_DYNAMIC, self.inner.module.is_dynamic_paging());
+        self.program_counter = program_counter;
+
         assert!(core::mem::size_of::<T>() >= 1);
 
         let address = base
-            .map_or(0, |base| cast(self.inner.regs[base.to_usize()]).truncate_to_u32())
+            .map_or(0, |base| cast(self.regs[base.to_usize()]).truncate_to_u32())
             .wrapping_add(offset);
-        let length = cast(core::mem::size_of::<T>()).assert_always_fits_in_u32();
-        let value = if !IS_DYNAMIC {
-            let Some(slice) = self.inner.basic_memory.get_memory_slice(&self.inner.module, address, length) else {
-                if DEBUG {
-                    log::debug!(
-                        "Load of {length} bytes from 0x{address:x} failed! (pc = {program_counter}, cycle = {cycle})",
-                        cycle = self.inner.cycle_counter
-                    );
-                }
 
-                return trap_impl::<DEBUG>(self, program_counter);
-            };
+        M::load_impl::<T, DEBUG>(self, dst, address)
+    }
 
-            T::from_slice(slice)
-        } else {
-            let Some(address_end) = address.checked_add(length) else {
-                return self.segfault_or_trap_at_top_of_address_space::<DEBUG>(program_counter);
-            };
+    #[inline(never)]
+    fn on_load_ok_trace<T: LoadTy>(dst: Reg, address: u32, value: u64) {
+        log::trace!("  {dst} = {kind} [0x{address:x}] = 0x{value:x}", kind = core::any::type_name::<T>());
+    }
 
-            let page_address_lo = self.inner.module.round_to_page_size_down(address);
-            let page_address_hi = self.inner.module.round_to_page_size_down(address_end - 1);
-            if page_address_lo == page_address_hi {
-                if let Some(page) = self.inner.dynamic_memory.pages.get_mut(&page_address_lo) {
-                    let offset = cast(address).to_usize() - cast(page_address_lo).to_usize();
-                    T::from_slice(&page[offset..offset + core::mem::size_of::<T>()])
-                } else {
-                    return self.segfault_impl(program_counter, page_address_lo, false);
-                }
-            } else {
-                let mut iter = self.inner.dynamic_memory.pages.range(page_address_lo..=page_address_hi);
-                let lo = iter.next();
-                let hi = iter.next();
-
-                match (lo, hi) {
-                    (Some((_, lo)), Some((_, hi))) => {
-                        let page_size = cast(self.inner.module.memory_map().page_size()).to_usize();
-                        let lo_len = cast(page_address_hi).to_usize() - cast(address).to_usize();
-                        let hi_len = core::mem::size_of::<T>() - lo_len;
-                        let mut buffer = [0; 8];
-                        let buffer = &mut buffer[..core::mem::size_of::<T>()];
-                        buffer[..lo_len].copy_from_slice(&lo[page_size - lo_len..]);
-                        buffer[lo_len..].copy_from_slice(&hi[..hi_len]);
-                        T::from_slice(buffer)
-                    }
-                    (None, _) => {
-                        return self.segfault_impl(program_counter, page_address_lo, false);
-                    }
-                    (Some((page_address, _)), _) => {
-                        let missing_page_address = if *page_address == page_address_lo {
-                            page_address_hi
-                        } else {
-                            page_address_lo
-                        };
-
-                        return self.segfault_impl(program_counter, missing_page_address, false);
-                    }
-                }
-            }
-        };
-
+    #[must_use]
+    #[inline(always)]
+    fn on_load_ok<T: LoadTy, const DEBUG: bool>(&mut self, dst: Reg, address: u32, value: u64) -> Option<Target> {
         if DEBUG {
-            log::trace!("  {dst} = {kind} [0x{address:x}] = 0x{value:x}", kind = core::any::type_name::<T>());
+            Self::on_load_ok_trace::<T>(dst, address, value);
         }
 
         self.set64::<false>(dst, value);
         self.go_to_next_instruction()
     }
 
-    fn store<T: StoreTy, const DEBUG: bool, const IS_DYNAMIC: bool>(
+    #[must_use]
+    #[cold]
+    #[inline(never)]
+    fn on_load_trap<T: LoadTy, const DEBUG: bool>(&mut self, address: u32) -> Option<Target> {
+        if DEBUG {
+            log::debug!(
+                "Load of {length} bytes from 0x{address:x} failed: trap! (pc = {program_counter}, cycle = {cycle})",
+                length = core::mem::size_of::<T>(),
+                program_counter = self.program_counter,
+                cycle = self.cycle_counter
+            );
+        }
+
+        trap_impl::<DEBUG>(self, self.program_counter)
+    }
+
+    #[must_use]
+    #[cold]
+    #[inline(never)]
+    fn on_load_segfault<T: LoadTy, const DEBUG: bool>(
+        &mut self,
+        address: u32,
+        page_address: u32,
+        is_write_protected: bool,
+    ) -> Option<Target> {
+        if DEBUG {
+            log::debug!(
+                "Load of {length} bytes from 0x{address:x} failed: segfault! (pc = {program_counter}, cycle = {cycle})",
+                length = core::mem::size_of::<T>(),
+                program_counter = self.program_counter,
+                cycle = self.cycle_counter
+            );
+        }
+
+        self.segfault_impl(self.program_counter, page_address, is_write_protected)
+    }
+
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn store<M: Memory, T: StoreTy, const DEBUG: bool>(
         &mut self,
         program_counter: ProgramCounter,
         src: impl IntoRegImm,
         base: Option<Reg>,
         offset: u32,
     ) -> Option<Target> {
-        debug_assert_eq!(IS_DYNAMIC, self.inner.module.is_dynamic_paging());
+        self.program_counter = program_counter;
+
         assert!(core::mem::size_of::<T>() >= 1);
 
         let address = base
-            .map_or(0, |base| cast(self.inner.regs[base.to_usize()]).truncate_to_u32())
+            .map_or(0, |base| cast(self.regs[base.to_usize()]).truncate_to_u32())
             .wrapping_add(offset);
+
         let value = match src.into() {
             RegImm::Reg(src) => {
-                let value = self.inner.regs[src.to_usize()];
+                let value = self.regs[src.to_usize()];
                 if DEBUG {
                     log::trace!("  {kind} [0x{address:x}] = {src} = 0x{value:x}", kind = core::any::type_name::<T>());
                 }
@@ -1479,115 +1765,70 @@ impl<'a> Visitor<'a> {
                     log::trace!("  {kind} [0x{address:x}] = 0x{value:x}", kind = core::any::type_name::<T>());
                 }
 
-                // TODO: do we zero extend or sign extend?
                 let value = cast(value).to_signed();
                 let value = cast(value).to_i64_sign_extend();
                 cast(value).to_unsigned()
             }
         };
 
-        let length = cast(core::mem::size_of::<T>()).assert_always_fits_in_u32();
-        let value = T::into_bytes(value);
+        M::store_impl::<T, DEBUG>(self, address, value)
+    }
 
-        if !IS_DYNAMIC {
-            let Some(slice) = self
-                .inner
-                .basic_memory
-                .get_memory_slice_mut::<false>(&self.inner.module, address, length)
-            else {
-                if DEBUG {
-                    log::debug!(
-                        "Store of {length} bytes to 0x{address:x} failed! (pc = {program_counter}, cycle = {cycle})",
-                        cycle = self.inner.cycle_counter
-                    );
-                }
-
-                return trap_impl::<DEBUG>(self, program_counter);
-            };
-            slice.copy_from_slice(value.as_ref());
-        } else {
-            let Some(address_end) = address.checked_add(length) else {
-                return self.segfault_or_trap_at_top_of_address_space::<DEBUG>(program_counter);
-            };
-
-            let page_address_lo = self.inner.module.round_to_page_size_down(address);
-            let page_address_hi = self.inner.module.round_to_page_size_down(address_end - 1);
-            if page_address_lo == page_address_hi {
-                if let Some(page) = self.inner.dynamic_memory.pages.get_mut(&page_address_lo) {
-                    if page.is_read_only {
-                        if DEBUG {
-                            log::debug!(
-                                "Store of {length} bytes to 0x{address:x} failed! (pc = {program_counter}, cycle = {cycle})",
-                                cycle = self.inner.cycle_counter
-                            );
-                        }
-
-                        return self.segfault_impl(program_counter, page_address_lo, true);
-                    }
-
-                    let offset = cast(address).to_usize() - cast(page_address_lo).to_usize();
-                    let value = value.as_ref();
-                    page[offset..offset + value.len()].copy_from_slice(value);
-                } else {
-                    return self.segfault_impl(program_counter, page_address_lo, false);
-                }
-            } else {
-                let mut iter = self.inner.dynamic_memory.pages.range_mut(page_address_lo..=page_address_hi);
-                let lo = iter.next();
-                let hi = iter.next();
-
-                match (lo, hi) {
-                    (Some((_, lo)), Some((_, hi))) => {
-                        if lo.is_read_only || hi.is_read_only {
-                            if DEBUG {
-                                log::debug!(
-                                    "Store of {length} bytes to 0x{address:x} failed! (pc = {program_counter}, cycle = {cycle})",
-                                    cycle = self.inner.cycle_counter
-                                );
-                            }
-
-                            let address = if lo.is_read_only { page_address_lo } else { page_address_hi };
-                            return self.segfault_impl(program_counter, address, true);
-                        }
-
-                        let value = value.as_ref();
-                        let page_size = cast(self.inner.module.memory_map().page_size()).to_usize();
-                        let lo_len = cast(page_address_hi).to_usize() - cast(address).to_usize();
-                        let hi_len = value.len() - lo_len;
-                        lo[page_size - lo_len..].copy_from_slice(&value[..lo_len]);
-                        hi[..hi_len].copy_from_slice(&value[lo_len..]);
-                    }
-                    (None, _) => {
-                        return self.segfault_impl(program_counter, page_address_lo, false);
-                    }
-                    (Some((page_address, _)), _) => {
-                        let missing_page_address = if *page_address == page_address_lo {
-                            page_address_hi
-                        } else {
-                            page_address_lo
-                        };
-
-                        return self.segfault_impl(program_counter, missing_page_address, false);
-                    }
-                }
-            }
-        };
-
+    #[must_use]
+    #[inline(always)]
+    fn on_store_ok<T: StoreTy, const DEBUG: bool>(&mut self) -> Option<Target> {
         self.go_to_next_instruction()
+    }
+
+    #[must_use]
+    #[cold]
+    #[inline(never)]
+    fn on_store_trap<T: StoreTy, const DEBUG: bool>(&mut self, address: u32) -> Option<Target> {
+        if DEBUG {
+            log::debug!(
+                "Store of {length} bytes to 0x{address:x} failed: trap! (pc = {program_counter}, cycle = {cycle})",
+                length = core::mem::size_of::<T>(),
+                program_counter = self.program_counter,
+                cycle = self.cycle_counter
+            );
+        }
+
+        trap_impl::<DEBUG>(self, self.program_counter)
+    }
+
+    #[must_use]
+    #[cold]
+    #[inline(never)]
+    fn on_store_segfault<T: StoreTy, const DEBUG: bool>(
+        &mut self,
+        address: u32,
+        page_address: u32,
+        is_write_protected: bool,
+    ) -> Option<Target> {
+        if DEBUG {
+            log::debug!(
+                "Store of {length} bytes to 0x{address:x} failed: segfault! (pc = {program_counter}, cycle = {cycle})",
+                length = core::mem::size_of::<T>(),
+                program_counter = self.program_counter,
+                cycle = self.cycle_counter
+            );
+        }
+
+        self.segfault_impl(self.program_counter, page_address, is_write_protected)
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn jump_indirect_impl<const DEBUG: bool>(&mut self, program_counter: ProgramCounter, dynamic_address: u32) -> Option<Target> {
         if dynamic_address == VM_ADDR_RETURN_TO_HOST {
-            self.inner.program_counter = ProgramCounter(!0);
-            self.inner.program_counter_valid = false;
-            self.inner.next_program_counter = None;
-            self.inner.next_program_counter_changed = true;
-            self.inner.interrupt = InterruptKind::Finished;
+            self.program_counter = ProgramCounter(!0);
+            self.program_counter_valid = false;
+            self.next_program_counter = None;
+            self.next_program_counter_changed = true;
+            self.interrupt = InterruptKind::Finished;
             return None;
         }
 
-        let Some(target) = self.inner.module.jump_table().get_by_address(dynamic_address) else {
+        let Some(target) = self.module.jump_table().get_by_address(dynamic_address) else {
             if DEBUG {
                 log::trace!("Indirect jump to dynamic address {dynamic_address}: invalid (bad jump table index)");
             }
@@ -1595,7 +1836,7 @@ impl<'a> Visitor<'a> {
             return trap_impl::<DEBUG>(self, program_counter);
         };
 
-        if let Some(target) = self.inner.resolve_jump::<DEBUG>(target) {
+        if let Some(target) = self.resolve_jump::<DEBUG>(target) {
             if DEBUG {
                 log::trace!("Indirect jump to dynamic address {dynamic_address}: {target}");
             }
@@ -1612,16 +1853,26 @@ impl<'a> Visitor<'a> {
 }
 
 trait LoadTy {
+    type Slice: Default
+        + core::ops::Index<core::ops::Range<usize>, Output = [u8]>
+        + core::ops::IndexMut<core::ops::Range<usize>, Output = [u8]>
+        + core::ops::Index<core::ops::RangeFrom<usize>, Output = [u8]>
+        + core::ops::IndexMut<core::ops::RangeFrom<usize>, Output = [u8]>
+        + core::ops::Index<core::ops::RangeTo<usize>, Output = [u8]>
+        + core::ops::IndexMut<core::ops::RangeTo<usize>, Output = [u8]>
+        + core::convert::AsRef<[u8]>;
     fn from_slice(xs: &[u8]) -> u64;
 }
 
 impl LoadTy for u8 {
+    type Slice = [u8; 1];
     fn from_slice(xs: &[u8]) -> u64 {
         u64::from(xs[0])
     }
 }
 
 impl LoadTy for i8 {
+    type Slice = [u8; 1];
     fn from_slice(xs: &[u8]) -> u64 {
         let value = cast(xs[0]).to_signed();
         let value = cast(value).to_i64_sign_extend();
@@ -1630,12 +1881,14 @@ impl LoadTy for i8 {
 }
 
 impl LoadTy for u16 {
+    type Slice = [u8; 2];
     fn from_slice(xs: &[u8]) -> u64 {
         u64::from(u16::from_le_bytes([xs[0], xs[1]]))
     }
 }
 
 impl LoadTy for i16 {
+    type Slice = [u8; 2];
     fn from_slice(xs: &[u8]) -> u64 {
         let value = i16::from_le_bytes([xs[0], xs[1]]);
         let value = cast(value).to_i64_sign_extend();
@@ -1644,12 +1897,14 @@ impl LoadTy for i16 {
 }
 
 impl LoadTy for u32 {
+    type Slice = [u8; 4];
     fn from_slice(xs: &[u8]) -> u64 {
         u64::from(u32::from_le_bytes([xs[0], xs[1], xs[2], xs[3]]))
     }
 }
 
 impl LoadTy for i32 {
+    type Slice = [u8; 4];
     fn from_slice(xs: &[u8]) -> u64 {
         let value = i32::from_le_bytes([xs[0], xs[1], xs[2], xs[3]]);
         let value = cast(value).to_i64_sign_extend();
@@ -1658,6 +1913,7 @@ impl LoadTy for i32 {
 }
 
 impl LoadTy for u64 {
+    type Slice = [u8; 8];
     fn from_slice(xs: &[u8]) -> u64 {
         u64::from_le_bytes([xs[0], xs[1], xs[2], xs[3], xs[4], xs[5], xs[6], xs[7]])
     }
@@ -1713,7 +1969,7 @@ struct Args {
     a3: u32,
 }
 
-type Handler = for<'a, 'b> fn(visitor: &'a mut Visitor<'b>) -> Option<Target>;
+type Handler = for<'a> fn(visitor: &'a mut InterpretedInstance) -> Option<Target>;
 
 macro_rules! define_interpreter {
     (@define $handler_name:ident $body:block $self:ident) => {{
@@ -1736,7 +1992,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = args.a0;
         $body
     }};
@@ -1751,7 +2007,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = ProgramCounter(args.a0);
         $body
     }};
@@ -1767,7 +2023,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = ProgramCounter(args.a0);
         let $a1 = args.a1;
         $body
@@ -1784,7 +2040,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = ProgramCounter(args.a0);
         let $a1 = ProgramCounter(args.a1);
 
@@ -1803,7 +2059,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = ProgramCounter(args.a0);
         let $a1 = args.a1;
         let $a2 = args.a2;
@@ -1822,7 +2078,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = ProgramCounter(args.a0);
         let $a1 = transmute_reg(args.a1);
         let $a2 = args.a2;
@@ -1843,7 +2099,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = ProgramCounter(args.a0);
         let $a1 = transmute_reg(args.a1);
         let $a2 = args.a2;
@@ -1865,7 +2121,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = ProgramCounter(args.a0);
         let $a1 = transmute_reg(args.a1);
         let $a2 = transmute_reg(args.a2);
@@ -1887,7 +2143,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = ProgramCounter(args.a0);
         let $a1 = transmute_reg(args.a1 & 0b1111);
         let $a2 = transmute_reg(args.a1 >> 4);
@@ -1907,7 +2163,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = transmute_reg(args.a0);
         let $a1 = transmute_reg(args.a1);
         $body
@@ -1925,7 +2181,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = transmute_reg(args.a0);
         let $a1 = transmute_reg(args.a1);
         let $a2 = transmute_reg(args.a2);
@@ -1944,7 +2200,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = transmute_reg(args.a0);
         let $a1 = transmute_reg(args.a1);
         let $a2 = args.a2;
@@ -1962,7 +2218,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = transmute_reg(args.a0);
         let $a1 = args.a1;
         $body
@@ -1980,7 +2236,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = transmute_reg(args.a0);
         let $a1 = args.a1;
         let $a2 = args.a2;
@@ -1997,7 +2253,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = args.a0;
         $body
     }};
@@ -2014,7 +2270,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = transmute_reg(args.a0);
         let $a1 = args.a1;
         let $a2 = args.a2;
@@ -2033,7 +2289,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = transmute_reg(args.a0);
         let $a1 = transmute_reg(args.a1);
         let $a2 = args.a2;
@@ -2054,7 +2310,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = transmute_reg(args.a0);
         let $a1 = transmute_reg(args.a1);
         let $a2 = args.a2;
@@ -2076,7 +2332,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = transmute_reg(args.a0);
         let $a1 = args.a1;
         let $a2 = args.a2;
@@ -2096,7 +2352,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = transmute_reg(args.a0);
         let $a1 = transmute_reg(args.a1);
         let $a2 = ProgramCounter(args.a2);
@@ -2117,7 +2373,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = transmute_reg(args.a0);
         let $a1 = transmute_reg(args.a1);
         let $a2 = ProgramCounter(args.a2);
@@ -2139,7 +2395,7 @@ macro_rules! define_interpreter {
             }
         }
 
-        let args = $self.inner.compiled_args[cast($self.inner.compiled_offset).to_usize()];
+        let args = $self.compiled_args[cast($self.compiled_offset).to_usize()];
         let $a0 = transmute_reg(args.a0);
         let $a1 = args.a1;
         let $a2 = ProgramCounter(args.a2);
@@ -2152,13 +2408,13 @@ macro_rules! define_interpreter {
     };
 
     ($(
-        fn $handler_name:ident<$(const $const:ident: $const_ty:ty),+>($self:ident: &mut Visitor $($arg:tt)*) -> Option<Target> $body:block
+        fn $handler_name:ident<$(M: $M_ty:ident,)? $(const $const:ident: $const_ty:ty),+>($self:ident: &mut InterpretedInstance $($arg:tt)*) -> Option<Target> $body:block
     )+) => {
         mod raw_handlers {
             use super::*;
             $(
                 #[allow(clippy::needless_lifetimes)]
-                pub fn $handler_name<'a, 'b, $(const $const: $const_ty),+>($self: &'a mut Visitor<'b>) -> Option<Target> {
+                pub fn $handler_name<'a, $(M: $M_ty,)? $(const $const: $const_ty),+>($self: &'a mut InterpretedInstance) -> Option<Target> {
                     define_interpreter!(@define $handler_name $body $self $($arg)*)
                 }
             )+
@@ -2174,33 +2430,37 @@ fn transmute_reg(value: u32) -> Reg {
     unsafe { core::mem::transmute(value) }
 }
 
-fn trap_impl<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter) -> Option<Target> {
-    visitor.inner.program_counter = program_counter;
-    visitor.inner.program_counter_valid = true;
-    visitor.inner.next_program_counter = None;
-    visitor.inner.next_program_counter_changed = true;
-    visitor.inner.unresolved_program_counter = None;
-    visitor.inner.interrupt = InterruptKind::Trap;
+fn trap_impl<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter) -> Option<Target> {
+    visitor.program_counter = program_counter;
+    visitor.program_counter_valid = true;
+    visitor.next_program_counter = None;
+    visitor.next_program_counter_changed = true;
+    visitor.unresolved_program_counter = None;
+    visitor.interrupt = InterruptKind::Trap;
     None
 }
 
-fn not_enough_gas_impl<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, new_gas: i64) -> Option<Target> {
-    match visitor.inner.module.gas_metering().unwrap() {
+fn not_enough_gas_impl<const DEBUG: bool>(
+    visitor: &mut InterpretedInstance,
+    program_counter: ProgramCounter,
+    new_gas: i64,
+) -> Option<Target> {
+    match visitor.module.gas_metering().unwrap() {
         GasMeteringKind::Async => {
-            visitor.inner.gas = new_gas;
-            visitor.inner.program_counter_valid = false;
-            visitor.inner.next_program_counter = None;
-            visitor.inner.next_program_counter_changed = true;
+            visitor.gas = new_gas;
+            visitor.program_counter_valid = false;
+            visitor.next_program_counter = None;
+            visitor.next_program_counter_changed = true;
         }
         GasMeteringKind::Sync => {
-            visitor.inner.program_counter = program_counter;
-            visitor.inner.program_counter_valid = true;
-            visitor.inner.next_program_counter = Some(program_counter);
-            visitor.inner.next_program_counter_changed = false;
+            visitor.program_counter = program_counter;
+            visitor.program_counter_valid = true;
+            visitor.next_program_counter = Some(program_counter);
+            visitor.next_program_counter_changed = false;
         }
     }
 
-    visitor.inner.interrupt = InterruptKind::NotEnoughGas;
+    visitor.interrupt = InterruptKind::NotEnoughGas;
     None
 }
 
@@ -2210,150 +2470,150 @@ const TARGET_OUT_OF_RANGE: Target = 1;
 macro_rules! handle_unresolved_branch {
     ($debug:expr, $visitor:ident, $s1:ident, $s2:ident, $tt:ident, $tf:ident, $name:ident) => {{
         if DEBUG {
-            log::trace!("[{}]: jump {} if {} {} {}", $visitor.inner.compiled_offset, $tt, $s1, $debug, $s2);
+            log::trace!("[{}]: jump {} if {} {} {}", $visitor.compiled_offset, $tt, $s1, $debug, $s2);
         }
 
-        let offset = $visitor.inner.compiled_offset;
+        let offset = $visitor.compiled_offset;
 
-        let (target_true, is_tt_valid) = if let Some(target_true) = $visitor.inner.resolve_jump::<DEBUG>($tt) {
+        let (target_true, is_tt_valid) = if let Some(target_true) = $visitor.resolve_jump::<DEBUG>($tt) {
             (target_true, true)
         } else {
             ($tt.0, false)
         };
 
-        let (target_false, is_tf_valid) = if let Some(target_false) = $visitor.inner.resolve_jump::<DEBUG>($tf) {
+        let (target_false, is_tf_valid) = if let Some(target_false) = $visitor.resolve_jump::<DEBUG>($tf) {
             (target_false, true)
         } else {
             ($tf.0, false)
         };
 
         if is_tt_valid && is_tf_valid {
-            $visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG, true, true>);
+            $visitor.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG, true, true>);
         } else if is_tt_valid {
-            $visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG, true, false>);
+            $visitor.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG, true, false>);
         } else if is_tf_valid {
-            $visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG, false, true>);
+            $visitor.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG, false, true>);
         } else {
-            $visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG, false, false>);
+            $visitor.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG, false, false>);
         }
 
-        $visitor.inner.compiled_args[cast(offset).to_usize()] = Args::$name($s1, $s2, target_true, target_false);
+        $visitor.compiled_args[cast(offset).to_usize()] = Args::$name($s1, $s2, target_true, target_false);
         Some(offset)
     }};
 }
 
 define_interpreter! {
-    fn charge_gas<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, gas_cost: u32) -> Option<Target> {
-        let new_gas = visitor.inner.gas - i64::from(gas_cost);
+    fn charge_gas<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, gas_cost: u32) -> Option<Target> {
+        let new_gas = visitor.gas - i64::from(gas_cost);
 
         if DEBUG {
-            log::trace!("[{}]: charge_gas: {gas_cost} ({} -> {})", visitor.inner.compiled_offset, visitor.inner.gas, new_gas);
+            log::trace!("[{}]: charge_gas: {gas_cost} ({} -> {})", visitor.compiled_offset, visitor.gas, new_gas);
         }
 
         if new_gas < 0 {
             not_enough_gas_impl::<DEBUG>(visitor, program_counter, new_gas)
         } else {
-            visitor.inner.gas = new_gas;
+            visitor.gas = new_gas;
             visitor.go_to_next_instruction()
         }
     }
 
-    fn invalid_branch_target<const DEBUG: bool>(visitor: &mut Visitor) -> Option<Target> {
+    fn invalid_branch_target<const DEBUG: bool>(visitor: &mut InterpretedInstance) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: trap (invalid branch)", visitor.inner.compiled_offset);
+            log::trace!("[{}]: trap (invalid branch)", visitor.compiled_offset);
         }
 
-        let program_counter = visitor.inner.program_counter;
+        let program_counter = visitor.program_counter;
         trap_impl::<DEBUG>(visitor, program_counter)
     }
 
-    fn out_of_range<const DEBUG: bool>(visitor: &mut Visitor, gas: u32) -> Option<Target> {
+    fn out_of_range<const DEBUG: bool>(visitor: &mut InterpretedInstance, gas: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: trap (out of range)", visitor.inner.compiled_offset);
+            log::trace!("[{}]: trap (out of range)", visitor.compiled_offset);
         }
 
-        let program_counter = visitor.inner.unresolved_program_counter.unwrap_or(visitor.inner.program_counter);
+        let program_counter = visitor.unresolved_program_counter.unwrap_or(visitor.program_counter);
 
-        let new_gas = visitor.inner.gas - i64::from(gas);
+        let new_gas = visitor.gas - i64::from(gas);
         if new_gas < 0 {
             not_enough_gas_impl::<DEBUG>(visitor, program_counter, new_gas)
         } else {
             log::debug!("Trap at {}: out of range", program_counter);
 
-            visitor.inner.gas = new_gas;
+            visitor.gas = new_gas;
             trap_impl::<DEBUG>(visitor, program_counter)
         }
     }
 
-    fn step<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter) -> Option<Target> {
+    fn step<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: step", visitor.inner.compiled_offset);
+            log::trace!("[{}]: step", visitor.compiled_offset);
         }
 
-        visitor.inner.program_counter = program_counter;
-        visitor.inner.program_counter_valid = true;
-        visitor.inner.next_program_counter = Some(program_counter);
-        visitor.inner.next_program_counter_changed = false;
-        visitor.inner.interrupt = InterruptKind::Step;
-        visitor.inner.compiled_offset += 1;
+        visitor.program_counter = program_counter;
+        visitor.program_counter_valid = true;
+        visitor.next_program_counter = Some(program_counter);
+        visitor.next_program_counter_changed = false;
+        visitor.interrupt = InterruptKind::Step;
+        visitor.compiled_offset += 1;
         None
     }
 
-    fn step_out_of_range<const DEBUG: bool>(visitor: &mut Visitor) -> Option<Target> {
+    fn step_out_of_range<const DEBUG: bool>(visitor: &mut InterpretedInstance) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: step (out of range)", visitor.inner.compiled_offset);
+            log::trace!("[{}]: step (out of range)", visitor.compiled_offset);
         }
 
-        let program_counter = visitor.inner.unresolved_program_counter.unwrap_or(visitor.inner.program_counter);
+        let program_counter = visitor.unresolved_program_counter.unwrap_or(visitor.program_counter);
 
-        visitor.inner.program_counter = program_counter;
-        visitor.inner.program_counter_valid = true;
-        visitor.inner.next_program_counter = Some(program_counter);
-        visitor.inner.next_program_counter_changed = false;
-        visitor.inner.interrupt = InterruptKind::Step;
-        visitor.inner.compiled_offset += 1;
+        visitor.program_counter = program_counter;
+        visitor.program_counter_valid = true;
+        visitor.next_program_counter = Some(program_counter);
+        visitor.next_program_counter_changed = false;
+        visitor.interrupt = InterruptKind::Step;
+        visitor.compiled_offset += 1;
         None
     }
 
-    fn reset_cache<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter) -> Option<Target> {
+    fn reset_cache<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: reset_cache", visitor.inner.compiled_offset);
+            log::trace!("[{}]: reset_cache", visitor.compiled_offset);
         }
 
-        visitor.inner.reset_interpreter_cache();
-        visitor.inner.compile_block::<DEBUG>(program_counter)
+        visitor.reset_interpreter_cache();
+        visitor.compile_block::<DEBUG>(program_counter)
     }
 
-    fn fallthrough<const DEBUG: bool>(visitor: &mut Visitor) -> Option<Target> {
+    fn fallthrough<const DEBUG: bool>(visitor: &mut InterpretedInstance) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: fallthrough", visitor.inner.compiled_offset);
+            log::trace!("[{}]: fallthrough", visitor.compiled_offset);
         }
 
         visitor.go_to_next_instruction()
     }
 
-    fn trap<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter) -> Option<Target> {
+    fn trap<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: trap", visitor.inner.compiled_offset);
+            log::trace!("[{}]: trap", visitor.compiled_offset);
         }
 
         log::debug!("Trap at {}: explicit trap", program_counter);
         trap_impl::<DEBUG>(visitor, program_counter)
     }
 
-    fn sbrk<const DEBUG: bool>(visitor: &mut Visitor, dst: Reg, size: Reg) -> Option<Target> {
+    fn sbrk<const DEBUG: bool>(visitor: &mut InterpretedInstance, dst: Reg, size: Reg) -> Option<Target> {
         let size = visitor.get64::<DEBUG>(size);
-        let result = size.try_into().ok().and_then(|size| visitor.inner.sbrk(size)).unwrap_or(0);
+        let result = size.try_into().ok().and_then(|size| visitor.sbrk(size)).unwrap_or(0);
         visitor.set64::<DEBUG>(dst, u64::from(result));
         visitor.go_to_next_instruction()
     }
 
-    fn memset<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter) -> Option<Target> {
+    fn memset<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: memset", visitor.inner.compiled_offset);
+            log::trace!("[{}]: memset", visitor.compiled_offset);
         }
 
-        let gas_metering_enabled = visitor.inner.module.gas_metering().is_some();
+        let gas_metering_enabled = visitor.module.gas_metering().is_some();
 
         // TODO: This is very inefficient.
         let next_instruction = visitor.go_to_next_instruction();
@@ -2363,22 +2623,18 @@ define_interpreter! {
         let mut dst = visitor.get32::<DEBUG>(Reg::A0);
         let mut count = visitor.get64::<DEBUG>(Reg::A2);
         while count > 0 {
-            if gas_metering_enabled && visitor.inner.gas == 0 {
+            if gas_metering_enabled && visitor.gas == 0 {
                 result = not_enough_gas_impl::<DEBUG>(visitor, program_counter, 0);
                 break;
             }
 
-            if visitor.inner.module.is_dynamic_paging() {
-                result = visitor.store::<u8, DEBUG, true>(program_counter, value, None, dst);
-            } else {
-                result = visitor.store::<u8, DEBUG, false>(program_counter, value, None, dst);
-            }
+            result = visitor.store::<M, u8, DEBUG>(program_counter, value, None, dst);
             if result != next_instruction {
                 break;
             }
 
             if gas_metering_enabled {
-                visitor.inner.gas -= 1;
+                visitor.gas -= 1;
             }
 
             dst += 1;
@@ -2391,620 +2647,620 @@ define_interpreter! {
         result
     }
 
-    fn ecalli<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, hostcall_number: u32) -> Option<Target> {
+    fn ecalli<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, hostcall_number: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: ecalli {hostcall_number}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: ecalli {hostcall_number}", visitor.compiled_offset);
         }
 
-        let next_offset = visitor.inner.module.instructions_bounded_at(program_counter).next().unwrap().next_offset;
-        visitor.inner.program_counter = program_counter;
-        visitor.inner.program_counter_valid = true;
-        visitor.inner.next_program_counter = Some(next_offset);
-        visitor.inner.next_program_counter_changed = true;
-        visitor.inner.interrupt = InterruptKind::Ecalli(hostcall_number);
+        let next_offset = visitor.module.instructions_bounded_at(program_counter).next().unwrap().next_offset;
+        visitor.program_counter = program_counter;
+        visitor.program_counter_valid = true;
+        visitor.next_program_counter = Some(next_offset);
+        visitor.next_program_counter_changed = true;
+        visitor.interrupt = InterruptKind::Ecalli(hostcall_number);
         None
     }
 
-    fn set_less_than_unsigned<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn set_less_than_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::set_less_than_unsigned(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::set_less_than_unsigned(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::from(s1 < s2))
     }
 
-    fn set_less_than_signed<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn set_less_than_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::set_less_than_signed(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::set_less_than_signed(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::from(cast(s1).to_signed() < cast(s2).to_signed()))
     }
 
-    fn shift_logical_right_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn shift_logical_right_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_logical_right_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_right_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_shr)
     }
 
-    fn shift_logical_right_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn shift_logical_right_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_logical_right_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_right_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::wrapping_shr(s1, cast(s2).truncate_to_u32()))
     }
 
-    fn shift_arithmetic_right_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn shift_arithmetic_right_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_arithmetic_right_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_arithmetic_right_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().wrapping_shr(s2)).to_unsigned())
     }
 
-    fn shift_arithmetic_right_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn shift_arithmetic_right_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_arithmetic_right_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_arithmetic_right_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().wrapping_shr(cast(s2).truncate_to_u32())).to_unsigned())
     }
 
-    fn shift_logical_left_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn shift_logical_left_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_logical_left_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_left_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_shl)
     }
 
-    fn shift_logical_left_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn shift_logical_left_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_logical_left_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_left_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::wrapping_shl(s1, cast(s2).truncate_to_u32()))
     }
 
-    fn xor<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn xor<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::xor(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::xor(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1 ^ s2)
     }
 
-    fn and<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn and<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::and(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::and(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1 & s2)
     }
 
-    fn or<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn or<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::or(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::or(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1 | s2)
     }
 
-    fn add_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn add_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::add_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::add_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_add)
     }
 
-    fn add_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn add_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::add_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::add_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, u64::wrapping_add)
     }
 
-    fn sub_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn sub_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sub_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::sub_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_sub)
     }
 
-    fn sub_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn sub_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sub_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::sub_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, u64::wrapping_sub)
     }
 
-    fn negate_and_add_imm_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn negate_and_add_imm_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::negate_and_add_imm_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::negate_and_add_imm_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| s2.wrapping_sub(s1))
     }
 
-    fn negate_and_add_imm_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn negate_and_add_imm_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::negate_and_add_imm_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::negate_and_add_imm_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s2.wrapping_sub(s1))
     }
 
-    fn mul_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn mul_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::mul_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_mul)
     }
 
-    fn mul_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn mul_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::mul_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, u64::wrapping_mul)
     }
 
-    fn mul_imm_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn mul_imm_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::mul_imm_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_imm_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_mul)
     }
 
-    fn mul_imm_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn mul_imm_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::mul_imm_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_imm_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, u64::wrapping_mul)
     }
 
-    fn mul_upper_signed_signed_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn mul_upper_signed_signed_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::mul_upper_signed_signed(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_upper_signed_signed(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(mulh(cast(s1).to_signed(), cast(s2).to_signed())).to_unsigned())
     }
 
-    fn mul_upper_signed_signed_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn mul_upper_signed_signed_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::mul_upper_signed_signed(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_upper_signed_signed(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(mulh64(cast(s1).to_signed(), cast(s2).to_signed())).to_unsigned())
     }
 
-    fn mul_upper_unsigned_unsigned_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn mul_upper_unsigned_unsigned_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::mul_upper_unsigned_unsigned(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_upper_unsigned_unsigned(d, s1, s2));
         }
 
 
         visitor.set3_32::<DEBUG>(d, s1, s2, mulhu)
     }
 
-    fn mul_upper_unsigned_unsigned_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn mul_upper_unsigned_unsigned_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::mul_upper_unsigned_unsigned(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_upper_unsigned_unsigned(d, s1, s2));
         }
 
 
         visitor.set3_64::<DEBUG>(d, s1, s2, mulhu64)
     }
 
-    fn mul_upper_signed_unsigned_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn mul_upper_signed_unsigned_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::mul_upper_signed_unsigned(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_upper_signed_unsigned(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(mulhsu(cast(s1).to_signed(), s2)).to_unsigned())
     }
 
-    fn mul_upper_signed_unsigned_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn mul_upper_signed_unsigned_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::mul_upper_signed_unsigned(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_upper_signed_unsigned(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(mulhsu64(cast(s1).to_signed(), s2)).to_unsigned())
     }
 
-    fn div_unsigned_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn div_unsigned_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::div_unsigned_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::div_unsigned_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, divu)
     }
 
-    fn div_unsigned_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn div_unsigned_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::div_unsigned_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::div_unsigned_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, divu64)
     }
 
-    fn div_signed_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn div_signed_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::div_signed_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::div_signed_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(div(cast(s1).to_signed(), cast(s2).to_signed())).to_unsigned())
     }
 
-    fn div_signed_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn div_signed_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::div_signed_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::div_signed_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(div64(cast(s1).to_signed(), cast(s2).to_signed())).to_unsigned())
     }
 
-    fn rem_unsigned_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn rem_unsigned_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rem_unsigned_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rem_unsigned_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, remu)
     }
 
-    fn rem_unsigned_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn rem_unsigned_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rem_unsigned_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rem_unsigned_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, remu64)
     }
 
-    fn rem_signed_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn rem_signed_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rem_signed_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rem_signed_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(rem(cast(s1).to_signed(), cast(s2).to_signed())).to_unsigned())
     }
 
-    fn rem_signed_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn rem_signed_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rem_signed_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rem_signed_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(rem64(cast(s1).to_signed(), cast(s2).to_signed())).to_unsigned())
     }
 
-    fn and_inverted_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn and_inverted_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::and_inverted(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::and_inverted(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| (s1 & !s2))
     }
 
-    fn and_inverted_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn and_inverted_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::and_inverted(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::and_inverted(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| (s1 & !s2))
     }
 
-    fn or_inverted_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn or_inverted_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::or_inverted(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::or_inverted(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| (s1 | !s2))
     }
 
-    fn or_inverted_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn or_inverted_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::or_inverted(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::or_inverted(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| (s1 | !s2))
     }
 
-    fn xnor_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn xnor_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::xnor(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::xnor(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| !(s1 ^ s2))
     }
 
-    fn xnor_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn xnor_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::xnor(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::xnor(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| !(s1 ^ s2))
     }
 
-    fn maximum_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn maximum_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::maximum(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::maximum(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().max(cast(s2).to_signed())).to_unsigned())
     }
 
-    fn maximum_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn maximum_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::maximum(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::maximum(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().max(cast(s2).to_signed())).to_unsigned())
     }
 
-    fn maximum_unsigned_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn maximum_unsigned_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::maximum_unsigned(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::maximum_unsigned(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| s1.max(s2))
     }
 
-    fn maximum_unsigned_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn maximum_unsigned_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::maximum_unsigned(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::maximum_unsigned(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1.max(s2))
     }
 
-    fn minimum_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn minimum_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::minimum(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::minimum(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().min(cast(s2).to_signed())).to_unsigned())
     }
 
-    fn minimum_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn minimum_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::minimum(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::minimum(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().min(cast(s2).to_signed())).to_unsigned())
     }
 
-    fn minimum_unsigned_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn minimum_unsigned_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::minimum_unsigned(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::minimum_unsigned(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| s1.min(s2))
     }
 
-    fn minimum_unsigned_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn minimum_unsigned_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::minimum_unsigned(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::minimum_unsigned(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1.min(s2))
     }
 
-    fn rotate_left_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn rotate_left_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_left_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_left_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_left)
     }
 
-    fn rotate_left_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn rotate_left_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_left_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_left_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::rotate_left(s1, cast(s2).truncate_to_u32()))
     }
 
-    fn rotate_right_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn rotate_right_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_right_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
     }
 
-    fn rotate_right_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
+    fn rotate_right_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_right_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::rotate_right(s1, cast(s2).truncate_to_u32()))
     }
 
-    fn set_less_than_unsigned_imm<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn set_less_than_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::set_less_than_unsigned_imm(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::set_less_than_unsigned_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::from(s1 < s2))
     }
 
-    fn set_greater_than_unsigned_imm<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn set_greater_than_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::set_greater_than_unsigned_imm(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::set_greater_than_unsigned_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::from(s1 > s2))
     }
 
-    fn set_less_than_signed_imm<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn set_less_than_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::set_less_than_signed_imm(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::set_less_than_signed_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::from(cast(s1).to_signed() < cast(s2).to_signed()))
     }
 
-    fn set_greater_than_signed_imm<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn set_greater_than_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::set_greater_than_signed_imm(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::set_greater_than_signed_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::from(cast(s1).to_signed() > cast(s2).to_signed()))
     }
 
-    fn shift_logical_right_imm_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn shift_logical_right_imm_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_logical_right_imm_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_right_imm_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_shr)
     }
 
-    fn shift_logical_right_imm_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn shift_logical_right_imm_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_logical_right_imm_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_right_imm_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::wrapping_shr(s1, cast(s2).truncate_to_u32()))
     }
 
-    fn shift_logical_right_imm_alt_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
+    fn shift_logical_right_imm_alt_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_logical_right_imm_alt_32(d, s2, s1));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_right_imm_alt_32(d, s2, s1));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_shr)
     }
 
-    fn shift_logical_right_imm_alt_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
+    fn shift_logical_right_imm_alt_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_logical_right_imm_alt_64(d, s2, s1));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_right_imm_alt_64(d, s2, s1));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::wrapping_shr(s1, cast(s2).truncate_to_u32()))
     }
 
-    fn shift_arithmetic_right_imm_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn shift_arithmetic_right_imm_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_arithmetic_right_imm_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_arithmetic_right_imm_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(i32::wrapping_shr(cast(s1).to_signed(), s2)).to_unsigned())
     }
 
-    fn shift_arithmetic_right_imm_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn shift_arithmetic_right_imm_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_arithmetic_right_imm_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_arithmetic_right_imm_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(i64::wrapping_shr(cast(s1).to_signed(), cast(s2).truncate_to_u32())).to_unsigned())
     }
 
-    fn shift_arithmetic_right_imm_alt_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
+    fn shift_arithmetic_right_imm_alt_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_arithmetic_right_imm_alt_32(d, s2, s1));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_arithmetic_right_imm_alt_32(d, s2, s1));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(i32::wrapping_shr(cast(s1).to_signed(), s2)).to_unsigned())
     }
 
-    fn shift_arithmetic_right_imm_alt_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
+    fn shift_arithmetic_right_imm_alt_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_arithmetic_right_imm_alt_64(d, s2, s1));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_arithmetic_right_imm_alt_64(d, s2, s1));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(i64::wrapping_shr(cast(s1).to_signed(), cast(s2).truncate_to_u32())).to_unsigned())
     }
 
-    fn shift_logical_left_imm_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn shift_logical_left_imm_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_logical_left_imm_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_left_imm_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_shl)
     }
 
-    fn shift_logical_left_imm_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn shift_logical_left_imm_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_logical_left_imm_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_left_imm_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::wrapping_shl(s1, cast(s2).truncate_to_u32()))
     }
 
-    fn shift_logical_left_imm_alt_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
+    fn shift_logical_left_imm_alt_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_logical_left_imm_alt_32(d, s2, s1));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_left_imm_alt_32(d, s2, s1));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_shl)
     }
 
-    fn shift_logical_left_imm_alt_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
+    fn shift_logical_left_imm_alt_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::shift_logical_left_imm_alt_64(d, s2, s1));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_left_imm_alt_64(d, s2, s1));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::wrapping_shl(s1, cast(s2).truncate_to_u32()))
     }
 
-    fn or_imm<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn or_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::or_imm(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::or_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1 | s2)
     }
 
-    fn and_imm<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn and_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::and_imm(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::and_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1 & s2)
     }
 
-    fn xor_imm<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn xor_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::xor_imm(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::xor_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1 ^ s2)
     }
 
-    fn load_imm<const DEBUG: bool>(visitor: &mut Visitor, dst: Reg, imm: u32) -> Option<Target> {
+    fn load_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, dst: Reg, imm: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_imm(dst, imm));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_imm(dst, imm));
         }
 
         visitor.set32::<DEBUG>(dst, imm);
         visitor.go_to_next_instruction()
     }
 
-    fn load_imm64<const DEBUG: bool>(visitor: &mut Visitor, dst: Reg, imm_lo: u32, imm_hi: u32) -> Option<Target> {
+    fn load_imm64<const DEBUG: bool>(visitor: &mut InterpretedInstance, dst: Reg, imm_lo: u32, imm_hi: u32) -> Option<Target> {
         let imm = cast(imm_lo).to_u64() | (cast(imm_hi).to_u64() << 32);
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_imm64(dst, imm));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_imm64(dst, imm));
         }
 
         visitor.set64::<DEBUG>(dst, imm);
         visitor.go_to_next_instruction()
     }
 
-    fn move_reg<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn move_reg<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::move_reg(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::move_reg(d, s));
         }
 
         let imm = visitor.get64::<DEBUG>(s);
@@ -3012,63 +3268,63 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn count_leading_zero_bits_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn count_leading_zero_bits_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_leading_zero_bits_32(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::count_leading_zero_bits_32(d, s));
         }
 
         visitor.set32::<DEBUG>(d, u32::leading_zeros(visitor.get32::<DEBUG>(s)));
         visitor.go_to_next_instruction()
     }
 
-    fn count_leading_zero_bits_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn count_leading_zero_bits_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_leading_zero_bits_64(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::count_leading_zero_bits_64(d, s));
         }
 
         visitor.set64::<DEBUG>(d, cast(u64::leading_zeros(visitor.get64::<DEBUG>(s))).to_u64());
         visitor.go_to_next_instruction()
     }
 
-    fn count_trailing_zero_bits_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn count_trailing_zero_bits_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_trailing_zero_bits_32(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::count_trailing_zero_bits_32(d, s));
         }
 
         visitor.set32::<DEBUG>(d, u32::trailing_zeros(visitor.get32::<DEBUG>(s)));
         visitor.go_to_next_instruction()
     }
 
-    fn count_trailing_zero_bits_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn count_trailing_zero_bits_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_trailing_zero_bits_64(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::count_trailing_zero_bits_64(d, s));
         }
 
         visitor.set64::<DEBUG>(d, cast(u64::trailing_zeros(visitor.get64::<DEBUG>(s))).to_u64());
         visitor.go_to_next_instruction()
     }
 
-    fn count_set_bits_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn count_set_bits_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_set_bits_32(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::count_set_bits_32(d, s));
         }
 
         visitor.set32::<DEBUG>(d, u32::count_ones(visitor.get32::<DEBUG>(s)));
         visitor.go_to_next_instruction()
     }
 
-    fn count_set_bits_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn count_set_bits_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::count_set_bits_64(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::count_set_bits_64(d, s));
         }
 
         visitor.set64::<DEBUG>(d, cast(u64::count_ones(visitor.get64::<DEBUG>(s))).to_u64());
         visitor.go_to_next_instruction()
     }
 
-    fn sign_extend_8_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn sign_extend_8_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_8(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::sign_extend_8(d, s));
         }
 
         let byte = cast(cast(visitor.get32::<DEBUG>(s)).truncate_to_u8()).to_signed();
@@ -3076,9 +3332,9 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn sign_extend_8_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn sign_extend_8_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_8(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::sign_extend_8(d, s));
         }
 
         let byte = cast(cast(visitor.get64::<DEBUG>(s)).truncate_to_u8()).to_signed();
@@ -3086,9 +3342,9 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn sign_extend_16_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn sign_extend_16_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_16(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::sign_extend_16(d, s));
         }
 
         let hword = cast(cast(visitor.get32::<DEBUG>(s)).truncate_to_u16()).to_signed();
@@ -3096,9 +3352,9 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn sign_extend_16_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn sign_extend_16_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::sign_extend_16(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::sign_extend_16(d, s));
         }
 
         let hword = cast(cast(visitor.get64::<DEBUG>(s)).truncate_to_u16()).to_signed();
@@ -3106,9 +3362,9 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn zero_extend_16_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn zero_extend_16_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::zero_extend_16(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::zero_extend_16(d, s));
         }
 
         let hword = cast(visitor.get32::<DEBUG>(s)).truncate_to_u16();
@@ -3116,9 +3372,9 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn zero_extend_16_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn zero_extend_16_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::zero_extend_16(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::zero_extend_16(d, s));
         }
 
         let hword = cast(visitor.get64::<DEBUG>(s)).truncate_to_u16();
@@ -3126,27 +3382,27 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn reverse_byte_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn reverse_byte_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::reverse_byte(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::reverse_byte(d, s));
         }
 
         visitor.set32::<DEBUG>(d, u32::swap_bytes(visitor.get32::<DEBUG>(s)));
         visitor.go_to_next_instruction()
     }
 
-    fn reverse_byte_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg) -> Option<Target> {
+    fn reverse_byte_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::reverse_byte(d, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::reverse_byte(d, s));
         }
 
         visitor.set64::<DEBUG>(d, u64::swap_bytes(visitor.get64::<DEBUG>(s)));
         visitor.go_to_next_instruction()
     }
 
-    fn cmov_if_zero<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg, c: Reg) -> Option<Target> {
+    fn cmov_if_zero<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg, c: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::cmov_if_zero(d, s, c));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::cmov_if_zero(d, s, c));
         }
 
         if visitor.get64::<DEBUG>(c) == 0 {
@@ -3157,9 +3413,9 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn cmov_if_zero_imm<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, c: Reg, s: u32) -> Option<Target> {
+    fn cmov_if_zero_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, c: Reg, s: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::cmov_if_zero_imm(d, c, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::cmov_if_zero_imm(d, c, s));
         }
 
         if visitor.get64::<DEBUG>(c) == 0 {
@@ -3169,9 +3425,9 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn cmov_if_not_zero<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s: Reg, c: Reg) -> Option<Target> {
+    fn cmov_if_not_zero<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg, c: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::cmov_if_not_zero(d, s, c));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::cmov_if_not_zero(d, s, c));
         }
 
         if visitor.get64::<DEBUG>(c) != 0 {
@@ -3182,9 +3438,9 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn cmov_if_not_zero_imm<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, c: Reg, s: u32) -> Option<Target> {
+    fn cmov_if_not_zero_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, c: Reg, s: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::cmov_if_not_zero_imm(d, c, s));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::cmov_if_not_zero_imm(d, c, s));
         }
 
         if visitor.get64::<DEBUG>(c) != 0 {
@@ -3194,682 +3450,442 @@ define_interpreter! {
         visitor.go_to_next_instruction()
     }
 
-    fn rotate_right_imm_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn rotate_right_imm_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_imm_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_right_imm_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
     }
 
-    fn rotate_right_imm_alt_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn rotate_right_imm_alt_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_imm_alt_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_right_imm_alt_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s2, s1, u32::rotate_right)
     }
 
-    fn rotate_right_imm_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn rotate_right_imm_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_imm_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_right_imm_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::rotate_right(s1, cast(s2).truncate_to_u32()))
     }
 
-    fn rotate_right_imm_alt_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn rotate_right_imm_alt_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::rotate_right_imm_alt_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_right_imm_alt_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s2, s1, |s2, s1| u64::rotate_right(s2, cast(s1).truncate_to_u32()))
     }
 
-    fn add_imm_32<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn add_imm_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::add_imm_32(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::add_imm_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_add)
     }
 
-    fn add_imm_64<const DEBUG: bool>(visitor: &mut Visitor, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
+    fn add_imm_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::add_imm_64(d, s1, s2));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::add_imm_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, u64::wrapping_add)
     }
 
-    fn store_imm_u8_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
+    fn store_imm_u8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_u8(offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_u8(offset, value));
         }
 
-        visitor.store::<u8, DEBUG, false>(program_counter, value, None, offset)
+        visitor.store::<M, u8, DEBUG>(program_counter, value, None, offset)
     }
 
-    fn store_imm_u8_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
+    fn store_imm_u16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_u8(offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_u16(offset, value));
         }
 
-        visitor.store::<u8, DEBUG, true>(program_counter, value, None, offset)
+        visitor.store::<M, u16, DEBUG>(program_counter, value, None, offset)
     }
 
-    fn store_imm_u16_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
+    fn store_imm_u32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_u16(offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_u32(offset, value));
         }
 
-        visitor.store::<u16, DEBUG, false>(program_counter, value, None, offset)
+        visitor.store::<M, u32, DEBUG>(program_counter, value, None, offset)
     }
 
-    fn store_imm_u16_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
+    fn store_imm_u64<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_u16(offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_u64(offset, value));
         }
 
-        visitor.store::<u16, DEBUG, true>(program_counter, value, None, offset)
+        visitor.store::<M, u64, DEBUG>(program_counter, value, None, offset)
     }
 
-    fn store_imm_u32_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
+    fn store_imm_indirect_u8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_u32(offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_indirect_u8(base, offset, value));
         }
 
-        visitor.store::<u32, DEBUG, false>(program_counter, value, None, offset)
+        visitor.store::<M, u8, DEBUG>(program_counter, value, Some(base), offset)
     }
 
-    fn store_imm_u32_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
+    fn store_imm_indirect_u16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_u32(offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_indirect_u16(base, offset, value));
         }
 
-        visitor.store::<u32, DEBUG, true>(program_counter, value, None, offset)
+        visitor.store::<M, u16, DEBUG>(program_counter, value, Some(base), offset)
     }
 
-    fn store_imm_u64_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
+    fn store_imm_indirect_u32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_u64(offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_indirect_u32(base, offset, value));
         }
 
-        visitor.store::<u64, DEBUG, false>(program_counter, value, None, offset)
+        visitor.store::<M, u32, DEBUG>(program_counter, value, Some(base), offset)
     }
 
-    fn store_imm_u64_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
+    fn store_imm_indirect_u64<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_u64(offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_indirect_u64(base, offset, value));
         }
 
-        visitor.store::<u64, DEBUG, true>(program_counter, value, None, offset)
+        visitor.store::<M, u64, DEBUG>(program_counter, value, Some(base), offset)
     }
 
-    fn store_imm_indirect_u8_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
+    fn store_indirect_u8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_indirect_u8(base, offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_indirect_u8(src, base, offset));
         }
 
-        visitor.store::<u8, DEBUG, false>(program_counter, value, Some(base), offset)
+        visitor.store::<M, u8, DEBUG>(program_counter, src, Some(base), offset)
     }
 
-    fn store_imm_indirect_u8_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
+    fn store_indirect_u16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_indirect_u8(base, offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_indirect_u16(src, base, offset));
         }
 
-        visitor.store::<u8, DEBUG, true>(program_counter, value, Some(base), offset)
+        visitor.store::<M, u16, DEBUG>(program_counter, src, Some(base), offset)
     }
 
-    fn store_imm_indirect_u16_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
+    fn store_indirect_u32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_indirect_u16(base, offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_indirect_u32(src, base, offset));
         }
 
-        visitor.store::<u16, DEBUG, false>(program_counter, value, Some(base), offset)
+        visitor.store::<M, u32, DEBUG>(program_counter, src, Some(base), offset)
     }
 
-    fn store_imm_indirect_u16_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
+    fn store_indirect_u64<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_indirect_u16(base, offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_indirect_u64(src, base, offset));
         }
 
-        visitor.store::<u16, DEBUG, true>(program_counter, value, Some(base), offset)
+        visitor.store::<M, u64, DEBUG>(program_counter, src, Some(base), offset)
     }
 
-    fn store_imm_indirect_u32_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
+    fn store_u8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_indirect_u32(base, offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_u8(src, offset));
         }
 
-        visitor.store::<u32, DEBUG, false>(program_counter, value, Some(base), offset)
+        visitor.store::<M, u8, DEBUG>(program_counter, src, None, offset)
     }
 
-    fn store_imm_indirect_u32_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
+    fn store_u16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_indirect_u32(base, offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_u16(src, offset));
         }
 
-        visitor.store::<u32, DEBUG, true>(program_counter, value, Some(base), offset)
+        visitor.store::<M, u16, DEBUG>(program_counter, src, None, offset)
     }
 
-    fn store_imm_indirect_u64_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
+    fn store_u32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_indirect_u64(base, offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_u32(src, offset));
         }
 
-        visitor.store::<u64, DEBUG, false>(program_counter, value, Some(base), offset)
+        visitor.store::<M, u32, DEBUG>(program_counter, src, None, offset)
     }
 
-    fn store_imm_indirect_u64_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
+    fn store_u64<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_imm_indirect_u64(base, offset, value));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_u64(src, offset));
         }
 
-        visitor.store::<u64, DEBUG, true>(program_counter, value, Some(base), offset)
+        visitor.store::<M, u64, DEBUG>(program_counter, src, None, offset)
     }
 
-    fn store_indirect_u8_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
+    fn load_u8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_indirect_u8(src, base, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_u8(dst, offset));
         }
 
-        visitor.store::<u8, DEBUG, false>(program_counter, src, Some(base), offset)
+        visitor.load::<M, u8, DEBUG>(program_counter, dst, None, offset)
     }
 
-    fn store_indirect_u8_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
+    fn load_i8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_indirect_u8(src, base, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_i8(dst, offset));
         }
 
-        visitor.store::<u8, DEBUG, true>(program_counter, src, Some(base), offset)
+        visitor.load::<M, i8, DEBUG>(program_counter, dst, None, offset)
     }
 
-    fn store_indirect_u16_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
+    fn load_u16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_indirect_u16(src, base, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_u16(dst, offset));
         }
 
-        visitor.store::<u16, DEBUG, false>(program_counter, src, Some(base), offset)
+        visitor.load::<M, u16, DEBUG>(program_counter, dst, None, offset)
     }
 
-    fn store_indirect_u16_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
+    fn load_i16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_indirect_u16(src, base, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_i16(dst, offset));
         }
 
-        visitor.store::<u16, DEBUG, true>(program_counter, src, Some(base), offset)
+        visitor.load::<M, i16, DEBUG>(program_counter, dst, None, offset)
     }
 
-    fn store_indirect_u32_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
+    fn load_u32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_indirect_u32(src, base, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_u32(dst, offset));
         }
 
-        visitor.store::<u32, DEBUG, false>(program_counter, src, Some(base), offset)
+        visitor.load::<M, u32, DEBUG>(program_counter, dst, None, offset)
     }
 
-    fn store_indirect_u32_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
+    fn load_i32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_indirect_u32(src, base, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_i32(dst, offset));
         }
 
-        visitor.store::<u32, DEBUG, true>(program_counter, src, Some(base), offset)
+        visitor.load::<M, i32, DEBUG>(program_counter, dst, None, offset)
     }
 
-    fn store_indirect_u64_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
+    fn load_u64<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_indirect_u64(src, base, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_u64(dst, offset));
         }
 
-        visitor.store::<u64, DEBUG, false>(program_counter, src, Some(base), offset)
+        visitor.load::<M, u64, DEBUG>(program_counter, dst, None, offset)
     }
 
-    fn store_indirect_u64_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
+    fn load_indirect_u8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_indirect_u64(src, base, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_indirect_u8(dst, base, offset));
         }
 
-        visitor.store::<u64, DEBUG, true>(program_counter, src, Some(base), offset)
+        visitor.load::<M, u8, DEBUG>(program_counter, dst, Some(base), offset)
     }
 
-    fn store_u8_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
+    fn load_indirect_i8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_u8(src, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_indirect_i8(dst, base, offset));
         }
 
-        visitor.store::<u8, DEBUG, false>(program_counter, src, None, offset)
+        visitor.load::<M, i8, DEBUG>(program_counter, dst, Some(base), offset)
     }
 
-    fn store_u8_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
+    fn load_indirect_u16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_u8(src, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_indirect_u16(dst, base, offset));
         }
 
-        visitor.store::<u8, DEBUG, true>(program_counter, src, None, offset)
+        visitor.load::<M, u16, DEBUG>(program_counter, dst, Some(base), offset)
     }
 
-    fn store_u16_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
+    fn load_indirect_i16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_u16(src, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_indirect_i16(dst, base, offset));
         }
 
-        visitor.store::<u16, DEBUG, false>(program_counter, src, None, offset)
+        visitor.load::<M, i16, DEBUG>(program_counter, dst, Some(base), offset)
     }
 
-    fn store_u16_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
+    fn load_indirect_u32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_u16(src, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_indirect_u32(dst, base, offset));
         }
 
-        visitor.store::<u16, DEBUG, true>(program_counter, src, None, offset)
+        visitor.load::<M, u32, DEBUG>(program_counter, dst, Some(base), offset)
     }
 
-    fn store_u32_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
+    fn load_indirect_i32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_u32(src, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_indirect_i32(dst, base, offset));
         }
 
-        visitor.store::<u32, DEBUG, false>(program_counter, src, None, offset)
+        visitor.load::<M, i32, DEBUG>(program_counter, dst, Some(base), offset)
     }
 
-    fn store_u32_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
+    fn load_indirect_u64<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_u32(src, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_indirect_u64(dst, base, offset));
         }
 
-        visitor.store::<u32, DEBUG, true>(program_counter, src, None, offset)
+        visitor.load::<M, u64, DEBUG>(program_counter, dst, Some(base), offset)
     }
 
-    fn store_u64_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
+    fn branch_less_unsigned<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_u64(src, offset));
-        }
-
-        visitor.store::<u64, DEBUG, false>(program_counter, src, None, offset)
-    }
-
-    fn store_u64_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::store_u64(src, offset));
-        }
-
-        visitor.store::<u64, DEBUG, true>(program_counter, src, None, offset)
-    }
-
-    fn load_u8_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_u8(dst, offset));
-        }
-
-        visitor.load::<u8, DEBUG, false>(program_counter, dst, None, offset)
-    }
-
-    fn load_u8_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_u8(dst, offset));
-        }
-
-        visitor.load::<u8, DEBUG, true>(program_counter, dst, None, offset)
-    }
-
-    fn load_i8_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_i8(dst, offset));
-        }
-
-        visitor.load::<i8, DEBUG, false>(program_counter, dst, None, offset)
-    }
-
-    fn load_i8_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_i8(dst, offset));
-        }
-
-        visitor.load::<i8, DEBUG, true>(program_counter, dst, None, offset)
-    }
-
-    fn load_u16_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_u16(dst, offset));
-        }
-
-        visitor.load::<u16, DEBUG, false>(program_counter, dst, None, offset)
-    }
-
-    fn load_u16_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_u16(dst, offset));
-        }
-
-        visitor.load::<u16, DEBUG, true>(program_counter, dst, None, offset)
-    }
-
-    fn load_i16_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_i16(dst, offset));
-        }
-
-        visitor.load::<i16, DEBUG, false>(program_counter, dst, None, offset)
-    }
-
-    fn load_i16_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_i16(dst, offset));
-        }
-
-        visitor.load::<i16, DEBUG, true>(program_counter, dst, None, offset)
-    }
-
-    fn load_u32_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_u32(dst, offset));
-        }
-
-        visitor.load::<u32, DEBUG, false>(program_counter, dst, None, offset)
-    }
-
-    fn load_u32_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_u32(dst, offset));
-        }
-
-        visitor.load::<u32, DEBUG, true>(program_counter, dst, None, offset)
-    }
-
-    fn load_i32_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_i32(dst, offset));
-        }
-
-        visitor.load::<i32, DEBUG, false>(program_counter, dst, None, offset)
-    }
-
-    fn load_i32_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_i32(dst, offset));
-        }
-
-        visitor.load::<i32, DEBUG, true>(program_counter, dst, None, offset)
-    }
-
-    fn load_u64_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_u64(dst, offset));
-        }
-
-        visitor.load::<u64, DEBUG, false>(program_counter, dst, None, offset)
-    }
-
-    fn load_u64_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_u64(dst, offset));
-        }
-
-        visitor.load::<u64, DEBUG, true>(program_counter, dst, None, offset)
-    }
-
-    fn load_indirect_u8_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_indirect_u8(dst, base, offset));
-        }
-
-        visitor.load::<u8, DEBUG, false>(program_counter, dst, Some(base), offset)
-    }
-
-    fn load_indirect_u8_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_indirect_u8(dst, base, offset));
-        }
-
-        visitor.load::<u8, DEBUG, true>(program_counter, dst, Some(base), offset)
-    }
-
-    fn load_indirect_i8_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_indirect_i8(dst, base, offset));
-        }
-
-        visitor.load::<i8, DEBUG, false>(program_counter, dst, Some(base), offset)
-    }
-
-    fn load_indirect_i8_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_indirect_i8(dst, base, offset));
-        }
-
-        visitor.load::<i8, DEBUG, true>(program_counter, dst, Some(base), offset)
-    }
-
-    fn load_indirect_u16_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_indirect_u16(dst, base, offset));
-        }
-
-        visitor.load::<u16, DEBUG, false>(program_counter, dst, Some(base), offset)
-    }
-
-    fn load_indirect_u16_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_indirect_u16(dst, base, offset));
-        }
-
-        visitor.load::<u16, DEBUG, true>(program_counter, dst, Some(base), offset)
-    }
-
-    fn load_indirect_i16_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_indirect_i16(dst, base, offset));
-        }
-
-        visitor.load::<i16, DEBUG, false>(program_counter, dst, Some(base), offset)
-    }
-
-    fn load_indirect_i16_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_indirect_i16(dst, base, offset));
-        }
-
-        visitor.load::<i16, DEBUG, true>(program_counter, dst, Some(base), offset)
-    }
-
-    fn load_indirect_u32_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_indirect_u32(dst, base, offset));
-        }
-
-        visitor.load::<u32, DEBUG, false>(program_counter, dst, Some(base), offset)
-    }
-
-    fn load_indirect_u32_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_indirect_u32(dst, base, offset));
-        }
-
-        visitor.load::<u32, DEBUG, true>(program_counter, dst, Some(base), offset)
-    }
-
-    fn load_indirect_i32_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_indirect_i32(dst, base, offset));
-        }
-
-        visitor.load::<i32, DEBUG, false>(program_counter, dst, Some(base), offset)
-    }
-
-    fn load_indirect_i32_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_indirect_i32(dst, base, offset));
-        }
-
-        visitor.load::<i32, DEBUG, true>(program_counter, dst, Some(base), offset)
-    }
-
-    fn load_indirect_u64_basic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_indirect_u64(dst, base, offset));
-        }
-
-        visitor.load::<u64, DEBUG, false>(program_counter, dst, Some(base), offset)
-    }
-
-    fn load_indirect_u64_dynamic<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_indirect_u64(dst, base, offset));
-        }
-
-        visitor.load::<u64, DEBUG, true>(program_counter, dst, Some(base), offset)
-    }
-
-    fn branch_less_unsigned<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
-        if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} <u {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} <u {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 < s2)
     }
 
-    fn branch_less_unsigned_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_less_unsigned_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} <u {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} <u {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 < s2)
     }
 
-    fn branch_less_signed<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_less_signed<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} <s {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} <s {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() < cast(s2).to_signed())
     }
 
-    fn branch_less_signed_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_less_signed_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} <s {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} <s {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() < cast(s2).to_signed())
     }
 
-    fn branch_eq<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_eq<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} == {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} == {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 == s2)
     }
 
-    fn branch_eq_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_eq_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} == {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} == {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 == s2)
     }
 
-    fn branch_not_eq<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_not_eq<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} != {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} != {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 != s2)
     }
 
-    fn branch_not_eq_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_not_eq_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} != {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} != {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 != s2)
     }
 
-    fn branch_greater_or_equal_unsigned<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_greater_or_equal_unsigned<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} >=u {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} >=u {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 >= s2)
     }
 
-    fn branch_greater_or_equal_unsigned_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_greater_or_equal_unsigned_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} >=u {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} >=u {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 >= s2)
     }
 
-    fn branch_greater_or_equal_signed<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_greater_or_equal_signed<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} >=s {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} >=s {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() >= cast(s2).to_signed())
     }
 
-    fn branch_greater_or_equal_signed_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_greater_or_equal_signed_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} >=s {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} >=s {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() >= cast(s2).to_signed())
     }
 
-    fn branch_less_or_equal_unsigned_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_less_or_equal_unsigned_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} <=u {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} <=u {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 <= s2)
     }
 
-    fn branch_less_or_equal_signed_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_less_or_equal_signed_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} <=s {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} <=s {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() <= cast(s2).to_signed())
     }
 
-    fn branch_greater_unsigned_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_greater_unsigned_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} >u {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} >u {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| s1 > s2)
     }
 
-    fn branch_greater_signed_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
+    fn branch_greater_signed_imm<const DEBUG: bool, const IS_TARGET_TRUE_VALID: bool, const IS_TARGET_FALSE_VALID: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} >s {s2}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{tt} if {s1} >s {s2}", visitor.compiled_offset);
         }
 
         visitor.branch::<DEBUG, IS_TARGET_TRUE_VALID, IS_TARGET_FALSE_VALID>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() > cast(s2).to_signed())
     }
 
-    fn jump<const DEBUG: bool>(visitor: &mut Visitor, target: Target) -> Option<Target> {
+    fn jump<const DEBUG: bool>(visitor: &mut InterpretedInstance, target: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{target}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: jump ~{target}", visitor.compiled_offset);
         }
 
         Some(target)
     }
 
-    fn jump_indirect<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, base: Reg, offset: u32) -> Option<Target> {
+    fn jump_indirect<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::jump_indirect(base, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::jump_indirect(base, offset));
         }
 
         let dynamic_address = visitor.get32::<DEBUG>(base).wrapping_add(offset);
         visitor.jump_indirect_impl::<DEBUG>(program_counter, dynamic_address)
     }
 
-    fn load_imm_and_jump_indirect<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, ra: Reg, base: Reg, value: u32, offset: u32) -> Option<Target> {
+    fn load_imm_and_jump_indirect<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, ra: Reg, base: Reg, value: u32, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_imm_and_jump_indirect(ra, base, value, offset));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_imm_and_jump_indirect(ra, base, value, offset));
         }
 
         let dynamic_address = visitor.get32::<DEBUG>(base).wrapping_add(offset);
@@ -3877,98 +3893,98 @@ define_interpreter! {
         visitor.jump_indirect_impl::<DEBUG>(program_counter, dynamic_address)
     }
 
-    fn load_imm_and_jump<const DEBUG: bool>(visitor: &mut Visitor, ra: Reg, value: u32, target: Target) -> Option<Target> {
+    fn load_imm_and_jump<const DEBUG: bool>(visitor: &mut InterpretedInstance, ra: Reg, value: u32, target: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.inner.compiled_offset, asm::load_imm_and_jump(ra, value, target));
+            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_imm_and_jump(ra, value, target));
         }
 
         visitor.set32::<DEBUG>(ra, value);
         Some(target)
     }
 
-    fn unresolved_branch_less_unsigned<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_less_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!("<u", visitor, s1, s2, tt, tf, branch_less_unsigned)
     }
 
-    fn unresolved_branch_less_unsigned_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_less_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!("<u", visitor, s1, s2, tt, tf, branch_less_unsigned_imm)
     }
 
-    fn unresolved_branch_less_signed<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_less_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!("<s", visitor, s1, s2, tt, tf, branch_less_signed)
     }
 
-    fn unresolved_branch_less_signed_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_less_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!("<s", visitor, s1, s2, tt, tf, branch_less_signed_imm)
     }
 
-    fn unresolved_branch_eq<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_eq<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!("==", visitor, s1, s2, tt, tf, branch_eq)
     }
 
-    fn unresolved_branch_eq_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_eq_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!("==", visitor, s1, s2, tt, tf, branch_eq_imm)
     }
 
-    fn unresolved_branch_not_eq<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_not_eq<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!("!=", visitor, s1, s2, tt, tf, branch_not_eq)
     }
 
-    fn unresolved_branch_not_eq_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_not_eq_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!("!=", visitor, s1, s2, tt, tf, branch_not_eq_imm)
     }
 
-    fn unresolved_branch_greater_or_equal_unsigned<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_greater_or_equal_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!(">=u", visitor, s1, s2, tt, tf, branch_greater_or_equal_unsigned)
     }
 
-    fn unresolved_branch_greater_or_equal_unsigned_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_greater_or_equal_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!(">=u", visitor, s1, s2, tt, tf, branch_greater_or_equal_unsigned_imm)
     }
 
-    fn unresolved_branch_greater_or_equal_signed<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_greater_or_equal_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!(">=s", visitor, s1, s2, tt, tf, branch_greater_or_equal_signed)
     }
 
-    fn unresolved_branch_greater_or_equal_signed_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_greater_or_equal_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!(">=s", visitor, s1, s2, tt, tf, branch_greater_or_equal_signed_imm)
     }
 
-    fn unresolved_branch_greater_unsigned_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_greater_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!(">u", visitor, s1, s2, tt, tf, branch_greater_unsigned_imm)
     }
 
-    fn unresolved_branch_greater_signed_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_greater_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!(">s", visitor, s1, s2, tt, tf, branch_greater_signed_imm)
     }
 
-    fn unresolved_branch_less_or_equal_unsigned_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_less_or_equal_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!("<=u", visitor, s1, s2, tt, tf, branch_less_or_equal_unsigned_imm)
     }
 
-    fn unresolved_branch_less_or_equal_signed_imm<const DEBUG: bool>(visitor: &mut Visitor, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
+    fn unresolved_branch_less_or_equal_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: ProgramCounter, tf: ProgramCounter) -> Option<Target> {
         handle_unresolved_branch!("<=s", visitor, s1, s2, tt, tf, branch_less_or_equal_signed_imm)
     }
 
-    fn unresolved_jump<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, jump_to: ProgramCounter) -> Option<Target> {
+    fn unresolved_jump<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, jump_to: ProgramCounter) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: unresolved jump {jump_to}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: unresolved jump {jump_to}", visitor.compiled_offset);
         }
 
-        if let Some(target) = visitor.inner.resolve_jump::<DEBUG>(jump_to) {
-            let offset = visitor.inner.compiled_offset;
+        if let Some(target) = visitor.resolve_jump::<DEBUG>(jump_to) {
+            let offset = visitor.compiled_offset;
             if offset + 1 == target {
                 if DEBUG {
                     log::trace!("  -> resolved to fallthrough");
                 }
-                visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::fallthrough::<DEBUG>);
-                visitor.inner.compiled_args[cast(offset).to_usize()] = Args::fallthrough();
+                visitor.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::fallthrough::<DEBUG>);
+                visitor.compiled_args[cast(offset).to_usize()] = Args::fallthrough();
             } else {
                 if DEBUG {
                     log::trace!("  -> resolved to jump");
                 }
-                visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::jump::<DEBUG>);
-                visitor.inner.compiled_args[cast(offset).to_usize()] = Args::jump(target);
+                visitor.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::jump::<DEBUG>);
+                visitor.compiled_args[cast(offset).to_usize()] = Args::jump(target);
             }
 
             Some(target)
@@ -3980,20 +3996,20 @@ define_interpreter! {
         }
     }
 
-    fn unresolved_load_imm_and_jump<const DEBUG: bool>(visitor: &mut Visitor, program_counter: ProgramCounter, ra: Reg, value: u32, jump_to: u32) -> Option<Target> {
+    fn unresolved_load_imm_and_jump<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, ra: Reg, value: u32, jump_to: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: unresolved {}", visitor.inner.compiled_offset, asm::load_imm_and_jump(ra, value, jump_to));
+            log::trace!("[{}]: unresolved {}", visitor.compiled_offset, asm::load_imm_and_jump(ra, value, jump_to));
         }
 
         visitor.set32::<DEBUG>(ra, value);
 
-        let offset = visitor.inner.compiled_offset;
-        if let Some(target) = visitor.inner.resolve_jump::<DEBUG>(ProgramCounter(jump_to)) {
+        let offset = visitor.compiled_offset;
+        if let Some(target) = visitor.resolve_jump::<DEBUG>(ProgramCounter(jump_to)) {
             if DEBUG {
                 log::trace!("  -> resolved to jump");
             }
-            visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::load_imm_and_jump::<DEBUG>);
-            visitor.inner.compiled_args[cast(offset).to_usize()] = Args::load_imm_and_jump(ra, value, target);
+            visitor.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::load_imm_and_jump::<DEBUG>);
+            visitor.compiled_args[cast(offset).to_usize()] = Args::load_imm_and_jump(ra, value, target);
 
             Some(target)
         } else {
@@ -4004,32 +4020,32 @@ define_interpreter! {
         }
     }
 
-    fn unresolved_fallthrough<const DEBUG: bool>(visitor: &mut Visitor, jump_to: ProgramCounter) -> Option<Target> {
+    fn unresolved_fallthrough<const DEBUG: bool>(visitor: &mut InterpretedInstance, jump_to: ProgramCounter) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: unresolved fallthrough {jump_to}", visitor.inner.compiled_offset);
+            log::trace!("[{}]: unresolved fallthrough {jump_to}", visitor.compiled_offset);
         }
 
-        let offset = visitor.inner.compiled_offset;
-        if let Some(target) = visitor.inner.resolve_fallthrough::<DEBUG>(jump_to) {
+        let offset = visitor.compiled_offset;
+        if let Some(target) = visitor.resolve_fallthrough::<DEBUG>(jump_to) {
             if offset + 1 == target {
                 if DEBUG {
                     log::trace!("  -> resolved to fallthrough");
                 }
-                visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::fallthrough::<DEBUG>);
-                visitor.inner.compiled_args[cast(offset).to_usize()] = Args::fallthrough();
+                visitor.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::fallthrough::<DEBUG>);
+                visitor.compiled_args[cast(offset).to_usize()] = Args::fallthrough();
             } else {
                 if DEBUG {
                     log::trace!("  -> resolved to jump");
                 }
-                visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::jump::<DEBUG>);
-                visitor.inner.compiled_args[cast(offset).to_usize()] = Args::jump(target);
+                visitor.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::jump::<DEBUG>);
+                visitor.compiled_args[cast(offset).to_usize()] = Args::jump(target);
             }
 
             Some(target)
         } else {
-            visitor.inner.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::jump::<DEBUG>);
-            visitor.inner.compiled_args[cast(offset).to_usize()] = Args::jump(TARGET_OUT_OF_RANGE);
-            visitor.inner.unresolved_program_counter = Some(jump_to);
+            visitor.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::jump::<DEBUG>);
+            visitor.compiled_args[cast(offset).to_usize()] = Args::jump(TARGET_OUT_OF_RANGE);
+            visitor.unresolved_program_counter = Some(jump_to);
             Some(TARGET_OUT_OF_RANGE)
         }
     }
@@ -4041,6 +4057,7 @@ struct Compiler<'a, const DEBUG: bool> {
     compiled_handlers: &'a mut Vec<Handler>,
     compiled_args: &'a mut Vec<Args>,
     module: &'a Module,
+    memory_kind: usize,
 }
 
 impl<'a, const DEBUG: bool> Compiler<'a, DEBUG> {
@@ -4078,7 +4095,13 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
     }
 
     fn memset(&mut self) -> Self::ReturnTy {
-        emit!(self, memset(self.program_counter));
+        #[allow(clippy::branches_sharing_code)]
+        if self.memory_kind == MEMORY_STANDARD {
+            emit_raw!(self, memset::<StandardMemory, DEBUG>(self.program_counter));
+        } else {
+            debug_assert_eq!(self.memory_kind, MEMORY_DYNAMIC);
+            emit_raw!(self, memset::<DynamicMemory, DEBUG>(self.program_counter));
+        }
     }
 
     fn ecalli(&mut self, imm: u32) -> Self::ReturnTy {
@@ -4503,258 +4526,131 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
     }
 
     fn store_imm_u8(&mut self, offset: u32, value: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_imm_u8_basic(self.program_counter, offset, value));
-        } else {
-            emit!(self, store_imm_u8_dynamic(self.program_counter, offset, value));
-        }
+        emit_load_store!(self, store_imm_u8(self.program_counter, offset, value));
     }
 
     fn store_imm_u16(&mut self, offset: u32, value: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_imm_u16_basic(self.program_counter, offset, value));
-        } else {
-            emit!(self, store_imm_u16_dynamic(self.program_counter, offset, value));
-        }
+        emit_load_store!(self, store_imm_u16(self.program_counter, offset, value));
     }
 
     fn store_imm_u32(&mut self, offset: u32, value: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_imm_u32_basic(self.program_counter, offset, value));
-        } else {
-            emit!(self, store_imm_u32_dynamic(self.program_counter, offset, value));
-        }
+        emit_load_store!(self, store_imm_u32(self.program_counter, offset, value));
     }
 
     fn store_imm_u64(&mut self, offset: u32, value: u32) -> Self::ReturnTy {
         self.assert_64_bit();
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_imm_u64_basic(self.program_counter, offset, value));
-        } else {
-            emit!(self, store_imm_u64_dynamic(self.program_counter, offset, value));
-        }
+        emit_load_store!(self, store_imm_u64(self.program_counter, offset, value));
     }
 
     fn store_imm_indirect_u8(&mut self, base: RawReg, offset: u32, value: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_imm_indirect_u8_basic(self.program_counter, base, offset, value));
-        } else {
-            emit!(self, store_imm_indirect_u8_dynamic(self.program_counter, base, offset, value));
-        }
+        emit_load_store!(self, store_imm_indirect_u8(self.program_counter, base, offset, value));
     }
 
     fn store_imm_indirect_u16(&mut self, base: RawReg, offset: u32, value: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_imm_indirect_u16_basic(self.program_counter, base, offset, value));
-        } else {
-            emit!(self, store_imm_indirect_u16_dynamic(self.program_counter, base, offset, value));
-        }
+        emit_load_store!(self, store_imm_indirect_u16(self.program_counter, base, offset, value));
     }
 
     fn store_imm_indirect_u32(&mut self, base: RawReg, offset: u32, value: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_imm_indirect_u32_basic(self.program_counter, base, offset, value));
-        } else {
-            emit!(self, store_imm_indirect_u32_dynamic(self.program_counter, base, offset, value));
-        }
+        emit_load_store!(self, store_imm_indirect_u32(self.program_counter, base, offset, value));
     }
 
     fn store_imm_indirect_u64(&mut self, base: RawReg, offset: u32, value: u32) -> Self::ReturnTy {
         self.assert_64_bit();
-
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_imm_indirect_u64_basic(self.program_counter, base, offset, value));
-        } else {
-            emit!(self, store_imm_indirect_u64_dynamic(self.program_counter, base, offset, value));
-        }
+        emit_load_store!(self, store_imm_indirect_u64(self.program_counter, base, offset, value));
     }
 
     fn store_indirect_u8(&mut self, src: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_indirect_u8_basic(self.program_counter, src, base, offset));
-        } else {
-            emit!(self, store_indirect_u8_dynamic(self.program_counter, src, base, offset));
-        }
+        emit_load_store!(self, store_indirect_u8(self.program_counter, src, base, offset));
     }
 
     fn store_indirect_u16(&mut self, src: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_indirect_u16_basic(self.program_counter, src, base, offset));
-        } else {
-            emit!(self, store_indirect_u16_dynamic(self.program_counter, src, base, offset));
-        }
+        emit_load_store!(self, store_indirect_u16(self.program_counter, src, base, offset));
     }
 
     fn store_indirect_u32(&mut self, src: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_indirect_u32_basic(self.program_counter, src, base, offset));
-        } else {
-            emit!(self, store_indirect_u32_dynamic(self.program_counter, src, base, offset));
-        }
+        emit_load_store!(self, store_indirect_u32(self.program_counter, src, base, offset));
     }
 
     fn store_indirect_u64(&mut self, src: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
         self.assert_64_bit();
-
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_indirect_u64_basic(self.program_counter, src, base, offset));
-        } else {
-            emit!(self, store_indirect_u64_dynamic(self.program_counter, src, base, offset));
-        }
+        emit_load_store!(self, store_indirect_u64(self.program_counter, src, base, offset));
     }
 
     fn store_u8(&mut self, src: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_u8_basic(self.program_counter, src, offset));
-        } else {
-            emit!(self, store_u8_dynamic(self.program_counter, src, offset));
-        }
+        emit_load_store!(self, store_u8(self.program_counter, src, offset));
     }
 
     fn store_u16(&mut self, src: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_u16_basic(self.program_counter, src, offset));
-        } else {
-            emit!(self, store_u16_dynamic(self.program_counter, src, offset));
-        }
+        emit_load_store!(self, store_u16(self.program_counter, src, offset));
     }
 
     fn store_u32(&mut self, src: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_u32_basic(self.program_counter, src, offset));
-        } else {
-            emit!(self, store_u32_dynamic(self.program_counter, src, offset));
-        }
+        emit_load_store!(self, store_u32(self.program_counter, src, offset));
     }
 
     fn store_u64(&mut self, src: RawReg, offset: u32) -> Self::ReturnTy {
         self.assert_64_bit();
-
-        if !self.module.is_dynamic_paging() {
-            emit!(self, store_u64_basic(self.program_counter, src, offset));
-        } else {
-            emit!(self, store_u64_dynamic(self.program_counter, src, offset));
-        }
+        emit_load_store!(self, store_u64(self.program_counter, src, offset));
     }
 
     fn load_u8(&mut self, dst: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, load_u8_basic(self.program_counter, dst, offset));
-        } else {
-            emit!(self, load_u8_dynamic(self.program_counter, dst, offset));
-        }
+        emit_load_store!(self, load_u8(self.program_counter, dst, offset));
     }
 
     fn load_i8(&mut self, dst: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, load_i8_basic(self.program_counter, dst, offset));
-        } else {
-            emit!(self, load_i8_dynamic(self.program_counter, dst, offset));
-        }
+        emit_load_store!(self, load_i8(self.program_counter, dst, offset));
     }
 
     fn load_u16(&mut self, dst: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, load_u16_basic(self.program_counter, dst, offset));
-        } else {
-            emit!(self, load_u16_dynamic(self.program_counter, dst, offset));
-        }
+        emit_load_store!(self, load_u16(self.program_counter, dst, offset));
     }
 
     fn load_i16(&mut self, dst: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, load_i16_basic(self.program_counter, dst, offset));
-        } else {
-            emit!(self, load_i16_dynamic(self.program_counter, dst, offset));
-        }
+        emit_load_store!(self, load_i16(self.program_counter, dst, offset));
     }
 
     fn load_i32(&mut self, dst: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, load_i32_basic(self.program_counter, dst, offset));
-        } else {
-            emit!(self, load_i32_dynamic(self.program_counter, dst, offset));
-        }
+        emit_load_store!(self, load_i32(self.program_counter, dst, offset));
     }
 
     fn load_u32(&mut self, dst: RawReg, offset: u32) -> Self::ReturnTy {
         self.assert_64_bit();
-
-        if !self.module.is_dynamic_paging() {
-            emit!(self, load_u32_basic(self.program_counter, dst, offset));
-        } else {
-            emit!(self, load_u32_dynamic(self.program_counter, dst, offset));
-        }
+        emit_load_store!(self, load_u32(self.program_counter, dst, offset));
     }
 
     fn load_u64(&mut self, dst: RawReg, offset: u32) -> Self::ReturnTy {
         self.assert_64_bit();
-
-        if !self.module.is_dynamic_paging() {
-            emit!(self, load_u64_basic(self.program_counter, dst, offset));
-        } else {
-            emit!(self, load_u64_dynamic(self.program_counter, dst, offset));
-        }
+        emit_load_store!(self, load_u64(self.program_counter, dst, offset));
     }
 
     fn load_indirect_u8(&mut self, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, load_indirect_u8_basic(self.program_counter, dst, base, offset));
-        } else {
-            emit!(self, load_indirect_u8_dynamic(self.program_counter, dst, base, offset));
-        }
+        emit_load_store!(self, load_indirect_u8(self.program_counter, dst, base, offset));
     }
 
     fn load_indirect_i8(&mut self, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, load_indirect_i8_basic(self.program_counter, dst, base, offset));
-        } else {
-            emit!(self, load_indirect_i8_dynamic(self.program_counter, dst, base, offset));
-        }
+        emit_load_store!(self, load_indirect_i8(self.program_counter, dst, base, offset));
     }
 
     fn load_indirect_u16(&mut self, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, load_indirect_u16_basic(self.program_counter, dst, base, offset));
-        } else {
-            emit!(self, load_indirect_u16_dynamic(self.program_counter, dst, base, offset));
-        }
+        emit_load_store!(self, load_indirect_u16(self.program_counter, dst, base, offset));
     }
 
     fn load_indirect_i16(&mut self, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, load_indirect_i16_basic(self.program_counter, dst, base, offset));
-        } else {
-            emit!(self, load_indirect_i16_dynamic(self.program_counter, dst, base, offset));
-        }
+        emit_load_store!(self, load_indirect_i16(self.program_counter, dst, base, offset));
     }
 
     fn load_indirect_i32(&mut self, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
-        if !self.module.is_dynamic_paging() {
-            emit!(self, load_indirect_i32_basic(self.program_counter, dst, base, offset));
-        } else {
-            emit!(self, load_indirect_i32_dynamic(self.program_counter, dst, base, offset));
-        }
+        emit_load_store!(self, load_indirect_i32(self.program_counter, dst, base, offset));
     }
 
     fn load_indirect_u32(&mut self, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
         self.assert_64_bit();
-
-        if !self.module.is_dynamic_paging() {
-            emit!(self, load_indirect_u32_basic(self.program_counter, dst, base, offset));
-        } else {
-            emit!(self, load_indirect_u32_dynamic(self.program_counter, dst, base, offset));
-        }
+        emit_load_store!(self, load_indirect_u32(self.program_counter, dst, base, offset));
     }
 
     fn load_indirect_u64(&mut self, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
         self.assert_64_bit();
-
-        if !self.module.is_dynamic_paging() {
-            emit!(self, load_indirect_u64_basic(self.program_counter, dst, base, offset));
-        } else {
-            emit!(self, load_indirect_u64_dynamic(self.program_counter, dst, base, offset));
-        }
+        emit_load_store!(self, load_indirect_u64(self.program_counter, dst, base, offset));
     }
 
     fn branch_less_unsigned(&mut self, s1: RawReg, s2: RawReg, i: u32) -> Self::ReturnTy {

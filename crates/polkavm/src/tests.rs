@@ -1627,7 +1627,7 @@ fn dynamic_paging_read_memory_which_is_not_paged_in(mut engine_config: Config) {
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let instance = module.instantiate().unwrap();
+    let mut instance = module.instantiate().unwrap();
 
     #[allow(clippy::match_wildcard_for_single_variants)]
     match instance.read_memory(0x10000, page_size).unwrap_err() {
