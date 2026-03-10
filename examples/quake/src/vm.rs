@@ -200,6 +200,7 @@ impl Vm {
                 }
                 Err(MemoryAccessError::Error(error)) => return Err(error.into()),
                 Err(MemoryAccessError::OutOfRangeAccess { .. }) => return Ok(None),
+                Err(MemoryAccessError::MemoryLimitReached) => unreachable!(),
             }
         }
 
@@ -301,6 +302,7 @@ impl Vm {
                 log::trace!("  -> EFAULT");
                 return Ok(errno(EFAULT));
             }
+            Err(MemoryAccessError::MemoryLimitReached) => unreachable!(),
         }
 
         let length_out = blob.len() as u64;
@@ -332,6 +334,7 @@ impl Vm {
             Ok(data) => data,
             Err(MemoryAccessError::Error(error)) => return Err(error.into()),
             Err(MemoryAccessError::OutOfRangeAccess { .. }) => return Ok(errno(EFAULT)),
+            Err(MemoryAccessError::MemoryLimitReached) => unreachable!(),
         };
 
         use std::io::Write;

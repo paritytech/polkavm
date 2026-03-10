@@ -5437,6 +5437,11 @@ impl ProgramBlob {
         &self.ro_data
     }
 
+    /// Returns an Arc of the read-only data section.
+    pub fn ro_data_arc(&self) -> &ArcBytes {
+        &self.ro_data
+    }
+
     /// Returns the size of the read-only data section.
     ///
     /// This can be larger than the length of `ro_data`, in which case the rest of the space is assumed to be filled with zeros.
@@ -5448,6 +5453,11 @@ impl ProgramBlob {
     ///
     /// This only covers the initial non-zero portion of the section; use `rw_data_size` to get the full size.
     pub fn rw_data(&self) -> &[u8] {
+        &self.rw_data
+    }
+
+    /// Returns an Arc of the read-write data section.
+    pub fn rw_data_arc(&self) -> &ArcBytes {
         &self.rw_data
     }
 
