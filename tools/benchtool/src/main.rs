@@ -531,6 +531,11 @@ fn main() {
                 }
             }
 
+            if list.is_empty() {
+                eprintln!("No benchmarks found; exiting!");
+                std::process::exit(1);
+            }
+
             struct Stats {
                 min: Duration,
                 max: Duration,
