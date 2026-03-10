@@ -4144,6 +4144,25 @@ fn memset_with_dynamic_paging(mut config: Config) {
     assert_eq!(instance.gas(), 95);
 }
 
+fn rotate_right_imm_alt_64(config: Config) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::rotate_right_imm_alt_64(Reg::A0, Reg::A0, 0x80000000), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A0, 0xffffffff80000000);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.reg(Reg::A0), 0xffffffff80000000);
+}
+
 fn test_basic_debug_info(raw_blob: &'static [u8]) {
     let _ = env_logger::try_init();
     let program = get_blob(raw_blob);
@@ -4435,6 +4454,8 @@ run_tests! {
 
     spawn_stress_test
     module_cache
+
+    rotate_right_imm_alt_64
 }
 
 run_test_blob_tests! {

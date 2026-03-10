@@ -2139,7 +2139,10 @@ where
 
         let asm = self.asm.reserve::<polkavm_assembler::U4>();
         let asm = asm.push(mov(reg_size, rcx, s));
-        let asm = asm.push(mov_imm(d, imm32(c)));
+        let asm = match reg_size {
+            RegSize::R32 => asm.push(mov_imm(d, imm32(c))),
+            RegSize::R64 => asm.push(mov_imm(d, imm64(cast(c).to_signed()))),
+        };
         let asm = asm.push(ror_cl(reg_size, d));
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
