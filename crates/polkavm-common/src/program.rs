@@ -5595,6 +5595,20 @@ impl ProgramBlob {
         Instructions::new_bounded(instruction_set, self.code(), self.bitmask(), offset.0)
     }
 
+    /// Returns whether the code of the module is well formed. Has worst-case O(n) complexity.
+    pub fn validate_code_with_isa<I>(&self, instruction_set: I) -> Result<(), ProgramCounter>
+    where
+        I: InstructionSet,
+    {
+        for instruction in self.instructions_bounded_at_with_isa(instruction_set, ProgramCounter(0)) {
+            if matches!(instruction.kind, Instruction::invalid) {
+                return Err(instruction.offset);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Returns whether the given program counter is a valid target for a jump.
     pub fn is_jump_target_valid<I>(&self, instruction_set: I, target: ProgramCounter) -> bool
     where

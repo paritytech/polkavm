@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -9,7 +10,7 @@ use polkavm_common::program::{FrameKind, Imports, InstructionSetKind, Instructio
 use polkavm_common::utils::{ArcBytes, AsUninitSliceMut, B32, B64};
 
 use crate::config::{BackendKind, Config, GasMeteringKind, ModuleConfig, SandboxKind};
-use crate::error::{bail, bail_static, Error};
+use crate::error::{bail, Error};
 use crate::gas::{CostModel, CostModelKind, GasVisitor};
 use crate::interpreter::InterpretedInstance;
 use crate::utils::{GuestInit, InterruptKind};
@@ -395,29 +396,28 @@ impl Module {
     }
 
     /// Creates a new module by deserializing the program from the given `bytes`.
-    pub fn new(engine: &Engine, config: &ModuleConfig, bytes: ArcBytes) -> Result<Self, Error> {
-        let blob = match ProgramBlob::parse(bytes) {
-            Ok(blob) => blob,
-            Err(error) => {
-                bail!("failed to parse blob: {}", error);
-            }
-        };
-
+    pub fn new(engine: &Engine, config: &ModuleConfig, bytes: ArcBytes) -> Result<Self, CompileError> {
+        let blob = ProgramBlob::parse(bytes).map_err(|error| CompileError::ValidationFailed(error.into()))?;
         Self::from_blob(engine, config, blob)
     }
 
     /// Creates a new module from a deserialized program `blob`.
-    pub fn from_blob(engine: &Engine, config: &ModuleConfig, blob: ProgramBlob) -> Result<Self, Error> {
+    pub fn from_blob(engine: &Engine, config: &ModuleConfig, blob: ProgramBlob) -> Result<Self, CompileError> {
         if config.dynamic_paging() && !engine.allow_dynamic_paging {
-            bail!("dynamic paging was not enabled; use `Config::set_allow_dynamic_paging` to enable it");
+            return Err(
+                Error::from_static_str("dynamic paging was not enabled; use `Config::set_allow_dynamic_paging` to enable it").into(),
+            );
         }
 
         if config.custom_codegen.is_some() && !engine.allow_experimental {
-            bail!("cannot use custom codegen: `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` is not enabled");
+            return Err(Error::from_static_str(
+                "cannot use custom codegen: `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` is not enabled",
+            )
+            .into());
         }
 
         if config.is_per_instruction_metering && engine.selected_backend == BackendKind::Compiler {
-            bail!("per instruction metering is not supported with the recompiler");
+            return Err(Error::from_static_str("per instruction metering is not supported with the recompiler").into());
         }
 
         log::trace!(
@@ -427,13 +427,19 @@ impl Module {
 
         let cost_model = config.cost_model.clone().unwrap_or_else(|| engine.default_cost_model.clone());
         if config.is_per_instruction_metering && !cost_model.is_naive() {
-            bail!("per instruction metering is not supported with a non-naive gas cost model");
+            return Err(Error::from_static_str("per instruction metering is not supported with a non-naive gas cost model").into());
         }
 
         // TODO: Use cpuid instead so that we don't have to gate this to 'std'-only.
         #[cfg(all(target_arch = "x86_64", feature = "std"))]
         if matches!(cost_model, CostModelKind::Full(..)) && !std::is_x86_feature_detected!("avx2") {
-            bail!("on AMD64 the full gas cost model is only supported on CPUs with AVX2 support");
+            return Err(Error::from_static_str("on AMD64 the full gas cost model is only supported on CPUs with AVX2 support").into());
+        }
+
+        if engine.selected_backend == BackendKind::Interpreter && matches!(blob.isa(), InstructionSetKind::JamV1) {
+            if let Err(pc) = blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1) {
+                return Err(CompileError::ValidationFailed(format!("validation failed at offset {pc}")));
+            }
         }
 
         #[cfg(feature = "module-cache")]
@@ -452,7 +458,7 @@ impl Module {
             .stack_size(blob.stack_size())
             .aux_data_size(config.aux_data_size())
             .build()
-            .map_err(Error::from_static_str)?;
+            .map_err(|error| CompileError::ValidationFailed(error.into()))?;
 
         if config.is_strict || cfg!(debug_assertions) {
             log::trace!("Checking imports...");
@@ -462,7 +468,7 @@ impl Module {
                 } else {
                     log::trace!("  Import #{}: INVALID", nth_import);
                     if config.is_strict {
-                        bail_static!("found an invalid import");
+                        return Err(Error::from_static_str("found an invalid import").into());
                     }
                 }
             }
@@ -475,7 +481,7 @@ impl Module {
                         blob.code().len()
                     );
                     if config.is_strict {
-                        bail_static!("out of range jump table entry found");
+                        return Err(Error::from_static_str("out of range jump table entry found").into());
                     }
                 }
             }
@@ -488,12 +494,12 @@ impl Module {
                 for export in blob.exports() {
                     log::trace!("  Export at {}: {}", export.program_counter(), export.symbol());
                     if config.is_strict && cast(export.program_counter().0).to_usize() >= blob.code().len() {
-                        bail!(
+                        return Err(Error::from_display(format!(
                             "out of range export found; export {} points to code offset {}, while the code blob is only {} bytes",
                             export.symbol(),
                             export.program_counter(),
                             blob.code().len(),
-                        );
+                        )).into());
                     }
 
                     exports.push(export);
@@ -629,7 +635,7 @@ impl Module {
             log::debug!("Backend used: 'interpreted'");
         }
 
-        let memory_map = init.memory_map().map_err(Error::from_static_str)?;
+        let memory_map = init.memory_map().map_err(|error| CompileError::ValidationFailed(error.into()))?;
         log::debug!(
             "  Memory map: RO data: 0x{:08x}..0x{:08x} ({}/{} bytes, non-zero until 0x{:08x})",
             memory_map.ro_data_range().start,
@@ -1009,6 +1015,48 @@ impl core::fmt::Display for MemoryAccessError {
 impl From<MemoryAccessError> for alloc::string::String {
     fn from(error: MemoryAccessError) -> alloc::string::String {
         alloc::string::ToString::to_string(&error)
+    }
+}
+
+/// Compilation failed.
+#[derive(Debug)]
+pub enum CompileError {
+    /// The module has failed validation.
+    ValidationFailed(String),
+    Error(Error),
+}
+
+impl From<Error> for CompileError {
+    fn from(error: Error) -> Self {
+        Self::Error(error)
+    }
+}
+
+impl From<CompileError> for Error {
+    fn from(error: CompileError) -> Self {
+        match error {
+            CompileError::Error(error) => error,
+            error @ CompileError::ValidationFailed(..) => Error::from_display(error),
+        }
+    }
+}
+
+impl From<CompileError> for String {
+    fn from(error: CompileError) -> Self {
+        error.to_string()
+    }
+}
+
+impl core::error::Error for CompileError {}
+
+impl core::fmt::Display for CompileError {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
+            CompileError::ValidationFailed(error) => {
+                write!(fmt, "module validation failed: {error}")
+            }
+            CompileError::Error(error) => error.fmt(fmt),
+        }
     }
 }
 
