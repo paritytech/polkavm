@@ -5704,32 +5704,74 @@ impl ProgramBlob {
         }))
     }
 
-    /// Returns frame info for the region containing the given program counter.
-    pub fn get_frame_info_for(
-        &self,
+    pub fn get_frame_info_for<'a>(
+        &'a self,
         program_counter: ProgramCounter,
         iteration_limit: Option<usize>,
-    ) -> Result<Option<FrameInfoList>, ProgramParseError> {
-        let Some(mut lp) = self.get_debug_line_program_at(program_counter)? else {
-            return Ok(None);
-        };
+    ) -> impl Iterator<Item = FrameInfo<'a>> {
+        struct FrameInfoIter<'a> {
+            program_counter: ProgramCounter,
+            line_program: Option<LineProgram<'a>>,
+            region_info: Option<RawRegionInfo>,
+            current_frame: usize,
+            iteration_limit: usize,
+        }
 
-        for _ in 0..iteration_limit.unwrap_or(self.debug_line_programs.len()) {
-            match lp.run() {
-                Ok(Some(region)) => {
-                    if region.instruction_range().contains(&program_counter) {
-                        let mut frames = [LineProgramFrame::default(); 16];
-                        let len = region.frames.len();
-                        frames[..len].copy_from_slice(region.frames);
-                        return Ok(Some(FrameInfoList { blob: self, frames, len }));
+        impl<'a> Iterator for FrameInfoIter<'a> {
+            type Item = FrameInfo<'a>;
+            fn next(&mut self) -> Option<Self::Item> {
+                self.line_program.as_ref()?;
+
+                loop {
+                    if let Some(ref region_info) = self.region_info {
+                        let line_program = self.line_program.as_ref()?;
+                        let region_info = line_program.convert_region_info(region_info.clone());
+                        if let Some(frame) = region_info.frames.get(self.current_frame) {
+                            self.current_frame += 1;
+                            return Some(FrameInfo {
+                                blob: line_program.blob,
+                                inner: frame.clone(),
+                            });
+                        }
+                    }
+
+                    let line_program = self.line_program.as_mut()?;
+                    loop {
+                        if self.iteration_limit == 0 {
+                            return None;
+                        }
+
+                        self.iteration_limit -= 1;
+
+                        let Ok(Some(region_info)) = line_program.raw_run() else {
+                            self.iteration_limit = 0;
+                            return None;
+                        };
+
+                        if !region_info.range.contains(&self.program_counter) {
+                            continue;
+                        }
+
+                        self.region_info = Some(region_info);
+                        self.current_frame = 0;
+                        break;
                     }
                 }
-                Ok(None) => return Ok(None),
-                Err(e) => return Err(e),
             }
         }
 
-        Ok(None)
+        let line_program = match self.get_debug_line_program_at(program_counter) {
+            Ok(Some(line_program)) => Some(line_program),
+            _ => None,
+        };
+
+        FrameInfoIter {
+            program_counter,
+            line_program,
+            region_info: None,
+            current_frame: 0,
+            iteration_limit: iteration_limit.unwrap_or(self.debug_line_programs.len()),
+        }
     }
 
     #[cfg(feature = "alloc")]
@@ -5943,7 +5985,7 @@ pub enum FrameKind {
 
 pub struct FrameInfo<'a> {
     blob: &'a ProgramBlob,
-    inner: &'a LineProgramFrame,
+    inner: LineProgramFrame,
 }
 
 impl<'a> FrameInfo<'a> {
@@ -6042,6 +6084,13 @@ pub struct RegionInfo<'a> {
     frames: &'a [LineProgramFrame],
 }
 
+#[derive(Clone)]
+struct RawRegionInfo {
+    entry_index: usize,
+    range: Range<ProgramCounter>,
+    frame_count: usize,
+}
+
 impl<'a> RegionInfo<'a> {
     /// Returns the entry index of this region info within the parent line program object.
     pub fn entry_index(&self) -> usize {
@@ -6055,11 +6104,14 @@ impl<'a> RegionInfo<'a> {
 
     /// Returns an iterator over the frames this region covers.
     pub fn frames(&self) -> impl ExactSizeIterator<Item = FrameInfo> {
-        self.frames.iter().map(|inner| FrameInfo { blob: self.blob, inner })
+        self.frames.iter().map(|inner| FrameInfo {
+            blob: self.blob,
+            inner: inner.clone(),
+        })
     }
 }
 
-#[derive(Copy, Clone, Default)]
+#[derive(Clone, Default)]
 struct LineProgramFrame {
     kind: Option<FrameKind>,
     namespace_offset: u32,
@@ -6067,20 +6119,6 @@ struct LineProgramFrame {
     path_offset: u32,
     line: u32,
     column: u32,
-}
-
-/// A list of frame info entries for a given program counter.
-pub struct FrameInfoList<'a> {
-    blob: &'a ProgramBlob,
-    frames: [LineProgramFrame; 16],
-    len: usize,
-}
-
-impl<'a> FrameInfoList<'a> {
-    /// Returns an iterator over the frames.
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = FrameInfo> {
-        self.frames[..self.len].iter().map(|inner| FrameInfo { blob: self.blob, inner })
-    }
 }
 
 /// A line program state machine.
@@ -6105,6 +6143,23 @@ impl<'a> LineProgram<'a> {
 
     /// Runs the line program until the next region becomes available, or until the program ends.
     pub fn run(&mut self) -> Result<Option<RegionInfo>, ProgramParseError> {
+        match self.raw_run() {
+            Ok(Some(region_info)) => Ok(Some(self.convert_region_info(region_info))),
+            Ok(None) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn convert_region_info(&self, region_info: RawRegionInfo) -> RegionInfo {
+        RegionInfo {
+            entry_index: region_info.entry_index,
+            blob: self.blob,
+            range: region_info.range,
+            frames: &self.stack[..region_info.frame_count],
+        }
+    }
+
+    fn raw_run(&mut self) -> Result<Option<RawRegionInfo>, ProgramParseError> {
         struct SetTrueOnDrop<'a>(&'a mut bool);
         impl<'a> Drop for SetTrueOnDrop<'a> {
             fn drop(&mut self) {
@@ -6251,16 +6306,14 @@ impl<'a> LineProgram<'a> {
             let range = ProgramCounter(self.program_counter)..ProgramCounter(self.program_counter + count);
             self.program_counter += count;
 
-            let frames = &self.stack[..core::cmp::min(stack_depth as usize, self.stack.len())];
             core::mem::forget(mark_as_finished_on_drop);
 
             let entry_index = self.region_counter;
             self.region_counter += 1;
-            return Ok(Some(RegionInfo {
+            return Ok(Some(RawRegionInfo {
                 entry_index,
-                blob: self.blob,
                 range,
-                frames,
+                frame_count: core::cmp::min(stack_depth as usize, self.stack.len()),
             }));
         }
 

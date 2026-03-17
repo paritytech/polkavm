@@ -4675,12 +4675,8 @@ fn test_advance_pc_and_const_add_pc_debug_info_64() {
 
     let pc = ProgramCounter(0x222);
 
-    let line_program = program.get_debug_line_program_at(pc).unwrap();
-    assert!(line_program.is_some());
-
-    let frame_info_list = program.get_frame_info_for(pc, None).unwrap().unwrap();
-    let frame = frame_info_list
-        .iter()
+    let frame = program
+        .get_frame_info_for(pc, None)
         .find(|frame| frame.kind() == polkavm_common::program::FrameKind::Line)
         .unwrap();
 
