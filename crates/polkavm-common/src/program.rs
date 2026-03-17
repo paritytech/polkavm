@@ -5636,11 +5636,7 @@ impl ProgramBlob {
     }
 
     /// Returns the line program for the given instruction.
-    pub fn get_debug_line_program_at(
-        &self,
-        program_counter: ProgramCounter,
-        region_search_limit: Option<u32>,
-    ) -> Result<Option<LineProgram>, ProgramParseError> {
+    pub fn get_debug_line_program_at(&self, program_counter: ProgramCounter) -> Result<Option<LineProgram>, ProgramParseError> {
         let program_counter = program_counter.0;
         if self.debug_line_program_ranges.is_empty() || self.debug_line_programs.is_empty() {
             return Ok(None);
@@ -5695,7 +5691,7 @@ impl ProgramBlob {
 
         reader.skip(info_offset as usize)?;
 
-        let mut lp = LineProgram {
+        Ok(Some(LineProgram {
             entry_index: offset / ENTRY_SIZE,
             region_counter: 0,
             blob: self,
@@ -5705,56 +5701,34 @@ impl ProgramBlob {
             stack: Default::default(),
             stack_depth: 0,
             mutation_depth: 0,
+        }))
+    }
+
+    /// Returns frame info for the region containing the given program counter.
+    pub fn get_frame_info_for(
+        &self,
+        program_counter: ProgramCounter,
+        iteration_limit: Option<usize>,
+    ) -> Result<Option<FrameInfoList>, ProgramParseError> {
+        let Some(mut lp) = self.get_debug_line_program_at(program_counter)? else {
+            return Ok(None);
         };
 
-        // Advance the line program to the region containing the queried PC.
-        // Each group's line program encodes multiple regions (one per instruction
-        // state change). Without seeking, the first run() call always returns the
-        // first region regardless of which PC was queried.
-        for _ in 0..region_search_limit.unwrap_or(128) {
-            // Save state so we can rewind if the next region contains our PC.
-            let saved_reader = lp.reader.clone();
-            let saved_pc = lp.program_counter;
-            let saved_stack = lp.stack;
-            let saved_stack_depth = lp.stack_depth;
-            let saved_mutation_depth = lp.mutation_depth;
-            let saved_region_counter = lp.region_counter;
-            let saved_is_finished = lp.is_finished;
-
+        for _ in 0..iteration_limit.unwrap_or(self.debug_line_programs.len()) {
             match lp.run() {
                 Ok(Some(region)) => {
-                    if region.instruction_range().contains(&ProgramCounter(program_counter)) {
-                        // Found the region containing our PC. Restore state so the
-                        // caller's next run() call returns this same region.
-                        lp.reader = saved_reader;
-                        lp.program_counter = saved_pc;
-                        lp.stack = saved_stack;
-                        lp.stack_depth = saved_stack_depth;
-                        lp.mutation_depth = saved_mutation_depth;
-                        lp.region_counter = saved_region_counter;
-                        lp.is_finished = saved_is_finished;
-                        return Ok(Some(lp));
+                    if region.instruction_range().contains(&program_counter) {
+                        let mut frames = [LineProgramFrame::default(); 16];
+                        let len = region.frames.len();
+                        frames[..len].copy_from_slice(region.frames);
+                        return Ok(Some(FrameInfoList { blob: self, frames, len }));
                     }
                 }
-                Ok(None) => {
-                    // Reached end without finding the PC. Restore to start.
-                    lp.reader = saved_reader;
-                    lp.program_counter = saved_pc;
-                    lp.stack = saved_stack;
-                    lp.stack_depth = saved_stack_depth;
-                    lp.mutation_depth = saved_mutation_depth;
-                    lp.region_counter = saved_region_counter;
-                    lp.is_finished = saved_is_finished;
-                    return Ok(Some(lp));
-                }
+                Ok(None) => return Ok(None),
                 Err(e) => return Err(e),
             }
         }
-        #[cfg(feature = "logging")]
-        log::debug!(
-            "Cannot find LineProgram after {} iterations. Consider to increase number of iterations",
-            region_search_limit.unwrap_or(128)
-        );
+
         Ok(None)
     }
 
@@ -6093,6 +6067,20 @@ struct LineProgramFrame {
     path_offset: u32,
     line: u32,
     column: u32,
+}
+
+/// A list of frame info entries for a given program counter.
+pub struct FrameInfoList<'a> {
+    blob: &'a ProgramBlob,
+    frames: [LineProgramFrame; 16],
+    len: usize,
+}
+
+impl<'a> FrameInfoList<'a> {
+    /// Returns an iterator over the frames.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = FrameInfo> {
+        self.frames[..self.len].iter().map(|inner| FrameInfo { blob: self.blob, inner })
+    }
 }
 
 /// A line program state machine.

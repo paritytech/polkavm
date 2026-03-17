@@ -370,7 +370,7 @@ impl<'a> Disassembler<'a> {
                 instruction_s.to_string()
             };
 
-            let line_program = self.blob.get_debug_line_program_at(offset, None)?;
+            let line_program = self.blob.get_debug_line_program_at(offset)?;
 
             if let Some(mut line_program) = line_program {
                 if last_line_program_entry != Some(line_program.entry_index()) {
