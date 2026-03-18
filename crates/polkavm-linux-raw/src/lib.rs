@@ -99,6 +99,7 @@ pub use crate::arch_bindings::{
     __NR_getdents64 as SYS_getdents64,
     __NR_getgid as SYS_getgid,
     __NR_getpid as SYS_getpid,
+    __NR_gettid as SYS_gettid,
     __NR_getuid as SYS_getuid,
     __NR_io_uring_enter as SYS_io_uring_enter,
     __NR_io_uring_register as SYS_io_uring_register,
@@ -2114,6 +2115,12 @@ pub fn sys_set_tid_address(address: *const u32) -> Result<(), Error> {
     let result = unsafe { syscall_readonly!(SYS_set_tid_address, address) };
     Error::from_syscall("set_tid_address", result)?;
     Ok(())
+}
+
+pub fn sys_gettid() -> Result<pid_t, Error> {
+    let result = unsafe { syscall_readonly!(SYS_gettid) };
+    Error::from_syscall("gettid", result)?;
+    Ok(result as pid_t)
 }
 
 pub unsafe fn sys_rt_sigaction(signal: u32, new_action: &kernel_sigaction, old_action: Option<&mut kernel_sigaction>) -> Result<(), Error> {
