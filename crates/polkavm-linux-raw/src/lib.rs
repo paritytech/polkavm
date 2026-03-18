@@ -95,6 +95,7 @@ pub use crate::arch_bindings::{
     __NR_fcntl as SYS_fcntl,
     __NR_ftruncate as SYS_ftruncate,
     __NR_futex as SYS_futex,
+    __NR_getcpu as SYS_getcpu,
     __NR_getdents64 as SYS_getdents64,
     __NR_getgid as SYS_getgid,
     __NR_getpid as SYS_getpid,
@@ -131,6 +132,8 @@ pub use crate::arch_bindings::{
     __NR_rt_sigaction as SYS_rt_sigaction,
     __NR_rt_sigprocmask as SYS_rt_sigprocmask,
     __NR_rt_sigreturn as SYS_rt_sigreturn,
+    __NR_sched_getaffinity as SYS_sched_getaffinity,
+    __NR_sched_setaffinity as SYS_sched_setaffinity,
     __NR_sched_yield as SYS_sched_yield,
     __NR_seccomp as SYS_seccomp,
     __NR_sendmsg as SYS_sendmsg,
@@ -1590,6 +1593,33 @@ pub fn sys_sched_yield() -> Result<(), Error> {
     let result = unsafe { syscall_readonly!(SYS_sched_yield) };
     Error::from_syscall("sched_yield", result)?;
     Ok(())
+}
+
+pub fn sys_sched_getaffinity(pid: pid_t, mask: &mut [usize]) -> Result<(), Error> {
+    let result = unsafe { syscall!(SYS_sched_getaffinity, pid, core::mem::size_of_val(mask), mask.as_mut_ptr()) };
+    Error::from_syscall("sched_getaffinity", result)?;
+    Ok(())
+}
+
+pub fn sys_sched_setaffinity(pid: pid_t, mask: &[usize]) -> Result<(), Error> {
+    let result = unsafe { syscall_readonly!(SYS_sched_setaffinity, pid, core::mem::size_of_val(mask), mask.as_ptr()) };
+    Error::from_syscall("sched_setaffinity", result)?;
+    Ok(())
+}
+
+pub fn sys_getcpu() -> Result<(u32, u32), Error> {
+    let mut cpu = u32::MAX;
+    let mut numa_node = u32::MAX;
+    let result = unsafe {
+        syscall!(
+            SYS_getcpu,
+            core::ptr::addr_of_mut!(cpu),
+            core::ptr::addr_of_mut!(numa_node),
+            core::ptr::null::<c_void>()
+        )
+    };
+    Error::from_syscall("getcpu", result)?;
+    Ok((cpu, numa_node))
 }
 
 pub fn sys_socketpair(domain: u32, kind: u32, protocol: u32) -> Result<(Fd, Fd), Error> {
