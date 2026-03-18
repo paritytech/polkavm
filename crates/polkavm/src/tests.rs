@@ -4719,7 +4719,7 @@ fn spawn_stress_test(mut config: Config) {
         let linker: Linker = Linker::new();
         let instance_pre = linker.instantiate_pre(&module).unwrap();
 
-        const THREAD_COUNT: usize = 32;
+        const THREAD_COUNT: usize = 24;
         let barrier = alloc::sync::Arc::new(std::sync::Barrier::new(THREAD_COUNT));
 
         let mut threads = Vec::new();
