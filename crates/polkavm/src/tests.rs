@@ -4672,8 +4672,21 @@ fn test_advance_pc_and_const_add_pc_debug_info_64() {
     let bytes = polkavm_linker::program_from_elf(config, TargetInstructionSet::ReviveV1, elf.as_slice());
     assert!(bytes.is_ok());
     let program = ProgramBlob::parse(bytes.unwrap().into()).unwrap();
-    assert!(program.code().len() as u32 > 0);
-    // TODO: Check lines in debug info to make sure advance_pc and const_add_pc work properly
+
+    let pc = ProgramCounter(0x222);
+
+    let frame = program
+        .get_frame_info_for(pc, None)
+        .find(|frame| frame.kind() == polkavm_common::program::FrameKind::Line)
+        .unwrap();
+
+    assert_eq!(frame.full_name().unwrap().to_string(), "__revive_store_immutable_data");
+    assert_eq!(
+        frame.path().unwrap().unwrap(),
+        "/tmp/bad_debug_info/_tmp_bad_debug_info.sol.TransferExample.yul"
+    );
+    assert_eq!(frame.line().unwrap(), 35);
+    assert_eq!(frame.column().unwrap(), 13);
 }
 
 #[test]
