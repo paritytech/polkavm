@@ -13,6 +13,7 @@ log = { version = "0.4.20" }
 object = { version = "0.32.1", default-features = false, features = ["std", "elf"], optional = true }
 wasmi = { version = "0.39.1", optional = true }
 polkavm = { path = "../../crates/polkavm" }
+polkavm-common = { path = "../../crates/polkavm-common" }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 ckb-vm = { version = "0.24.11", features = ["asm"], optional = true }

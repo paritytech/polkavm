@@ -191,6 +191,7 @@ dependencies = [
  "log",
  "object 0.32.2",
  "polkavm",
+ "polkavm-common",
  "pvf-executor",
  "solana_rbpf",
  "wasm3",
