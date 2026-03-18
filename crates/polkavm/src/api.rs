@@ -268,6 +268,7 @@ impl CompiledModuleKind {
 pub(crate) struct ModulePrivate {
     #[allow(dead_code)]
     engine_state: Option<Arc<EngineState>>,
+    #[allow(dead_code)]
     crosscheck: bool,
 
     blob: ProgramBlob,
@@ -755,10 +756,16 @@ impl Module {
             )),
         };
 
-        let crosscheck_instance = if self.state().crosscheck && !matches!(backend, InstanceBackend::Interpreted(..)) {
-            Some(Box::new(InterpretedInstance::new_from_module(self.clone(), true, false)))
-        } else {
-            None
+        let crosscheck_instance = if_compiler_is_supported! {
+            {
+                if self.state().crosscheck && !matches!(backend, InstanceBackend::Interpreted(..)) {
+                    Some(Box::new(InterpretedInstance::new_from_module(self.clone(), true, false)))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         };
 
         Ok(RawInstance {
@@ -1131,8 +1138,13 @@ impl RawInstance {
     }
 
     #[cold]
+    #[inline(never)]
     fn on_trap(&self) {
         use crate::program::Instruction;
+
+        if !log::log_enabled!(log::Level::Debug) {
+            return;
+        }
 
         if let Some(program_counter) = self.program_counter() {
             self.module.debug_print_location(log::Level::Debug, program_counter);
@@ -1209,59 +1221,35 @@ impl RawInstance {
             return Ok(InterruptKind::NotEnoughGas);
         }
 
+        if self.crosscheck_instance.is_some() || log::log_enabled!(log::Level::Debug) {
+            self.run_impl::<true>()
+        } else {
+            self.run_impl::<false>()
+        }
+    }
+
+    fn run_impl<const DEBUG: bool>(&mut self) -> Result<InterruptKind, Error> {
+        #[allow(clippy::never_loop)]
         loop {
             let interruption = access_backend!(self.backend, |mut backend| backend
                 .run()
                 .map_err(|error| format!("execution failed: {error}")))?;
-            log::trace!("Interrupted: {:?}", interruption);
 
-            if matches!(interruption, InterruptKind::Trap) && log::log_enabled!(log::Level::Debug) {
-                self.on_trap();
+            if DEBUG {
+                log::trace!("Interrupted: {:?}", interruption);
+                if matches!(interruption, InterruptKind::Trap) {
+                    self.on_trap();
+                }
             }
 
-            if let Some(ref mut crosscheck) = self.crosscheck_instance {
-                let is_step = matches!(interruption, InterruptKind::Step);
-                let expected_interruption = crosscheck.run().expect("crosscheck failed");
-                if interruption != expected_interruption {
-                    panic!("run: crosscheck mismatch, interpreter = {expected_interruption:?}, backend = {interruption:?}");
-                }
+            if_compiler_is_supported! {
+                if DEBUG && self.crosscheck_instance.is_some() {
+                    let is_step = matches!(interruption, InterruptKind::Step);
+                    self.crosscheck(interruption.clone());
 
-                if self.module.gas_metering() != Some(GasMeteringKind::Async) {
-                    for reg in Reg::ALL {
-                        let value = access_backend!(self.backend, |backend| backend.reg(reg));
-                        let expected_value = crosscheck.reg(reg);
-                        if value != expected_value {
-                            panic!("run: crosscheck mismatch for {reg}, interpreter = 0x{expected_value:x}, backend = 0x{value:x}");
-                        }
+                    if is_step && !self.module().state().step_tracing {
+                        continue;
                     }
-                }
-
-                let crosscheck_gas = crosscheck.gas();
-                let crosscheck_program_counter = crosscheck.program_counter();
-                let crosscheck_next_program_counter = crosscheck.next_program_counter();
-                if self.module.gas_metering() != Some(GasMeteringKind::Async) {
-                    let gas = self.gas();
-                    if gas != crosscheck_gas {
-                        panic!("run: crosscheck mismatch for gas, interpreter = {crosscheck_gas}, backend = {gas}");
-                    }
-                }
-
-                if self.program_counter() != crosscheck_program_counter {
-                    panic!(
-                        "run: crosscheck mismatch for program counter, interpreter = {crosscheck_program_counter:?}, backend = {:?}",
-                        self.program_counter()
-                    );
-                }
-
-                if self.next_program_counter() != crosscheck_next_program_counter {
-                    panic!(
-                        "run: crosscheck mismatch for next program counter, interpreter = {crosscheck_next_program_counter:?}, backend = {:?}",
-                        self.next_program_counter()
-                    );
-                }
-
-                if is_step && !self.module().state().step_tracing {
-                    continue;
                 }
             }
 
@@ -1270,6 +1258,53 @@ impl RawInstance {
             }
 
             break Ok(interruption);
+        }
+    }
+
+    #[allow(dead_code)]
+    #[inline(never)]
+    #[cold]
+    fn crosscheck(&mut self, interruption: InterruptKind) {
+        let Some(ref mut crosscheck) = self.crosscheck_instance else {
+            unreachable!()
+        };
+        let expected_interruption = crosscheck.run().expect("crosscheck failed");
+        if interruption != expected_interruption {
+            panic!("run: crosscheck mismatch, interpreter = {expected_interruption:?}, backend = {interruption:?}");
+        }
+
+        if self.module.gas_metering() != Some(GasMeteringKind::Async) {
+            for reg in Reg::ALL {
+                let value = access_backend!(self.backend, |backend| backend.reg(reg));
+                let expected_value = crosscheck.reg(reg);
+                if value != expected_value {
+                    panic!("run: crosscheck mismatch for {reg}, interpreter = 0x{expected_value:x}, backend = 0x{value:x}");
+                }
+            }
+        }
+
+        let crosscheck_gas = crosscheck.gas();
+        let crosscheck_program_counter = crosscheck.program_counter();
+        let crosscheck_next_program_counter = crosscheck.next_program_counter();
+        if self.module.gas_metering() != Some(GasMeteringKind::Async) {
+            let gas = self.gas();
+            if gas != crosscheck_gas {
+                panic!("run: crosscheck mismatch for gas, interpreter = {crosscheck_gas}, backend = {gas}");
+            }
+        }
+
+        if self.program_counter() != crosscheck_program_counter {
+            panic!(
+                "run: crosscheck mismatch for program counter, interpreter = {crosscheck_program_counter:?}, backend = {:?}",
+                self.program_counter()
+            );
+        }
+
+        if self.next_program_counter() != crosscheck_next_program_counter {
+            panic!(
+                "run: crosscheck mismatch for next program counter, interpreter = {crosscheck_next_program_counter:?}, backend = {:?}",
+                self.next_program_counter()
+            );
         }
     }
 
