@@ -453,6 +453,12 @@ enum Args {
 
     /// Benchmarks PolkaVM's memset.
     BenchMemset,
+
+    /// Benchmarks ecalli overhead.
+    BenchEcalli {
+        #[clap(long)]
+        interpreter: bool,
+    },
 }
 
 fn disable_aslr() {
@@ -781,6 +787,35 @@ fn main() {
                         println!("{kind_name:<18} {size:<8} {offset_name:<10}: {}", format_time(elapsed));
                     }
                 }
+            }
+        }
+        Args::BenchEcalli { interpreter } => {
+            use polkavm_common::program::{asm, InstructionSetKind, ProgramBlob};
+            let mut builder = polkavm_common::writer::ProgramBlobBuilder::new(InstructionSetKind::JamV1);
+            builder.add_export_by_basic_block(0, b"main");
+            builder.set_code(&[asm::ecalli(0), asm::jump(0)], &[]);
+            let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+            let mut config = polkavm::Config::from_env().unwrap();
+            if interpreter {
+                config.set_backend(Some(polkavm::BackendKind::Interpreter));
+            } else {
+                config.set_backend(Some(polkavm::BackendKind::Compiler));
+            }
+
+            let times = 1000000;
+            let engine = polkavm::Engine::new(&config).unwrap();
+            let module = polkavm::Module::from_blob(&engine, &polkavm::ModuleConfig::default(), blob).unwrap();
+            let mut instance = module.instantiate().unwrap();
+            instance.set_next_program_counter(polkavm::ProgramCounter(0));
+
+            for _ in 0..50 {
+                let timestamp = std::time::Instant::now();
+                for _ in 0..times {
+                    assert!(matches!(instance.run().unwrap(), polkavm::InterruptKind::Ecalli(0)));
+                }
+
+                let elapsed = timestamp.elapsed() / times;
+                println!("{}", format_time(elapsed));
             }
         }
     }
