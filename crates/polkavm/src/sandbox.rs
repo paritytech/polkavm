@@ -8,7 +8,6 @@ use crate::api::{EngineState, MemoryProtection, Module};
 use crate::compiler::CompiledModule;
 use crate::config::{Config, SandboxKind};
 use crate::error::Error;
-use crate::mutex::Mutex;
 use crate::utils::GuestInit;
 use crate::{Gas, InterruptKind, MemoryAccessError, ProgramCounter, Reg, RegValue};
 
@@ -83,6 +82,7 @@ pub struct OffsetTable {
     pub next_program_counter: usize,
     pub program_counter: usize,
     pub regs: usize,
+    pub futex: usize,
 }
 
 pub(crate) trait Sandbox: Sized {
@@ -97,7 +97,6 @@ pub(crate) trait Sandbox: Sized {
 
     fn downcast_module(module: &Module) -> &CompiledModule<Self>;
     fn downcast_global_state(global: &GlobalStateKind) -> &Self::GlobalState;
-    fn downcast_worker_cache(global: &WorkerCacheKind) -> &WorkerCache<Self>;
 
     fn allocate_jump_table(global: &Self::GlobalState, count: usize) -> Result<Self::JumpTable, Self::Error>;
 
@@ -107,12 +106,12 @@ pub(crate) trait Sandbox: Sized {
         init: SandboxInit<Self>,
         address_space: Self::AddressSpace,
     ) -> Result<Self::Program, Self::Error>;
-    fn spawn(global: &Self::GlobalState, config: &Self::Config) -> Result<Self, Self::Error>;
+    fn spawn(global: &Self::GlobalState, config: &Self::Config, outer_instance: Option<&Self>) -> Result<Box<Self>, Self::Error>;
     fn load_module(&mut self, global: &Self::GlobalState, module: &Module) -> Result<(), Self::Error>;
-    fn recycle(&mut self, global: &Self::GlobalState) -> Result<(), Self::Error>;
+    fn recycle(sandbox: Box<Self>, global: &Self::GlobalState) -> Result<(), Self::Error>;
     fn address_table() -> AddressTable;
     fn offset_table() -> OffsetTable;
-    fn sync(&mut self) -> Result<(), Self::Error>;
+    fn idle_worker_pids(global: &Self::GlobalState) -> Vec<u32>;
 
     fn run(&mut self) -> Result<InterruptKind, Self::Error>;
     fn reg(&self, reg: Reg) -> RegValue;
@@ -154,14 +153,14 @@ where
     S: Sandbox,
 {
     engine_state: Arc<EngineState>,
-    sandbox: Option<S>,
+    sandbox: Option<Box<S>>,
 }
 
 impl<S> SandboxInstance<S>
 where
     S: Sandbox,
 {
-    pub fn spawn_and_load_module(engine_state: Arc<EngineState>, module: &Module) -> Result<Self, Error> {
+    pub fn spawn_and_load_module(engine_state: Arc<EngineState>, module: &Module, outer_instance: Option<&Self>) -> Result<Self, Error> {
         use crate::sandbox::SandboxConfig;
 
         let mut sandbox_config = S::Config::default();
@@ -169,22 +168,26 @@ where
         sandbox_config.enable_sandboxing(engine_state.sandboxing_enabled);
 
         let global = S::downcast_global_state(engine_state.sandbox_global.as_ref().unwrap());
-        let mut sandbox = if let Some(sandbox) = engine_state
-            .sandbox_cache
-            .as_ref()
-            .and_then(|cache| S::downcast_worker_cache(cache).reuse_sandbox())
-        {
-            sandbox
-        } else {
-            S::spawn(global, &sandbox_config)
-                .map_err(Error::from_display)
-                .map_err(|error| error.context("instantiation failed: failed to create a sandbox"))?
-        };
+        let mut sandbox = S::spawn(
+            global,
+            &sandbox_config,
+            outer_instance.and_then(|instance| instance.sandbox.as_deref()),
+        )
+        .map_err(Error::from_display)
+        .map_err(|error| error.context("instantiation failed: failed to create a sandbox"))?;
 
-        sandbox
+        let result = sandbox
             .load_module(global, module)
             .map_err(Error::from_display)
-            .map_err(|error| error.context("instantiation failed: failed to upload the program into the sandbox"))?;
+            .map_err(|error| error.context("instantiation failed: failed to upload the program into the sandbox"));
+
+        if let Err(error) = result {
+            if let Err(recycle_error) = S::recycle(sandbox, global) {
+                log::warn!("Failed to recycle sandbox: {recycle_error}");
+            }
+
+            return Err(error);
+        }
 
         Ok(SandboxInstance {
             sandbox: Some(sandbox),
@@ -206,18 +209,11 @@ where
     S: Sandbox,
 {
     fn drop(&mut self) {
-        if let Some(cache) = self.engine_state.sandbox_cache.as_ref() {
-            let cache = S::downcast_worker_cache(cache);
-            cache.recycle_sandbox(|| {
-                let mut sandbox = self.sandbox.take()?;
-                let global = S::downcast_global_state(self.engine_state.sandbox_global.as_ref().unwrap());
-                if let Err(error) = sandbox.recycle(global) {
-                    log::warn!("Failed to cache a sandbox worker process due to an error: {error}");
-                    None
-                } else {
-                    Some(sandbox)
-                }
-            })
+        if let Some(sandbox) = self.sandbox.take() {
+            let global = S::downcast_global_state(self.engine_state.sandbox_global.as_ref().unwrap());
+            if let Err(error) = S::recycle(sandbox, global) {
+                log::warn!("Failed to recycle sandbox: {error}");
+            }
         }
     }
 }
@@ -262,164 +258,14 @@ impl GlobalStateKind {
             }
         }
     }
-}
-
-pub(crate) enum WorkerCacheKind {
-    #[cfg(target_os = "linux")]
-    Linux(WorkerCache<crate::sandbox::linux::Sandbox>),
-    #[cfg(feature = "generic-sandbox")]
-    Generic(WorkerCache<crate::sandbox::generic::Sandbox>),
-}
-
-impl WorkerCacheKind {
-    pub(crate) fn new(kind: SandboxKind, config: &Config) -> Self {
-        match kind {
-            SandboxKind::Linux => {
-                #[cfg(target_os = "linux")]
-                {
-                    Self::Linux(WorkerCache::new(config))
-                }
-
-                #[cfg(not(target_os = "linux"))]
-                {
-                    unreachable!()
-                }
-            }
-            SandboxKind::Generic => {
-                #[cfg(feature = "generic-sandbox")]
-                {
-                    Self::Generic(WorkerCache::new(config))
-                }
-
-                #[cfg(not(feature = "generic-sandbox"))]
-                {
-                    unreachable!()
-                }
-            }
-        }
-    }
-
-    pub(crate) fn spawn(&self, global: &GlobalStateKind) -> Result<(), Error> {
-        match self {
-            #[cfg(target_os = "linux")]
-            WorkerCacheKind::Linux(ref cache) => cache.spawn(crate::sandbox::linux::Sandbox::downcast_global_state(global)),
-            #[cfg(feature = "generic-sandbox")]
-            WorkerCacheKind::Generic(ref cache) => cache.spawn(crate::sandbox::generic::Sandbox::downcast_global_state(global)),
-        }
-    }
 
     pub(crate) fn idle_worker_pids(&self) -> Vec<u32> {
+        #[allow(unreachable_patterns)]
         match self {
             #[cfg(target_os = "linux")]
-            WorkerCacheKind::Linux(ref cache) => cache.idle_worker_pids(),
-            #[cfg(feature = "generic-sandbox")]
-            WorkerCacheKind::Generic(ref cache) => cache.idle_worker_pids(),
+            GlobalStateKind::Linux(state) => crate::sandbox::linux::Sandbox::idle_worker_pids(state),
+            _ => Vec::new(),
         }
-    }
-}
-
-pub(crate) struct WorkerCache<S> {
-    sandboxing_enabled: bool,
-    sandboxes: Mutex<Vec<S>>,
-    available_workers: AtomicUsize,
-    worker_limit: usize,
-}
-
-impl<S> WorkerCache<S>
-where
-    S: Sandbox,
-{
-    pub(crate) fn new(config: &Config) -> Self {
-        WorkerCache {
-            sandboxing_enabled: config.sandboxing_enabled,
-            sandboxes: Mutex::new(Vec::new()),
-            available_workers: AtomicUsize::new(0),
-            worker_limit: config.worker_count,
-        }
-    }
-
-    fn spawn(&self, global: &S::GlobalState) -> Result<(), Error> {
-        let mut sandbox_config = S::Config::default();
-        sandbox_config.enable_logger(is_sandbox_logging_enabled());
-        sandbox_config.enable_sandboxing(self.sandboxing_enabled);
-
-        let sandbox = S::spawn(global, &sandbox_config)
-            .map_err(crate::Error::from_display)
-            .map_err(|error| {
-                error.context(format!(
-                    "failed to create a worker process ({} already exist)",
-                    self.available_workers.load(Ordering::Relaxed)
-                ))
-            })?;
-
-        let mut sandboxes = self.sandboxes.lock();
-        sandboxes.push(sandbox);
-        self.available_workers.store(sandboxes.len(), Ordering::Relaxed);
-
-        Ok(())
-    }
-
-    fn reuse_sandbox(&self) -> Option<S> {
-        if self.available_workers.load(Ordering::Relaxed) == 0 {
-            return None;
-        }
-
-        let mut sandbox = {
-            let mut sandboxes = self.sandboxes.lock();
-            let sandbox = sandboxes.pop()?;
-            self.available_workers.store(sandboxes.len(), Ordering::Relaxed);
-
-            sandbox
-        };
-
-        if let Err(error) = sandbox.sync() {
-            log::warn!("Failed to reuse a sandbox: {error}");
-            None
-        } else {
-            Some(sandbox)
-        }
-    }
-
-    fn recycle_sandbox(&self, get_sandbox: impl FnOnce() -> Option<S>) {
-        let mut count = self.available_workers.load(Ordering::Relaxed);
-        if count >= self.worker_limit {
-            return;
-        }
-
-        loop {
-            if let Err(new_count) = self
-                .available_workers
-                .compare_exchange(count, count + 1, Ordering::Relaxed, Ordering::Relaxed)
-            {
-                if new_count >= self.worker_limit {
-                    return;
-                }
-
-                count = new_count;
-                continue;
-            }
-
-            break;
-        }
-
-        let sandbox = get_sandbox();
-        {
-            let mut sandboxes = self.sandboxes.lock();
-            if let Some(sandbox) = sandbox {
-                sandboxes.push(sandbox);
-            }
-            self.available_workers.store(sandboxes.len(), Ordering::Relaxed);
-        }
-    }
-
-    fn idle_worker_pids(&self) -> Vec<u32> {
-        let mut output = Vec::new();
-        for sandbox in &*self.sandboxes.lock() {
-            if let Some(pid) = sandbox.pid() {
-                output.push(pid);
-            }
-        }
-        output
     }
 }
 

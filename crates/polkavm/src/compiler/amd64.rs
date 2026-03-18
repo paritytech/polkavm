@@ -627,10 +627,41 @@ where
         let label = self.ecall_label;
         self.define_label(label);
 
-        self.save_return_address_to_vmctx();
-        self.save_registers_to_vmctx();
-        self.push(mov_imm64(TMP_REG, S::address_table().syscall_hostcall));
-        self.push(jmp(TMP_REG));
+        match S::KIND {
+            SandboxKind::Linux => {
+                self.save_return_address_to_vmctx();
+                self.save_registers_to_vmctx();
+
+                // We don't need the old value, but doing an xchg is sligtly faster than just a normal store.
+                self.asm
+                    .push(mov_imm(TMP_REG, imm32(polkavm_common::zygote::VMCTX_FUTEX_GUEST_ECALLI)));
+                self.asm
+                    .push(xchg_mem(RegSize::R32, TMP_REG, Self::vmctx_field(S::offset_table().futex)));
+
+                let label_abort = self.asm.forward_declare_label();
+                let label = self.asm.create_label();
+                self.asm.push(pause());
+                self.asm
+                    .push(load(LoadKind::U32, TMP_REG, Self::vmctx_field(S::offset_table().futex)));
+                self.asm
+                    .push(cmp((TMP_REG, imm32(polkavm_common::zygote::VMCTX_FUTEX_GUEST_ECALLI))));
+                branch_to_label(self.asm.reserve::<U1>(), Condition::Equal, label);
+                self.asm.push(cmp((TMP_REG, imm32(polkavm_common::zygote::VMCTX_FUTEX_LONGJUMP))));
+                self.asm.push(jcc_label8(Condition::Equal, label_abort));
+                self.restore_registers_from_vmctx();
+                self.asm.push(ret());
+
+                self.define_label(label_abort);
+                self.push(mov_imm64(TMP_REG, S::address_table().syscall_hostcall));
+                self.push(jmp(TMP_REG));
+            }
+            SandboxKind::Generic => {
+                self.save_return_address_to_vmctx();
+                self.save_registers_to_vmctx();
+                self.push(mov_imm64(TMP_REG, S::address_table().syscall_hostcall));
+                self.push(jmp(TMP_REG));
+            }
+        }
     }
 
     pub(crate) fn emit_step_trampoline(&mut self) {

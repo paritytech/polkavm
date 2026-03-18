@@ -23,7 +23,6 @@ use polkavm_common::{
         VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE,
         VM_SHARED_MEMORY_SIZE,
         VMCTX_FUTEX_BUSY,
-        VMCTX_FUTEX_GUEST_ECALLI,
         VMCTX_FUTEX_GUEST_STEP,
         VMCTX_FUTEX_GUEST_TRAP,
         VMCTX_FUTEX_GUEST_NOT_ENOUGH_GAS,
@@ -898,8 +897,8 @@ pub unsafe extern "C" fn ext_zero_memory_chunk() -> ! {
 #[inline(never)]
 #[no_mangle]
 pub unsafe extern "C" fn syscall_hostcall() -> ! {
-    trace!("syscall: hostcall triggered");
-    signal_host_and_longjmp(VMCTX_FUTEX_GUEST_ECALLI);
+    // NOTE: For this backend this is only called when a hostcall is *aborted*.
+    signal_host_and_longjmp(VMCTX_FUTEX_IDLE);
 }
 
 #[inline(never)]

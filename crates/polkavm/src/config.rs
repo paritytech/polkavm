@@ -100,6 +100,17 @@ impl SandboxKind {
     }
 }
 
+/// Core pinning behavior of the VM host (Linux sandbox only).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum CorePinning {
+    /// Automatically and permanently pin the host thread to a single CPU core.
+    PinToCore,
+    /// Automatically and permanently pin the host thread to a single CPU CCX.
+    PinToCcx,
+    /// Disable automatic pinning.
+    Disabled,
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub(crate) backend: Option<BackendKind>,
@@ -113,6 +124,7 @@ pub struct Config {
     pub(crate) sandboxing_enabled: bool,
     pub(crate) default_cost_model: Option<CostModelKind>,
     pub(crate) imperfect_logger_filtering_workaround: bool,
+    pub(crate) core_pinning: CorePinning,
 }
 
 impl Default for Config {
@@ -168,6 +180,7 @@ impl Config {
             sandboxing_enabled: true,
             default_cost_model: None,
             imperfect_logger_filtering_workaround: false,
+            core_pinning: CorePinning::PinToCore,
         }
     }
 
@@ -236,6 +249,21 @@ impl Config {
                     config.default_cost_model = Some(CostModelKind::Simple(CostModelRef::from(Arc::new(cost_model))));
                 }
             }
+
+            if let Some(value) = std::env::var_os("POLKAVM_CORE_PINNING") {
+                if value == "pin_to_core" {
+                    config.core_pinning = CorePinning::PinToCore;
+                } else if value == "pin_to_ccx" {
+                    config.core_pinning = CorePinning::PinToCcx;
+                } else if value == "disabled" {
+                    config.core_pinning = CorePinning::Disabled;
+                } else {
+                    bail!(
+                        "invalid value of POLKAVM_CORE_PINNING {:?} (supported options: pin_to_core, pin_to_ccx, disabled)",
+                        value
+                    );
+                }
+            }
         }
 
         Ok(config)
@@ -269,6 +297,21 @@ impl Config {
     /// Gets the currently set sandbox, if any.
     pub fn sandbox(&self) -> Option<SandboxKind> {
         self.sandbox
+    }
+
+    /// Sets the CPU core pinning behavior. Only has an effect when using the Linux sandbox with the recompiler backend.
+    ///
+    /// Default: `PinToCore`
+    ///
+    /// Corresponding environment variable: `POLKAVM_CORE_PINNING` (`pin_to_core`, `pin_to_ccx`, `disabled`)
+    pub fn set_core_pinning(&mut self, core_pinning: CorePinning) -> &mut Self {
+        self.core_pinning = core_pinning;
+        self
+    }
+
+    /// Gets the currently set core pinning behavior.
+    pub fn core_pinning(&self) -> CorePinning {
+        self.core_pinning
     }
 
     /// Enables execution cross-checking.

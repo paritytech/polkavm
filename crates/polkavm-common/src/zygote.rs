@@ -350,6 +350,9 @@ pub const VMCTX_FUTEX_GUEST_NOT_ENOUGH_GAS: u32 = VMCTX_FUTEX_IDLE | (5 << 1);
 /// The VM has triggered a page fault.
 pub const VMCTX_FUTEX_GUEST_PAGEFAULT: u32 = VMCTX_FUTEX_IDLE | (6 << 1);
 
+/// The host wants the VM to execute a fresh longjmp.
+pub const VMCTX_FUTEX_LONGJUMP: u32 = u32::MAX;
+
 #[allow(clippy::declare_interior_mutable_const)]
 const ATOMIC_U64_ZERO: AtomicU64 = AtomicU64::new(0);
 
