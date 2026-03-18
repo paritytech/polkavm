@@ -1237,6 +1237,12 @@ pub mod inst {
             None,
             (fmt.write_fmt(core::format_args!("pop {}", self.0))),
 
+        // https://www.felixcloutier.com/x86/pause
+        pause() =>
+            InstBuf::from_array([0xf3, 0x90]),
+            None,
+            (fmt.write_str("pause")),
+
         // https://www.felixcloutier.com/x86/nop
         nop() =>
             InstBuf::from_array([0x90]),
@@ -2444,6 +2450,7 @@ mod tests {
         nop9,
         not,
         or,
+        pause,
         pop,
         push,
         push_imm,
