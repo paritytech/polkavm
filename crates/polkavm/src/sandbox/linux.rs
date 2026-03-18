@@ -10,33 +10,219 @@ use polkavm_common::{
     zygote::{
         AddressTable, AddressTablePacked, ExtTable, ExtTablePacked, VmCtx, VmFd, VmMap, VMCTX_FUTEX_BUSY, VMCTX_FUTEX_GUEST_ECALLI,
         VMCTX_FUTEX_GUEST_NOT_ENOUGH_GAS, VMCTX_FUTEX_GUEST_PAGEFAULT, VMCTX_FUTEX_GUEST_SIGNAL, VMCTX_FUTEX_GUEST_STEP,
-        VMCTX_FUTEX_GUEST_TRAP, VMCTX_FUTEX_IDLE, VM_ADDR_NATIVE_CODE,
+        VMCTX_FUTEX_GUEST_TRAP, VMCTX_FUTEX_IDLE, VMCTX_FUTEX_LONGJUMP, VM_ADDR_NATIVE_CODE,
     },
 };
 
 pub use linux_raw::Error;
 
+use core::cell::Cell;
 use core::ffi::{c_int, c_uint};
 use core::mem::MaybeUninit;
 use core::sync::atomic::Ordering;
 use core::time::Duration;
 use linux_raw::{abort, cstr, syscall_readonly, Fd, Mmap};
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::{get_native_page_size, OffsetTable, SandboxInit, SandboxKind, WorkerCache, WorkerCacheKind};
+use super::{get_native_page_size, OffsetTable, SandboxInit, SandboxKind};
 use crate::api::{CompiledModuleKind, MemoryAccessError, MemoryProtection, Module};
 use crate::compiler::CompiledModule;
-use crate::config::Config;
-use crate::config::GasMeteringKind;
+use crate::config::{Config, CorePinning, GasMeteringKind};
+use crate::mutex::Mutex;
 use crate::page_set::PageSet;
 use crate::shm_allocator::{ShmAllocation, ShmAllocator};
 use crate::{Gas, InterruptKind, ProgramCounter, RegValue, Segfault};
+
+thread_local! {
+    static PINNED_TO_CORE: Cell<usize> = const { Cell::new(usize::MAX) };
+    static PINNED_TO_CCX: Cell<usize> = const { Cell::new(usize::MAX) };
+}
+
+#[repr(transparent)]
+#[derive(Copy, Clone, Default)]
+struct CpuMask([usize; 16]);
+
+impl CpuMask {
+    #[inline]
+    fn set_bit(&mut self, bit: usize) {
+        let n = bit / (core::mem::size_of::<usize>() * 8);
+        let m = bit % (core::mem::size_of::<usize>() * 8);
+        self.0[n] |= 1 << m;
+    }
+
+    #[inline]
+    fn is_set(&self, bit: usize) -> bool {
+        let n = bit / (core::mem::size_of::<usize>() * 8);
+        let m = bit % (core::mem::size_of::<usize>() * 8);
+        (self.0[n] & 1 << m) != 0
+    }
+
+    fn set_affinity(&self, pid: linux_raw::pid_t) -> Result<(), linux_raw::Error> {
+        linux_raw::sys_sched_setaffinity(pid, &self.0)
+    }
+
+    fn get_affinity(pid: linux_raw::pid_t) -> Result<Self, linux_raw::Error> {
+        let mut output = CpuMask::default();
+        linux_raw::sys_sched_getaffinity(pid, &mut output.0)?;
+        Ok(output)
+    }
+}
+
+fn gettid() -> linux_raw::pid_t {
+    linux_raw::sys_gettid().ok().unwrap_or(linux_raw::pid_t::MAX)
+}
+
+fn pin_to_cpu(pid: i32, cpu: usize) -> Result<(), linux_raw::Error> {
+    let mut mask = CpuMask::default();
+    mask.set_bit(cpu);
+    mask.set_affinity(pid)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TopologyInfo {
+    /// List of hyperthreads of this core, not including the core itself.
+    pub hyperthreads: Vec<usize>,
+    /// List of threads sharing the same CCX, not including the core itself nor its hyperthreads.
+    pub ccx_siblings: Vec<usize>,
+}
+
+fn parse_cpu_list(list: &str) -> Vec<usize> {
+    let mut cpus = Vec::new();
+
+    for part in list.trim().split(',') {
+        if let Some((start, end)) = part.split_once('-') {
+            let s: usize = start.parse().unwrap();
+            let e: usize = end.parse().unwrap();
+            for cpu in s..=e {
+                cpus.push(cpu);
+            }
+        } else {
+            cpus.push(part.parse().unwrap());
+        }
+    }
+
+    cpus
+}
+
+fn read_list(path: &Path) -> Result<Vec<usize>, String> {
+    let s = std::fs::read_to_string(path).map_err(|error| format!("failed to read {}: {}", path.display(), error))?;
+    Ok(parse_cpu_list(&s))
+}
+
+fn fetch_cpu_topology() -> Result<Vec<TopologyInfo>, String> {
+    let mut map = BTreeMap::new();
+    let cpu_root = Path::new("/sys/devices/system/cpu");
+
+    let mut max_cpu_id = 0;
+    for entry in std::fs::read_dir(cpu_root).map_err(|error| format!("failed to read directory {}: {}", cpu_root.display(), error))? {
+        let entry = entry.map_err(|error| format!("failed to read directory entry in {}: {}", cpu_root.display(), error))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with("cpu") {
+            continue;
+        }
+
+        let cpu_id: usize = match name[3..].parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let base = cpu_root.join(name);
+        let hyperthreads = read_list(&base.join("topology/thread_siblings_list"))?;
+        let ccx_siblings = read_list(&base.join("cache/index3/shared_cpu_list"))?;
+
+        map.insert(
+            cpu_id,
+            TopologyInfo {
+                hyperthreads,
+                ccx_siblings,
+            },
+        );
+
+        max_cpu_id = max_cpu_id.max(cpu_id);
+    }
+
+    let mut output = Vec::new();
+    for cpu_id in 0..=max_cpu_id {
+        output.push(map.remove(&cpu_id).unwrap_or_else(|| TopologyInfo {
+            hyperthreads: Vec::new(),
+            ccx_siblings: Vec::new(),
+        }));
+    }
+
+    Ok(output)
+}
+
+struct CcxState {
+    enabled: bool,
+    cores: Vec<usize>,
+    host_count: usize,
+    worker_count: usize,
+    unused_cores: usize,
+}
+
+impl CcxState {
+    #[inline]
+    fn is_unused(&self) -> bool {
+        self.worker_count == 0 && self.host_count == 0 && self.unused_cores > 0
+    }
+}
+
+struct CoreState {
+    enabled: bool,
+    ccx_id: usize,
+    topology: TopologyInfo,
+    #[allow(clippy::vec_box)]
+    worker_cache: Vec<Box<Sandbox>>,
+    host_count: usize,
+    worker_count: usize,
+}
+
+impl CoreState {
+    #[inline]
+    fn is_unused(&self) -> bool {
+        self.enabled && self.worker_count == 0 && self.host_count == 0
+    }
+}
+
+struct MutableState {
+    per_ccx: Vec<CcxState>,
+    per_core: Vec<CoreState>,
+}
+
+impl MutableState {
+    fn release(&mut self, host_core: usize, worker_core: usize) {
+        let host_ccx = self.per_core[host_core].ccx_id;
+        let worker_ccx = self.per_core[worker_core].ccx_id;
+        self.per_ccx[host_ccx].host_count -= 1;
+        self.per_ccx[worker_ccx].worker_count -= 1;
+        self.per_core[host_core].host_count -= 1;
+        self.per_core[worker_core].worker_count -= 1;
+    }
+
+    #[inline]
+    fn ccx_mask(&self, ccx: usize) -> CpuMask {
+        let mut mask = CpuMask::default();
+        for &core in &self.per_ccx[ccx].cores {
+            if self.per_core[core].enabled {
+                mask.set_bit(core);
+            }
+        }
+        mask
+    }
+}
 
 pub struct GlobalState {
     shared_memory: ShmAllocator,
     uffd_available: bool,
     zygote_memfd: Fd,
+    mutable: Mutex<MutableState>,
+    core_count: usize,
+    max_cached_workers: usize,
+    core_pinning: CorePinning,
 }
 
 const UFFD_REQUIRED_FEATURES: u64 = (linux_raw::UFFD_FEATURE_MISSING_SHMEM
@@ -170,11 +356,74 @@ impl GlobalState {
             },
         }
 
+        let mut topology = fetch_cpu_topology().map_err(|error| Error::from(format!("failed to fetch CPU topology: {error}")))?;
+        let affinity = CpuMask::get_affinity(0).map_err(|error| Error::from(format!("failed to fetch CPU affinity: {error}")))?;
+        for (core, topology) in topology.iter().enumerate() {
+            log::trace!(
+                "CPU topology for #{core}: {topology:?}{}",
+                if !affinity.is_set(core) { " (DISABLED)" } else { "" }
+            );
+        }
+
+        if topology.is_empty() {
+            topology.push(TopologyInfo::default());
+        }
+
+        let mut ccx_map = BTreeMap::new();
+        for (core, topology) in topology.iter().enumerate() {
+            ccx_map.entry(&topology.ccx_siblings).or_insert_with(Vec::new).push(core);
+        }
+
+        let per_ccx: Vec<_> = ccx_map
+            .into_values()
+            .map(|cores| {
+                let unused_cores = cores.iter().filter(|&&core| affinity.is_set(core)).count();
+                CcxState {
+                    enabled: unused_cores > 0,
+                    cores,
+                    host_count: 0,
+                    worker_count: 0,
+                    unused_cores,
+                }
+            })
+            .collect();
+
+        let core_count = topology.len();
+        let mut per_core: Vec<_> = topology
+            .into_iter()
+            .enumerate()
+            .map(|(core, mut topology)| {
+                topology.hyperthreads.retain(|&other_core| other_core != core);
+                topology
+                    .ccx_siblings
+                    .retain(|&other_core| other_core != core && !topology.hyperthreads.contains(&other_core));
+
+                CoreState {
+                    enabled: affinity.is_set(core),
+                    ccx_id: usize::MAX,
+                    topology,
+                    worker_cache: Vec::new(),
+                    host_count: 0,
+                    worker_count: 0,
+                }
+            })
+            .collect();
+
+        for (ccx_id, state) in per_ccx.iter().enumerate() {
+            for &core in &state.cores {
+                per_core[core].ccx_id = ccx_id;
+            }
+        }
+
         let zygote_memfd = prepare_zygote()?;
         Ok(GlobalState {
             shared_memory: ShmAllocator::new()?,
             uffd_available,
             zygote_memfd,
+            core_count,
+            mutable: Mutex::new(MutableState { per_ccx, per_core }),
+            max_cached_workers: config.worker_count,
+            core_pinning: config.core_pinning,
         })
     }
 }
@@ -1069,13 +1318,11 @@ pub struct Sandbox {
     userfaultfd: Fd,
     child: ChildProcess,
 
-    count_wait_loop_start: u64,
-    count_futex_wait: u64,
-
     module: Option<Module>,
     gas_metering: Option<GasMeteringKind>,
 
     state: SandboxState,
+    low_latency: bool,
     is_program_counter_valid: bool,
     charge_gas_on_entry: bool,
     next_program_counter: Option<ProgramCounter>,
@@ -1086,31 +1333,8 @@ pub struct Sandbox {
     aux_data_address: u32,
     aux_data_length: u32,
     is_borked: bool,
-}
-
-impl Drop for Sandbox {
-    fn drop(&mut self) {
-        let vmctx = self.vmctx();
-        let child_futex_wait = unsafe { *vmctx.counters.syscall_futex_wait.get() };
-        let child_loop_start = unsafe { *vmctx.counters.syscall_wait_loop_start.get() };
-        if self.count_wait_loop_start != 0 {
-            log::trace!(
-                "Host futex wait count: {}/{} ({:.02}%)",
-                self.count_futex_wait,
-                self.count_wait_loop_start,
-                self.count_futex_wait as f64 / self.count_wait_loop_start as f64 * 100.0
-            );
-        }
-
-        if child_loop_start != 0 {
-            log::trace!(
-                "Child futex wait count: {}/{} ({:.02}%)",
-                child_futex_wait,
-                child_loop_start,
-                child_futex_wait as f64 / child_loop_start as f64 * 100.0
-            );
-        }
-    }
+    host_core: usize,
+    worker_core: usize,
 }
 
 impl super::SandboxAddressSpace for () {
@@ -1150,6 +1374,17 @@ impl super::Sandbox for Sandbox {
     type GlobalState = GlobalState;
     type JumpTable = JumpTableAllocation;
 
+    fn idle_worker_pids(global: &Self::GlobalState) -> Vec<u32> {
+        let mut output = Vec::new();
+        for per_core in global.mutable.lock().per_core.iter() {
+            for sandbox in &per_core.worker_cache {
+                output.push(sandbox.child.pid as u32)
+            }
+        }
+
+        output
+    }
+
     fn downcast_module(module: &Module) -> &CompiledModule<Self> {
         let CompiledModuleKind::Linux(ref module) = module.compiled_module() else {
             unreachable!()
@@ -1164,15 +1399,6 @@ impl super::Sandbox for Sandbox {
             unreachable!()
         };
         global
-    }
-
-    fn downcast_worker_cache(cache: &WorkerCacheKind) -> &WorkerCache<Self> {
-        #[allow(irrefutable_let_patterns)]
-        let crate::sandbox::WorkerCacheKind::Linux(ref cache) = cache
-        else {
-            unreachable!()
-        };
-        cache
     }
 
     fn allocate_jump_table(global: &Self::GlobalState, count: usize) -> Result<Self::JumpTable, Self::Error> {
@@ -1301,325 +1527,294 @@ impl super::Sandbox for Sandbox {
         })))
     }
 
-    fn spawn(global: &Self::GlobalState, config: &SandboxConfig) -> Result<Self, Error> {
-        let sigset = Sigmask::block_all_signals()?;
-        let (socket, child_socket) = linux_raw::sys_socketpair(linux_raw::AF_UNIX, linux_raw::SOCK_SEQPACKET | linux_raw::SOCK_CLOEXEC, 0)?;
-        let (lifetime_pipe_host, lifetime_pipe_child) = linux_raw::sys_pipe2(linux_raw::O_CLOEXEC)?;
-        let (logger_rx, logger_tx) = if config.enable_logger {
-            let (rx, tx) = linux_raw::sys_pipe2(linux_raw::O_CLOEXEC)?;
-            (Some(rx), Some(tx))
-        } else {
-            (None, None)
-        };
-        // TODO: If not using userfaultfd then don't mmap all of this immediately.
-        let (memory_memfd, memory_mmap) = prepare_memory()?;
-
-        let sandboxing_enabled = config.enable_sandboxing && !cfg!(polkavm_dev_debug_zygote);
-        let (vmctx_memfd, vmctx_mmap) = prepare_vmctx()?;
-        let vmctx = unsafe { &*vmctx_mmap.as_ptr().cast::<VmCtx>() };
-        vmctx.init.logging_enabled.store(config.enable_logger, Ordering::Relaxed);
-        vmctx.init.uffd_available.store(global.uffd_available, Ordering::Relaxed);
-        vmctx.init.sandbox_disabled.store(!sandboxing_enabled, Ordering::Relaxed);
-
-        let sandbox_flags = if sandboxing_enabled { SANDBOX_FLAGS } else { 0 };
-
-        let uid = linux_raw::sys_getuid()?;
-        let gid = linux_raw::sys_getgid()?;
-
-        let uid_map = format!("0 {} 1\n", uid);
-        let gid_map = format!("0 {} 1\n", gid);
-
-        let mut child = match clone(sandbox_flags)? {
-            Fork::Child => {
-                // We're in the child.
-                //
-                // Calling into libc from here risks a deadlock as other threads might have
-                // been holding onto internal libc locks while we were cloning ourselves,
-                // so from now on we can't use anything from libc anymore.
-                core::mem::forget(sigset);
-
-                unsafe {
-                    match child_main(
-                        &uid_map,
-                        &gid_map,
-                        ChildFds {
-                            zygote: linux_raw::Fd::from_raw_unchecked(global.zygote_memfd.raw()),
-                            socket: child_socket,
-                            vmctx: vmctx_memfd,
-                            shm: linux_raw::Fd::from_raw_unchecked(global.shared_memory.fd().raw()),
-                            mem: memory_memfd,
-                            lifetime_pipe: lifetime_pipe_child,
-                            logging_pipe: logger_tx,
-                        },
-                        sandboxing_enabled,
-                    ) {
-                        Ok(()) => {
-                            // This is impossible.
-                            abort();
-                        }
-                        Err(error) => {
-                            let vmctx = &*vmctx_mmap.as_ptr().cast::<VmCtx>();
-                            set_message(vmctx, format_args!("fatal error while spawning child: {error}"));
-
-                            abort();
-                        }
-                    }
-                }
+    fn spawn(global: &Self::GlobalState, config: &SandboxConfig, outer_instance: Option<&Self>) -> Result<Box<Self>, Error> {
+        #[inline]
+        fn pin_to_ccx(host_ccx: usize, mask: CpuMask) -> bool {
+            if let Err(error) = mask.set_affinity(0) {
+                log::warn!("Failed to pin thread #{} to CCX {host_ccx}: {error}", gettid());
+                false
+            } else {
+                PINNED_TO_CCX.with(|cell| cell.set(host_ccx));
+                log::trace!("Pinned thread #{} to CCX {host_ccx}", gettid());
+                true
             }
-            Fork::Host(child) => child,
-        };
-
-        let child_pid = child.pid;
-
-        child_socket.close()?;
-        vmctx_memfd.close()?;
-        memory_memfd.close()?;
-        lifetime_pipe_child.close()?;
-        if let Some(logger_tx) = logger_tx {
-            logger_tx.close()?;
         }
 
-        if let Some(logger_rx) = logger_rx {
-            // Hook up the child process' STDERR to our logger.
-            std::thread::Builder::new()
-                .name("polkavm-logger".into())
-                .spawn(move || {
-                    let mut tmp = [0; 4096];
-                    let mut buffer = Vec::new();
-                    loop {
-                        if buffer.len() > 8192 {
-                            // Make sure the child can't exhaust our memory by spamming logs.
-                            buffer.clear();
-                        }
+        #[inline]
+        fn getcpu() -> Option<usize> {
+            match linux_raw::sys_getcpu() {
+                Ok((core, _)) => Some(cast(core).to_usize()),
+                Err(error) => {
+                    log::warn!("Failed to fetch the current CPU core: {error}");
+                    None
+                }
+            }
+        }
 
-                        match linux_raw::sys_read(logger_rx.borrow(), &mut tmp) {
-                            Err(error) if error.errno() == linux_raw::EINTR => continue,
-                            Err(error) => {
-                                log::warn!("Failed to read from logger: {}", error);
-                                break;
+        #[inline]
+        fn core_cost(state: &CoreState) -> (bool, usize, usize) {
+            (!state.is_unused(), state.worker_count, state.host_count)
+        }
+
+        let mut running_on_core = PINNED_TO_CORE.with(|cell| cell.get());
+        if running_on_core == usize::MAX {
+            running_on_core = getcpu().unwrap_or(0);
+            if running_on_core >= global.core_count {
+                log::warn!(
+                    "Out of range CPU core ({running_on_core} >= {}); did the CPU count suddenly change?",
+                    global.core_count
+                );
+                running_on_core = 0;
+            }
+        } else if cfg!(debug_assertions) {
+            if let Some(actual_core) = getcpu() {
+                if actual_core != running_on_core {
+                    log::warn!(
+                        "Thread #{} was repinned from core {} to core {}!",
+                        gettid(),
+                        running_on_core,
+                        actual_core
+                    );
+                }
+            }
+        }
+
+        let mut host_core = running_on_core;
+        let (host_ccx, worker_core, worker) = {
+            let mut mutable = global.mutable.lock();
+            if let Some(outer_instance) = outer_instance {
+                // Pick the host core for an inner VM.
+                let outer_host_core = outer_instance.host_core;
+                let outer_host_ccx = mutable.per_core[outer_host_core].ccx_id;
+                match global.core_pinning {
+                    CorePinning::PinToCore => {
+                        if outer_host_core != host_core {
+                            log::warn!("Trying to launch an inner VM on a different core than the outer VM! (inner core = {host_core}, outer core = {outer_host_core})");
+                            let previously_pinned_core = PINNED_TO_CORE.with(|cell| cell.get());
+                            if previously_pinned_core != usize::MAX {
+                                log::warn!(
+                                    "Thread #{} was already pinned to a different core {}",
+                                    gettid(),
+                                    previously_pinned_core
+                                );
+                            } else {
+                                host_core = outer_host_core;
                             }
-                            Ok(0) => break,
-                            Ok(count) => {
-                                let mut tmp = &tmp[..count];
-                                while !tmp.is_empty() {
-                                    if let Some(index) = tmp.iter().position(|&byte| byte == b'\n') {
-                                        buffer.extend_from_slice(&tmp[..index]);
-                                        tmp = &tmp[index + 1..];
+                        }
+                    }
+                    CorePinning::PinToCcx => {
+                        let host_ccx = mutable.per_core[host_core].ccx_id;
+                        if outer_host_ccx != host_ccx {
+                            log::warn!("Trying to launch an inner VM on a different CCX than the outer VM! (inner CCX = {host_ccx}, outer CCX = {outer_host_ccx})");
 
-                                        log::trace!(target: "polkavm::zygote", "Child #{}: {}", child_pid, String::from_utf8_lossy(&buffer));
-                                        buffer.clear();
-                                    } else {
-                                        buffer.extend_from_slice(tmp);
-                                        break;
+                            let previously_pinned_ccx = PINNED_TO_CCX.with(|cell| cell.get());
+                            if previously_pinned_ccx != usize::MAX {
+                                log::warn!(
+                                    "Thread #{} was already pinned to a different CCX {}",
+                                    gettid(),
+                                    previously_pinned_ccx
+                                );
+                            } else {
+                                let mask = mutable.ccx_mask(outer_host_ccx);
+                                if pin_to_ccx(outer_host_ccx, mask) {
+                                    if let Some(new_host_core) = getcpu() {
+                                        host_core = new_host_core;
                                     }
                                 }
                             }
                         }
                     }
-                })
-                .map_err(|error| Error::from_os_error("failed to spawn logger thread", error))?;
-        }
-
-        // We're in the parent. Restore the signal mask.
-        sigset.unblock()?;
-
-        fn wait_for_futex(vmctx: &VmCtx, child: &mut ChildProcess, current_state: u32, target_state: u32) -> Result<(), Error> {
-            let instant = Instant::now();
-            loop {
-                let state = vmctx.futex.load(Ordering::Relaxed);
-                if state == target_state {
-                    return Ok(());
+                    CorePinning::Disabled => {}
                 }
-
-                if state != current_state {
-                    return Err(Error::from_str("failed to initialize sandbox process: unexpected futex state"));
-                }
-
-                let status = child.check_status(true)?;
-                if !status.is_running() {
-                    let message = get_message(vmctx);
-                    if let Some(message) = message {
-                        let error = Error::from(format!("failed to initialize sandbox process: {status}: {message}"));
-                        return Err(error);
-                    } else {
-                        return Err(Error::from(format!(
-                            "failed to initialize sandbox process: child process unexpectedly quit: {status}",
-                        )));
-                    }
-                }
-
-                if !cfg!(polkavm_dev_debug_zygote) && instant.elapsed() > Duration::from_secs(10) {
-                    // This should never happen, but just in case.
-                    return Err(Error::from_str("failed to initialize sandbox process: initialization timeout"));
-                }
-
-                match linux_raw::sys_futex_wait(&vmctx.futex, state, Some(Duration::from_millis(100))) {
-                    Ok(()) => continue,
-                    Err(error)
-                        if error.errno() == linux_raw::EAGAIN
-                            || error.errno() == linux_raw::EINTR
-                            || error.errno() == linux_raw::ETIMEDOUT =>
-                    {
-                        continue
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-
-        #[cfg(debug_assertions)]
-        if cfg!(polkavm_dev_debug_zygote) {
-            use core::fmt::Write;
-            std::thread::sleep(Duration::from_millis(200));
-
-            let mut command = String::new();
-            // Make sure gdb can actually attach to the worker process.
-            if std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
-                .map(|value| value.trim() == "1")
-                .unwrap_or(false)
-            {
-                command.push_str("echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope ;");
-            }
-
-            command.push_str(concat!(
-                "gdb",
-                " -ex 'set pagination off'",
-                " -ex 'layout split'",
-                " -ex 'set print asm-demangle on'",
-                " -ex 'set debuginfod enabled off'",
-                " -ex 'tcatch exec'",
-                " -ex 'handle SIGSTOP nostop'",
-            ));
-
-            let _ = write!(&mut command, " -ex 'attach {}' -ex 'continue'", child.pid);
-
-            let mut cmd = if std::env::var_os("DISPLAY").is_some() {
-                // Running X11; open gdb in a terminal.
-                let mut cmd = std::process::Command::new("urxvt");
-                cmd.args(["-fg", "rgb:ffff/ffff/ffff"])
-                    .args(["-bg", "rgba:0000/0000/0000/7777"])
-                    .arg("-e")
-                    .arg("sh")
-                    .arg("-c")
-                    .arg(&command);
-                cmd
             } else {
-                // Not running under X11; just run it as-is.
-                let mut cmd = std::process::Command::new("sh");
-                cmd.arg("-c").arg(&command);
-                cmd
-            };
+                // Pick the host core for an outer VM.
+                let mut host_ccx = mutable.per_core[host_core].ccx_id;
+                if mutable.per_ccx[host_ccx].is_unused() {
+                    log::trace!("CCX {host_ccx} is already empty");
+                } else if !matches!(global.core_pinning, CorePinning::Disabled) {
+                    log::trace!("CCX {host_ccx} is not empty; searching for an alternative...");
+                    // There's already something running on this CCX; try to find another CCX that's idle.
+                    if let Some((new_host_ccx, _)) = mutable.per_ccx.iter().enumerate().find(|(_, ccx_state)| ccx_state.is_unused()) {
+                        // We've found an idle CCX.
+                        log::trace!("Picked an empty CCX: {new_host_ccx}");
+                        host_ccx = new_host_ccx;
+                        host_core = mutable.per_ccx[host_ccx].cores[0];
+                        if matches!(global.core_pinning, CorePinning::PinToCcx) {
+                            // We can't pin ourselves to a specific core, so pin to a CCX and query on which core we're running.
+                            let mask = mutable.ccx_mask(host_ccx);
+                            if pin_to_ccx(host_ccx, mask) {
+                                if let Some(new_host_core) = getcpu() {
+                                    host_core = new_host_core;
+                                }
+                            }
+                        }
+                    }
+                    // We have no idle CCXes; this is not ideal since the VMs are going to trash each other's caches.
+                    // Find a CCX with the most unused cores.
+                    else if let Some((new_host_ccx, _)) = mutable
+                        .per_ccx
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, ccx_state)| ccx_state.enabled)
+                        .min_by_key(|(_, ccx_state)| (!ccx_state.unused_cores, ccx_state.host_count + ccx_state.worker_count))
+                    {
+                        log::trace!(
+                            "Picked non-empty CCX {new_host_ccx} (unused cores = {}, hosts = {}, workers = {})",
+                            mutable.per_ccx[new_host_ccx].unused_cores,
+                            mutable.per_ccx[new_host_ccx].host_count,
+                            mutable.per_ccx[new_host_ccx].worker_count
+                        );
 
-            let mut gdb = match cmd.spawn() {
-                Ok(child) => child,
-                Err(error) => {
-                    panic!("failed to launch: '{cmd:?}': {error}");
-                }
-            };
+                        host_ccx = new_host_ccx;
+                        host_core = mutable.per_ccx[host_ccx].cores[0];
 
-            let pid = child.pid;
-            std::thread::spawn(move || {
-                let _ = gdb.wait();
-                let _ = linux_raw::sys_kill(pid, linux_raw::SIGKILL);
-            });
-        }
-
-        // Wait until the child process receives the vmctx memfd.
-        wait_for_futex(vmctx, &mut child, VMCTX_FUTEX_BUSY, VMCTX_FUTEX_IDLE)?;
-
-        // Grab the child process' maps and see what we can unmap.
-        //
-        // The child process can't do it itself as it's too sandboxed.
-        let maps = std::fs::read(format!("/proc/{}/maps", child_pid))
-            .map_err(|error| Error::from_errno("failed to read child's maps", error.raw_os_error().unwrap_or(0)))?;
-
-        for line in maps.split(|&byte| byte == b'\n') {
-            if line.is_empty() {
-                continue;
-            }
-
-            let map = Map::parse(line).ok_or_else(|| Error::from_str("failed to parse the maps of the child process"))?;
-            match map.name {
-                b"[stack]" => {
-                    vmctx.init.stack_address.store(map.start, Ordering::Relaxed);
-                    vmctx.init.stack_length.store(map.end - map.start, Ordering::Relaxed);
-                }
-                b"[vdso]" => {
-                    vmctx.init.vdso_address.store(map.start, Ordering::Relaxed);
-                    vmctx.init.vdso_length.store(map.end - map.start, Ordering::Relaxed);
-                }
-                b"[vvar]" => {
-                    vmctx.init.vvar_address.store(map.start, Ordering::Relaxed);
-                    vmctx.init.vvar_length.store(map.end - map.start, Ordering::Relaxed);
-                }
-                b"[vsyscall]" => {
-                    if map.is_readable {
-                        return Err(Error::from_str("failed to initialize sandbox process: vsyscall region is readable"));
+                        if matches!(global.core_pinning, CorePinning::PinToCcx) {
+                            // We can't pin ourselves to a specific core, so pin to a CCX and query on which core we're running.
+                            let mask = mutable.ccx_mask(host_ccx);
+                            if pin_to_ccx(host_ccx, mask) {
+                                if let Some(new_host_core) = getcpu() {
+                                    host_core = new_host_core;
+                                }
+                            }
+                        } else {
+                            debug_assert!(matches!(global.core_pinning, CorePinning::PinToCore));
+                            // Try to find us an unused core with an unused hyperthread.
+                            host_core = mutable.per_ccx[host_ccx]
+                                .cores
+                                .iter()
+                                .copied()
+                                .find(|&core| {
+                                    mutable.per_core[core].is_unused()
+                                        && mutable.per_core[core]
+                                            .topology
+                                            .hyperthreads
+                                            .iter()
+                                            .any(|&hyperthread| mutable.per_core[hyperthread].is_unused())
+                                })
+                                // Otherwise find the least loaded core.
+                                .or_else(|| {
+                                    mutable.per_ccx[host_ccx]
+                                        .cores
+                                        .iter()
+                                        .copied()
+                                        .filter(|&core| mutable.per_core[core].enabled)
+                                        .min_by_key(|&core| core_cost(&mutable.per_core[core]))
+                                })
+                                .expect("internal error: CCX with no cores");
+                        }
                     }
                 }
-                _ => {}
             }
-        }
 
-        // Wake the child so that it finishes initialization.
-        vmctx.futex.store(VMCTX_FUTEX_BUSY, Ordering::Release);
-        linux_raw::sys_futex_wake_one(&vmctx.futex)?;
+            let host_ccx = mutable.per_core[host_core].ccx_id;
+            mutable.per_ccx[host_ccx].host_count += 1;
+            mutable.per_core[host_core].host_count += 1;
 
-        let userfaultfd = if global.uffd_available {
-            let userfaultfd = linux_raw::recvfd(socket.borrow()).map_err(|error| {
-                let mut error = format!("failed to fetch the userfaultfd from the child process: {error}");
-                if let Some(message) = get_message(vmctx) {
-                    use core::fmt::Write;
-                    write!(&mut error, " (root cause: {message})").unwrap();
-                }
-                Error::from(error)
-            })?;
-
-            let mut api: linux_raw::uffdio_api = linux_raw::uffdio_api {
-                api: linux_raw::UFFD_API,
-                features: UFFD_REQUIRED_FEATURES,
-                ..Default::default()
+            let worker_core = if let Some(outer_instance) = outer_instance {
+                // Pick the worker core for an outer VM.
+                // Put the worker on an unused CCX sibling of the host VM if we can.
+                let outer_worker_core = outer_instance.worker_core;
+                mutable.per_core[outer_worker_core]
+                    .topology
+                    .ccx_siblings
+                    .iter()
+                    .copied()
+                    .find(|&sibling| mutable.per_core[sibling].is_unused())
+                    .inspect(|sibling| log::trace!("Picked unused CCX sibling {sibling} for inner VM worker"))
+                    .or_else(|| {
+                        // There are no unused CCX siblings, so put the worker on *any* CCX sibling, prioritizing those which are least loaded.
+                        mutable.per_core[outer_worker_core]
+                            .topology
+                            .ccx_siblings
+                            .iter()
+                            .copied()
+                            .filter(|&sibling| mutable.per_core[sibling].enabled)
+                            .min_by_key(|&sibling| core_cost(&mutable.per_core[sibling]))
+                            .inspect(|sibling| log::trace!("Picked CCX sibling {sibling} for inner VM worker as a last resort"))
+                    })
+                    // Give up and put it on the same core.
+                    .unwrap_or(outer_worker_core)
+            } else {
+                // Pick the worker core for an inner VM.
+                // Put the worker on a free hyperthread if we can.
+                mutable.per_core[host_core]
+                    .topology
+                    .hyperthreads
+                    .iter()
+                    .copied()
+                    .find(|&hyperthread| mutable.per_core[hyperthread].is_unused())
+                    .inspect(|hyperthread| log::trace!("Picked hyperthread {hyperthread} for worker"))
+                    .or_else(|| {
+                        // There are no unused hyperthreads, so put the worker on an unused CCX sibling.
+                        mutable.per_core[host_core]
+                            .topology
+                            .ccx_siblings
+                            .iter()
+                            .copied()
+                            .find(|&sibling| mutable.per_core[sibling].is_unused())
+                            .inspect(|sibling| log::trace!("Picked unused CCX sibling {sibling} for worker"))
+                    })
+                    .or_else(|| {
+                        // There are no unused CCX siblings, so put the worker on *any* other core, prioritizing those which are least loaded.
+                        mutable
+                            .per_core
+                            .iter()
+                            .enumerate()
+                            .filter(|&(core, core_state)| core_state.enabled && core != host_core)
+                            .min_by_key(|(_, core_state)| core_cost(core_state))
+                            .map(|(core, _)| core)
+                            .inspect(|core| log::trace!("Picked core {core} for worker as a last resort"))
+                    })
+                    // Give up and put it on the same core.
+                    .unwrap_or(host_core)
             };
 
-            linux_raw::sys_uffdio_api(userfaultfd.borrow(), &mut api)
-                .map_err(|error| Error::from(format!("failed to initialize the userfaultfd API: {error}")))?;
+            let worker_ccx = mutable.per_core[worker_core].ccx_id;
+            mutable.per_ccx[worker_ccx].worker_count += 1;
+            mutable.per_core[worker_core].worker_count += 1;
+            let worker = mutable.per_core[worker_core].worker_cache.pop();
 
-            userfaultfd
-        } else {
-            Fd::from_raw_unchecked(-1)
+            log::trace!("Spawning a new instance: host core = {host_core} (CCX = {host_ccx}), worker core = {worker_core} (CCX = {worker_ccx}), recycled = {}", worker.is_some());
+            (host_ccx, worker_core, worker)
         };
 
-        // Close the socket; we don't need it anymore.
-        socket.close()?;
+        let result = if let Some(mut worker) = worker {
+            worker.wait().and_then(expect_idle).map(|()| worker)
+        } else {
+            Self::spawn_new_worker(global, config, worker_core)
+        };
 
-        // Wait for the child to finish initialization.
-        wait_for_futex(vmctx, &mut child, VMCTX_FUTEX_BUSY, VMCTX_FUTEX_IDLE)?;
+        match result {
+            Ok(mut sandbox) => {
+                debug_assert_eq!(sandbox.worker_core, worker_core);
+                sandbox.host_core = host_core;
+                match global.core_pinning {
+                    CorePinning::PinToCore => {
+                        if PINNED_TO_CORE.with(|cell| cell.get()) != host_core {
+                            if let Err(error) = pin_to_cpu(0, host_core) {
+                                log::warn!("Failed to pin thread #{} to core {host_core}: {error}", gettid());
+                            } else {
+                                PINNED_TO_CORE.with(|cell| cell.set(host_core));
+                                log::trace!("Pinned thread #{} to core {host_core}", gettid());
+                            }
+                        }
+                    }
+                    CorePinning::PinToCcx => {
+                        if PINNED_TO_CCX.with(|cell| cell.get()) != host_ccx {
+                            let mask = global.mutable.lock().ccx_mask(host_ccx);
+                            pin_to_ccx(host_ccx, mask);
+                        }
+                    }
+                    CorePinning::Disabled => {}
+                }
 
-        Ok(Sandbox {
-            _lifetime_pipe: lifetime_pipe_host,
-            vmctx_mmap,
-            memory_mmap,
-            userfaultfd,
-            child,
-
-            count_wait_loop_start: 0,
-            count_futex_wait: 0,
-
-            module: None,
-            gas_metering: None,
-
-            state: SandboxState::Idle,
-            is_program_counter_valid: false,
-            charge_gas_on_entry: true,
-            next_program_counter: None,
-            next_program_counter_changed: true,
-            page_set_present: PageSet::new(),
-            page_set_writable: PageSet::new(),
-            dynamic_paging_enabled: false,
-            aux_data_address: 0,
-            aux_data_length: 0,
-            is_borked: false,
-        })
+                Ok(sandbox)
+            }
+            Err(error) => {
+                global.mutable.lock().release(host_core, worker_core);
+                Err(error)
+            }
+        }
     }
 
     fn load_module(&mut self, global: &Self::GlobalState, module: &Module) -> Result<(), Self::Error> {
@@ -1754,54 +1949,45 @@ impl super::Sandbox for Sandbox {
         Ok(())
     }
 
-    fn recycle(&mut self, _global: &Self::GlobalState) -> Result<(), Self::Error> {
-        if self.is_borked {
+    fn recycle(mut sandbox: Box<Self>, global: &Self::GlobalState) -> Result<(), Self::Error> {
+        let should_cache = {
+            let mut mutable = global.mutable.lock();
+            mutable.release(sandbox.host_core, sandbox.worker_core);
+            mutable.per_core[sandbox.worker_core].worker_cache.len() < global.max_cached_workers
+        };
+
+        if sandbox.is_borked {
             return Err(Error::from_str("broken sandbox"));
         }
 
-        log::trace!("Recycling sandbox #{}", self.child.pid);
-        if self.dynamic_paging_enabled {
-            self.free_pages(0x10000, 0xffff0000)?;
+        if !should_cache {
+            return Ok(());
         }
 
-        self.module = None;
-        self.vmctx().jump_into.store(ZYGOTE_TABLES.1.ext_recycle, Ordering::Relaxed);
-        self.wake_oneshot_and_expect_idle()
+        log::trace!("Recycling sandbox #{}", sandbox.child.pid);
+        if sandbox.dynamic_paging_enabled {
+            sandbox.free_pages(0x10000, 0xffff0000)?;
+        }
+
+        sandbox.module = None;
+        sandbox.vmctx().jump_into.store(ZYGOTE_TABLES.1.ext_recycle, Ordering::Relaxed);
+        sandbox.wake_worker()?;
+
+        let per_core = &mut global.mutable.lock().per_core;
+        let worker_cache = &mut per_core[sandbox.worker_core].worker_cache;
+        if worker_cache.len() < global.max_cached_workers {
+            worker_cache.push(sandbox);
+        }
+
+        Ok(())
     }
 
+    #[inline(always)]
     fn run(&mut self) -> Result<InterruptKind, Self::Error> {
-        let Some(module) = self.module.as_ref() else {
-            return Err(Error::from_str("no module loaded into the sandbox"));
-        };
-
-        let compiled_module = Self::downcast_module(module);
         if self.next_program_counter_changed {
-            let Some(pc) = self.next_program_counter else {
-                panic!("failed to run: next program counter is not set");
-            };
-
-            let Some(address) = compiled_module.lookup_native_code_address(pc) else {
-                log::debug!("Tried to call into {pc} which doesn't have any native code associated with it");
-                self.vmctx().program_counter.store(pc.0, Ordering::Relaxed);
-                self.is_program_counter_valid = true;
-                return Ok(InterruptKind::Trap);
-            };
-
-            if self.charge_gas_on_entry {
-                match crate::sandbox::charge_gas_on_entry(module, pc, address, compiled_module, self.gas()) {
-                    Some(Ok(new_gas)) => self.vmctx().gas.store(new_gas, Ordering::Relaxed),
-                    Some(Err(())) => return Ok(InterruptKind::NotEnoughGas),
-                    None => {}
-                }
+            if let Some(interrupt) = self.handle_next_program_counter_changed()? {
+                return Ok(interrupt);
             }
-
-            self.next_program_counter_changed = false;
-            self.next_program_counter = None;
-            self.charge_gas_on_entry = false;
-
-            log::trace!("Jumping into: {pc} (0x{address:x}), gas remaining = {}", self.gas());
-            self.vmctx().next_program_counter.store(pc.0, Ordering::Relaxed);
-            self.vmctx().next_native_program_counter.store(address, Ordering::Relaxed);
         } else {
             log::trace!(
                 "Resuming into: {} (0x{:x}), gas remaining = {}",
@@ -1812,36 +1998,16 @@ impl super::Sandbox for Sandbox {
         };
 
         debug_assert_eq!(self.vmctx().futex.load(Ordering::Relaxed) & 1, VMCTX_FUTEX_IDLE);
-        self.vmctx()
-            .jump_into
-            .store(compiled_module.sandbox_program.0.sysenter_address, Ordering::Relaxed);
-        self.wake_worker()?;
-        self.is_program_counter_valid = true;
 
-        let result = self.wait()?;
-        if self.module.as_ref().unwrap().gas_metering() == Some(GasMeteringKind::Async) && self.gas() < 0 {
-            self.is_program_counter_valid = false;
-            self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
-            return Ok(InterruptKind::NotEnoughGas);
+        if self.low_latency {
+            self.wake_worker_low_latency();
+            self.low_latency = false;
+        } else {
+            self.set_sysenter_and_wake_worker()?;
         }
 
-        Ok(match result {
-            Interrupt::Idle => {
-                self.is_program_counter_valid = false;
-                InterruptKind::Finished
-            }
-            Interrupt::NotEnoughGas => InterruptKind::NotEnoughGas,
-            Interrupt::Trap => InterruptKind::Trap,
-            Interrupt::Ecalli(num) => {
-                self.state = SandboxState::Hostcall;
-                InterruptKind::Ecalli(num)
-            }
-            Interrupt::Segfault(segfault) => {
-                self.state = SandboxState::Pagefault;
-                InterruptKind::Segfault(segfault)
-            }
-            Interrupt::Step => InterruptKind::Step,
-        })
+        self.is_program_counter_valid = true;
+        self.wait_low_latency()
     }
 
     fn reg(&self, reg: Reg) -> RegValue {
@@ -2271,7 +2437,7 @@ impl super::Sandbox for Sandbox {
         self.vmctx().jump_into.store(ZYGOTE_TABLES.1.ext_sbrk, Ordering::Relaxed);
         self.vmctx().arg.store(size, Ordering::Relaxed);
         self.wake_worker()?;
-        self.wait()?.expect_idle()?;
+        expect_idle(self.wait()?)?;
 
         let result = self.vmctx().arg.load(Ordering::Relaxed);
         if result == 0 {
@@ -2299,34 +2465,19 @@ impl super::Sandbox for Sandbox {
             next_program_counter: get_field_offset!(VmCtx::new(), |base| base.next_program_counter.as_ptr()),
             program_counter: get_field_offset!(VmCtx::new(), |base| base.program_counter.as_ptr()),
             regs: get_field_offset!(VmCtx::new(), |base| base.regs.as_ptr()),
+            futex: get_field_offset!(VmCtx::new(), |base| base.futex.as_ptr()),
         }
-    }
-
-    fn sync(&mut self) -> Result<(), Self::Error> {
-        self.wait()?.expect_idle()
     }
 }
 
-#[must_use]
-enum Interrupt {
-    Idle,
-    Trap,
-    NotEnoughGas,
-    Ecalli(u32),
-    Segfault(Segfault),
-    Step,
-}
-
-impl Interrupt {
-    fn expect_idle(self) -> Result<(), Error> {
-        match self {
-            Interrupt::Idle => Ok(()),
-            Interrupt::Trap => Err(Error::from_str("unexpected trap")),
-            Interrupt::NotEnoughGas => Err(Error::from_str("unexpected not enough gas")),
-            Interrupt::Ecalli(_) => Err(Error::from_str("unexpected ecalli")),
-            Interrupt::Segfault(_) => Err(Error::from_str("unexpected segfault")),
-            Interrupt::Step => Err(Error::from_str("unexpected step")),
-        }
+fn expect_idle(interrupt: InterruptKind) -> Result<(), Error> {
+    match interrupt {
+        InterruptKind::Finished => Ok(()),
+        InterruptKind::Trap => Err(Error::from_str("unexpected trap")),
+        InterruptKind::NotEnoughGas => Err(Error::from_str("unexpected not enough gas")),
+        InterruptKind::Ecalli(_) => Err(Error::from_str("unexpected ecalli")),
+        InterruptKind::Segfault(_) => Err(Error::from_str("unexpected segfault")),
+        InterruptKind::Step => Err(Error::from_str("unexpected step")),
     }
 }
 
@@ -2336,17 +2487,39 @@ impl Sandbox {
         unsafe { &*self.vmctx_mmap.as_ptr().cast::<VmCtx>() }
     }
 
-    fn wake_worker(&self) -> Result<(), Error> {
+    fn wake_worker(&mut self) -> Result<(), Error> {
+        self.exit_low_latency_mode();
         self.vmctx().futex.store(VMCTX_FUTEX_BUSY, Ordering::Release);
         linux_raw::sys_futex_wake_one(&self.vmctx().futex).map(|_| ())
     }
 
-    fn wake_oneshot_and_expect_idle(&mut self) -> Result<(), Error> {
-        self.wake_worker()?;
-        self.wait()?.expect_idle()
+    #[inline(never)]
+    fn set_sysenter_and_wake_worker(&mut self) -> Result<(), Error> {
+        use crate::sandbox::Sandbox;
+
+        let Some(module) = self.module.as_ref() else {
+            return Err(Error::from_str("no module loaded into the sandbox"));
+        };
+
+        let compiled_module = Self::downcast_module(module);
+        self.vmctx()
+            .jump_into
+            .store(compiled_module.sandbox_program.0.sysenter_address, Ordering::Relaxed);
+
+        self.wake_worker()
     }
 
-    fn handle_guest_signal(&mut self, machine_code_address: u64) -> Result<Interrupt, Error> {
+    #[inline(always)]
+    fn wake_worker_low_latency(&self) {
+        self.vmctx().futex.store(VMCTX_FUTEX_BUSY, Ordering::Release);
+    }
+
+    fn wake_oneshot_and_expect_idle(&mut self) -> Result<(), Error> {
+        self.wake_worker()?;
+        expect_idle(self.wait()?)
+    }
+
+    fn handle_guest_signal(&mut self, machine_code_address: u64) -> Result<InterruptKind, Error> {
         use crate::sandbox::Sandbox;
 
         let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
@@ -2360,24 +2533,47 @@ impl Sandbox {
 
         self.is_program_counter_valid = true;
         if is_out_of_gas {
-            Ok(Interrupt::NotEnoughGas)
+            Ok(InterruptKind::NotEnoughGas)
         } else {
-            Ok(Interrupt::Trap)
+            Ok(InterruptKind::Trap)
         }
     }
 
+    #[inline(always)]
+    fn wait(&mut self) -> Result<InterruptKind, Error> {
+        self.wait_impl::<false>()
+    }
+
+    #[inline(always)]
+    fn wait_low_latency(&mut self) -> Result<InterruptKind, Error> {
+        self.wait_impl::<true>()
+    }
+
     #[inline(never)]
-    #[cold]
-    fn wait(&mut self) -> Result<Interrupt, Error> {
+    fn wait_impl<const LOW_LATENCY: bool>(&mut self) -> Result<InterruptKind, Error> {
         use crate::sandbox::Sandbox;
 
         'outer: loop {
-            self.count_wait_loop_start += 1;
-
             let state = self.vmctx().futex.load(Ordering::Relaxed);
-            if state == VMCTX_FUTEX_IDLE {
+            if state == VMCTX_FUTEX_GUEST_ECALLI {
+                self.low_latency = true;
+                self.state = SandboxState::Hostcall;
+
                 core::sync::atomic::fence(Ordering::Acquire);
-                return Ok(Interrupt::Idle);
+                let hostcall = self.vmctx().arg.load(Ordering::Relaxed);
+                return Ok(InterruptKind::Ecalli(hostcall));
+            }
+
+            if LOW_LATENCY && state == VMCTX_FUTEX_BUSY {
+                core::hint::spin_loop();
+                continue;
+            }
+
+            if state == VMCTX_FUTEX_IDLE {
+                self.is_program_counter_valid = false;
+
+                core::sync::atomic::fence(Ordering::Acquire);
+                return Ok(InterruptKind::Finished);
             }
 
             if state == VMCTX_FUTEX_GUEST_SIGNAL {
@@ -2394,25 +2590,26 @@ impl Sandbox {
                 return self.handle_guest_signal(machine_code_address);
             }
 
-            if state == VMCTX_FUTEX_GUEST_ECALLI {
-                core::sync::atomic::fence(Ordering::Acquire);
-                let hostcall = self.vmctx().arg.load(Ordering::Relaxed);
-                return Ok(Interrupt::Ecalli(hostcall));
-            }
-
             if state == VMCTX_FUTEX_GUEST_TRAP {
                 core::sync::atomic::fence(Ordering::Acquire);
-                return Ok(Interrupt::Trap);
+                return Ok(InterruptKind::Trap);
             }
 
             if state == VMCTX_FUTEX_GUEST_NOT_ENOUGH_GAS {
                 core::sync::atomic::fence(Ordering::Acquire);
-                return Ok(Interrupt::NotEnoughGas);
+                return Ok(InterruptKind::NotEnoughGas);
             }
 
             if state == VMCTX_FUTEX_GUEST_STEP {
                 core::sync::atomic::fence(Ordering::Acquire);
-                return Ok(Interrupt::Step);
+                if self.vmctx().gas.load(Ordering::Relaxed) < 0 {
+                    if self.module.as_ref().unwrap().gas_metering() == Some(GasMeteringKind::Async) {
+                        self.is_program_counter_valid = false;
+                        self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
+                    }
+                    return Ok(InterruptKind::NotEnoughGas);
+                }
+                return Ok(InterruptKind::Step);
             }
 
             if state == VMCTX_FUTEX_GUEST_PAGEFAULT {
@@ -2449,7 +2646,9 @@ impl Sandbox {
                 .map_err(Error::from_str)?;
 
                 self.is_program_counter_valid = true;
-                return Ok(Interrupt::Segfault(Segfault {
+                self.state = SandboxState::Pagefault;
+
+                return Ok(InterruptKind::Segfault(Segfault {
                     page_address,
                     page_size,
                     is_write_protected: is_write_protected != 0,
@@ -2461,45 +2660,46 @@ impl Sandbox {
                 return Err(Error::from_str("internal error: unexpected worker process state"));
             }
 
-            let spin_target = if self.module.as_ref().map_or(false, |module| module.is_step_tracing()) {
-                128
-            } else {
-                0
-            };
+            if !LOW_LATENCY {
+                let spin_target = if self.module.as_ref().map_or(false, |module| module.is_step_tracing()) {
+                    128
+                } else {
+                    0
+                };
 
-            let yield_target = 16;
+                let yield_target = 16;
 
-            for _ in 0..spin_target {
-                core::hint::spin_loop();
-                if self.vmctx().futex.load(Ordering::Relaxed) != VMCTX_FUTEX_BUSY {
-                    continue 'outer;
-                }
-            }
-
-            for _ in 0..yield_target {
-                let _ = linux_raw::sys_sched_yield();
-                if self.vmctx().futex.load(Ordering::Relaxed) != VMCTX_FUTEX_BUSY {
-                    continue 'outer;
-                }
-            }
-
-            self.count_futex_wait += 1;
-            match linux_raw::sys_futex_wait(&self.vmctx().futex, VMCTX_FUTEX_BUSY, Some(Duration::from_millis(1000))) {
-                Ok(()) => continue,
-                Err(error) if error.errno() == linux_raw::EAGAIN || error.errno() == linux_raw::EINTR => continue,
-                Err(error) if error.errno() == linux_raw::ETIMEDOUT => {
-                    log::trace!("Timeout expired while waiting for child #{}...", self.child.pid);
-                    let status = self.child.check_status(true)?;
-                    if let Some(interrupt) = self.handle_child_status(status)? {
-                        return Ok(interrupt);
+                for _ in 0..spin_target {
+                    core::hint::spin_loop();
+                    if self.vmctx().futex.load(Ordering::Relaxed) != VMCTX_FUTEX_BUSY {
+                        continue 'outer;
                     }
                 }
-                Err(error) => return Err(error),
+
+                for _ in 0..yield_target {
+                    let _ = linux_raw::sys_sched_yield();
+                    if self.vmctx().futex.load(Ordering::Relaxed) != VMCTX_FUTEX_BUSY {
+                        continue 'outer;
+                    }
+                }
+
+                match linux_raw::sys_futex_wait(&self.vmctx().futex, VMCTX_FUTEX_BUSY, Some(Duration::from_millis(1000))) {
+                    Ok(()) => continue,
+                    Err(error) if error.errno() == linux_raw::EAGAIN || error.errno() == linux_raw::EINTR => continue,
+                    Err(error) if error.errno() == linux_raw::ETIMEDOUT => {
+                        log::trace!("Timeout expired while waiting for child #{}...", self.child.pid);
+                        let status = self.child.check_status(true)?;
+                        if let Some(interrupt) = self.handle_child_status(status)? {
+                            return Ok(interrupt);
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         }
     }
 
-    fn handle_child_status(&mut self, status: ChildStatus) -> Result<Option<Interrupt>, Error> {
+    fn handle_child_status(&mut self, status: ChildStatus) -> Result<Option<InterruptKind>, Error> {
         self.is_borked = true;
 
         if status.is_running() {
@@ -2561,5 +2761,386 @@ impl Sandbox {
         }
 
         Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn handle_next_program_counter_changed(&mut self) -> Result<Option<InterruptKind>, Error> {
+        use crate::sandbox::Sandbox;
+
+        let Some(module) = self.module.as_ref() else {
+            return Err(Error::from_str("no module loaded into the sandbox"));
+        };
+
+        let Some(pc) = self.next_program_counter else {
+            panic!("failed to run: next program counter is not set");
+        };
+
+        let compiled_module = Self::downcast_module(module);
+        let Some(address) = compiled_module.lookup_native_code_address(pc) else {
+            log::debug!("Tried to call into {pc} which doesn't have any native code associated with it");
+            self.vmctx().program_counter.store(pc.0, Ordering::Relaxed);
+            self.is_program_counter_valid = true;
+            return Ok(Some(InterruptKind::Trap));
+        };
+
+        if self.charge_gas_on_entry {
+            match crate::sandbox::charge_gas_on_entry(module, pc, address, compiled_module, self.gas()) {
+                Some(Ok(new_gas)) => self.vmctx().gas.store(new_gas, Ordering::Relaxed),
+                Some(Err(())) => return Ok(Some(InterruptKind::NotEnoughGas)),
+                None => {}
+            }
+        }
+
+        self.next_program_counter_changed = false;
+        self.next_program_counter = None;
+        self.charge_gas_on_entry = false;
+
+        log::trace!("Jumping into: {pc} (0x{address:x}), gas remaining = {}", self.gas());
+        self.vmctx().next_program_counter.store(pc.0, Ordering::Relaxed);
+        self.vmctx().next_native_program_counter.store(address, Ordering::Relaxed);
+
+        self.exit_low_latency_mode();
+        Ok(None)
+    }
+
+    fn exit_low_latency_mode(&mut self) {
+        if self.low_latency {
+            log::trace!("Triggering a longjump...");
+            debug_assert_eq!(self.vmctx().futex.load(Ordering::Relaxed), VMCTX_FUTEX_GUEST_ECALLI);
+
+            self.vmctx().futex.store(VMCTX_FUTEX_LONGJUMP, Ordering::Release);
+            while self.vmctx().futex.load(Ordering::Relaxed) == VMCTX_FUTEX_LONGJUMP {
+                core::hint::spin_loop();
+            }
+
+            self.low_latency = false;
+        }
+    }
+
+    fn spawn_new_worker(global: &GlobalState, config: &SandboxConfig, worker_core: usize) -> Result<Box<Self>, Error> {
+        let sigset = Sigmask::block_all_signals()?;
+        let (socket, child_socket) = linux_raw::sys_socketpair(linux_raw::AF_UNIX, linux_raw::SOCK_SEQPACKET | linux_raw::SOCK_CLOEXEC, 0)?;
+        let (lifetime_pipe_host, lifetime_pipe_child) = linux_raw::sys_pipe2(linux_raw::O_CLOEXEC)?;
+        let (logger_rx, logger_tx) = if config.enable_logger {
+            let (rx, tx) = linux_raw::sys_pipe2(linux_raw::O_CLOEXEC)?;
+            (Some(rx), Some(tx))
+        } else {
+            (None, None)
+        };
+        // TODO: If not using userfaultfd then don't mmap all of this immediately.
+        let (memory_memfd, memory_mmap) = prepare_memory()?;
+
+        let sandboxing_enabled = config.enable_sandboxing && !cfg!(polkavm_dev_debug_zygote);
+        let (vmctx_memfd, vmctx_mmap) = prepare_vmctx()?;
+        let vmctx = unsafe { &*vmctx_mmap.as_ptr().cast::<VmCtx>() };
+        vmctx.init.logging_enabled.store(config.enable_logger, Ordering::Relaxed);
+        vmctx.init.uffd_available.store(global.uffd_available, Ordering::Relaxed);
+        vmctx.init.sandbox_disabled.store(!sandboxing_enabled, Ordering::Relaxed);
+
+        let sandbox_flags = if sandboxing_enabled { SANDBOX_FLAGS } else { 0 };
+
+        let uid = linux_raw::sys_getuid()?;
+        let gid = linux_raw::sys_getgid()?;
+
+        let uid_map = format!("0 {} 1\n", uid);
+        let gid_map = format!("0 {} 1\n", gid);
+
+        let mut child = match clone(sandbox_flags)? {
+            Fork::Child => {
+                // We're in the child.
+                //
+                // Calling into libc from here risks a deadlock as other threads might have
+                // been holding onto internal libc locks while we were cloning ourselves,
+                // so from now on we can't use anything from libc anymore.
+                core::mem::forget(sigset);
+
+                unsafe {
+                    match child_main(
+                        &uid_map,
+                        &gid_map,
+                        ChildFds {
+                            zygote: linux_raw::Fd::from_raw_unchecked(global.zygote_memfd.raw()),
+                            socket: child_socket,
+                            vmctx: vmctx_memfd,
+                            shm: linux_raw::Fd::from_raw_unchecked(global.shared_memory.fd().raw()),
+                            mem: memory_memfd,
+                            lifetime_pipe: lifetime_pipe_child,
+                            logging_pipe: logger_tx,
+                        },
+                        sandboxing_enabled,
+                    ) {
+                        Ok(()) => {
+                            // This is impossible.
+                            abort();
+                        }
+                        Err(error) => {
+                            let vmctx = &*vmctx_mmap.as_ptr().cast::<VmCtx>();
+                            set_message(vmctx, format_args!("fatal error while spawning child: {error}"));
+
+                            abort();
+                        }
+                    }
+                }
+            }
+            Fork::Host(child) => child,
+        };
+
+        let child_pid = child.pid;
+        if let Err(error) = pin_to_cpu(child_pid, worker_core) {
+            log::warn!("Failed to pin worker #{child_pid} to core {worker_core}: {error}");
+        } else {
+            log::trace!("Pinned worker #{child_pid} to core {worker_core}");
+        }
+
+        child_socket.close()?;
+        vmctx_memfd.close()?;
+        memory_memfd.close()?;
+        lifetime_pipe_child.close()?;
+        if let Some(logger_tx) = logger_tx {
+            logger_tx.close()?;
+        }
+
+        if let Some(logger_rx) = logger_rx {
+            // Hook up the child process' STDERR to our logger.
+            std::thread::Builder::new()
+                .name("polkavm-logger".into())
+                .spawn(move || {
+                    let mut tmp = [0; 4096];
+                    let mut buffer = Vec::new();
+                    loop {
+                        if buffer.len() > 8192 {
+                            // Make sure the child can't exhaust our memory by spamming logs.
+                            buffer.clear();
+                        }
+
+                        match linux_raw::sys_read(logger_rx.borrow(), &mut tmp) {
+                            Err(error) if error.errno() == linux_raw::EINTR => continue,
+                            Err(error) => {
+                                log::warn!("Failed to read from logger: {}", error);
+                                break;
+                            }
+                            Ok(0) => break,
+                            Ok(count) => {
+                                let mut tmp = &tmp[..count];
+                                while !tmp.is_empty() {
+                                    if let Some(index) = tmp.iter().position(|&byte| byte == b'\n') {
+                                        buffer.extend_from_slice(&tmp[..index]);
+                                        tmp = &tmp[index + 1..];
+
+                                        log::trace!(target: "polkavm::zygote", "Child #{}: {}", child_pid, String::from_utf8_lossy(&buffer));
+                                        buffer.clear();
+                                    } else {
+                                        buffer.extend_from_slice(tmp);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                })
+                .map_err(|error| Error::from_os_error("failed to spawn logger thread", error))?;
+        }
+
+        // We're in the parent. Restore the signal mask.
+        sigset.unblock()?;
+
+        fn wait_for_futex(vmctx: &VmCtx, child: &mut ChildProcess, current_state: u32, target_state: u32) -> Result<(), Error> {
+            let instant = Instant::now();
+            loop {
+                let state = vmctx.futex.load(Ordering::Relaxed);
+                if state == target_state {
+                    return Ok(());
+                }
+
+                if state != current_state {
+                    return Err(Error::from_str("failed to initialize sandbox process: unexpected futex state"));
+                }
+
+                let status = child.check_status(true)?;
+                if !status.is_running() {
+                    let message = get_message(vmctx);
+                    if let Some(message) = message {
+                        let error = Error::from(format!("failed to initialize sandbox process: {status}: {message}"));
+                        return Err(error);
+                    } else {
+                        return Err(Error::from(format!(
+                            "failed to initialize sandbox process: child process unexpectedly quit: {status}",
+                        )));
+                    }
+                }
+
+                if !cfg!(polkavm_dev_debug_zygote) && instant.elapsed() > Duration::from_secs(10) {
+                    // This should never happen, but just in case.
+                    return Err(Error::from_str("failed to initialize sandbox process: initialization timeout"));
+                }
+
+                match linux_raw::sys_futex_wait(&vmctx.futex, state, Some(Duration::from_millis(100))) {
+                    Ok(()) => continue,
+                    Err(error)
+                        if error.errno() == linux_raw::EAGAIN
+                            || error.errno() == linux_raw::EINTR
+                            || error.errno() == linux_raw::ETIMEDOUT =>
+                    {
+                        continue
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+
+        #[cfg(debug_assertions)]
+        if cfg!(polkavm_dev_debug_zygote) {
+            use core::fmt::Write;
+            std::thread::sleep(Duration::from_millis(200));
+
+            let mut command = String::new();
+            // Make sure gdb can actually attach to the worker process.
+            if std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope")
+                .map(|value| value.trim() == "1")
+                .unwrap_or(false)
+            {
+                command.push_str("echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope ;");
+            }
+
+            command.push_str(concat!(
+                "gdb",
+                " -ex 'set pagination off'",
+                " -ex 'layout split'",
+                " -ex 'set print asm-demangle on'",
+                " -ex 'set debuginfod enabled off'",
+                " -ex 'tcatch exec'",
+                " -ex 'handle SIGSTOP nostop'",
+            ));
+
+            let _ = write!(&mut command, " -ex 'attach {}' -ex 'continue'", child.pid);
+
+            let mut cmd = if std::env::var_os("DISPLAY").is_some() {
+                // Running X11; open gdb in a terminal.
+                let mut cmd = std::process::Command::new("urxvt");
+                cmd.args(["-fg", "rgb:ffff/ffff/ffff"])
+                    .args(["-bg", "rgba:0000/0000/0000/7777"])
+                    .arg("-e")
+                    .arg("sh")
+                    .arg("-c")
+                    .arg(&command);
+                cmd
+            } else {
+                // Not running under X11; just run it as-is.
+                let mut cmd = std::process::Command::new("sh");
+                cmd.arg("-c").arg(&command);
+                cmd
+            };
+
+            let mut gdb = match cmd.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    panic!("failed to launch: '{cmd:?}': {error}");
+                }
+            };
+
+            let pid = child.pid;
+            std::thread::spawn(move || {
+                let _ = gdb.wait();
+                let _ = linux_raw::sys_kill(pid, linux_raw::SIGKILL);
+            });
+        }
+
+        // Wait until the child process receives the vmctx memfd.
+        wait_for_futex(vmctx, &mut child, VMCTX_FUTEX_BUSY, VMCTX_FUTEX_IDLE)?;
+
+        // Grab the child process' maps and see what we can unmap.
+        //
+        // The child process can't do it itself as it's too sandboxed.
+        let maps = std::fs::read(format!("/proc/{}/maps", child_pid))
+            .map_err(|error| Error::from_errno("failed to read child's maps", error.raw_os_error().unwrap_or(0)))?;
+
+        for line in maps.split(|&byte| byte == b'\n') {
+            if line.is_empty() {
+                continue;
+            }
+
+            let map = Map::parse(line).ok_or_else(|| Error::from_str("failed to parse the maps of the child process"))?;
+            match map.name {
+                b"[stack]" => {
+                    vmctx.init.stack_address.store(map.start, Ordering::Relaxed);
+                    vmctx.init.stack_length.store(map.end - map.start, Ordering::Relaxed);
+                }
+                b"[vdso]" => {
+                    vmctx.init.vdso_address.store(map.start, Ordering::Relaxed);
+                    vmctx.init.vdso_length.store(map.end - map.start, Ordering::Relaxed);
+                }
+                b"[vvar]" => {
+                    vmctx.init.vvar_address.store(map.start, Ordering::Relaxed);
+                    vmctx.init.vvar_length.store(map.end - map.start, Ordering::Relaxed);
+                }
+                b"[vsyscall]" => {
+                    if map.is_readable {
+                        return Err(Error::from_str("failed to initialize sandbox process: vsyscall region is readable"));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Wake the child so that it finishes initialization.
+        vmctx.futex.store(VMCTX_FUTEX_BUSY, Ordering::Release);
+        linux_raw::sys_futex_wake_one(&vmctx.futex)?;
+
+        let userfaultfd = if global.uffd_available {
+            let userfaultfd = linux_raw::recvfd(socket.borrow()).map_err(|error| {
+                let mut error = format!("failed to fetch the userfaultfd from the child process: {error}");
+                if let Some(message) = get_message(vmctx) {
+                    use core::fmt::Write;
+                    write!(&mut error, " (root cause: {message})").unwrap();
+                }
+                Error::from(error)
+            })?;
+
+            let mut api: linux_raw::uffdio_api = linux_raw::uffdio_api {
+                api: linux_raw::UFFD_API,
+                features: UFFD_REQUIRED_FEATURES,
+                ..Default::default()
+            };
+
+            linux_raw::sys_uffdio_api(userfaultfd.borrow(), &mut api)
+                .map_err(|error| Error::from(format!("failed to initialize the userfaultfd API: {error}")))?;
+
+            userfaultfd
+        } else {
+            Fd::from_raw_unchecked(-1)
+        };
+
+        // Close the socket; we don't need it anymore.
+        socket.close()?;
+
+        // Wait for the child to finish initialization.
+        wait_for_futex(vmctx, &mut child, VMCTX_FUTEX_BUSY, VMCTX_FUTEX_IDLE)?;
+
+        Ok(Box::new(Sandbox {
+            _lifetime_pipe: lifetime_pipe_host,
+            vmctx_mmap,
+            memory_mmap,
+            userfaultfd,
+            child,
+
+            module: None,
+            gas_metering: None,
+
+            state: SandboxState::Idle,
+            low_latency: false,
+            is_program_counter_valid: false,
+            charge_gas_on_entry: true,
+            next_program_counter: None,
+            next_program_counter_changed: true,
+            page_set_present: PageSet::new(),
+            page_set_writable: PageSet::new(),
+            dynamic_paging_enabled: false,
+            aux_data_address: 0,
+            aux_data_length: 0,
+            is_borked: false,
+            host_core: usize::MAX,
+            worker_core,
+        }))
     }
 }

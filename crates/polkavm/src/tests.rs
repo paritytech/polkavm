@@ -4747,6 +4747,26 @@ fn spawn_stress_test(mut config: Config) {
     }
 }
 
+fn spawn_inner_vm(config: Config) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::ret()], &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::default(), blob).unwrap();
+    let mut outer = module.instantiate().unwrap();
+    let mut inner_1 = module.instantiate_nested(&outer).unwrap();
+    let mut inner_2 = module.instantiate_nested(&outer).unwrap();
+    for instance in [&mut outer, &mut inner_1, &mut inner_2] {
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    }
+}
+
 #[cfg(not(feature = "module-cache"))]
 fn module_cache(_config: Config) {}
 
@@ -4931,6 +4951,7 @@ run_tests! {
     jam_validate_invalid_skip
 
     spawn_stress_test
+    spawn_inner_vm
     module_cache
 
     rotate_right_imm_alt_64

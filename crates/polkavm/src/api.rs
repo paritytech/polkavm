@@ -38,7 +38,6 @@ if_compiler_is_supported! {
         pub(crate) struct EngineState {
             pub(crate) sandboxing_enabled: bool,
             pub(crate) sandbox_global: Option<crate::sandbox::GlobalStateKind>,
-            pub(crate) sandbox_cache: Option<crate::sandbox::WorkerCacheKind>,
             compiler_cache: CompilerCache,
             imperfect_logger_filtering_workaround: bool,
             #[cfg(feature = "module-cache")]
@@ -173,15 +172,10 @@ impl Engine {
                     }
 
                     let sandbox_global = crate::sandbox::GlobalStateKind::new(selected_sandbox, config)?;
-                    let sandbox_cache = crate::sandbox::WorkerCacheKind::new(selected_sandbox, config);
-                    for _ in 0..config.worker_count {
-                        sandbox_cache.spawn(&sandbox_global)?;
-                    }
 
                     let state = Arc::new(EngineState {
                         sandboxing_enabled: config.sandboxing_enabled,
                         sandbox_global: Some(sandbox_global),
-                        sandbox_cache: Some(sandbox_cache),
                         compiler_cache: Default::default(),
 
                         imperfect_logger_filtering_workaround: config.imperfect_logger_filtering_workaround,
@@ -194,7 +188,6 @@ impl Engine {
                     (None, Arc::new(EngineState {
                         sandboxing_enabled: config.sandboxing_enabled,
                         sandbox_global: None,
-                        sandbox_cache: None,
                         compiler_cache: Default::default(),
 
                         imperfect_logger_filtering_workaround: config.imperfect_logger_filtering_workaround,
@@ -235,7 +228,7 @@ impl Engine {
     pub fn idle_worker_pids(&self) -> Vec<u32> {
         if_compiler_is_supported! {
             {
-                self.state.sandbox_cache.as_ref().map(|cache| cache.idle_worker_pids()).unwrap_or_default()
+                self.state.sandbox_global.as_ref().map(|global| global.idle_worker_pids()).unwrap_or_default()
             } else {
                 Vec::new()
             }
@@ -311,6 +304,10 @@ impl Module {
             // SAFETY: self.0 is only ever `None` in the destructor.
             unsafe { core::hint::unreachable_unchecked() }
         }
+    }
+
+    fn engine_state_pointer(&self) -> *const EngineState {
+        self.state().engine_state.as_ref().map(Arc::as_ptr).unwrap_or(core::ptr::null())
     }
 
     pub(crate) fn is_per_instruction_metering(&self) -> bool {
@@ -720,6 +717,22 @@ impl Module {
 
     /// Instantiates a new module.
     pub fn instantiate(&self) -> Result<RawInstance, Error> {
+        self.instantiate_impl(None)
+    }
+
+    /// Instantiates a new module with a given outer instance.
+    ///
+    /// This should be used over plain `instantiate` in cases where the given `outer_instance`
+    /// is going to control the newly spawned instance.
+    ///
+    /// Currently this makes no functional difference and only affects performance.
+    ///
+    /// The outer instance *must* come from the same `Engine`.
+    pub fn instantiate_nested(&self, outer_instance: &RawInstance) -> Result<RawInstance, Error> {
+        self.instantiate_impl(Some(outer_instance))
+    }
+
+    fn instantiate_impl(&self, outer_instance: Option<&RawInstance>) -> Result<RawInstance, Error> {
         let compiled_module = &self.state().compiled_module;
         let Some(engine_state) = self.state().engine_state.as_ref() else {
             return Err(Error::from_static_str("failed to instantiate module: empty module"));
@@ -730,12 +743,34 @@ impl Module {
                 match compiled_module {
                     #[cfg(target_os = "linux")]
                     CompiledModuleKind::Linux(..) => {
-                        let compiled_instance = SandboxInstance::<SandboxLinux>::spawn_and_load_module(Arc::clone(engine_state), self)?;
+                        let outer_instance = match outer_instance {
+                            Some(outer_instance) => {
+                                let outer_module = &outer_instance.module;
+                                #[allow(clippy::match_wildcard_for_single_variants)]
+                                match outer_instance.backend {
+                                    InstanceBackend::CompiledLinux(ref outer_instance) if outer_module.engine_state_pointer() == self.engine_state_pointer() => Some(outer_instance),
+                                    _ => return Err(Error::from_static_str("failed to instantiate module: received incompatible outer instance")),
+                                }
+                            },
+                            None => None,
+                        };
+                        let compiled_instance = SandboxInstance::<SandboxLinux>::spawn_and_load_module(Arc::clone(engine_state), self, outer_instance)?;
                         Some(InstanceBackend::CompiledLinux(compiled_instance))
                     },
                     #[cfg(feature = "generic-sandbox")]
                     CompiledModuleKind::Generic(..) => {
-                        let compiled_instance = SandboxInstance::<SandboxGeneric>::spawn_and_load_module(Arc::clone(engine_state), self)?;
+                        let outer_instance = match outer_instance {
+                            Some(outer_instance) => {
+                                let outer_module = &outer_instance.module;
+                                #[allow(clippy::match_wildcard_for_single_variants)]
+                                match outer_instance.backend {
+                                    InstanceBackend::CompiledGeneric(ref outer_instance) if outer_module.engine_state_pointer() == self.engine_state_pointer() => Some(outer_instance),
+                                    _ => return Err(Error::from_static_str("failed to instantiate module: received incompatible outer instance")),
+                                }
+                            },
+                            None => None,
+                        };
+                        let compiled_instance = SandboxInstance::<SandboxGeneric>::spawn_and_load_module(Arc::clone(engine_state), self, outer_instance)?;
                         Some(InstanceBackend::CompiledGeneric(compiled_instance))
                     },
                     CompiledModuleKind::Unavailable => None
@@ -749,11 +784,26 @@ impl Module {
 
         let backend = match backend {
             Some(backend) => backend,
-            None => InstanceBackend::Interpreted(InterpretedInstance::new_from_module(
-                self.clone(),
-                false,
-                engine_state.imperfect_logger_filtering_workaround,
-            )),
+            None => {
+                if let Some(outer_instance) = outer_instance {
+                    let outer_module = &outer_instance.module;
+                    #[allow(clippy::match_wildcard_for_single_variants)]
+                    match outer_instance.backend {
+                        InstanceBackend::Interpreted(..) if outer_module.engine_state_pointer() == self.engine_state_pointer() => {}
+                        _ => {
+                            return Err(Error::from_static_str(
+                                "failed to instantiate module: received incompatible outer instance",
+                            ))
+                        }
+                    }
+                }
+
+                InstanceBackend::Interpreted(InterpretedInstance::new_from_module(
+                    self.clone(),
+                    false,
+                    engine_state.imperfect_logger_filtering_workaround,
+                ))
+            }
         };
 
         let crosscheck_instance = if_compiler_is_supported! {
@@ -1212,6 +1262,7 @@ impl RawInstance {
     }
 
     /// Starts or resumes the execution.
+    #[inline(always)]
     pub fn run(&mut self) -> Result<InterruptKind, Error> {
         if self.next_program_counter().is_none() {
             return Err(Error::from_static_str("failed to run: next program counter is not set"));
@@ -1222,19 +1273,29 @@ impl RawInstance {
         }
 
         if self.crosscheck_instance.is_some() || log::log_enabled!(log::Level::Debug) {
-            self.run_impl::<true>()
+            self.run_impl_debug()
         } else {
             self.run_impl::<false>()
         }
     }
 
+    #[inline(never)]
+    #[cold]
+    fn run_impl_debug(&mut self) -> Result<InterruptKind, Error> {
+        self.run_impl::<true>()
+    }
+
+    #[inline(always)]
     fn run_impl<const DEBUG: bool>(&mut self) -> Result<InterruptKind, Error> {
         #[allow(clippy::never_loop)]
         loop {
-            let interruption = access_backend!(self.backend, |mut backend| backend
-                .run()
-                .map_err(|error| format!("execution failed: {error}")))?;
+            let (interruption, gas) = access_backend!(self.backend, |mut backend| {
+                let interruption = backend.run().map_err(|error| format!("execution failed: {error}"));
+                let gas = backend.gas();
+                (interruption, gas)
+            });
 
+            let mut interruption = interruption?;
             if DEBUG {
                 log::trace!("Interrupted: {:?}", interruption);
                 if matches!(interruption, InterruptKind::Trap) {
@@ -1253,8 +1314,8 @@ impl RawInstance {
                 }
             }
 
-            if self.gas() < 0 {
-                return Ok(InterruptKind::NotEnoughGas);
+            if gas < 0 {
+                interruption = InterruptKind::NotEnoughGas;
             }
 
             break Ok(interruption);

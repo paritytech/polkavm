@@ -17,7 +17,7 @@ use core::ops::Range;
 use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use super::{get_native_page_size, OffsetTable, SandboxInit, SandboxKind, WorkerCache, WorkerCacheKind};
+use super::{get_native_page_size, OffsetTable, SandboxInit, SandboxKind};
 use crate::api::{CompiledModuleKind, MemoryAccessError, MemoryProtection, Module};
 use crate::compiler::CompiledModule;
 use crate::config::Config;
@@ -1226,6 +1226,10 @@ impl super::Sandbox for Sandbox {
     type GlobalState = GlobalState;
     type JumpTable = Vec<usize>;
 
+    fn idle_worker_pids(_global: &Self::GlobalState) -> Vec<u32> {
+        Vec::new()
+    }
+
     fn downcast_module(module: &Module) -> &CompiledModule<Self> {
         match module.compiled_module() {
             CompiledModuleKind::Generic(ref module) => module,
@@ -1237,14 +1241,6 @@ impl super::Sandbox for Sandbox {
         #[allow(clippy::match_wildcard_for_single_variants)]
         match global {
             crate::sandbox::GlobalStateKind::Generic(global) => global,
-            _ => unreachable!(),
-        }
-    }
-
-    fn downcast_worker_cache(cache: &WorkerCacheKind) -> &WorkerCache<Self> {
-        #[allow(clippy::match_wildcard_for_single_variants)]
-        match cache {
-            crate::sandbox::WorkerCacheKind::Generic(ref cache) => cache,
             _ => unreachable!(),
         }
     }
@@ -1407,7 +1403,9 @@ impl super::Sandbox for Sandbox {
         })))
     }
 
-    fn spawn(_global: &Self::GlobalState, _config: &SandboxConfig) -> Result<Self, Error> {
+    fn spawn(_global: &Self::GlobalState, _config: &SandboxConfig, _outer_instance: Option<&Self>) -> Result<Box<Self>, Error> {
+        // TODO: Add caching.
+
         register_signal_handlers_if_necessary()?;
 
         let guest_memory_offset = get_guest_memory_offset();
@@ -1422,7 +1420,7 @@ impl super::Sandbox for Sandbox {
             core::ptr::write(vmctx_mut_ptr(&mut memory), VmCtx::new());
         }
 
-        Ok(Sandbox {
+        Ok(Box::new(Sandbox {
             poison: Poison::None,
             program: None,
             memory,
@@ -1439,7 +1437,7 @@ impl super::Sandbox for Sandbox {
             aux_data_address: 0,
             aux_data_full_length: 0,
             aux_data_length: 0,
-        })
+        }))
     }
 
     fn load_module(&mut self, _global: &Self::GlobalState, module: &Module) -> Result<(), Self::Error> {
@@ -1529,14 +1527,15 @@ impl super::Sandbox for Sandbox {
         Ok(())
     }
 
-    fn recycle(&mut self, _global: &Self::GlobalState) -> Result<(), Self::Error> {
+    fn recycle(mut sandbox: Box<Self>, _global: &Self::GlobalState) -> Result<(), Self::Error> {
         log::trace!("Recycling sandbox");
-        if self.dynamic_paging_enabled {
-            self.free_pages(0x10000, 0xffff0000)?;
+        if sandbox.dynamic_paging_enabled {
+            sandbox.free_pages(0x10000, 0xffff0000)?;
         }
 
-        self.module = None;
+        sandbox.module = None;
 
+        // TODO: Add caching.
         Ok(())
     }
 
@@ -2032,10 +2031,7 @@ impl super::Sandbox for Sandbox {
             next_program_counter: get_field_offset!(VmCtx::new(), |base| base.next_program_counter.as_ptr()),
             program_counter: get_field_offset!(VmCtx::new(), |base| base.program_counter.as_ptr()),
             regs: get_field_offset!(VmCtx::new(), |base| &base.regs),
+            futex: usize::MAX,
         }
-    }
-
-    fn sync(&mut self) -> Result<(), Self::Error> {
-        Ok(())
     }
 }
