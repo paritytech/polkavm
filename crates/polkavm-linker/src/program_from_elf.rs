@@ -6915,6 +6915,46 @@ mod test {
             expect_regs([(Reg::A0, 10), (Reg::A1, 8)]),
         )
     }
+
+    #[test]
+    fn test_link_revive_transfer_example_18_with_debug_info() {
+        let test_file = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test-data/revive-transfer-example-18");
+        if !std::path::Path::new(test_file).exists() {
+            return;
+        }
+
+        let data = std::fs::read(test_file).expect("failed to read test ELF file");
+        let config = Config::default();
+        let blob_bytes = program_from_elf(config, TargetInstructionSet::ReviveV1, &data).expect("failed to link ELF file");
+
+        let blob = ProgramBlob::parse(blob_bytes[..].into()).expect("failed to parse blob");
+
+        let mut total_instructions = 0u32;
+        for _ in blob.instructions() {
+            total_instructions += 1;
+        }
+        assert!(total_instructions > 0, "blob should have instructions");
+
+        // Verify that debug line programs and source locations are present.
+        let mut frames_with_source_location = 0u32;
+        for i in 0..total_instructions {
+            let pc = polkavm_common::program::ProgramCounter(i);
+            if let Ok(Some(mut line_program)) = blob.get_debug_line_program_at(pc) {
+                while let Ok(Some(region)) = line_program.run() {
+                    for frame in region.frames() {
+                        if let Ok(Some(_location)) = frame.location() {
+                            frames_with_source_location += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            frames_with_source_location > 0,
+            "expected at least some frames to have source locations, but found none (total instructions: {total_instructions})"
+        );
+    }
 }
 
 fn collect_used_blocks(all_blocks: &[BasicBlock<AnyTarget, BlockTarget>], reachability_graph: &ReachabilityGraph) -> Vec<BlockTarget> {

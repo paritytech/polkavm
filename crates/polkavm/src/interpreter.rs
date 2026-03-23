@@ -1159,10 +1159,11 @@ macro_rules! cast_handler {
 }
 
 macro_rules! emit_raw {
-    ($self:ident, $handler_name:ident::<$($generic:tt),+>($($args:tt)*)) => {
+    ($self:ident, $handler_name:ident::<$($generic:tt),+>($($args:tt)*)) => {{
         $self.compiled_handlers.push(cast_handler!(raw_handlers::$handler_name::<$($generic),+>));
         $self.compiled_args.push(Args::$handler_name($($args)*));
-    };
+        $self.compiled_pcs.push($self.program_counter);
+    }};
 }
 
 macro_rules! emit {
@@ -1172,7 +1173,7 @@ macro_rules! emit {
 }
 
 macro_rules! emit_load_store {
-    ($self:ident, $handler_name:ident($($args:tt)*)) => {
+    ($self:ident, $handler_name:ident($($args:tt)*)) => {{
         let handler = if $self.memory_kind == MEMORY_STANDARD {
             raw_handlers::$handler_name::<StandardMemory, DEBUG>
         } else {
@@ -1182,13 +1183,15 @@ macro_rules! emit_load_store {
 
         $self.compiled_handlers.push(cast_handler!(handler));
         $self.compiled_args.push(Args::$handler_name($($args)*));
-    };
+        $self.compiled_pcs.push($self.program_counter);
+    }};
 }
 
 macro_rules! emit_consistent_address {
-    ($self:ident, $handler_name:ident($($args:tt)*)) => {
+    ($self:ident, $pc:expr, $handler_name:ident($($args:tt)*)) => {
         $self.compiled_handlers.push($self.handlers::<DEBUG>().$handler_name);
         $self.compiled_args.push(Args::$handler_name($($args)*));
+        $self.compiled_pcs.push($pc);
     };
 }
 
@@ -1354,6 +1357,50 @@ macro_rules! access_memory_mut {
     };
 }
 
+struct PcDebugInfo<'a> {
+    module: &'a Module,
+    pc: Option<ProgramCounter>,
+}
+
+impl<'a> core::fmt::Display for PcDebugInfo<'a> {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        let Some(pc) = self.pc else {
+            return Ok(());
+        };
+
+        write!(f, " ({pc}")?;
+
+        let mut wrote_name = false;
+        for frame in self.module.blob().get_frame_info_for(pc, Some(1024)) {
+            // First frame with a name: print the function name.
+            if !wrote_name {
+                if let Ok(name) = frame.full_name() {
+                    write!(f, " {name}")?;
+                    wrote_name = true;
+                }
+            }
+
+            // First frame with a source location: print it and stop.
+            if let Ok(Some(loc)) = frame.location() {
+                write!(f, " @ {loc}")?;
+                break;
+            }
+            if let Ok(Some(path)) = frame.path() {
+                write!(f, " @ {path}")?;
+                if let Some(line) = frame.line() {
+                    write!(f, ":{line}")?;
+                    if let Some(col) = frame.column() {
+                        write!(f, ":{col}")?;
+                    }
+                }
+                break;
+            }
+        }
+
+        write!(f, ")")
+    }
+}
+
 pub(crate) struct InterpretedInstance {
     module: Module,
     standard_memory: StandardMemory,
@@ -1369,6 +1416,7 @@ pub(crate) struct InterpretedInstance {
     compiled_offset_for_block: FlatMap<CompiledOffset, true>,
     compiled_handlers: Vec<Handler>,
     compiled_args: Vec<Args>,
+    compiled_pcs: Vec<ProgramCounter>,
     compiled_offset: u32,
     interrupt: InterruptKind,
     step_tracing: bool,
@@ -1386,6 +1434,7 @@ impl InterpretedInstance {
             compiled_offset_for_block: FlatMap::new(module.code_len() + 1), // + 1 for one implicit out-of-bounds trap.
             compiled_handlers: Default::default(),
             compiled_args: Default::default(),
+            compiled_pcs: Default::default(),
             module,
             standard_memory: StandardMemory::new(),
             dynamic_memory: DynamicMemory::new(),
@@ -1644,7 +1693,7 @@ impl InterpretedInstance {
                 log::debug!("Starting execution at: {} [{}]", program_counter, self.compiled_offset);
             }
         } else if DEBUG {
-            log::trace!("Implicitly resuming at: [{}]", self.compiled_offset);
+            log::trace!("Implicitly resuming at: [{}]{}", self.compiled_offset, self.pc_debug_info());
         }
 
         let mut offset = self.compiled_offset;
@@ -1672,9 +1721,11 @@ impl InterpretedInstance {
     pub fn reset_interpreter_cache(&mut self) {
         self.compiled_handlers.clear();
         self.compiled_args.clear();
+        self.compiled_pcs.clear();
 
         self.compiled_handlers.shrink_to_fit();
         self.compiled_args.shrink_to_fit();
+        self.compiled_pcs.shrink_to_fit();
 
         self.compiled_offset_for_block.reset();
 
@@ -1880,7 +1931,7 @@ impl InterpretedInstance {
                 if DEBUG {
                     log::debug!("  [{}]: {}: step", self.compiled_handlers.len(), instruction.offset);
                 }
-                emit_consistent_address!(self, step(instruction.offset));
+                emit_consistent_address!(self, instruction.offset, step(instruction.offset));
             }
 
             if self.module.gas_metering().is_some() {
@@ -1891,7 +1942,7 @@ impl InterpretedInstance {
                         }
 
                         charge_gas_index = Some((instruction.offset, self.compiled_handlers.len()));
-                        emit_consistent_address!(self, charge_gas(instruction.offset, 0));
+                        emit_consistent_address!(self, instruction.offset, charge_gas(instruction.offset, 0));
                     }
                     instruction.visit_parsing(&mut gas_visitor);
                 } else {
@@ -1899,7 +1950,7 @@ impl InterpretedInstance {
                         log::debug!("  [{}]: {}: charge_gas", self.compiled_handlers.len(), instruction.offset);
                     }
 
-                    emit_consistent_address!(self, charge_gas(instruction.offset, 1));
+                    emit_consistent_address!(self, instruction.offset, charge_gas(instruction.offset, 1));
                 }
             }
 
@@ -1916,6 +1967,7 @@ impl InterpretedInstance {
                 next_program_counter: instruction.next_offset,
                 compiled_handlers: &mut self.compiled_handlers,
                 compiled_args: &mut self.compiled_args,
+                compiled_pcs: &mut self.compiled_pcs,
                 module: &self.module,
                 memory_kind,
             });
@@ -1958,6 +2010,7 @@ impl InterpretedInstance {
             } else if self.compiled_handlers.capacity() > max_compiled_handlers {
                 self.compiled_handlers.shrink_to(max_compiled_handlers);
                 self.compiled_args.shrink_to(max_compiled_handlers);
+                self.compiled_pcs.shrink_to(max_compiled_handlers);
             }
         }
 
@@ -2008,6 +2061,11 @@ impl InterpretedInstance {
     #[inline(always)]
     fn go_to_next_instruction(&self) -> Option<Target> {
         Some(self.compiled_offset + 1)
+    }
+
+    fn pc_debug_info(&self) -> PcDebugInfo<'_> {
+        let pc = self.compiled_pcs.get(cast(self.compiled_offset).to_usize()).copied();
+        PcDebugInfo { module: &self.module, pc }
     }
 
     #[inline(always)]
@@ -2917,7 +2975,15 @@ fn not_enough_gas_impl<const DEBUG: bool>(
 macro_rules! handle_unresolved_branch {
     ($debug:expr, $visitor:ident, $s1:ident, $s2:ident, $tt:ident, $tf:ident, $name:ident) => {{
         if DEBUG {
-            log::trace!("[{}]: jump {} if {} {} {}", $visitor.compiled_offset, $tt, $s1, $debug, $s2);
+            log::trace!(
+                "[{}]{}: jump {} if {} {} {}",
+                $visitor.compiled_offset,
+                $visitor.pc_debug_info(),
+                $tt,
+                $s1,
+                $debug,
+                $s2
+            );
         }
 
         let offset = $visitor.compiled_offset;
@@ -2946,7 +3012,7 @@ define_interpreter! {
         let new_gas = visitor.gas - i64::from(gas_cost);
 
         if DEBUG {
-            log::trace!("[{}]: charge_gas: {gas_cost} ({} -> {})", visitor.compiled_offset, visitor.gas, new_gas);
+            log::trace!("[{}]{}: charge_gas: {gas_cost} ({} -> {})", visitor.compiled_offset, visitor.pc_debug_info(), visitor.gas, new_gas);
         }
 
         if new_gas < 0 {
@@ -2959,7 +3025,7 @@ define_interpreter! {
 
     fn step<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: step", visitor.compiled_offset);
+            log::trace!("[{}]{}: step", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.program_counter = program_counter;
@@ -2973,7 +3039,7 @@ define_interpreter! {
 
     fn reset_cache<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: reset_cache", visitor.compiled_offset);
+            log::trace!("[{}]{}: reset_cache", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.reset_interpreter_cache();
@@ -2982,7 +3048,7 @@ define_interpreter! {
 
     fn fallthrough<const DEBUG: bool>(visitor: &mut InterpretedInstance) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: fallthrough", visitor.compiled_offset);
+            log::trace!("[{}]{}: fallthrough", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.go_to_next_instruction()
@@ -2990,7 +3056,7 @@ define_interpreter! {
 
     fn trap<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: trap", visitor.compiled_offset);
+            log::trace!("[{}]{}: trap", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         log::debug!("Trap at {}: explicit trap", program_counter);
@@ -2999,7 +3065,7 @@ define_interpreter! {
 
     fn invalid_branch_trap<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: trap (invalid branch)", visitor.compiled_offset);
+            log::trace!("[{}]{}: trap (invalid branch)", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         log::debug!("Trap at {}: invalid branch", program_counter);
@@ -3015,7 +3081,7 @@ define_interpreter! {
 
     fn memset<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: memset", visitor.compiled_offset);
+            log::trace!("[{}]{}: memset", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         let gas_metering_enabled = visitor.module.gas_metering().is_some();
@@ -3054,7 +3120,7 @@ define_interpreter! {
 
     fn ecalli<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, hostcall_number: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: ecalli {hostcall_number}", visitor.compiled_offset);
+            log::trace!("[{}]{}: ecalli {hostcall_number}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         let next_offset = visitor.module.instructions_bounded_at(program_counter).next().unwrap().next_offset;
@@ -3068,7 +3134,7 @@ define_interpreter! {
 
     fn set_less_than_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::set_less_than_unsigned(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::set_less_than_unsigned(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::from(s1 < s2))
@@ -3076,7 +3142,7 @@ define_interpreter! {
 
     fn set_less_than_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::set_less_than_signed(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::set_less_than_signed(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::from(cast(s1).to_signed() < cast(s2).to_signed()))
@@ -3084,7 +3150,7 @@ define_interpreter! {
 
     fn shift_logical_right_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_right_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_logical_right_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_shr)
@@ -3092,7 +3158,7 @@ define_interpreter! {
 
     fn shift_logical_right_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_right_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_logical_right_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::wrapping_shr(s1, cast(s2).truncate_to_u32()))
@@ -3100,7 +3166,7 @@ define_interpreter! {
 
     fn shift_arithmetic_right_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_arithmetic_right_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_arithmetic_right_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().wrapping_shr(s2)).to_unsigned())
@@ -3108,7 +3174,7 @@ define_interpreter! {
 
     fn shift_arithmetic_right_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_arithmetic_right_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_arithmetic_right_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().wrapping_shr(cast(s2).truncate_to_u32())).to_unsigned())
@@ -3116,7 +3182,7 @@ define_interpreter! {
 
     fn shift_logical_left_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_left_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_logical_left_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_shl)
@@ -3124,7 +3190,7 @@ define_interpreter! {
 
     fn shift_logical_left_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_left_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_logical_left_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::wrapping_shl(s1, cast(s2).truncate_to_u32()))
@@ -3132,7 +3198,7 @@ define_interpreter! {
 
     fn xor<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::xor(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::xor(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1 ^ s2)
@@ -3140,7 +3206,7 @@ define_interpreter! {
 
     fn and<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::and(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::and(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1 & s2)
@@ -3148,7 +3214,7 @@ define_interpreter! {
 
     fn or<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::or(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::or(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1 | s2)
@@ -3156,7 +3222,7 @@ define_interpreter! {
 
     fn add_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::add_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::add_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_add)
@@ -3164,7 +3230,7 @@ define_interpreter! {
 
     fn add_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::add_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::add_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, u64::wrapping_add)
@@ -3172,7 +3238,7 @@ define_interpreter! {
 
     fn sub_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::sub_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::sub_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_sub)
@@ -3180,7 +3246,7 @@ define_interpreter! {
 
     fn sub_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::sub_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::sub_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, u64::wrapping_sub)
@@ -3188,7 +3254,7 @@ define_interpreter! {
 
     fn negate_and_add_imm_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::negate_and_add_imm_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::negate_and_add_imm_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| s2.wrapping_sub(s1))
@@ -3196,7 +3262,7 @@ define_interpreter! {
 
     fn negate_and_add_imm_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::negate_and_add_imm_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::negate_and_add_imm_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s2.wrapping_sub(s1))
@@ -3204,7 +3270,7 @@ define_interpreter! {
 
     fn mul_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::mul_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_mul)
@@ -3212,7 +3278,7 @@ define_interpreter! {
 
     fn mul_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::mul_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, u64::wrapping_mul)
@@ -3220,7 +3286,7 @@ define_interpreter! {
 
     fn mul_imm_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_imm_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::mul_imm_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_mul)
@@ -3228,7 +3294,7 @@ define_interpreter! {
 
     fn mul_imm_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_imm_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::mul_imm_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, u64::wrapping_mul)
@@ -3236,7 +3302,7 @@ define_interpreter! {
 
     fn mul_upper_signed_signed_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_upper_signed_signed(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::mul_upper_signed_signed(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(mulh(cast(s1).to_signed(), cast(s2).to_signed())).to_unsigned())
@@ -3244,7 +3310,7 @@ define_interpreter! {
 
     fn mul_upper_signed_signed_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_upper_signed_signed(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::mul_upper_signed_signed(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(mulh64(cast(s1).to_signed(), cast(s2).to_signed())).to_unsigned())
@@ -3252,7 +3318,7 @@ define_interpreter! {
 
     fn mul_upper_unsigned_unsigned_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_upper_unsigned_unsigned(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::mul_upper_unsigned_unsigned(d, s1, s2));
         }
 
 
@@ -3261,7 +3327,7 @@ define_interpreter! {
 
     fn mul_upper_unsigned_unsigned_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_upper_unsigned_unsigned(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::mul_upper_unsigned_unsigned(d, s1, s2));
         }
 
 
@@ -3270,7 +3336,7 @@ define_interpreter! {
 
     fn mul_upper_signed_unsigned_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_upper_signed_unsigned(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::mul_upper_signed_unsigned(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(mulhsu(cast(s1).to_signed(), s2)).to_unsigned())
@@ -3278,7 +3344,7 @@ define_interpreter! {
 
     fn mul_upper_signed_unsigned_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::mul_upper_signed_unsigned(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::mul_upper_signed_unsigned(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(mulhsu64(cast(s1).to_signed(), s2)).to_unsigned())
@@ -3286,7 +3352,7 @@ define_interpreter! {
 
     fn div_unsigned_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::div_unsigned_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::div_unsigned_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, divu)
@@ -3294,7 +3360,7 @@ define_interpreter! {
 
     fn div_unsigned_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::div_unsigned_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::div_unsigned_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, divu64)
@@ -3302,7 +3368,7 @@ define_interpreter! {
 
     fn div_signed_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::div_signed_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::div_signed_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(div(cast(s1).to_signed(), cast(s2).to_signed())).to_unsigned())
@@ -3310,7 +3376,7 @@ define_interpreter! {
 
     fn div_signed_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::div_signed_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::div_signed_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(div64(cast(s1).to_signed(), cast(s2).to_signed())).to_unsigned())
@@ -3318,7 +3384,7 @@ define_interpreter! {
 
     fn rem_unsigned_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rem_unsigned_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::rem_unsigned_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, remu)
@@ -3326,7 +3392,7 @@ define_interpreter! {
 
     fn rem_unsigned_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rem_unsigned_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::rem_unsigned_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, remu64)
@@ -3334,7 +3400,7 @@ define_interpreter! {
 
     fn rem_signed_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rem_signed_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::rem_signed_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(rem(cast(s1).to_signed(), cast(s2).to_signed())).to_unsigned())
@@ -3342,7 +3408,7 @@ define_interpreter! {
 
     fn rem_signed_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rem_signed_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::rem_signed_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(rem64(cast(s1).to_signed(), cast(s2).to_signed())).to_unsigned())
@@ -3350,7 +3416,7 @@ define_interpreter! {
 
     fn and_inverted_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::and_inverted(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::and_inverted(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| (s1 & !s2))
@@ -3358,7 +3424,7 @@ define_interpreter! {
 
     fn and_inverted_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::and_inverted(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::and_inverted(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| (s1 & !s2))
@@ -3366,7 +3432,7 @@ define_interpreter! {
 
     fn or_inverted_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::or_inverted(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::or_inverted(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| (s1 | !s2))
@@ -3374,7 +3440,7 @@ define_interpreter! {
 
     fn or_inverted_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::or_inverted(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::or_inverted(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| (s1 | !s2))
@@ -3382,7 +3448,7 @@ define_interpreter! {
 
     fn xnor_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::xnor(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::xnor(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| !(s1 ^ s2))
@@ -3390,7 +3456,7 @@ define_interpreter! {
 
     fn xnor_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::xnor(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::xnor(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| !(s1 ^ s2))
@@ -3398,7 +3464,7 @@ define_interpreter! {
 
     fn maximum_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::maximum(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::maximum(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().max(cast(s2).to_signed())).to_unsigned())
@@ -3406,7 +3472,7 @@ define_interpreter! {
 
     fn maximum_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::maximum(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::maximum(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().max(cast(s2).to_signed())).to_unsigned())
@@ -3414,7 +3480,7 @@ define_interpreter! {
 
     fn maximum_unsigned_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::maximum_unsigned(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::maximum_unsigned(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| s1.max(s2))
@@ -3422,7 +3488,7 @@ define_interpreter! {
 
     fn maximum_unsigned_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::maximum_unsigned(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::maximum_unsigned(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1.max(s2))
@@ -3430,7 +3496,7 @@ define_interpreter! {
 
     fn minimum_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::minimum(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::minimum(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().min(cast(s2).to_signed())).to_unsigned())
@@ -3438,7 +3504,7 @@ define_interpreter! {
 
     fn minimum_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::minimum(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::minimum(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(cast(s1).to_signed().min(cast(s2).to_signed())).to_unsigned())
@@ -3446,7 +3512,7 @@ define_interpreter! {
 
     fn minimum_unsigned_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::minimum_unsigned(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::minimum_unsigned(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| s1.min(s2))
@@ -3454,7 +3520,7 @@ define_interpreter! {
 
     fn minimum_unsigned_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::minimum_unsigned(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::minimum_unsigned(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1.min(s2))
@@ -3462,7 +3528,7 @@ define_interpreter! {
 
     fn rotate_left_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_left_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::rotate_left_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_left)
@@ -3470,7 +3536,7 @@ define_interpreter! {
 
     fn rotate_left_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_left_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::rotate_left_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::rotate_left(s1, cast(s2).truncate_to_u32()))
@@ -3478,7 +3544,7 @@ define_interpreter! {
 
     fn rotate_right_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_right_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::rotate_right_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
@@ -3486,7 +3552,7 @@ define_interpreter! {
 
     fn rotate_right_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_right_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::rotate_right_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::rotate_right(s1, cast(s2).truncate_to_u32()))
@@ -3494,7 +3560,7 @@ define_interpreter! {
 
     fn set_less_than_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::set_less_than_unsigned_imm(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::set_less_than_unsigned_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::from(s1 < s2))
@@ -3502,7 +3568,7 @@ define_interpreter! {
 
     fn set_greater_than_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::set_greater_than_unsigned_imm(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::set_greater_than_unsigned_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::from(s1 > s2))
@@ -3510,7 +3576,7 @@ define_interpreter! {
 
     fn set_less_than_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::set_less_than_signed_imm(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::set_less_than_signed_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::from(cast(s1).to_signed() < cast(s2).to_signed()))
@@ -3518,7 +3584,7 @@ define_interpreter! {
 
     fn set_greater_than_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::set_greater_than_signed_imm(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::set_greater_than_signed_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::from(cast(s1).to_signed() > cast(s2).to_signed()))
@@ -3526,7 +3592,7 @@ define_interpreter! {
 
     fn shift_logical_right_imm_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_right_imm_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_logical_right_imm_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_shr)
@@ -3534,7 +3600,7 @@ define_interpreter! {
 
     fn shift_logical_right_imm_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_right_imm_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_logical_right_imm_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::wrapping_shr(s1, cast(s2).truncate_to_u32()))
@@ -3542,7 +3608,7 @@ define_interpreter! {
 
     fn shift_logical_right_imm_alt_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_right_imm_alt_32(d, s2, s1));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_logical_right_imm_alt_32(d, s2, s1));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_shr)
@@ -3550,7 +3616,7 @@ define_interpreter! {
 
     fn shift_logical_right_imm_alt_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_right_imm_alt_64(d, s2, s1));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_logical_right_imm_alt_64(d, s2, s1));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::wrapping_shr(s1, cast(s2).truncate_to_u32()))
@@ -3558,7 +3624,7 @@ define_interpreter! {
 
     fn shift_arithmetic_right_imm_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_arithmetic_right_imm_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_arithmetic_right_imm_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(i32::wrapping_shr(cast(s1).to_signed(), s2)).to_unsigned())
@@ -3566,7 +3632,7 @@ define_interpreter! {
 
     fn shift_arithmetic_right_imm_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_arithmetic_right_imm_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_arithmetic_right_imm_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(i64::wrapping_shr(cast(s1).to_signed(), cast(s2).truncate_to_u32())).to_unsigned())
@@ -3574,7 +3640,7 @@ define_interpreter! {
 
     fn shift_arithmetic_right_imm_alt_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_arithmetic_right_imm_alt_32(d, s2, s1));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_arithmetic_right_imm_alt_32(d, s2, s1));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| cast(i32::wrapping_shr(cast(s1).to_signed(), s2)).to_unsigned())
@@ -3582,7 +3648,7 @@ define_interpreter! {
 
     fn shift_arithmetic_right_imm_alt_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_arithmetic_right_imm_alt_64(d, s2, s1));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_arithmetic_right_imm_alt_64(d, s2, s1));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| cast(i64::wrapping_shr(cast(s1).to_signed(), cast(s2).truncate_to_u32())).to_unsigned())
@@ -3590,7 +3656,7 @@ define_interpreter! {
 
     fn shift_logical_left_imm_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_left_imm_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_logical_left_imm_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_shl)
@@ -3598,7 +3664,7 @@ define_interpreter! {
 
     fn shift_logical_left_imm_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_left_imm_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_logical_left_imm_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::wrapping_shl(s1, cast(s2).truncate_to_u32()))
@@ -3606,7 +3672,7 @@ define_interpreter! {
 
     fn shift_logical_left_imm_alt_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_left_imm_alt_32(d, s2, s1));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_logical_left_imm_alt_32(d, s2, s1));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_shl)
@@ -3614,7 +3680,7 @@ define_interpreter! {
 
     fn shift_logical_left_imm_alt_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s2: Reg, s1: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::shift_logical_left_imm_alt_64(d, s2, s1));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::shift_logical_left_imm_alt_64(d, s2, s1));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::wrapping_shl(s1, cast(s2).truncate_to_u32()))
@@ -3622,7 +3688,7 @@ define_interpreter! {
 
     fn or_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::or_imm(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::or_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1 | s2)
@@ -3630,7 +3696,7 @@ define_interpreter! {
 
     fn and_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::and_imm(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::and_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1 & s2)
@@ -3638,7 +3704,7 @@ define_interpreter! {
 
     fn xor_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::xor_imm(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::xor_imm(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1 ^ s2)
@@ -3646,7 +3712,7 @@ define_interpreter! {
 
     fn load_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, dst: Reg, imm: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_imm(dst, imm));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_imm(dst, imm));
         }
 
         visitor.set32::<DEBUG>(dst, imm);
@@ -3656,7 +3722,7 @@ define_interpreter! {
     fn load_imm64<const DEBUG: bool>(visitor: &mut InterpretedInstance, dst: Reg, imm_lo: u32, imm_hi: u32) -> Option<Target> {
         let imm = cast(imm_lo).to_u64() | (cast(imm_hi).to_u64() << 32);
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_imm64(dst, imm));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_imm64(dst, imm));
         }
 
         visitor.set64::<DEBUG>(dst, imm);
@@ -3665,7 +3731,7 @@ define_interpreter! {
 
     fn move_reg<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::move_reg(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::move_reg(d, s));
         }
 
         let imm = visitor.get64::<DEBUG>(s);
@@ -3675,7 +3741,7 @@ define_interpreter! {
 
     fn count_leading_zero_bits_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::count_leading_zero_bits_32(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::count_leading_zero_bits_32(d, s));
         }
 
         visitor.set32::<DEBUG>(d, u32::leading_zeros(visitor.get32::<DEBUG>(s)));
@@ -3684,7 +3750,7 @@ define_interpreter! {
 
     fn count_leading_zero_bits_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::count_leading_zero_bits_64(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::count_leading_zero_bits_64(d, s));
         }
 
         visitor.set64::<DEBUG>(d, cast(u64::leading_zeros(visitor.get64::<DEBUG>(s))).to_u64());
@@ -3693,7 +3759,7 @@ define_interpreter! {
 
     fn count_trailing_zero_bits_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::count_trailing_zero_bits_32(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::count_trailing_zero_bits_32(d, s));
         }
 
         visitor.set32::<DEBUG>(d, u32::trailing_zeros(visitor.get32::<DEBUG>(s)));
@@ -3702,7 +3768,7 @@ define_interpreter! {
 
     fn count_trailing_zero_bits_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::count_trailing_zero_bits_64(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::count_trailing_zero_bits_64(d, s));
         }
 
         visitor.set64::<DEBUG>(d, cast(u64::trailing_zeros(visitor.get64::<DEBUG>(s))).to_u64());
@@ -3711,7 +3777,7 @@ define_interpreter! {
 
     fn count_set_bits_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::count_set_bits_32(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::count_set_bits_32(d, s));
         }
 
         visitor.set32::<DEBUG>(d, u32::count_ones(visitor.get32::<DEBUG>(s)));
@@ -3720,7 +3786,7 @@ define_interpreter! {
 
     fn count_set_bits_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::count_set_bits_64(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::count_set_bits_64(d, s));
         }
 
         visitor.set64::<DEBUG>(d, cast(u64::count_ones(visitor.get64::<DEBUG>(s))).to_u64());
@@ -3729,7 +3795,7 @@ define_interpreter! {
 
     fn sign_extend_8_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::sign_extend_8(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::sign_extend_8(d, s));
         }
 
         let byte = cast(cast(visitor.get32::<DEBUG>(s)).truncate_to_u8()).to_signed();
@@ -3739,7 +3805,7 @@ define_interpreter! {
 
     fn sign_extend_8_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::sign_extend_8(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::sign_extend_8(d, s));
         }
 
         let byte = cast(cast(visitor.get64::<DEBUG>(s)).truncate_to_u8()).to_signed();
@@ -3749,7 +3815,7 @@ define_interpreter! {
 
     fn sign_extend_16_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::sign_extend_16(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::sign_extend_16(d, s));
         }
 
         let hword = cast(cast(visitor.get32::<DEBUG>(s)).truncate_to_u16()).to_signed();
@@ -3759,7 +3825,7 @@ define_interpreter! {
 
     fn sign_extend_16_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::sign_extend_16(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::sign_extend_16(d, s));
         }
 
         let hword = cast(cast(visitor.get64::<DEBUG>(s)).truncate_to_u16()).to_signed();
@@ -3769,7 +3835,7 @@ define_interpreter! {
 
     fn zero_extend_16_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::zero_extend_16(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::zero_extend_16(d, s));
         }
 
         let hword = cast(visitor.get32::<DEBUG>(s)).truncate_to_u16();
@@ -3779,7 +3845,7 @@ define_interpreter! {
 
     fn zero_extend_16_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::zero_extend_16(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::zero_extend_16(d, s));
         }
 
         let hword = cast(visitor.get64::<DEBUG>(s)).truncate_to_u16();
@@ -3789,7 +3855,7 @@ define_interpreter! {
 
     fn reverse_byte_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::reverse_byte(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::reverse_byte(d, s));
         }
 
         visitor.set32::<DEBUG>(d, u32::swap_bytes(visitor.get32::<DEBUG>(s)));
@@ -3798,7 +3864,7 @@ define_interpreter! {
 
     fn reverse_byte_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::reverse_byte(d, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::reverse_byte(d, s));
         }
 
         visitor.set64::<DEBUG>(d, u64::swap_bytes(visitor.get64::<DEBUG>(s)));
@@ -3807,7 +3873,7 @@ define_interpreter! {
 
     fn cmov_if_zero<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg, c: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::cmov_if_zero(d, s, c));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::cmov_if_zero(d, s, c));
         }
 
         if visitor.get64::<DEBUG>(c) == 0 {
@@ -3820,7 +3886,7 @@ define_interpreter! {
 
     fn cmov_if_zero_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, c: Reg, s: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::cmov_if_zero_imm(d, c, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::cmov_if_zero_imm(d, c, s));
         }
 
         if visitor.get64::<DEBUG>(c) == 0 {
@@ -3832,7 +3898,7 @@ define_interpreter! {
 
     fn cmov_if_not_zero<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s: Reg, c: Reg) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::cmov_if_not_zero(d, s, c));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::cmov_if_not_zero(d, s, c));
         }
 
         if visitor.get64::<DEBUG>(c) != 0 {
@@ -3845,7 +3911,7 @@ define_interpreter! {
 
     fn cmov_if_not_zero_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, c: Reg, s: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::cmov_if_not_zero_imm(d, c, s));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::cmov_if_not_zero_imm(d, c, s));
         }
 
         if visitor.get64::<DEBUG>(c) != 0 {
@@ -3857,7 +3923,7 @@ define_interpreter! {
 
     fn rotate_right_imm_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_right_imm_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::rotate_right_imm_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::rotate_right)
@@ -3865,7 +3931,7 @@ define_interpreter! {
 
     fn rotate_right_imm_alt_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_right_imm_alt_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::rotate_right_imm_alt_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s2, s1, u32::rotate_right)
@@ -3873,7 +3939,7 @@ define_interpreter! {
 
     fn rotate_right_imm_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_right_imm_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::rotate_right_imm_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| u64::rotate_right(s1, cast(s2).truncate_to_u32()))
@@ -3881,7 +3947,7 @@ define_interpreter! {
 
     fn rotate_right_imm_alt_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::rotate_right_imm_alt_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::rotate_right_imm_alt_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s2, s1, |s2, s1| u64::rotate_right(s2, cast(s1).truncate_to_u32()))
@@ -3889,7 +3955,7 @@ define_interpreter! {
 
     fn add_imm_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::add_imm_32(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::add_imm_32(d, s1, s2));
         }
 
         visitor.set3_32::<DEBUG>(d, s1, s2, u32::wrapping_add)
@@ -3897,7 +3963,7 @@ define_interpreter! {
 
     fn add_imm_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::add_imm_64(d, s1, s2));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::add_imm_64(d, s1, s2));
         }
 
         visitor.set3_64::<DEBUG>(d, s1, s2, u64::wrapping_add)
@@ -3905,7 +3971,7 @@ define_interpreter! {
 
     fn store_imm_u8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_u8(offset, value));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_imm_u8(offset, value));
         }
 
         visitor.store::<M, u8, DEBUG>(program_counter, value, None, offset)
@@ -3913,7 +3979,7 @@ define_interpreter! {
 
     fn store_imm_u16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_u16(offset, value));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_imm_u16(offset, value));
         }
 
         visitor.store::<M, u16, DEBUG>(program_counter, value, None, offset)
@@ -3921,7 +3987,7 @@ define_interpreter! {
 
     fn store_imm_u32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_u32(offset, value));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_imm_u32(offset, value));
         }
 
         visitor.store::<M, u32, DEBUG>(program_counter, value, None, offset)
@@ -3929,7 +3995,7 @@ define_interpreter! {
 
     fn store_imm_u64<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_u64(offset, value));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_imm_u64(offset, value));
         }
 
         visitor.store::<M, u64, DEBUG>(program_counter, value, None, offset)
@@ -3937,7 +4003,7 @@ define_interpreter! {
 
     fn store_imm_indirect_u8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_indirect_u8(base, offset, value));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_imm_indirect_u8(base, offset, value));
         }
 
         visitor.store::<M, u8, DEBUG>(program_counter, value, Some(base), offset)
@@ -3945,7 +4011,7 @@ define_interpreter! {
 
     fn store_imm_indirect_u16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_indirect_u16(base, offset, value));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_imm_indirect_u16(base, offset, value));
         }
 
         visitor.store::<M, u16, DEBUG>(program_counter, value, Some(base), offset)
@@ -3953,7 +4019,7 @@ define_interpreter! {
 
     fn store_imm_indirect_u32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_indirect_u32(base, offset, value));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_imm_indirect_u32(base, offset, value));
         }
 
         visitor.store::<M, u32, DEBUG>(program_counter, value, Some(base), offset)
@@ -3961,7 +4027,7 @@ define_interpreter! {
 
     fn store_imm_indirect_u64<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, base: Reg, offset: u32, value: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_imm_indirect_u64(base, offset, value));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_imm_indirect_u64(base, offset, value));
         }
 
         visitor.store::<M, u64, DEBUG>(program_counter, value, Some(base), offset)
@@ -3969,7 +4035,7 @@ define_interpreter! {
 
     fn store_indirect_u8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_indirect_u8(src, base, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_indirect_u8(src, base, offset));
         }
 
         visitor.store::<M, u8, DEBUG>(program_counter, src, Some(base), offset)
@@ -3977,7 +4043,7 @@ define_interpreter! {
 
     fn store_indirect_u16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_indirect_u16(src, base, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_indirect_u16(src, base, offset));
         }
 
         visitor.store::<M, u16, DEBUG>(program_counter, src, Some(base), offset)
@@ -3985,7 +4051,7 @@ define_interpreter! {
 
     fn store_indirect_u32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_indirect_u32(src, base, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_indirect_u32(src, base, offset));
         }
 
         visitor.store::<M, u32, DEBUG>(program_counter, src, Some(base), offset)
@@ -3993,7 +4059,7 @@ define_interpreter! {
 
     fn store_indirect_u64<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_indirect_u64(src, base, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_indirect_u64(src, base, offset));
         }
 
         visitor.store::<M, u64, DEBUG>(program_counter, src, Some(base), offset)
@@ -4001,7 +4067,7 @@ define_interpreter! {
 
     fn store_u8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_u8(src, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_u8(src, offset));
         }
 
         visitor.store::<M, u8, DEBUG>(program_counter, src, None, offset)
@@ -4009,7 +4075,7 @@ define_interpreter! {
 
     fn store_u16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_u16(src, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_u16(src, offset));
         }
 
         visitor.store::<M, u16, DEBUG>(program_counter, src, None, offset)
@@ -4017,7 +4083,7 @@ define_interpreter! {
 
     fn store_u32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_u32(src, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_u32(src, offset));
         }
 
         visitor.store::<M, u32, DEBUG>(program_counter, src, None, offset)
@@ -4025,7 +4091,7 @@ define_interpreter! {
 
     fn store_u64<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, src: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::store_u64(src, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::store_u64(src, offset));
         }
 
         visitor.store::<M, u64, DEBUG>(program_counter, src, None, offset)
@@ -4033,7 +4099,7 @@ define_interpreter! {
 
     fn load_u8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_u8(dst, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_u8(dst, offset));
         }
 
         visitor.load::<M, u8, DEBUG>(program_counter, dst, None, offset)
@@ -4041,7 +4107,7 @@ define_interpreter! {
 
     fn load_i8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_i8(dst, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_i8(dst, offset));
         }
 
         visitor.load::<M, i8, DEBUG>(program_counter, dst, None, offset)
@@ -4049,7 +4115,7 @@ define_interpreter! {
 
     fn load_u16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_u16(dst, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_u16(dst, offset));
         }
 
         visitor.load::<M, u16, DEBUG>(program_counter, dst, None, offset)
@@ -4057,7 +4123,7 @@ define_interpreter! {
 
     fn load_i16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_i16(dst, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_i16(dst, offset));
         }
 
         visitor.load::<M, i16, DEBUG>(program_counter, dst, None, offset)
@@ -4065,7 +4131,7 @@ define_interpreter! {
 
     fn load_u32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_u32(dst, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_u32(dst, offset));
         }
 
         visitor.load::<M, u32, DEBUG>(program_counter, dst, None, offset)
@@ -4073,7 +4139,7 @@ define_interpreter! {
 
     fn load_i32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_i32(dst, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_i32(dst, offset));
         }
 
         visitor.load::<M, i32, DEBUG>(program_counter, dst, None, offset)
@@ -4081,7 +4147,7 @@ define_interpreter! {
 
     fn load_u64<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_u64(dst, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_u64(dst, offset));
         }
 
         visitor.load::<M, u64, DEBUG>(program_counter, dst, None, offset)
@@ -4089,7 +4155,7 @@ define_interpreter! {
 
     fn load_indirect_u8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_indirect_u8(dst, base, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_indirect_u8(dst, base, offset));
         }
 
         visitor.load::<M, u8, DEBUG>(program_counter, dst, Some(base), offset)
@@ -4097,7 +4163,7 @@ define_interpreter! {
 
     fn load_indirect_i8<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_indirect_i8(dst, base, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_indirect_i8(dst, base, offset));
         }
 
         visitor.load::<M, i8, DEBUG>(program_counter, dst, Some(base), offset)
@@ -4105,7 +4171,7 @@ define_interpreter! {
 
     fn load_indirect_u16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_indirect_u16(dst, base, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_indirect_u16(dst, base, offset));
         }
 
         visitor.load::<M, u16, DEBUG>(program_counter, dst, Some(base), offset)
@@ -4113,7 +4179,7 @@ define_interpreter! {
 
     fn load_indirect_i16<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_indirect_i16(dst, base, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_indirect_i16(dst, base, offset));
         }
 
         visitor.load::<M, i16, DEBUG>(program_counter, dst, Some(base), offset)
@@ -4121,7 +4187,7 @@ define_interpreter! {
 
     fn load_indirect_u32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_indirect_u32(dst, base, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_indirect_u32(dst, base, offset));
         }
 
         visitor.load::<M, u32, DEBUG>(program_counter, dst, Some(base), offset)
@@ -4129,7 +4195,7 @@ define_interpreter! {
 
     fn load_indirect_i32<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_indirect_i32(dst, base, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_indirect_i32(dst, base, offset));
         }
 
         visitor.load::<M, i32, DEBUG>(program_counter, dst, Some(base), offset)
@@ -4137,7 +4203,7 @@ define_interpreter! {
 
     fn load_indirect_u64<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, dst: Reg, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_indirect_u64(dst, base, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_indirect_u64(dst, base, offset));
         }
 
         visitor.load::<M, u64, DEBUG>(program_counter, dst, Some(base), offset)
@@ -4145,7 +4211,7 @@ define_interpreter! {
 
     fn branch_less_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} <u {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} <u {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 < s2)
@@ -4153,7 +4219,7 @@ define_interpreter! {
 
     fn branch_less_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} <u {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} <u {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 < s2)
@@ -4161,7 +4227,7 @@ define_interpreter! {
 
     fn branch_less_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} <s {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} <s {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() < cast(s2).to_signed())
@@ -4169,7 +4235,7 @@ define_interpreter! {
 
     fn branch_less_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} <s {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} <s {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() < cast(s2).to_signed())
@@ -4177,7 +4243,7 @@ define_interpreter! {
 
     fn branch_eq<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} == {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} == {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 == s2)
@@ -4185,7 +4251,7 @@ define_interpreter! {
 
     fn branch_eq_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} == {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} == {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 == s2)
@@ -4193,7 +4259,7 @@ define_interpreter! {
 
     fn branch_not_eq<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} != {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} != {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 != s2)
@@ -4201,7 +4267,7 @@ define_interpreter! {
 
     fn branch_not_eq_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} != {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} != {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 != s2)
@@ -4209,7 +4275,7 @@ define_interpreter! {
 
     fn branch_greater_or_equal_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} >=u {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} >=u {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 >= s2)
@@ -4217,7 +4283,7 @@ define_interpreter! {
 
     fn branch_greater_or_equal_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} >=u {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} >=u {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 >= s2)
@@ -4225,7 +4291,7 @@ define_interpreter! {
 
     fn branch_greater_or_equal_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: Reg, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} >=s {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} >=s {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() >= cast(s2).to_signed())
@@ -4233,7 +4299,7 @@ define_interpreter! {
 
     fn branch_greater_or_equal_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} >=s {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} >=s {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() >= cast(s2).to_signed())
@@ -4241,7 +4307,7 @@ define_interpreter! {
 
     fn branch_less_or_equal_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} <=u {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} <=u {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 <= s2)
@@ -4249,7 +4315,7 @@ define_interpreter! {
 
     fn branch_less_or_equal_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} <=s {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} <=s {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() <= cast(s2).to_signed())
@@ -4257,7 +4323,7 @@ define_interpreter! {
 
     fn branch_greater_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} >u {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} >u {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| s1 > s2)
@@ -4265,7 +4331,7 @@ define_interpreter! {
 
     fn branch_greater_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, s1: Reg, s2: u32, tt: Target, tf: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{tt} if {s1} >s {s2}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{tt} if {s1} >s {s2}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         visitor.branch::<DEBUG>(s1, s2, tt, tf, |s1, s2| cast(s1).to_signed() > cast(s2).to_signed())
@@ -4273,7 +4339,7 @@ define_interpreter! {
 
     fn jump<const DEBUG: bool>(visitor: &mut InterpretedInstance, target: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: jump ~{target}", visitor.compiled_offset);
+            log::trace!("[{}]{}: jump ~{target}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         Some(target)
@@ -4281,7 +4347,7 @@ define_interpreter! {
 
     fn jump_indirect<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, base: Reg, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::jump_indirect(base, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::jump_indirect(base, offset));
         }
 
         let dynamic_address = visitor.get32::<DEBUG>(base).wrapping_add(offset);
@@ -4290,7 +4356,7 @@ define_interpreter! {
 
     fn load_imm_and_jump_indirect<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, ra: Reg, base: Reg, value: u32, offset: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_imm_and_jump_indirect(ra, base, value, offset));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_imm_and_jump_indirect(ra, base, value, offset));
         }
 
         let dynamic_address = visitor.get32::<DEBUG>(base).wrapping_add(offset);
@@ -4300,7 +4366,7 @@ define_interpreter! {
 
     fn load_imm_and_jump<const DEBUG: bool>(visitor: &mut InterpretedInstance, ra: Reg, value: u32, target: Target) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: {}", visitor.compiled_offset, asm::load_imm_and_jump(ra, value, target));
+            log::trace!("[{}]{}: {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_imm_and_jump(ra, value, target));
         }
 
         visitor.set32::<DEBUG>(ra, value);
@@ -4373,7 +4439,7 @@ define_interpreter! {
 
     fn unresolved_jump<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, jump_to: ProgramCounter) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: unresolved jump {jump_to}", visitor.compiled_offset);
+            log::trace!("[{}]{}: unresolved jump {jump_to}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         if let Some(target) = visitor.resolve_jump::<DEBUG>(jump_to) {
@@ -4403,7 +4469,7 @@ define_interpreter! {
 
     fn unresolved_load_imm_and_jump<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, ra: Reg, value: u32, jump_to: u32) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: unresolved {}", visitor.compiled_offset, asm::load_imm_and_jump(ra, value, jump_to));
+            log::trace!("[{}]{}: unresolved {}", visitor.compiled_offset, visitor.pc_debug_info(), asm::load_imm_and_jump(ra, value, jump_to));
         }
 
         visitor.set32::<DEBUG>(ra, value);
@@ -4427,7 +4493,7 @@ define_interpreter! {
 
     fn unresolved_fallthrough<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter, jump_to: ProgramCounter) -> Option<Target> {
         if DEBUG {
-            log::trace!("[{}]: unresolved fallthrough {jump_to}", visitor.compiled_offset);
+            log::trace!("[{}]{}: unresolved fallthrough {jump_to}", visitor.compiled_offset, visitor.pc_debug_info());
         }
 
         let offset = visitor.compiled_offset;
@@ -4461,6 +4527,7 @@ struct Compiler<'a, const DEBUG: bool> {
     next_program_counter: ProgramCounter,
     compiled_handlers: &'a mut Vec<Handler>,
     compiled_args: &'a mut Vec<Args>,
+    compiled_pcs: &'a mut Vec<ProgramCounter>,
     module: &'a Module,
     memory_kind: usize,
 }
