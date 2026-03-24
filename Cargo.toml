@@ -72,6 +72,10 @@ yansi = "0.5.1"
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(polkavm_dev_debug_zygote)'] }
+# This lint just makes the code more noisy for something that can be handled by the IDE.
+mismatched_lifetime_syntaxes = "allow"
+# Remove this once we bump MSRV and `mismatched_lifetime_syntaxes` isn't unknown anymore.
+unknown_lints = "allow"
 
 [workspace.lints.clippy]
 # This also triggers on cases like `.or_insert_with(Vec::new)`.
