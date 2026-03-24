@@ -3353,7 +3353,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.compiled_offset, asm::and_inverted(d, s1, s2));
         }
 
-        visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| (s1 & !s2))
+        visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| s1 & !s2)
     }
 
     fn and_inverted_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
@@ -3361,7 +3361,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.compiled_offset, asm::and_inverted(d, s1, s2));
         }
 
-        visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| (s1 & !s2))
+        visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1 & !s2)
     }
 
     fn or_inverted_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
@@ -3369,7 +3369,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.compiled_offset, asm::or_inverted(d, s1, s2));
         }
 
-        visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| (s1 | !s2))
+        visitor.set3_32::<DEBUG>(d, s1, s2, |s1, s2| s1 | !s2)
     }
 
     fn or_inverted_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
@@ -3377,7 +3377,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", visitor.compiled_offset, asm::or_inverted(d, s1, s2));
         }
 
-        visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| (s1 | !s2))
+        visitor.set3_64::<DEBUG>(d, s1, s2, |s1, s2| s1 | !s2)
     }
 
     fn xnor_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, d: Reg, s1: Reg, s2: Reg) -> Option<Target> {
