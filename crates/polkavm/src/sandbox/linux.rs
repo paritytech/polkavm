@@ -1013,13 +1013,6 @@ unsafe fn child_main(uid_map: &str, gid_map: &str, fds: ChildFds, sandboxing_ena
         proc_self.close()?;
     }
 
-    fn move_fd_after(fd: linux_raw::Fd, min: i32) -> Result<Fd, Error> {
-        let out_fd = linux_raw::sys_fcntl_dupfd(fd.borrow(), min)?;
-        fd.close()?;
-
-        Ok(out_fd)
-    }
-
     fn move_fd(fd: linux_raw::Fd, new_fd: i32, flags: u32) -> Result<Fd, Error> {
         linux_raw::sys_dup3(fd.borrow().raw(), new_fd, flags)?;
         fd.close()?;
@@ -1055,16 +1048,30 @@ unsafe fn child_main(uid_map: &str, gid_map: &str, fds: ChildFds, sandboxing_ena
     const LAST_USED_FD: i32 = FD_ZYGOTE;
     const NEXT_FREE_FD: i32 = FD_ZYGOTE + 1;
 
+    macro_rules! move_fd_high {
+        ($name:expr, $fd:expr) => {
+            if $fd.borrow().raw() >= NEXT_FREE_FD {
+                $fd
+            } else {
+                let out_fd = linux_raw::sys_fcntl_dupfd($fd.borrow(), NEXT_FREE_FD)
+                    .map_err(|error| error.with_message_static(concat!("failed to move ", $name, " FD: fcntl failed")))?;
+                $fd.close()
+                    .map_err(|error| error.with_message_static(concat!("failed to move ", $name, " FD: close failed")))?;
+                out_fd
+            }
+        };
+    }
+
     // Make sure no FD we need uses any FD number in range 0..LAST_USED_FD.
-    let fd_zygote = move_fd_after(fds.zygote, NEXT_FREE_FD)?;
-    let fd_socket = move_fd_after(fds.socket, NEXT_FREE_FD)?;
-    let fd_vmctx = move_fd_after(fds.vmctx, NEXT_FREE_FD)?;
-    let fd_shm = move_fd_after(fds.shm, NEXT_FREE_FD)?;
-    let fd_mem = move_fd_after(fds.mem, NEXT_FREE_FD)?;
-    let fd_lifetime_pipe = move_fd_after(fds.lifetime_pipe, NEXT_FREE_FD)?;
-    let fd_dummy = move_fd_after(fd_dummy, NEXT_FREE_FD)?;
+    let fd_zygote = move_fd_high!("zygote", fds.zygote);
+    let fd_socket = move_fd_high!("socket", fds.socket);
+    let fd_vmctx = move_fd_high!("vmctx", fds.vmctx);
+    let fd_shm = move_fd_high!("shared memory", fds.shm);
+    let fd_mem = move_fd_high!("memory", fds.mem);
+    let fd_lifetime_pipe = move_fd_high!("lifetime", fds.lifetime_pipe);
+    let fd_dummy = move_fd_high!("dummy", fd_dummy);
     let fd_logging_pipe = if let Some(fd_logging_pipe) = fds.logging_pipe {
-        Some(move_fd_after(fd_logging_pipe, NEXT_FREE_FD)?)
+        Some(move_fd_high!("logging", fd_logging_pipe))
     } else {
         None
     };
