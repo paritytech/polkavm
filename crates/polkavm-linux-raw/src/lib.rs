@@ -1391,6 +1391,14 @@ impl Error {
         }
     }
 
+    #[cold]
+    pub fn with_message_static(mut self, message: &'static str) -> Self {
+        #[cfg(feature = "std")]
+        let message = Cow::Borrowed(message);
+        self.message = message;
+        self
+    }
+
     #[inline]
     pub fn from_syscall(message: &'static str, result: i64) -> Result<(), Self> {
         if result >= -4095 && result < 0 {
