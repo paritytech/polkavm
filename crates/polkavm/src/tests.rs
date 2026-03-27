@@ -4981,6 +4981,89 @@ macro_rules! riscv_test {
 
 include!("tests_riscv.rs");
 
+#[cfg(all(not(miri), target_os = "linux", target_arch = "x86_64", feature = "std"))]
+#[test]
+fn core_pinning() {
+    use crate::config::CorePinning;
+    use crate::sandbox::linux::CpuMask;
+
+    let _ = env_logger::try_init();
+    let original_affinity = CpuMask::get_affinity(0).unwrap();
+    assert!(
+        original_affinity.count() > 1,
+        "thread pinned to only a single core; can't run the test"
+    );
+
+    let blob = basic_test_blob();
+
+    let mut engine_config = Config::new();
+    engine_config.set_core_pinning(CorePinning::Disabled);
+    {
+        let engine = Engine::new(&engine_config).unwrap();
+        let module = Module::from_blob(&engine, &Default::default(), blob.clone()).unwrap();
+        let _instance = module.instantiate().unwrap();
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+    }
+
+    {
+        engine_config.set_core_pinning(CorePinning::PinToCore);
+        let engine = Engine::new(&engine_config).unwrap();
+        let module = Module::from_blob(&engine, &Default::default(), blob.clone()).unwrap();
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+        let instance = module.instantiate().unwrap();
+        let current_affinity = CpuMask::get_affinity(0).unwrap();
+        assert_ne!(current_affinity, original_affinity);
+        assert_eq!(current_affinity.count(), 1);
+        core::mem::drop(instance);
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+    }
+
+    assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+
+    {
+        engine_config.set_core_pinning(CorePinning::PinToCcx);
+        let engine = Engine::new(&engine_config).unwrap();
+        let module = Module::from_blob(&engine, &Default::default(), blob.clone()).unwrap();
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+        let instance = module.instantiate().unwrap();
+        let current_affinity = CpuMask::get_affinity(0).unwrap();
+        assert!(current_affinity.count() > 1);
+        core::mem::drop(instance);
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+    }
+
+    assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+
+    {
+        engine_config.set_core_pinning(CorePinning::PinToCore);
+        let engine_1 = Engine::new(&engine_config).unwrap();
+        let engine_2 = Engine::new(&engine_config).unwrap();
+        let module_1 = Module::from_blob(&engine_1, &Default::default(), blob.clone()).unwrap();
+        let module_2 = Module::from_blob(&engine_2, &Default::default(), blob).unwrap();
+
+        let instance_1 = module_1.instantiate().unwrap();
+        let current_affinity = CpuMask::get_affinity(0).unwrap();
+        assert_ne!(current_affinity, original_affinity);
+        assert_eq!(current_affinity.count(), 1);
+
+        let instance_2 = module_2.instantiate().unwrap();
+        assert_eq!(current_affinity, CpuMask::get_affinity(0).unwrap());
+
+        core::mem::drop(instance_1);
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+
+        core::mem::drop(instance_2);
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+
+        let instance_2 = module_2.instantiate().unwrap();
+        let current_affinity = CpuMask::get_affinity(0).unwrap();
+        assert_ne!(current_affinity, original_affinity);
+        assert_eq!(current_affinity.count(), 1);
+        core::mem::drop(instance_2);
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+    }
+}
+
 run_tests! {
     simple_test
     basic_test
