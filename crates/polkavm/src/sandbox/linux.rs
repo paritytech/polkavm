@@ -16,15 +16,14 @@ use polkavm_common::{
 
 pub use linux_raw::Error;
 
-use core::cell::Cell;
 use core::ffi::{c_int, c_uint};
 use core::mem::MaybeUninit;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
 use linux_raw::{abort, cstr, syscall_readonly, Fd, Mmap};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 use super::{get_native_page_size, OffsetTable, SandboxInit, SandboxKind};
@@ -36,16 +35,102 @@ use crate::page_set::PageSet;
 use crate::shm_allocator::{ShmAllocation, ShmAllocator};
 use crate::{Gas, InterruptKind, ProgramCounter, RegValue, Segfault};
 
+type PinnedThreadMap = Mutex<BTreeMap<u64, Weak<Mutex<ThreadState>>>>;
+
+struct ThreadState {
+    unique_id: u64,
+    tid: linux_raw::pid_t,
+    instances_alive: isize,
+    original_affinity: CpuMask,
+    pinned_to_core: usize,
+    pinned_to_ccx: usize,
+    pinned_thread_map: Weak<PinnedThreadMap>,
+}
+
+struct ThreadPin(Weak<Mutex<ThreadState>>);
+
+impl Drop for ThreadPin {
+    fn drop(&mut self) {
+        if let Some(state) = self.0.upgrade() {
+            let mut state = state.lock();
+            state.instances_alive -= 1;
+            debug_assert!(state.instances_alive >= 0);
+
+            if state.instances_alive == 0 && state.tid != 0 {
+                if let Err(error) = state.original_affinity.set_affinity(state.tid) {
+                    log::warn!("Failed to restore thread #{}'s affinity: {error}", state.tid);
+                }
+            }
+
+            state.pinned_to_core = usize::MAX;
+            state.pinned_to_ccx = usize::MAX;
+
+            let pinned_thread_map = core::mem::replace(&mut state.pinned_thread_map, Weak::new());
+            let unique_id = state.unique_id;
+            core::mem::drop(state);
+
+            if let Some(pinned_thread_map) = pinned_thread_map.upgrade() {
+                pinned_thread_map.lock().remove(&unique_id);
+            }
+        }
+    }
+}
+
+static NEXT_UNIQUE_THREAD_ID: AtomicU64 = AtomicU64::new(0);
+
 thread_local! {
-    static PINNED_TO_CORE: Cell<usize> = const { Cell::new(usize::MAX) };
-    static PINNED_TO_CCX: Cell<usize> = const { Cell::new(usize::MAX) };
+    static THREAD_PIN: Arc<Mutex<ThreadState>> = Arc::new(Mutex::new({
+        let unique_id = NEXT_UNIQUE_THREAD_ID.fetch_add(1, Ordering::Relaxed);
+        let empty = || {
+            Arc::new(Mutex::new(ThreadState {
+                unique_id,
+                tid: 0,
+                instances_alive: 0,
+                original_affinity: CpuMask::empty(),
+                pinned_to_core: usize::MAX,
+                pinned_to_ccx: usize::MAX,
+                pinned_thread_map: Weak::new()
+            }))
+        };
+
+        let tid = match linux_raw::sys_gettid() {
+            Ok(tid) => tid,
+            Err(error) => {
+                log::warn!("Failed to get the current thread's ID: {error}");
+                return empty();
+            }
+        };
+
+        let original_affinity = match CpuMask::get_affinity(0) {
+            Ok(affinity) => affinity,
+            Err(error) => {
+                log::warn!("Failed to get the current thread's affinity: {error}");
+                return empty();
+            }
+        };
+
+        ThreadState {
+            unique_id,
+            tid,
+            instances_alive: 0,
+            original_affinity,
+            pinned_to_core: usize::MAX,
+            pinned_to_ccx: usize::MAX,
+            pinned_thread_map: Weak::new(),
+        }
+    }));
 }
 
 #[repr(transparent)]
-#[derive(Copy, Clone, Default)]
-struct CpuMask([usize; 16]);
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) struct CpuMask([usize; 16]);
 
 impl CpuMask {
+    #[inline]
+    const fn empty() -> Self {
+        CpuMask([0; 16])
+    }
+
     #[inline]
     fn set_bit(&mut self, bit: usize) {
         let n = bit / (core::mem::size_of::<usize>() * 8);
@@ -64,10 +149,15 @@ impl CpuMask {
         linux_raw::sys_sched_setaffinity(pid, &self.0)
     }
 
-    fn get_affinity(pid: linux_raw::pid_t) -> Result<Self, linux_raw::Error> {
-        let mut output = CpuMask::default();
+    pub(crate) fn get_affinity(pid: linux_raw::pid_t) -> Result<Self, linux_raw::Error> {
+        let mut output = CpuMask::empty();
         linux_raw::sys_sched_getaffinity(pid, &mut output.0)?;
         Ok(output)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn count(&self) -> usize {
+        self.0.iter().map(|mask| cast(mask.count_ones()).to_usize()).sum()
     }
 }
 
@@ -76,7 +166,7 @@ fn gettid() -> linux_raw::pid_t {
 }
 
 fn pin_to_cpu(pid: i32, cpu: usize) -> Result<(), linux_raw::Error> {
-    let mut mask = CpuMask::default();
+    let mut mask = CpuMask::empty();
     mask.set_bit(cpu);
     mask.set_affinity(pid)
 }
@@ -205,7 +295,7 @@ impl MutableState {
 
     #[inline]
     fn ccx_mask(&self, ccx: usize) -> CpuMask {
-        let mut mask = CpuMask::default();
+        let mut mask = CpuMask::empty();
         for &core in &self.per_ccx[ccx].cores {
             if self.per_core[core].enabled {
                 mask.set_bit(core);
@@ -223,6 +313,7 @@ pub struct GlobalState {
     core_count: usize,
     max_cached_workers: usize,
     core_pinning: CorePinning,
+    pinned_thread_map: Arc<PinnedThreadMap>,
 }
 
 const UFFD_REQUIRED_FEATURES: u64 = (linux_raw::UFFD_FEATURE_MISSING_SHMEM
@@ -424,6 +515,7 @@ impl GlobalState {
             mutable: Mutex::new(MutableState { per_ccx, per_core }),
             max_cached_workers: config.worker_count,
             core_pinning: config.core_pinning,
+            pinned_thread_map: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 }
@@ -1342,6 +1434,7 @@ pub struct Sandbox {
     is_borked: bool,
     host_core: usize,
     worker_core: usize,
+    thread_pin: Option<ThreadPin>,
 }
 
 impl super::SandboxAddressSpace for () {
@@ -1536,12 +1629,17 @@ impl super::Sandbox for Sandbox {
 
     fn spawn(global: &Self::GlobalState, config: &SandboxConfig, outer_instance: Option<&Self>) -> Result<Box<Self>, Error> {
         #[inline]
-        fn pin_to_ccx(host_ccx: usize, mask: CpuMask) -> bool {
+        fn pin_to_ccx(thread_pin: &ThreadPin, host_ccx: usize, mask: CpuMask) -> bool {
             if let Err(error) = mask.set_affinity(0) {
                 log::warn!("Failed to pin thread #{} to CCX {host_ccx}: {error}", gettid());
                 false
             } else {
-                PINNED_TO_CCX.with(|cell| cell.set(host_ccx));
+                thread_pin
+                    .0
+                    .upgrade()
+                    .expect("internal error: current thread weak pointer is stale")
+                    .lock()
+                    .pinned_to_ccx = host_ccx;
                 log::trace!("Pinned thread #{} to CCX {host_ccx}", gettid());
                 true
             }
@@ -1563,7 +1661,36 @@ impl super::Sandbox for Sandbox {
             (!state.is_unused(), state.worker_count, state.host_count)
         }
 
-        let mut running_on_core = PINNED_TO_CORE.with(|cell| cell.get());
+        let (thread_pin, pinned_to_core, pinned_to_ccx) = if global.core_pinning != CorePinning::Disabled {
+            THREAD_PIN.with(|thread_pin| {
+                let mut inner = thread_pin.lock();
+                if !core::ptr::eq(inner.pinned_thread_map.as_ptr(), Arc::as_ptr(&global.pinned_thread_map)) {
+                    if inner.pinned_thread_map.strong_count() == 0 {
+                        log::trace!(
+                            "Assigning thread {} to engine {:#x}",
+                            inner.tid,
+                            Arc::as_ptr(&global.pinned_thread_map) as usize
+                        );
+                        inner.pinned_thread_map = Arc::downgrade(&global.pinned_thread_map);
+                        global.pinned_thread_map.lock().insert(inner.unique_id, Arc::downgrade(thread_pin));
+                    } else {
+                        log::warn!("Detected multiple engines on the same thread; disabling thread pinning for this instance!");
+                        return (None, usize::MAX, usize::MAX);
+                    }
+                }
+
+                inner.instances_alive += 1;
+                (
+                    Some(ThreadPin(Arc::downgrade(thread_pin))),
+                    inner.pinned_to_core,
+                    inner.pinned_to_ccx,
+                )
+            })
+        } else {
+            (None, usize::MAX, usize::MAX)
+        };
+
+        let mut running_on_core = pinned_to_core;
         if running_on_core == usize::MAX {
             running_on_core = getcpu().unwrap_or(0);
             if running_on_core >= global.core_count {
@@ -1593,52 +1720,45 @@ impl super::Sandbox for Sandbox {
                 // Pick the host core for an inner VM.
                 let outer_host_core = outer_instance.host_core;
                 let outer_host_ccx = mutable.per_core[outer_host_core].ccx_id;
-                match global.core_pinning {
-                    CorePinning::PinToCore => {
-                        if outer_host_core != host_core {
-                            log::warn!("Trying to launch an inner VM on a different core than the outer VM! (inner core = {host_core}, outer core = {outer_host_core})");
-                            let previously_pinned_core = PINNED_TO_CORE.with(|cell| cell.get());
-                            if previously_pinned_core != usize::MAX {
-                                log::warn!(
-                                    "Thread #{} was already pinned to a different core {}",
-                                    gettid(),
-                                    previously_pinned_core
-                                );
-                            } else {
-                                host_core = outer_host_core;
+                if let Some(ref thread_pin) = thread_pin {
+                    match global.core_pinning {
+                        CorePinning::PinToCore => {
+                            if outer_host_core != host_core {
+                                log::warn!("Trying to launch an inner VM on a different core than the outer VM! (inner core = {host_core}, outer core = {outer_host_core})");
+                                if pinned_to_core != usize::MAX {
+                                    log::warn!("Thread #{} was already pinned to a different core {}", gettid(), pinned_to_core);
+                                } else {
+                                    host_core = outer_host_core;
+                                }
                             }
                         }
-                    }
-                    CorePinning::PinToCcx => {
-                        let host_ccx = mutable.per_core[host_core].ccx_id;
-                        if outer_host_ccx != host_ccx {
-                            log::warn!("Trying to launch an inner VM on a different CCX than the outer VM! (inner CCX = {host_ccx}, outer CCX = {outer_host_ccx})");
-
-                            let previously_pinned_ccx = PINNED_TO_CCX.with(|cell| cell.get());
-                            if previously_pinned_ccx != usize::MAX {
-                                log::warn!(
-                                    "Thread #{} was already pinned to a different CCX {}",
-                                    gettid(),
-                                    previously_pinned_ccx
-                                );
-                            } else {
-                                let mask = mutable.ccx_mask(outer_host_ccx);
-                                if pin_to_ccx(outer_host_ccx, mask) {
-                                    if let Some(new_host_core) = getcpu() {
-                                        host_core = new_host_core;
+                        CorePinning::PinToCcx => {
+                            let host_ccx = mutable.per_core[host_core].ccx_id;
+                            if outer_host_ccx != host_ccx {
+                                log::warn!("Trying to launch an inner VM on a different CCX than the outer VM! (inner CCX = {host_ccx}, outer CCX = {outer_host_ccx})");
+                                if pinned_to_core != usize::MAX {
+                                    log::warn!("Thread #{} was already pinned to a different CCX {}", gettid(), pinned_to_core);
+                                } else {
+                                    let mask = mutable.ccx_mask(outer_host_ccx);
+                                    if pin_to_ccx(thread_pin, outer_host_ccx, mask) {
+                                        if let Some(new_host_core) = getcpu() {
+                                            host_core = new_host_core;
+                                        }
                                     }
                                 }
                             }
                         }
+                        CorePinning::Disabled => {}
                     }
-                    CorePinning::Disabled => {}
                 }
             } else {
                 // Pick the host core for an outer VM.
                 let mut host_ccx = mutable.per_core[host_core].ccx_id;
                 if mutable.per_ccx[host_ccx].is_unused() {
                     log::trace!("CCX {host_ccx} is already empty");
-                } else if !matches!(global.core_pinning, CorePinning::Disabled) {
+                } else if let Some(ref thread_pin) = thread_pin {
+                    debug_assert_ne!(global.core_pinning, CorePinning::Disabled);
+
                     log::trace!("CCX {host_ccx} is not empty; searching for an alternative...");
                     // There's already something running on this CCX; try to find another CCX that's idle.
                     if let Some((new_host_ccx, _)) = mutable.per_ccx.iter().enumerate().find(|(_, ccx_state)| ccx_state.is_unused()) {
@@ -1649,7 +1769,7 @@ impl super::Sandbox for Sandbox {
                         if matches!(global.core_pinning, CorePinning::PinToCcx) {
                             // We can't pin ourselves to a specific core, so pin to a CCX and query on which core we're running.
                             let mask = mutable.ccx_mask(host_ccx);
-                            if pin_to_ccx(host_ccx, mask) {
+                            if pin_to_ccx(thread_pin, host_ccx, mask) {
                                 if let Some(new_host_core) = getcpu() {
                                     host_core = new_host_core;
                                 }
@@ -1678,7 +1798,7 @@ impl super::Sandbox for Sandbox {
                         if matches!(global.core_pinning, CorePinning::PinToCcx) {
                             // We can't pin ourselves to a specific core, so pin to a CCX and query on which core we're running.
                             let mask = mutable.ccx_mask(host_ccx);
-                            if pin_to_ccx(host_ccx, mask) {
+                            if pin_to_ccx(thread_pin, host_ccx, mask) {
                                 if let Some(new_host_core) = getcpu() {
                                     host_core = new_host_core;
                                 }
@@ -1795,26 +1915,34 @@ impl super::Sandbox for Sandbox {
             Ok(mut sandbox) => {
                 debug_assert_eq!(sandbox.worker_core, worker_core);
                 sandbox.host_core = host_core;
-                match global.core_pinning {
-                    CorePinning::PinToCore => {
-                        if PINNED_TO_CORE.with(|cell| cell.get()) != host_core {
-                            if let Err(error) = pin_to_cpu(0, host_core) {
-                                log::warn!("Failed to pin thread #{} to core {host_core}: {error}", gettid());
-                            } else {
-                                PINNED_TO_CORE.with(|cell| cell.set(host_core));
-                                log::trace!("Pinned thread #{} to core {host_core}", gettid());
+                if let Some(ref thread_pin) = thread_pin {
+                    match global.core_pinning {
+                        CorePinning::PinToCore => {
+                            if pinned_to_core != host_core {
+                                if let Err(error) = pin_to_cpu(0, host_core) {
+                                    log::warn!("Failed to pin thread #{} to core {host_core}: {error}", gettid());
+                                } else {
+                                    thread_pin
+                                        .0
+                                        .upgrade()
+                                        .expect("internal error: current thread weak pointer is stale")
+                                        .lock()
+                                        .pinned_to_core = host_core;
+                                    log::trace!("Pinned thread #{} to core {host_core}", gettid());
+                                }
                             }
                         }
-                    }
-                    CorePinning::PinToCcx => {
-                        if PINNED_TO_CCX.with(|cell| cell.get()) != host_ccx {
-                            let mask = global.mutable.lock().ccx_mask(host_ccx);
-                            pin_to_ccx(host_ccx, mask);
+                        CorePinning::PinToCcx => {
+                            if pinned_to_ccx != host_ccx {
+                                let mask = global.mutable.lock().ccx_mask(host_ccx);
+                                pin_to_ccx(thread_pin, host_ccx, mask);
+                            }
                         }
+                        CorePinning::Disabled => {}
                     }
-                    CorePinning::Disabled => {}
                 }
 
+                sandbox.thread_pin = thread_pin;
                 Ok(sandbox)
             }
             Err(error) => {
@@ -1957,6 +2085,8 @@ impl super::Sandbox for Sandbox {
     }
 
     fn recycle(mut sandbox: Box<Self>, global: &Self::GlobalState) -> Result<(), Self::Error> {
+        sandbox.thread_pin.take();
+
         let should_cache = {
             let mut mutable = global.mutable.lock();
             mutable.release(sandbox.host_core, sandbox.worker_core);
@@ -3148,6 +3278,7 @@ impl Sandbox {
             is_borked: false,
             host_core: usize::MAX,
             worker_core,
+            thread_pin: None,
         }))
     }
 }

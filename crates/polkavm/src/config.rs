@@ -103,9 +103,9 @@ impl SandboxKind {
 /// Core pinning behavior of the VM host (Linux sandbox only).
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum CorePinning {
-    /// Automatically and permanently pin the host thread to a single CPU core.
+    /// Automatically pin the host thread to a single CPU core.
     PinToCore,
-    /// Automatically and permanently pin the host thread to a single CPU CCX.
+    /// Automatically pin the host thread to a single CPU CCX.
     PinToCcx,
     /// Disable automatic pinning.
     Disabled,
