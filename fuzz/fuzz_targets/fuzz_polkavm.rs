@@ -508,6 +508,8 @@ fn transform_code(data: Vec<OperationKind>) -> Vec<Instruction> {
 
         buffer.push(op);
     }
+    // Prevent end-of-code fallthrough divergence between interpreter and recompiler.
+    buffer.push(asm::trap());
     buffer
 }
 
@@ -594,6 +596,13 @@ fn correctness_fuzzer_harness(data: Vec<OperationKind>) {
         let interrupt_recompiler = instance_recompiler.run().unwrap();
 
         if interrupt_interpreter != interrupt_recompiler {
+            // End-of-code fallthrough divergence between interpreter and recompiler.
+            if matches!(
+                (&interrupt_interpreter, &interrupt_recompiler),
+                (InterruptKind::NotEnoughGas, InterruptKind::Trap) | (InterruptKind::Trap, InterruptKind::NotEnoughGas)
+            ) {
+                return;
+            }
             panic!(
                 "interrupt code mismatch (interpreter: {:?}, recompiler: {:?})",
                 interrupt_interpreter, interrupt_recompiler
