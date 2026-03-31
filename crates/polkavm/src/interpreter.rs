@@ -1384,6 +1384,7 @@ polkavm_common::static_assert!(core::mem::size_of::<CompiledOffset>() == cast(IN
 struct Handlers {
     charge_gas: Handler,
     step: Handler,
+    trace_pc: Handler,
 }
 
 const MEMORY_STANDARD: usize = 0;
@@ -1478,10 +1479,12 @@ impl InterpretedInstance {
             handlers_debug: Handlers {
                 charge_gas: cast_handler!(raw_handlers::charge_gas::<true>),
                 step: cast_handler!(raw_handlers::step::<true>),
+                trace_pc: cast_handler!(raw_handlers::trace_pc::<true>),
             },
             handlers_non_debug: Handlers {
                 charge_gas: cast_handler!(raw_handlers::charge_gas::<false>),
                 step: cast_handler!(raw_handlers::step::<false>),
+                trace_pc: cast_handler!(raw_handlers::trace_pc::<false>),
             },
         };
 
@@ -1963,6 +1966,7 @@ impl InterpretedInstance {
 
             if DEBUG {
                 log::debug!("  [{}]: {}: {}", self.compiled_handlers.len(), instruction.offset, instruction.kind);
+                emit_consistent_address!(self, trace_pc(instruction.offset));
             }
 
             #[cfg(debug_assertions)]
@@ -3048,6 +3052,28 @@ define_interpreter! {
         visitor.next_program_counter_changed = false;
         visitor.next_compiled_offset = compiled_offset + 1;
         visitor.trigger_interrupt(InterruptKind::Step)
+    }
+
+    fn trace_pc<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter) -> Target {
+        if DEBUG {
+            let mut name = None::<alloc::string::String>;
+            let mut loc = None::<alloc::string::String>;
+            for frame in visitor.module.blob().get_frame_info_for(program_counter, Some(1000)) {
+                name = name.or_else(|| frame.full_name().ok().map(|n| n.to_string()).filter(|s| !s.is_empty()));
+                loc = loc.or_else(|| frame.location().ok().flatten().map(|l| l.to_string()));
+                if name.is_some() && loc.is_some() {
+                    break;
+                }
+            }
+            let pc = program_counter.0;
+            match (name.as_deref(), loc.as_deref()) {
+                (Some(n), Some(l)) => log::trace!("[{}]: @{:#x} {} @ {}", compiled_offset, pc, n, l),
+                (Some(n), None) => log::trace!("[{}]: @{:#x} {}", compiled_offset, pc, n),
+                (None, Some(l)) => log::trace!("[{}]: @{:#x} @ {}", compiled_offset, pc, l),
+                (None, None) => log::trace!("[{}]: @{:#x}", compiled_offset, pc),
+            }
+        }
+        visitor.go_to_next_instruction(compiled_offset)
     }
 
     fn reset_cache<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter) -> Target {
