@@ -3059,8 +3059,8 @@ define_interpreter! {
             let mut name = None::<alloc::string::String>;
             let mut loc = None::<alloc::string::String>;
             for frame in visitor.module.blob().get_frame_info_for(program_counter, Some(1000)) {
-                name = name.or_else(|| frame.full_name().ok().map(|n| n.to_string()).filter(|s| !s.is_empty()));
-                loc = loc.or_else(|| frame.location().ok().flatten().map(|l| l.to_string()));
+                name = name.or_else(|| frame.full_name().ok().map(|n| alloc::format!("{}", n)).filter(|s| !s.is_empty()));
+                loc = loc.or_else(|| frame.location().ok().flatten().map(|l| alloc::format!("{}", l)));
                 if name.is_some() && loc.is_some() {
                     break;
                 }
