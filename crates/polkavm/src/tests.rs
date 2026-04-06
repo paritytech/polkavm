@@ -3327,6 +3327,92 @@ fn interpreter_guest_memory_limit() {
     }
 }
 
+fn write_read_memory_from_host(config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+    builder.set_rw_data_size(page_size * 32);
+    builder.set_stack_size(page_size * 32);
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_aux_data_size(page_size * 32);
+
+    let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let memory_map = module.memory_map().clone();
+    let mut instance = module.instantiate().unwrap();
+
+    instance.write_memory(memory_map.rw_data_address() + page_size * 4, &[1]).unwrap();
+    instance.write_memory(memory_map.rw_data_address() + page_size, &[2]).unwrap();
+    instance.write_memory(memory_map.rw_data_address() + page_size * 16, &[3]).unwrap();
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_address() + page_size * 4, 1).unwrap(),
+        vec![1]
+    );
+    assert_eq!(instance.read_memory(memory_map.rw_data_address() + page_size, 1).unwrap(), vec![2]);
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_address() + page_size * 16, 1).unwrap(),
+        vec![3]
+    );
+
+    instance.write_memory(memory_map.aux_data_address() + page_size * 4, &[4]).unwrap();
+    instance.write_memory(memory_map.aux_data_address() + page_size, &[5]).unwrap();
+    instance.write_memory(memory_map.aux_data_address() + page_size * 16, &[6]).unwrap();
+    assert_eq!(
+        instance.read_memory(memory_map.aux_data_address() + page_size * 4, 1).unwrap(),
+        vec![4]
+    );
+    assert_eq!(instance.read_memory(memory_map.aux_data_address() + page_size, 1).unwrap(), vec![5]);
+    assert_eq!(
+        instance.read_memory(memory_map.aux_data_address() + page_size * 16, 1).unwrap(),
+        vec![6]
+    );
+
+    instance.write_memory(memory_map.stack_address_low() + page_size * 4, &[7]).unwrap();
+    instance.write_memory(memory_map.stack_address_low() + page_size, &[8]).unwrap();
+    instance
+        .write_memory(memory_map.stack_address_low() + page_size * 16, &[9])
+        .unwrap();
+    assert_eq!(
+        instance.read_memory(memory_map.stack_address_low() + page_size * 4, 1).unwrap(),
+        vec![7]
+    );
+    assert_eq!(
+        instance.read_memory(memory_map.stack_address_low() + page_size, 1).unwrap(),
+        vec![8]
+    );
+    assert_eq!(
+        instance.read_memory(memory_map.stack_address_low() + page_size * 16, 1).unwrap(),
+        vec![9]
+    );
+
+    let mut instance = module.instantiate().unwrap();
+    instance
+        .write_memory(memory_map.stack_address_high() - page_size * 4, &[7])
+        .unwrap();
+    instance.write_memory(memory_map.stack_address_high() - page_size, &[8]).unwrap();
+    instance
+        .write_memory(memory_map.stack_address_high() - page_size * 16, &[9])
+        .unwrap();
+    assert_eq!(
+        instance.read_memory(memory_map.stack_address_high() - page_size * 4, 1).unwrap(),
+        vec![7]
+    );
+    assert_eq!(
+        instance.read_memory(memory_map.stack_address_high() - page_size, 1).unwrap(),
+        vec![8]
+    );
+    assert_eq!(
+        instance.read_memory(memory_map.stack_address_high() - page_size * 16, 1).unwrap(),
+        vec![9]
+    );
+}
+
 fn sbrk_knob_works(config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
@@ -5120,6 +5206,7 @@ run_tests! {
     aux_data_accessible_area
     access_memory_from_host
     access_memory_from_within
+    write_read_memory_from_host
     sbrk_knob_works
 
     basic_gas_metering_sync

@@ -308,6 +308,11 @@ impl StandardMemory {
                 offset..offset + contents.len()
             };
 
+            if let Some(target) = self.aux.get_mut(range.clone()) {
+                contents.copy_into(target);
+                return Ok(());
+            }
+
             if range.end <= self.accessible_aux_size {
                 if !self.aux_resize(range.end) {
                     return Err(MemoryAccessError::MemoryLimitReached);
@@ -336,6 +341,11 @@ impl StandardMemory {
                 let offset = cast(address - self.rw_data_address).to_usize();
                 offset..offset + contents.len()
             };
+
+            if let Some(target) = self.rw_data.get_mut(range.clone()) {
+                contents.copy_into(target);
+                return Ok(());
+            }
 
             if range.end <= self.rw_data_size {
                 if self.rw_data_resize(range.end) {
