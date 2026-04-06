@@ -1775,7 +1775,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "polkavm"
-version = "0.33.0"
+version = "0.33.1"
 dependencies = [
  "libc",
  "log",
