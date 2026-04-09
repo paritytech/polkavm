@@ -3056,22 +3056,41 @@ define_interpreter! {
 
     fn trace_pc<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter) -> Target {
         if DEBUG {
-            let mut name = None::<alloc::string::String>;
-            let mut loc = None::<alloc::string::String>;
-            for frame in visitor.module.blob().get_frame_info_for(program_counter, Some(1000)) {
-                name = name.or_else(|| frame.full_name().ok().map(|n| alloc::format!("{}", n)).filter(|s| !s.is_empty()));
-                loc = loc.or_else(|| frame.location().ok().flatten().map(|l| alloc::format!("{}", l)));
-                if name.is_some() && loc.is_some() {
-                    break;
+            struct TracePc<'a> {
+                module: &'a Module,
+                compiled_offset: Target,
+                program_counter: ProgramCounter,
+            }
+
+            impl<'a> core::fmt::Display for TracePc<'a> {
+                fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+                    write!(f, "[{:#x}]: @{:#x}", self.compiled_offset, self.program_counter.0)?;
+                    let mut displayed_name = false;
+                    let mut displayed_loc = false;
+                    for frame in self.module.blob().get_frame_info_for(self.program_counter, Some(1000)) {
+                        if !displayed_name {
+                            if let Ok(Some(_)) = frame.function_name_without_namespace() {
+                                if let Ok(name) = frame.full_name() {
+                                    write!(f, " {}", name)?;
+                                    displayed_name = true;
+                                }
+                            }
+                        }
+                        if !displayed_loc {
+                            if let Ok(Some(loc)) = frame.location() {
+                                write!(f, " @ {}", loc)?;
+                                displayed_loc = true;
+                            }
+                        }
+                        if displayed_name && displayed_loc {
+                            break;
+                        }
+                    }
+                    Ok(())
                 }
             }
-            let pc = program_counter.0;
-            match (name.as_deref(), loc.as_deref()) {
-                (Some(n), Some(l)) => log::trace!("[{}]: @{:#x} {} @ {}", compiled_offset, pc, n, l),
-                (Some(n), None) => log::trace!("[{}]: @{:#x} {}", compiled_offset, pc, n),
-                (None, Some(l)) => log::trace!("[{}]: @{:#x} @ {}", compiled_offset, pc, l),
-                (None, None) => log::trace!("[{}]: @{:#x}", compiled_offset, pc),
-            }
+
+            log::trace!("{}", TracePc { module: &visitor.module, compiled_offset, program_counter });
         }
         visitor.go_to_next_instruction(compiled_offset)
     }
