@@ -299,24 +299,13 @@ fn transform_code(data: Vec<OperationKind>) -> Vec<Instruction> {
     for op in data {
         let op = match op {
             OperationKind::Argless { kind } => {
-                match kind {
-                    ArglessKind::Memset => {
-                        // Truncate A0 and A2 to 32-bit before memset so the
-                        // fuzzer exercises memset with 32-bit-range addresses and counts.
-                        buffer.push(asm::add_imm_32(Reg::A0, Reg::A0, 0));
-                        buffer.push(asm::add_imm_32(Reg::A2, Reg::A2, 0));
-                        asm::memset()
-                    }
-                    _ => {
-                        codegen! {
-                            args = (),
-                            kind = kind,
-                            {
-                                ArglessKind::Trap => trap,
-                                ArglessKind::Fallthrough => fallthrough,
-                                ArglessKind::Memset => memset,
-                            }
-                        }
+                codegen! {
+                    args = (),
+                    kind = kind,
+                    {
+                        ArglessKind::Trap => trap,
+                        ArglessKind::Fallthrough => fallthrough,
+                        ArglessKind::Memset => memset,
                     }
                 }
             }
