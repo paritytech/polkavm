@@ -3108,8 +3108,9 @@ define_interpreter! {
         let mut result = next_instruction;
 
         let value = visitor.get32::<DEBUG>(Reg::A1);
-        let mut dst = visitor.get32::<DEBUG>(Reg::A0);
-        let mut count = visitor.get64::<DEBUG>(Reg::A2);
+        let a0 = visitor.get64::<DEBUG>(Reg::A0);
+        let mut dst = cast(a0).truncate_to_u32();
+        let mut count = u64::from(visitor.get32::<DEBUG>(Reg::A2));
         while count > 0 {
             if gas_metering_enabled && visitor.gas == 0 {
                 result = not_enough_gas_impl::<DEBUG>(visitor, compiled_offset, program_counter, 0);
@@ -3129,7 +3130,7 @@ define_interpreter! {
             count -= 1;
         }
 
-        visitor.set64::<DEBUG>(Reg::A0, u64::from(dst));
+        visitor.set64::<DEBUG>(Reg::A0, a0.wrapping_add(u64::from(dst.wrapping_sub(cast(a0).truncate_to_u32()))));
         visitor.set64::<DEBUG>(Reg::A2, count);
 
         result
