@@ -274,6 +274,14 @@ enum OperationKind {
         reg1: OperationReg,
         reg2: OperationReg,
     },
+    RegImm64Args {
+        reg: OperationReg,
+        imm: u64,
+    },
+    RegImmOffsetArgs {
+        reg: OperationReg,
+        imm: u32,
+    },
 }
 
 fn transform_code(data: Vec<OperationKind>) -> Vec<Instruction> {
@@ -503,6 +511,12 @@ fn transform_code(data: Vec<OperationKind>) -> Vec<Instruction> {
                         RegRegKind::ReverseByte => reverse_byte,
                     }
                 }
+            }
+            OperationKind::RegImm64Args { reg, imm } => {
+                asm::load_imm64(reg.into(), imm)
+            }
+            OperationKind::RegImmOffsetArgs { reg, imm } => {
+                asm::load_imm_and_jump(reg.into(), imm, 0)
             }
         };
 
