@@ -512,12 +512,8 @@ fn transform_code(data: Vec<OperationKind>) -> Vec<Instruction> {
                     }
                 }
             }
-            OperationKind::RegImm64Args { reg, imm } => {
-                asm::load_imm64(reg.into(), imm)
-            }
-            OperationKind::RegImmOffsetArgs { reg, imm } => {
-                asm::load_imm_and_jump(reg.into(), imm, 0)
-            }
+            OperationKind::RegImm64Args { reg, imm } => asm::load_imm64(reg.into(), imm),
+            OperationKind::RegImmOffsetArgs { reg, imm } => asm::load_imm_and_jump(reg.into(), imm, 0),
         };
 
         buffer.push(op);
