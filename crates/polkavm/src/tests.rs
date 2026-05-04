@@ -4578,34 +4578,22 @@ fn memset_preserves_a0_and_a2(config: Config) {
     // and both registers must pass through with their upper 32 bits intact.
     let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
     builder.add_export_by_basic_block(0, b"main");
-    builder.set_code(
-        &[
-            // A0 = 0xffffffffffff0000 * 0xffffffffffff0000 = 0x0000000100000000
-            asm::load_imm(Reg::A0, 0xffff0000),
-            asm::mul_64(Reg::A0, Reg::A0, Reg::A0),
-            // A2 = sign_extend(0xff08bdbd) = 0xffffffffff08bdbd
-            asm::load_imm(Reg::A2, 0xff08bdbd),
-            // Swap A2 into A3 so we can set count=0 while keeping the test value.
-            asm::move_reg(Reg::A3, Reg::A2),
-            asm::load_imm(Reg::A2, 0),
-            asm::memset(),
-            asm::ret(),
-        ],
-        &[],
-    );
+    builder.set_code(&[asm::memset(), asm::ret()], &[]);
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let engine = Engine::new(&config).unwrap();
     let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
 
     let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A0, 0x0000000100000000);
+    instance.set_reg(Reg::A1, 0);
+    instance.set_reg(Reg::A2, 0);
+    instance.set_reg(Reg::A3, 0xffffffffff08bdbd);
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(ProgramCounter(0));
     assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
     assert_eq!(instance.reg(Reg::A0), 0x0000000100000000, "memset truncated A0");
-    // A2 was set to 0 (count), so it should be 0 after memset.
     assert_eq!(instance.reg(Reg::A2), 0);
-    // A3 was never touched by memset, just a sanity check.
     assert_eq!(instance.reg(Reg::A3), 0xffffffffff08bdbd);
 }
 
