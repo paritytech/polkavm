@@ -2600,6 +2600,18 @@ fn handler_tail<const DEBUG: bool>(_visitor: &mut InterpretedInstance, next_off:
     next_off
 }
 
+// `become` from the handler itself, so the tail call doesn't depend on
+// `handler_tail`/`dispatch` being inlined (which `-O0` may skip).
+#[cfg(feature = "experimental-musttail")]
+macro_rules! tail_dispatch {
+    ($self:expr, $next_off:expr) => { become handler_tail::<DEBUG>($self, $next_off) };
+}
+
+#[cfg(not(feature = "experimental-musttail"))]
+macro_rules! tail_dispatch {
+    ($self:expr, $next_off:expr) => { handler_tail::<DEBUG>($self, $next_off) };
+}
+
 macro_rules! define_interpreter {
     (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident) => {{
         impl Args {
@@ -3104,7 +3116,7 @@ macro_rules! define_interpreter {
                 pub fn $handler_name<'a, $(M: $M_ty,)? $(const $const: $const_ty),+>($self: &'a mut InterpretedInstance, compiled_offset: Target) -> HandlerResult {
                     let $compiled_offset = compiled_offset;
                     let next_off: Target = define_interpreter!(@define $handler_name $body $self $compiled_offset $($arg)*);
-                    handler_tail::<DEBUG>($self, next_off)
+                    tail_dispatch!($self, next_off)
                 }
             )+
         }
