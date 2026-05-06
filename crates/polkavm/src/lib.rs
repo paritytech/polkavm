@@ -1,4 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+#![feature(explicit_tail_calls)]
+#![allow(incomplete_features)]
 #![forbid(unused_must_use)]
 #![forbid(clippy::missing_safety_doc)]
 #![deny(clippy::undocumented_unsafe_blocks)]
