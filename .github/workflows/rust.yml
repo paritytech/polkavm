@@ -143,3 +143,11 @@ jobs:
       run: rustup run nightly-2024-07-10 cargo install --locked --version 0.12.0 cargo-fuzz
     - name: Fuzz
       run: ./ci/jobs/fuzz.sh
+  nightly-musttail:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install latest nightly
+      run: rustup toolchain install nightly --profile minimal
+    - name: Build and test with experimental-musttail
+      run: ./ci/jobs/build-and-test-nightly-musttail.sh

@@ -25,7 +25,11 @@ use polkavm_common::program::{
 use polkavm_common::utils::{align_to_next_page_usize, slice_assume_init_mut, ArcBytes, GasVisitorT};
 
 type Target = u32;
+
+#[cfg(feature = "experimental-musttail")]
 type HandlerResult = InterruptKind;
+#[cfg(not(feature = "experimental-musttail"))]
+type HandlerResult = Target;
 
 #[derive(Copy, Clone)]
 pub enum RegImm {
@@ -1710,7 +1714,25 @@ impl InterpretedInstance {
             log::trace!("Implicitly resuming at: [{}]", self.next_compiled_offset);
         }
 
-        dispatch::<DEBUG>(self, self.next_compiled_offset)
+        #[cfg(feature = "experimental-musttail")]
+        {
+            dispatch::<DEBUG>(self, self.next_compiled_offset)
+        }
+        #[cfg(not(feature = "experimental-musttail"))]
+        {
+            let mut offset = self.next_compiled_offset;
+            loop {
+                if DEBUG {
+                    self.cycle_counter += 1;
+                }
+
+                if let Some(handler) = self.compiled_handlers.get(cast(offset).to_usize()) {
+                    offset = handler(self, offset);
+                } else {
+                    return self.interrupt.clone();
+                }
+            }
+        }
     }
 
     pub fn reset_memory(&mut self) {
@@ -2564,16 +2586,18 @@ struct Args {
 
 type Handler = for<'a> fn(visitor: &'a mut InterpretedInstance, compiled_offset: Target) -> HandlerResult;
 
+// `become` is parse-time feature-gated, so the musttail dispatcher must live in a separately-loaded file.
+#[cfg(feature = "experimental-musttail")]
+#[path = "interpreter_musttail.rs"]
+mod musttail;
+
+#[cfg(feature = "experimental-musttail")]
+use musttail::{dispatch, handler_tail};
+
+#[cfg(not(feature = "experimental-musttail"))]
 #[inline(always)]
-fn dispatch<const DEBUG: bool>(visitor: &mut InterpretedInstance, off: Target) -> InterruptKind {
-    if DEBUG {
-        visitor.cycle_counter += 1;
-    }
-    if let Some(&handler) = visitor.compiled_handlers.get(cast(off).to_usize()) {
-        become handler(visitor, off);
-    } else {
-        visitor.interrupt.clone()
-    }
+fn handler_tail<const DEBUG: bool>(_visitor: &mut InterpretedInstance, next_off: Target) -> HandlerResult {
+    next_off
 }
 
 macro_rules! define_interpreter {
@@ -3080,7 +3104,7 @@ macro_rules! define_interpreter {
                 pub fn $handler_name<'a, $(M: $M_ty,)? $(const $const: $const_ty),+>($self: &'a mut InterpretedInstance, compiled_offset: Target) -> HandlerResult {
                     let $compiled_offset = compiled_offset;
                     let next_off: Target = define_interpreter!(@define $handler_name $body $self $compiled_offset $($arg)*);
-                    become dispatch::<DEBUG>($self, next_off);
+                    handler_tail::<DEBUG>($self, next_off)
                 }
             )+
         }
