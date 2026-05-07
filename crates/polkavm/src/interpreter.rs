@@ -2604,12 +2604,16 @@ fn handler_tail<const DEBUG: bool>(_visitor: &mut InterpretedInstance, next_off:
 // `handler_tail`/`dispatch` being inlined (which `-O0` may skip).
 #[cfg(feature = "experimental-musttail")]
 macro_rules! tail_dispatch {
-    ($self:expr, $next_off:expr) => { become handler_tail::<DEBUG>($self, $next_off) };
+    ($self:expr, $next_off:expr) => {
+        become handler_tail::<DEBUG>($self, $next_off)
+    };
 }
 
 #[cfg(not(feature = "experimental-musttail"))]
 macro_rules! tail_dispatch {
-    ($self:expr, $next_off:expr) => { handler_tail::<DEBUG>($self, $next_off) };
+    ($self:expr, $next_off:expr) => {
+        handler_tail::<DEBUG>($self, $next_off)
+    };
 }
 
 macro_rules! define_interpreter {
