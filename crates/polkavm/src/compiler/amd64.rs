@@ -1319,7 +1319,6 @@ where
         ));
 
         let count = conv_reg(Reg::A2.into());
-        self.asm.push(mov(RegSize::R32, count, count));
 
         match self.gas_metering {
             None => {

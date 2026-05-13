@@ -4571,6 +4571,32 @@ fn memset_with_dynamic_paging(mut config: Config) {
     assert_eq!(instance.gas(), 95);
 }
 
+fn memset_preserves_a0_and_a2(config: Config) {
+    let _ = env_logger::try_init();
+
+    // Memset must not truncate A0 or A2. With count=0, memset is a no-op
+    // and both registers must pass through with their upper 32 bits intact.
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::memset(), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A0, 0x0000000100000000);
+    instance.set_reg(Reg::A1, 0);
+    instance.set_reg(Reg::A2, 0);
+    instance.set_reg(Reg::A3, 0xffffffffff08bdbd);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.reg(Reg::A0), 0x0000000100000000, "memset truncated A0");
+    assert_eq!(instance.reg(Reg::A2), 0);
+    assert_eq!(instance.reg(Reg::A3), 0xffffffffff08bdbd);
+}
+
 fn count_leading_zero_bits_32_with_zero_input(config: Config) {
     let _ = env_logger::try_init();
 
@@ -5245,6 +5271,7 @@ run_tests! {
     count_trailing_zero_bits_32_with_zero_input
     count_trailing_zero_bits_64_with_zero_input
     count_trailing_zero_bits_64_with_ffff0000
+    memset_preserves_a0_and_a2
 }
 
 run_test_blob_tests! {
