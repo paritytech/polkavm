@@ -51,5 +51,5 @@ generic-sandbox = []
 # Internal feature for testing. DO NOT USE.
 export-internals-for-testing = []
 
-# Musttail (`become`) interpreter dispatch. Requires nightly.
-experimental-musttail = []
+# Musttail (`become`) direct-threaded interpreter dispatch. Requires nightly.
+interpreter-musttail-dispatch = []

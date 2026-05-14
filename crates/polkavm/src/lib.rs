@@ -1,6 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-#![cfg_attr(feature = "experimental-musttail", feature(explicit_tail_calls))]
-#![cfg_attr(feature = "experimental-musttail", allow(incomplete_features))]
+#![cfg_attr(feature = "interpreter-musttail-dispatch", feature(explicit_tail_calls))]
+#![cfg_attr(feature = "interpreter-musttail-dispatch", allow(incomplete_features))]
 #![forbid(unused_must_use)]
 #![forbid(clippy::missing_safety_doc)]
 #![deny(clippy::undocumented_unsafe_blocks)]

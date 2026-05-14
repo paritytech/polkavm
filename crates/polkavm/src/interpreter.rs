@@ -26,9 +26,9 @@ use polkavm_common::utils::{align_to_next_page_usize, slice_assume_init_mut, Arc
 
 type Target = u32;
 
-#[cfg(feature = "experimental-musttail")]
+#[cfg(feature = "interpreter-musttail-dispatch")]
 type HandlerResult = InterruptKind;
-#[cfg(not(feature = "experimental-musttail"))]
+#[cfg(not(feature = "interpreter-musttail-dispatch"))]
 type HandlerResult = Target;
 
 #[derive(Copy, Clone)]
@@ -1714,11 +1714,11 @@ impl InterpretedInstance {
             log::trace!("Implicitly resuming at: [{}]", self.next_compiled_offset);
         }
 
-        #[cfg(feature = "experimental-musttail")]
+        #[cfg(feature = "interpreter-musttail-dispatch")]
         {
             dispatch::<DEBUG>(self, self.next_compiled_offset)
         }
-        #[cfg(not(feature = "experimental-musttail"))]
+        #[cfg(not(feature = "interpreter-musttail-dispatch"))]
         {
             let mut offset = self.next_compiled_offset;
             loop {
@@ -2586,33 +2586,41 @@ struct Args {
 
 type Handler = for<'a> fn(visitor: &'a mut InterpretedInstance, compiled_offset: Target) -> HandlerResult;
 
-// `become` is parse-time feature-gated, so the musttail dispatcher must live in a separately-loaded file.
-#[cfg(feature = "experimental-musttail")]
-#[path = "interpreter_musttail.rs"]
-mod musttail;
-
-#[cfg(feature = "experimental-musttail")]
-use musttail::{dispatch, handler_tail};
-
-#[cfg(not(feature = "experimental-musttail"))]
-#[inline(always)]
-fn handler_tail<const DEBUG: bool>(_visitor: &mut InterpretedInstance, next_off: Target) -> HandlerResult {
-    next_off
-}
-
-// `become` from the handler itself, so the tail call doesn't depend on
-// `handler_tail`/`dispatch` being inlined (which `-O0` may skip).
-#[cfg(feature = "experimental-musttail")]
-macro_rules! tail_dispatch {
-    ($self:expr, $next_off:expr) => {
-        become handler_tail::<DEBUG>($self, $next_off)
+// `become` is parse-gated; hiding it in a macro keeps the parser happy when the feature is off.
+#[cfg(feature = "interpreter-musttail-dispatch")]
+macro_rules! tail_call {
+    ($e:expr) => {
+        become $e
     };
 }
 
-#[cfg(not(feature = "experimental-musttail"))]
+#[cfg(feature = "interpreter-musttail-dispatch")]
+#[inline(always)]
+fn dispatch<const DEBUG: bool>(visitor: &mut InterpretedInstance, off: Target) -> HandlerResult {
+    if DEBUG {
+        visitor.cycle_counter += 1;
+    }
+    if let Some(&handler) = visitor.compiled_handlers.get(cast(off).to_usize()) {
+        tail_call!(handler(visitor, off))
+    } else {
+        visitor.interrupt.clone()
+    }
+}
+
+// Tail-jump from a handler into the next one. `become` lives at the handler tail so the chain
+// stays musttail even if `dispatch` isn't inlined (e.g. at `-O0`). With the feature off, the
+// handler returns the new offset and the central loop drives the next call.
+#[cfg(feature = "interpreter-musttail-dispatch")]
 macro_rules! tail_dispatch {
     ($self:expr, $next_off:expr) => {
-        handler_tail::<DEBUG>($self, $next_off)
+        tail_call!(dispatch::<DEBUG>($self, $next_off))
+    };
+}
+
+#[cfg(not(feature = "interpreter-musttail-dispatch"))]
+macro_rules! tail_dispatch {
+    ($self:expr, $next_off:expr) => {
+        $next_off
     };
 }
 
