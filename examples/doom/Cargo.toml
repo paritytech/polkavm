@@ -7,7 +7,6 @@ publish = false
 [dependencies]
 env_logger = { workspace = true }
 polkavm = { path = "../../crates/polkavm" }
-sdl2 = { workspace = true }
 
-[features]
-default = ["sdl2/bundled"]
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+sdl2 = { workspace = true, features = ["bundled"] }
