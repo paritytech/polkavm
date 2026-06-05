@@ -57,6 +57,11 @@ const REORDER_BUFFER_SIZE: usize = 32;
 /// The maximum number of cycles refunded at the end of each basic block.
 const GAS_COST_SLACK: i32 = 3;
 
+const REORDER_BUFFER_MASK: u32 = {
+    assert!(REORDER_BUFFER_SIZE.is_power_of_two());
+    cast(REORDER_BUFFER_SIZE - 1).assert_always_fits_in_u32()
+};
+
 #[derive(Copy, Clone, Debug)]
 pub struct InstCost {
     pub latency: i8,
@@ -266,11 +271,11 @@ impl core::fmt::Debug for DebugState {
 impl InstCost {
     #[inline(always)]
     const fn resources(&self) -> u32 {
-        assert!(self.alu_slots <= MAX_ALU_SLOTS);
-        assert!(self.mul_slots <= MAX_MUL_SLOTS);
-        assert!(self.div_slots <= MAX_DIV_SLOTS);
-        assert!(self.load_slots <= MAX_LOAD_SLOTS);
-        assert!(self.store_slots <= MAX_STORE_SLOTS);
+        debug_assert!(self.alu_slots <= MAX_ALU_SLOTS);
+        debug_assert!(self.mul_slots <= MAX_MUL_SLOTS);
+        debug_assert!(self.div_slots <= MAX_DIV_SLOTS);
+        debug_assert!(self.load_slots <= MAX_LOAD_SLOTS);
+        debug_assert!(self.store_slots <= MAX_STORE_SLOTS);
 
         (self.alu_slots << ALU_OFFSET)
             | (self.load_slots << LOAD_OFFSET)
@@ -328,6 +333,45 @@ impl Tracer for () {
     const SHOULD_CALL_ON_EVENT: bool = false;
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[repr(transparent)]
+struct RobIndex(u32);
+
+impl RobIndex {
+    #[inline]
+    fn new(value: u32) -> Self {
+        Self(value & REORDER_BUFFER_MASK)
+    }
+
+    #[inline]
+    fn to_u32(self) -> u32 {
+        if self.0 >= cast(REORDER_BUFFER_SIZE).assert_always_fits_in_u32() {
+            const {
+                assert!(cast(REORDER_BUFFER_MASK + 1).to_usize() == REORDER_BUFFER_SIZE);
+            }
+
+            unsafe {
+                core::hint::unreachable_unchecked();
+            }
+        }
+
+        self.0
+    }
+
+    #[inline]
+    fn to_usize(self) -> usize {
+        cast(self.to_u32()).to_usize()
+    }
+
+    #[inline]
+    fn to_u8(self) -> u8 {
+        const {
+            assert!(REORDER_BUFFER_SIZE <= 255);
+        }
+        cast(self.to_u32()).truncate_to_u8()
+    }
+}
+
 pub struct Simulator<'a, B, T: Tracer = ()> {
     // The bytecode of the whole program.
     code: &'a [u8],
@@ -344,9 +388,9 @@ pub struct Simulator<'a, B, T: Tracer = ()> {
     /// The number of instructions currently in the reorder buffer.
     instructions_in_flight: u32,
     /// The offset of the first instruction in the reorder buffer (which is a circular buffer).
-    reorder_buffer_head: u32,
+    reorder_buffer_head: RobIndex,
     /// The next slot in the reorder buffer (which is a circular buffer).
-    reorder_buffer_tail: u32,
+    reorder_buffer_tail: RobIndex,
     /// Which exact instruction does the reorder buffer contain at a given possition?
     /// Used only when emitting events.
     rob_instruction: [u32; REORDER_BUFFER_SIZE],
@@ -359,6 +403,7 @@ pub struct Simulator<'a, B, T: Tracer = ()> {
     /// A bitmask which contains each instruction's dependencies.
     rob_dependencies: i32x32,
     /// A bitmask which contains each instruction's reverse dependencies.
+    /// Used only when emitting events.
     rob_depended_by: i32x32,
     /// A bitmask of all of the registers which a given instruction in the reorder buffer has written into.
     registers_written_by_rob_entry: i16x32,
@@ -374,6 +419,64 @@ pub struct Simulator<'a, B, T: Tracer = ()> {
 
     tracer: T,
     _phantom: core::marker::PhantomData<B>,
+}
+
+static SLOT_MASKS: [i8x32; 32] = {
+    let mut table = [i8x32::from_fallback(picosimd::fallback::i8x32::zero()); 32];
+    let mut i = 0;
+    while i < table.len() {
+        table[i] = i8x32::from_fallback(picosimd::fallback::i8x32::zero().set_dynamic(i as u8, 0xff_u8 as i8));
+        i += 1;
+    }
+    table
+};
+
+static REGISTER_MASKS: [i16x32; 16] = {
+    let mut table = [i16x32::from_fallback(picosimd::fallback::i16x32::zero()); 16];
+    let mut i = 0;
+    while i < table.len() {
+        table[i] = i16x32::from_fallback(picosimd::fallback::i16x32::splat(
+            cast(cast(1_u32 << i).truncate_to_u16()).to_signed(),
+        ));
+        i += 1;
+    }
+    table
+};
+
+static RETIRE_MASK_TABLE: [[i8x32; 33]; 32] = {
+    let mut table = [[i8x32::from_fallback(picosimd::fallback::i8x32::zero()); 33]; 32];
+    let mut reorder_buffer_head = 0;
+    while reorder_buffer_head < table.len() {
+        let subtable = &mut table[reorder_buffer_head];
+        let mut leading_count_to_retire = 0;
+        while leading_count_to_retire < subtable.len() {
+            subtable[leading_count_to_retire] = i8x32::from_fallback(picosimd::fallback::i8x32::from_i1x32_sext(
+                (cast(1_u64 << leading_count_to_retire).truncate_to_u32().wrapping_sub(1))
+                    .rotate_left(cast(reorder_buffer_head).assert_always_fits_in_u32()) as i32,
+            ));
+            leading_count_to_retire += 1;
+        }
+        reorder_buffer_head += 1;
+    }
+    table
+};
+
+trait DispatchReg: Copy {
+    fn get_reg(self) -> Option<crate::program::Reg>;
+}
+
+impl DispatchReg for RawReg {
+    #[inline(always)]
+    fn get_reg(self) -> Option<crate::program::Reg> {
+        Some(self.get())
+    }
+}
+
+impl DispatchReg for () {
+    #[inline(always)]
+    fn get_reg(self) -> Option<crate::program::Reg> {
+        None
+    }
 }
 
 impl<'a, B, T> Simulator<'a, B, T>
@@ -398,12 +501,12 @@ where
                 rob_depended_by: i32x32::zero(),
                 registers_written_by_rob_entry: i16x32::zero(),
                 rob_entry_by_register: i8x16::zero(),
-                reorder_buffer_tail: 0,
+                reorder_buffer_tail: RobIndex::new(0),
                 cache_model,
                 tracer,
                 force_branch_is_cheap: None,
                 instructions_in_flight: 0,
-                reorder_buffer_head: 0,
+                reorder_buffer_head: RobIndex::new(0),
                 opcode_trap: isa.opcode_to_u8(Opcode::trap).unwrap_or(UNUSED_RAW_OPCODE),
                 opcode_unlikely: isa.opcode_to_u8(Opcode::unlikely).unwrap_or(UNUSED_RAW_OPCODE),
                 _phantom: core::marker::PhantomData,
@@ -435,8 +538,8 @@ where
         .resources()
             | RESOURCES_UNDERFLOW_MASK;
 
-        self.reorder_buffer_tail = 0;
-        self.reorder_buffer_head = 0;
+        self.reorder_buffer_tail = RobIndex::new(0);
+        self.reorder_buffer_head = RobIndex::new(0);
 
         unsafe_avx2! {
             self.rob_entry_by_register = i8x16::negative_one();
@@ -459,19 +562,9 @@ where
         }
     }
 
-    fn tick_cycle<const FAST_FORWARD: bool>(&mut self) {
-        unsafe_avx2! {
-            self.tick_cycle_avx2::<FAST_FORWARD>();
-        }
-    }
-
     #[cfg_attr(all(feature = "simd", target_arch = "x86_64"), target_feature(enable = "avx2"))]
     #[inline(never)]
     fn emit_events_avx2(&mut self, mask: i8x32, event_kind: EventKind) {
-        if !T::SHOULD_CALL_ON_EVENT {
-            return;
-        }
-
         let mut bits = mask.most_significant_bits();
         while bits != 0 {
             let slot = bits.trailing_zeros();
@@ -480,12 +573,15 @@ where
         }
     }
 
+    #[inline(always)]
     fn instructions_in_flight(&self) -> u32 {
         self.instructions_in_flight
     }
 
+    #[allow(clippy::assign_op_pattern)]
     #[cfg_attr(all(feature = "simd", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-    fn tick_cycle_avx2<const FAST_FORWARD: bool>(&mut self) {
+    #[inline]
+    fn tick_cycle_avx2<const IS_FINISHED: bool, const HAS_DECODED_PENDING: bool>(&mut self) {
         let state_decoding = i8x32::splat(1);
         let state_waiting = i8x32::splat(2);
         let state_executing = i8x32::splat(3);
@@ -555,63 +651,63 @@ where
         );
 
         // Retire unneeded instructions.
-        {
+        let leading_count_to_retire = {
             let is_waiting_for_retirement: i8x32 = self.rob_state.simd_eq(state_executed);
             let leading_count_to_retire = is_waiting_for_retirement
                 .most_significant_bits()
-                .rotate_right(self.reorder_buffer_head)
-                .trailing_ones() as i32;
+                .rotate_right(self.reorder_buffer_head.to_u32())
+                .trailing_ones();
 
-            let is_retired_this_cycle = i8x32::from_i1x32_sext(
-                (cast(1_u64 << leading_count_to_retire).truncate_to_u32().wrapping_sub(1)).rotate_left(self.reorder_buffer_head) as i32,
-            );
+            if cast(leading_count_to_retire).to_signed() > 0 {
+                let is_retired_this_cycle =
+                    RETIRE_MASK_TABLE[self.reorder_buffer_head.to_usize()][cast(leading_count_to_retire).to_usize()];
 
-            // Mark every instruction which depended on instructions which just retired as not depending on them anymore.
-            self.rob_dependencies = self
-                .rob_dependencies
-                .and_not(i32x32::splat(is_retired_this_cycle.most_significant_bits()));
+                // Mark retired instructions as not depended by any other instruction.
+                if T::SHOULD_CALL_ON_EVENT {
+                    self.rob_depended_by = self.rob_depended_by.and_not(i32x32::from_i8x32_sext(is_retired_this_cycle));
+                }
 
-            // Mark retired instructions as not depended by any other instruction.
-            self.rob_depended_by = self.rob_depended_by.and_not(i32x32::from_i8x32_sext(is_retired_this_cycle));
+                // Reset the state of retired instructions.
+                self.rob_state = self.rob_state.and_not(is_retired_this_cycle);
 
-            // Reset the state of retired instructions.
-            self.rob_state = self.rob_state.and_not(is_retired_this_cycle);
+                #[cfg(all(test, feature = "logging"))]
+                {
+                    log::debug!(
+                        "tick_cycle_avx2[{}]: instructions_in_flight: {} -> {}",
+                        self.cycles,
+                        self.instructions_in_flight,
+                        self.instructions_in_flight - leading_count_to_retire
+                    );
+                }
 
-            let retired_count = is_retired_this_cycle.most_significant_bits().count_ones();
-            #[cfg(all(test, feature = "logging"))]
-            if retired_count > 0 {
-                log::debug!(
-                    "tick_cycle_avx2[{}]: instructions_in_flight: {} -> {}",
-                    self.cycles,
-                    self.instructions_in_flight,
-                    self.instructions_in_flight - retired_count
-                );
+                self.instructions_in_flight -= leading_count_to_retire;
+                self.reorder_buffer_head = RobIndex::new(self.reorder_buffer_head.to_u32() + leading_count_to_retire);
+
+                if T::SHOULD_CALL_ON_EVENT {
+                    self.emit_events_avx2(is_retired_this_cycle, EventKind::Retired);
+                    self.emit_events_avx2(
+                        is_waiting_for_retirement.and_not(is_retired_this_cycle),
+                        EventKind::WaitingForRetirement,
+                    );
+                }
+            } else if T::SHOULD_CALL_ON_EVENT {
+                self.emit_events_avx2(is_waiting_for_retirement, EventKind::WaitingForRetirement);
             }
-
-            self.instructions_in_flight -= retired_count;
-            self.reorder_buffer_head = (self.reorder_buffer_head + retired_count) % (REORDER_BUFFER_SIZE as u32);
-
-            self.emit_events_avx2(is_retired_this_cycle, EventKind::Retired);
-            self.emit_events_avx2(
-                is_waiting_for_retirement.and_not(is_retired_this_cycle),
-                EventKind::WaitingForRetirement,
-            );
 
             debug_assert_eq!(
                 self.rob_state.simd_eq(i8x32::zero()).most_significant_bits().count_zeros(),
                 self.instructions_in_flight
             );
-        }
+
+            leading_count_to_retire
+        };
 
         {
             const RESOURCES_UNDERFLOW_MASK_I16: i16 = RESOURCES_UNDERFLOW_MASK as u16 as i16;
-            let is_executed: i8x32 = self.rob_cycles_remaining.simd_lt(i8x32::splat(1));
-            let is_executed_mask: i32 = is_executed.most_significant_bits();
-            let has_no_dependencies: i8x32 = (self.rob_dependencies.and_not(i32x32::splat(is_executed_mask)))
-                .simd_eq(i32x32::zero())
-                .clamp_to_i8_range();
+            let has_no_dependencies: i8x32 = self.rob_dependencies.simd_eq(i32x32::zero()).clamp_to_i8_range();
 
             let mut is_waiting_to_start: i8x32 = self.rob_state.simd_eq(state_waiting) & has_no_dependencies;
+            let mut started_mask = i8x32::zero();
 
             for _ in 0..5 {
                 #[cfg(all(test, feature = "logging"))]
@@ -629,39 +725,47 @@ where
                     .simd_eq(i16x32::splat(RESOURCES_UNDERFLOW_MASK_I16))
                     .clamp_to_i8_range();
                 let have_enough_resources = have_enough_resources.and(is_waiting_to_start);
-                let mask = have_enough_resources.most_significant_bits().rotate_right(self.reorder_buffer_head);
+                let mask = have_enough_resources
+                    .most_significant_bits()
+                    .rotate_right(self.reorder_buffer_head.to_u32());
                 let position = mask.trailing_zeros();
-                if position != 32 {
-                    let position = (position + self.reorder_buffer_head) % (REORDER_BUFFER_SIZE as u32);
-                    #[cfg(all(test, feature = "logging"))]
-                    log::debug!(
-                        "tick_cycle_avx2[{}]: starting: instruction={}, slot={}",
-                        self.cycles,
-                        self.rob_instruction[cast(position).to_usize()],
-                        position,
-                    );
-
-                    let resources_consumed = self.rob_required_resources.as_slice()[cast(position).to_usize()];
-                    self.resources_available -= resources_consumed as u32;
-                    self.rob_state.as_slice_mut()[cast(position).to_usize()] += 1;
-                    is_waiting_to_start.as_slice_mut()[cast(position).to_usize()] = 0;
+                if position >= 32 {
+                    break;
                 }
+                let position = RobIndex::new(position + self.reorder_buffer_head.to_u32());
+                #[cfg(all(test, feature = "logging"))]
+                log::debug!(
+                    "tick_cycle_avx2[{}]: starting: instruction={}, slot={}",
+                    self.cycles,
+                    self.rob_instruction[position.to_usize()],
+                    position.to_usize(),
+                );
+
+                let resources_consumed = self.rob_required_resources.as_slice()[position.to_usize()];
+                self.resources_available -= resources_consumed as u32;
+
+                let slot_mask = SLOT_MASKS[position.to_usize()];
+                started_mask = started_mask | slot_mask;
+                is_waiting_to_start = is_waiting_to_start.and_not(slot_mask);
             }
-            self.emit_events_avx2(self.rob_state.simd_eq(state_waiting), EventKind::WaitingForDependencies);
+
+            self.rob_state += i8x32::splat(1) & started_mask;
+            if T::SHOULD_CALL_ON_EVENT {
+                self.emit_events_avx2(self.rob_state.simd_eq(state_waiting), EventKind::WaitingForDependencies);
+            }
         }
 
         // Progress execution. (executing -> executing, executing -> executed)
         let mut cycle_count = 1;
         {
             let is_executing: i8x32 = self.rob_state.simd_eq(state_executing);
-            if FAST_FORWARD {
-                let max_cycles =
-                    ((self.rob_cycles_remaining & is_executing) | (is_executing ^ i8x32::negative_one())).horizontal_min_unsigned();
+            if !HAS_DECODED_PENDING && self.tracer.should_enable_fast_forward() && (IS_FINISHED || leading_count_to_retire == 0) {
+                let max_cycles = (self.rob_cycles_remaining | (is_executing ^ i8x32::negative_one())).horizontal_min_unsigned();
                 let max_cycles = cast(max_cycles).to_signed();
 
                 #[cfg(all(test, feature = "logging"))]
                 log::debug!("tick_cycle_avx2[{}]: max_cycles={}", self.cycles, max_cycles);
-                if max_cycles > 0 && self.decode_slots_remaining_this_cycle == MAX_DECODE_PER_CYCLE {
+                if max_cycles > 0 {
                     cycle_count = max_cycles;
                 }
             }
@@ -670,39 +774,52 @@ where
 
             // Check which instructions just finished execution.
             let is_execution_finished: i8x32 = self.rob_cycles_remaining.simd_eq(i8x32::zero()) & is_executing;
-            let is_execution_finished = is_execution_finished.to_i16x32_sext();
+            if !is_execution_finished.is_equal(i8x32::zero()) {
+                #[cfg(all(test, feature = "logging"))]
+                log::debug!(
+                    "tick_cycle_avx2[{}]: is_execution_finished={:?}",
+                    self.cycles,
+                    is_execution_finished
+                );
 
-            #[cfg(all(test, feature = "logging"))]
-            log::debug!(
-                "tick_cycle_avx2[{}]: is_execution_finished={:?}",
-                self.cycles,
-                is_execution_finished
-            );
+                // Mark every instruction which depended on instructions which just finished execution
+                // as not depending on them anymore.
+                self.rob_dependencies = self
+                    .rob_dependencies
+                    .and_not(i32x32::splat(is_execution_finished.most_significant_bits()));
 
-            let retired_register_writes: i16 = (self.registers_written_by_rob_entry & is_execution_finished).bitwise_reduce();
-            self.registers_written_by_rob_entry = self.registers_written_by_rob_entry.and_not(is_execution_finished);
-            self.rob_entry_by_register = self.rob_entry_by_register.or(i8x16::from_i1x16_sext(retired_register_writes));
+                let is_execution_finished_wide = is_execution_finished.to_i16x32_sext();
 
-            // Release any resources used.
-            let resources_released = cast((self.rob_required_resources & is_execution_finished).wrapping_reduce()).to_unsigned();
-            self.resources_available += u32::from(resources_released);
-            self.rob_required_resources = self.rob_required_resources.and_not(is_execution_finished);
+                // Release the registers.
+                let retired_register_writes: i16 = (self.registers_written_by_rob_entry & is_execution_finished_wide).bitwise_reduce();
+                self.registers_written_by_rob_entry = self.registers_written_by_rob_entry.and_not(is_execution_finished_wide);
+                self.rob_entry_by_register = self.rob_entry_by_register.or(i8x16::from_i1x16_sext(retired_register_writes));
+
+                // Release any resources used.
+                let resources_released = cast((self.rob_required_resources & is_execution_finished_wide).wrapping_reduce()).to_unsigned();
+                self.resources_available += u32::from(resources_released);
+                self.rob_required_resources = self.rob_required_resources.and_not(is_execution_finished_wide);
+            }
 
             let is_last_cycle = self.rob_cycles_remaining.simd_eq(i8x32::negative_one());
-            let has_cycles_remaining = self.rob_cycles_remaining.simd_gt(i8x32::negative_one());
             self.rob_state += i8x32::splat(1) & is_executing.and(is_last_cycle);
-            self.emit_events_avx2(is_executing.and(is_last_cycle), EventKind::Executed);
-            self.emit_events_avx2(is_executing.and(has_cycles_remaining), EventKind::Executing);
+
+            if T::SHOULD_CALL_ON_EVENT {
+                let has_cycles_remaining = self.rob_cycles_remaining.simd_gt(i8x32::negative_one());
+                self.emit_events_avx2(is_executing.and(is_last_cycle), EventKind::Executed);
+                self.emit_events_avx2(is_executing.and(has_cycles_remaining), EventKind::Executing);
+            }
         }
 
         // Progress: decoding -> waiting
-        {
+        if HAS_DECODED_PENDING {
             let is_decoding = self.rob_state.simd_eq(state_decoding);
             self.rob_state += i8x32::splat(1) & is_decoding;
+            self.decode_slots_remaining_this_cycle = MAX_DECODE_PER_CYCLE;
+        } else {
+            debug_assert!(self.rob_state.simd_eq(state_decoding).is_equal(i8x32::zero()));
+            debug_assert_eq!(self.decode_slots_remaining_this_cycle, MAX_DECODE_PER_CYCLE);
         }
-
-        self.decode_slots_remaining_this_cycle = MAX_DECODE_PER_CYCLE;
-        self.cycles += cast(i32::from(cycle_count)).to_unsigned();
 
         #[cfg(all(test, feature = "logging"))]
         {
@@ -712,6 +829,8 @@ where
                 log::debug!("tick_cycle_avx2[{}]: state did NOT change!", self.cycles);
             }
         }
+
+        self.cycles += cast(i32::from(cycle_count)).to_unsigned();
 
         #[cfg(test)]
         {
@@ -734,30 +853,46 @@ where
 
     #[inline(always)]
     fn tick_cycle_if_cannot_decode(&mut self, decode_slots: u32) {
-        let mut should_tick =
-            self.decode_slots_remaining_this_cycle < decode_slots || self.instructions_in_flight() == (REORDER_BUFFER_SIZE as u32);
-        while should_tick {
-            self.tick_cycle::<false>();
-            should_tick = self.instructions_in_flight() == (REORDER_BUFFER_SIZE as u32);
+        if self.decode_slots_remaining_this_cycle < decode_slots
+            || self.instructions_in_flight() == cast(REORDER_BUFFER_SIZE).assert_always_fits_in_u32()
+        {
+            unsafe_avx2! {
+                self.tick_cycle_loop_avx2::<false>()
+            }
+        }
+    }
+
+    #[cfg_attr(all(feature = "simd", target_arch = "x86_64"), target_feature(enable = "avx2"))]
+    #[inline(never)]
+    fn tick_cycle_loop_avx2<const IS_FINISHED: bool>(&mut self) {
+        self.tick_cycle_avx2::<IS_FINISHED, true>();
+
+        let target_instructions = if IS_FINISHED {
+            0
+        } else {
+            cast(REORDER_BUFFER_SIZE).assert_always_fits_in_u32() - 1
+        };
+
+        while self.instructions_in_flight() > target_instructions {
+            self.tick_cycle_avx2::<IS_FINISHED, false>();
         }
     }
 
     #[inline(always)]
     fn wait_until_empty(&mut self) {
+        self.finished = true;
+
         #[cfg(all(test, feature = "logging"))]
         if self.instructions_in_flight() > 0 {
             log::debug!("wait_until_empty[{}]: starting fast forward!", self.cycles);
         }
 
-        while self.instructions_in_flight() > 0 {
-            if self.tracer.should_enable_fast_forward() {
-                self.tick_cycle::<true>();
-            } else {
-                self.tick_cycle::<false>();
-            }
+        unsafe_avx2! {
+            self.tick_cycle_loop_avx2::<true>();
         }
     }
 
+    #[inline(always)]
     fn dispatch_generic(&mut self, dst: Option<RawReg>, src1: Option<RawReg>, src2: Option<RawReg>, cost: InstCost) {
         #[cfg(all(test, feature = "logging"))]
         log::debug!(
@@ -781,22 +916,45 @@ where
     }
 
     #[cfg_attr(all(feature = "simd", target_arch = "x86_64"), target_feature(enable = "avx2"))]
+    #[inline]
     fn dispatch_generic_avx2(&mut self, dst: Option<RawReg>, src1: Option<RawReg>, src2: Option<RawReg>, cost: InstCost) {
-        let dst = dst.map(|dst| dst.get());
-        let src1 = src1.map(|src1| src1.get());
-        let src2 = src2.map(|src2| src2.get());
-
         self.tick_cycle_if_cannot_decode(cost.decode_slots);
+        match (dst, src1, src2) {
+            (Some(dst), Some(src1), Some(src2)) => self.dispatch_generic_avx2_impl(dst, src1, src2, cost.resources(), cost.latency),
+            (Some(dst), Some(src1), None) => self.dispatch_generic_avx2_impl(dst, src1, (), cost.resources(), cost.latency),
+            (Some(dst), None, None) => self.dispatch_generic_avx2_impl(dst, (), (), cost.resources(), cost.latency),
+            (None, None, None) => self.dispatch_generic_avx2_impl((), (), (), cost.resources(), cost.latency),
+            (None, Some(src1), None) => self.dispatch_generic_avx2_impl((), src1, (), cost.resources(), cost.latency),
+            (None, Some(src1), Some(src2)) => self.dispatch_generic_avx2_impl((), src1, src2, cost.resources(), cost.latency),
+            _ => unreachable!(),
+        }
+        self.decode_slots_remaining_this_cycle -= cost.decode_slots;
+    }
+
+    #[allow(clippy::assign_op_pattern)]
+    #[cfg_attr(all(feature = "simd", target_arch = "x86_64"), target_feature(enable = "avx2"))]
+    #[inline(never)]
+    fn dispatch_generic_avx2_impl(
+        &mut self,
+        dst: impl DispatchReg,
+        src1: impl DispatchReg,
+        src2: impl DispatchReg,
+        resources: u32,
+        latency: i8,
+    ) {
+        let dst = dst.get_reg();
+        let src1 = src1.get_reg();
+        let src2 = src2.get_reg();
+
         if T::SHOULD_CALL_ON_EVENT {
             self.tracer.on_event(self.cycles, self.instructions, EventKind::Decode);
         }
 
         let slot = self.reorder_buffer_tail;
-        self.reorder_buffer_tail = (self.reorder_buffer_tail + 1) % (REORDER_BUFFER_SIZE as u32);
-        let slot_mask = i8x32::zero().set_dynamic(cast(slot).truncate_to_u8(), cast(0xff_u8).to_signed());
-
-        self.rob_cycles_remaining = self.rob_cycles_remaining.set_dynamic(slot as u8, cost.latency);
-        self.rob_required_resources.as_slice_mut()[slot as usize] = cost.resources() as u16 as i16;
+        self.reorder_buffer_tail = RobIndex::new(self.reorder_buffer_tail.to_u32() + 1);
+        let slot_mask = SLOT_MASKS[slot.to_usize()];
+        self.rob_cycles_remaining = self.rob_cycles_remaining.conditional_assign(i8x32::splat(latency), slot_mask);
+        self.rob_required_resources.as_slice_mut()[slot.to_usize()] = resources as u16 as i16;
 
         let dependency_1: Option<u32> = src1
             .map(|src1| self.rob_entry_by_register.as_slice()[src1.to_usize()])
@@ -811,32 +969,39 @@ where
                 let base_1 = (dependency_1 >> 31) ^ 1;
                 let base_2 = (dependency_2 >> 31) ^ 1;
                 let dependencies_mask = cast(base_1.wrapping_shl(dependency_1) | base_2.wrapping_shl(dependency_2)).to_signed();
-                self.rob_dependencies.as_slice_mut()[slot as usize] = dependencies_mask;
-                self.rob_depended_by.as_slice_mut()[(dependency_1 * base_1) as usize] |= cast(base_1 << slot).to_signed();
-                self.rob_depended_by.as_slice_mut()[(dependency_2 * base_2) as usize] |= cast(base_2 << slot).to_signed();
+                self.rob_dependencies.as_slice_mut()[slot.to_usize()] = dependencies_mask;
+                if T::SHOULD_CALL_ON_EVENT {
+                    if base_1 != 0 {
+                        self.rob_depended_by.as_slice_mut()[dependency_1 as usize] |= cast(1u32 << slot.to_usize()).to_signed();
+                    }
+                    if base_2 != 0 {
+                        self.rob_depended_by.as_slice_mut()[dependency_2 as usize] |= cast(1u32 << slot.to_usize()).to_signed();
+                    }
+                }
             }
             (Some(dependency), None) | (None, Some(dependency)) => {
                 let base = (dependency >> 31) ^ 1;
-                self.rob_dependencies.as_slice_mut()[slot as usize] = cast(base.wrapping_shl(dependency)).to_signed();
-                self.rob_depended_by.as_slice_mut()[(dependency * base) as usize] |= cast(base.wrapping_shl(slot)).to_signed();
+                self.rob_dependencies.as_slice_mut()[slot.to_usize()] = cast(base.wrapping_shl(dependency)).to_signed();
+                if T::SHOULD_CALL_ON_EVENT && base != 0 {
+                    self.rob_depended_by.as_slice_mut()[dependency as usize] |= cast(1u32 << slot.to_usize()).to_signed();
+                }
             }
             (None, None) => {}
         }
 
         if let Some(dst) = dst {
-            let dst_mask: i16x32 = i16x32::splat(cast(cast(1_u32 << dst.to_u32()).truncate_to_u16()).to_signed());
+            let dst_mask = REGISTER_MASKS[dst.to_usize()];
             self.registers_written_by_rob_entry =
                 self.registers_written_by_rob_entry.and_not(dst_mask) | (slot_mask.to_i16x32_sext() & dst_mask);
-            self.rob_entry_by_register.as_slice_mut()[dst.to_usize()] = cast(cast(slot).truncate_to_u8()).to_signed();
+            self.rob_entry_by_register.as_slice_mut()[dst.to_usize()] = cast(slot.to_u8()).to_signed();
         }
 
-        self.rob_state = self.rob_state.set_dynamic(slot as u8, 1);
+        self.rob_state += i8x32::splat(1) & slot_mask;
         if T::SHOULD_CALL_ON_EVENT {
-            self.rob_instruction[cast(slot).to_usize()] = self.instructions;
+            self.rob_instruction[slot.to_usize()] = self.instructions;
         }
 
         self.instructions_in_flight += 1;
-        self.decode_slots_remaining_this_cycle -= cost.decode_slots;
         self.instructions += 1;
 
         debug_assert_eq!(
@@ -871,18 +1036,22 @@ where
         self.instructions += 1;
     }
 
+    #[inline(always)]
     fn dispatch_3op(&mut self, dst: RawReg, src1: RawReg, src2: RawReg, cost: InstCost) {
         self.dispatch_generic(Some(dst), Some(src1), Some(src2), cost);
     }
 
+    #[inline(always)]
     fn dispatch_2op(&mut self, dst: RawReg, src: RawReg, cost: InstCost) {
         self.dispatch_generic(Some(dst), Some(src), None, cost);
     }
 
+    #[inline(always)]
     fn dispatch_1op_dst(&mut self, dst: RawReg, cost: InstCost) {
         self.dispatch_generic(Some(dst), None, None, cost);
     }
 
+    #[inline(always)]
     fn dispatch_finish(&mut self, latency: i8) {
         self.dispatch_generic(
             None,
@@ -896,9 +1065,9 @@ where
         );
 
         self.wait_until_empty();
-        self.finished = true;
     }
 
+    #[inline(always)]
     fn load_cost(&self) -> InstCost {
         InstCost {
             latency: self.cache_model.memory_access_cost,
@@ -909,15 +1078,18 @@ where
         }
     }
 
+    #[inline(always)]
     fn dispatch_indirect_load(&mut self, dst: RawReg, base: RawReg, _offset: u32, _size: u32) {
         self.dispatch_2op(dst, base, self.load_cost());
     }
 
+    #[inline(always)]
     fn dispatch_load(&mut self, dst: RawReg, _offset: u32, _size: u32) {
         self.dispatch_1op_dst(dst, self.load_cost());
     }
 
     #[allow(clippy::unused_self)]
+    #[inline(always)]
     fn store_cost(&self) -> InstCost {
         InstCost {
             latency: 25,
@@ -928,18 +1100,22 @@ where
         }
     }
 
+    #[inline(always)]
     fn dispatch_store(&mut self, src: RawReg, _offset: u32, _size: u32) {
         self.dispatch_generic(None, Some(src), None, self.store_cost());
     }
 
+    #[inline(always)]
     fn dispatch_store_imm(&mut self, _offset: u32, _size: u32) {
         self.dispatch_generic(None, None, None, self.store_cost());
     }
 
+    #[inline(always)]
     fn dispatch_store_indirect(&mut self, src: RawReg, base: RawReg, _offset: u32, _size: u32) {
         self.dispatch_generic(None, Some(src), Some(base), self.store_cost());
     }
 
+    #[inline(always)]
     fn dispatch_store_imm_indirect(&mut self, base: RawReg, _offset: u32, _size: u32) {
         self.dispatch_generic(None, Some(base), None, self.store_cost());
     }
@@ -977,6 +1153,7 @@ where
         BRANCH_PREDICTION_MISS_COST
     }
 
+    #[inline(always)]
     fn dispatch_branch(&mut self, offset: u32, args_length: u32, s1: RawReg, s2: RawReg, jump_offset: u32) {
         self.dispatch_generic(
             None,
@@ -990,9 +1167,9 @@ where
             },
         );
         self.wait_until_empty();
-        self.finished = true;
     }
 
+    #[inline(always)]
     fn dispatch_branch_imm(&mut self, offset: u32, args_length: u32, s: RawReg, jump_offset: u32) {
         self.dispatch_generic(
             None,
@@ -1006,9 +1183,9 @@ where
             },
         );
         self.wait_until_empty();
-        self.finished = true;
     }
 
+    #[inline(always)]
     fn dispatch_trivial_2op_1c(&mut self, d: RawReg, s: RawReg) {
         self.dispatch_2op(
             d,
@@ -1022,6 +1199,7 @@ where
         );
     }
 
+    #[inline(always)]
     fn dispatch_trivial_2op_2c(&mut self, d: RawReg, s: RawReg) {
         self.dispatch_2op(
             d,
@@ -1035,6 +1213,7 @@ where
         );
     }
 
+    #[inline(always)]
     fn dispatch_simple_alu_2op(&mut self, d: RawReg, s: RawReg) {
         self.dispatch_2op(
             d,
@@ -1048,6 +1227,7 @@ where
         );
     }
 
+    #[inline(always)]
     fn dispatch_simple_alu_2op_32bit(&mut self, d: RawReg, s: RawReg) {
         self.dispatch_2op(
             d,
@@ -1061,6 +1241,7 @@ where
         );
     }
 
+    #[inline(always)]
     fn dispatch_simple_alu_3op(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         self.dispatch_3op(
             d,
@@ -2155,7 +2336,6 @@ where
             },
         );
         self.wait_until_empty();
-        self.finished = true;
     }
 
     #[inline(always)]
@@ -2179,7 +2359,6 @@ where
             },
         );
         self.wait_until_empty();
-        self.finished = true;
     }
 
     // Special instructions
