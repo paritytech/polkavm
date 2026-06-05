@@ -485,8 +485,7 @@ where
         }
 
         if let Some(gas_metering) = self.gas_metering {
-            self.gas_metering_stub_offsets
-                .push(cast(self.asm.len()).assert_always_fits_in_u32());
+            self.gas_metering_stub_offsets.push(cast(self.asm.len()).to_u32_or_debug_panic());
             ArchVisitor(self).emit_gas_metering_stub(gas_metering);
         }
     }
@@ -1837,7 +1836,7 @@ where
 
     pub fn lookup_gas_metering_offset_for_basic_block_if_address_is_in_the_middle(&self, machine_code_address: u64) -> Option<u32> {
         let machine_code_offset = machine_code_address.checked_sub(self.native_code_origin)?;
-        let machine_code_offset = cast(machine_code_offset).assert_always_fits_in_u32();
+        let machine_code_offset = cast(machine_code_offset).to_u32_or_debug_panic();
 
         if !self.step_tracing {
             // Every basic block starts with a gas metering stub.

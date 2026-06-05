@@ -812,7 +812,7 @@ impl PageSet {
             for group_index in start..=self.groups_filled.last_non_zero().unwrap() {
                 if self.groups_filled.contains_one(group_index) {
                     for page_index in group_index * PageSetGroup::alignment()..(group_index + 1) * PageSetGroup::alignment() {
-                        let page_index = cast(page_index).assert_always_fits_in_u32();
+                        let page_index = cast(page_index).to_u32_or_panic();
                         all.push(page_index);
                     }
                 }
@@ -824,7 +824,7 @@ impl PageSet {
                 if self.groups_partial.contains_one(group_index) {
                     for page_index in group_index * PageSetGroup::alignment()..(group_index + 1) * PageSetGroup::alignment() {
                         if self.pages.contains_one(page_index) {
-                            let page_index = cast(page_index).assert_always_fits_in_u32();
+                            let page_index = cast(page_index).to_u32_or_panic();
                             all.push(page_index);
                         }
                     }

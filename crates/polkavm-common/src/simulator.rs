@@ -57,9 +57,10 @@ const REORDER_BUFFER_SIZE: usize = 32;
 /// The maximum number of cycles refunded at the end of each basic block.
 const GAS_COST_SLACK: i32 = 3;
 
+const REORDER_BUFFER_SIZE_U32: u32 = cast(REORDER_BUFFER_SIZE).to_u32_or_panic();
 const REORDER_BUFFER_MASK: u32 = {
     assert!(REORDER_BUFFER_SIZE.is_power_of_two());
-    cast(REORDER_BUFFER_SIZE - 1).assert_always_fits_in_u32()
+    cast(REORDER_BUFFER_SIZE - 1).to_u32_or_panic()
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -345,7 +346,7 @@ impl RobIndex {
 
     #[inline]
     fn to_u32(self) -> u32 {
-        if self.0 >= cast(REORDER_BUFFER_SIZE).assert_always_fits_in_u32() {
+        if self.0 >= REORDER_BUFFER_SIZE_U32 {
             const {
                 assert!(cast(REORDER_BUFFER_MASK + 1).to_usize() == REORDER_BUFFER_SIZE);
             }
@@ -435,9 +436,7 @@ static REGISTER_MASKS: [i16x32; 16] = {
     let mut table = [i16x32::from_fallback(picosimd::fallback::i16x32::zero()); 16];
     let mut i = 0;
     while i < table.len() {
-        table[i] = i16x32::from_fallback(picosimd::fallback::i16x32::splat(
-            cast(cast(1_u32 << i).truncate_to_u16()).to_signed(),
-        ));
+        table[i] = i16x32::from_fallback(picosimd::fallback::i16x32::splat(cast(1_u32 << i).truncate_to_i16()));
         i += 1;
     }
     table
@@ -452,7 +451,7 @@ static RETIRE_MASK_TABLE: [[i8x32; 33]; 32] = {
         while leading_count_to_retire < subtable.len() {
             subtable[leading_count_to_retire] = i8x32::from_fallback(picosimd::fallback::i8x32::from_i1x32_sext(
                 (cast(1_u64 << leading_count_to_retire).truncate_to_u32().wrapping_sub(1))
-                    .rotate_left(cast(reorder_buffer_head).assert_always_fits_in_u32()) as i32,
+                    .rotate_left(cast(reorder_buffer_head).to_u32_or_panic()) as i32,
             ));
             leading_count_to_retire += 1;
         }
@@ -658,7 +657,7 @@ where
                 .rotate_right(self.reorder_buffer_head.to_u32())
                 .trailing_ones();
 
-            if cast(leading_count_to_retire).to_signed() > 0 {
+            if cast(leading_count_to_retire).to_signed_or_debug_panic() > 0 {
                 let is_retired_this_cycle =
                     RETIRE_MASK_TABLE[self.reorder_buffer_head.to_usize()][cast(leading_count_to_retire).to_usize()];
 
@@ -761,7 +760,7 @@ where
             let is_executing: i8x32 = self.rob_state.simd_eq(state_executing);
             if !HAS_DECODED_PENDING && self.tracer.should_enable_fast_forward() && (IS_FINISHED || leading_count_to_retire == 0) {
                 let max_cycles = (self.rob_cycles_remaining | (is_executing ^ i8x32::negative_one())).horizontal_min_unsigned();
-                let max_cycles = cast(max_cycles).to_signed();
+                let max_cycles = cast(max_cycles).bitwise_as_i8();
 
                 #[cfg(all(test, feature = "logging"))]
                 log::debug!("tick_cycle_avx2[{}]: max_cycles={}", self.cycles, max_cycles);
@@ -796,7 +795,8 @@ where
                 self.rob_entry_by_register = self.rob_entry_by_register.or(i8x16::from_i1x16_sext(retired_register_writes));
 
                 // Release any resources used.
-                let resources_released = cast((self.rob_required_resources & is_execution_finished_wide).wrapping_reduce()).to_unsigned();
+                let resources_released =
+                    cast((self.rob_required_resources & is_execution_finished_wide).wrapping_reduce()).bitwise_as_u16();
                 self.resources_available += u32::from(resources_released);
                 self.rob_required_resources = self.rob_required_resources.and_not(is_execution_finished_wide);
             }
@@ -830,7 +830,8 @@ where
             }
         }
 
-        self.cycles += cast(i32::from(cycle_count)).to_unsigned();
+        debug_assert!(cycle_count >= 1);
+        self.cycles += cast(cast(cycle_count).to_i32_sign_extend()).bitwise_as_u32();
 
         #[cfg(test)]
         {
@@ -853,9 +854,7 @@ where
 
     #[inline(always)]
     fn tick_cycle_if_cannot_decode(&mut self, decode_slots: u32) {
-        if self.decode_slots_remaining_this_cycle < decode_slots
-            || self.instructions_in_flight() == cast(REORDER_BUFFER_SIZE).assert_always_fits_in_u32()
-        {
+        if self.decode_slots_remaining_this_cycle < decode_slots || self.instructions_in_flight() == REORDER_BUFFER_SIZE_U32 {
             unsafe_avx2! {
                 self.tick_cycle_loop_avx2::<false>()
             }
@@ -867,11 +866,7 @@ where
     fn tick_cycle_loop_avx2<const IS_FINISHED: bool>(&mut self) {
         self.tick_cycle_avx2::<IS_FINISHED, true>();
 
-        let target_instructions = if IS_FINISHED {
-            0
-        } else {
-            cast(REORDER_BUFFER_SIZE).assert_always_fits_in_u32() - 1
-        };
+        let target_instructions = if IS_FINISHED { 0 } else { REORDER_BUFFER_SIZE_U32 - 1 };
 
         while self.instructions_in_flight() > target_instructions {
             self.tick_cycle_avx2::<IS_FINISHED, false>();
@@ -959,31 +954,31 @@ where
         let dependency_1: Option<u32> = src1
             .map(|src1| self.rob_entry_by_register.as_slice()[src1.to_usize()])
             .map(i32::from)
-            .map(|x| cast(x).to_unsigned());
+            .map(|x| cast(x).bitwise_as_u32());
         let dependency_2: Option<u32> = src2
             .map(|src2| self.rob_entry_by_register.as_slice()[src2.to_usize()])
             .map(i32::from)
-            .map(|x| cast(x).to_unsigned());
+            .map(|x| cast(x).bitwise_as_u32());
         match (dependency_1, dependency_2) {
             (Some(dependency_1), Some(dependency_2)) => {
                 let base_1 = (dependency_1 >> 31) ^ 1;
                 let base_2 = (dependency_2 >> 31) ^ 1;
-                let dependencies_mask = cast(base_1.wrapping_shl(dependency_1) | base_2.wrapping_shl(dependency_2)).to_signed();
+                let dependencies_mask = cast(base_1.wrapping_shl(dependency_1) | base_2.wrapping_shl(dependency_2)).bitwise_as_i32();
                 self.rob_dependencies.as_slice_mut()[slot.to_usize()] = dependencies_mask;
                 if T::SHOULD_CALL_ON_EVENT {
                     if base_1 != 0 {
-                        self.rob_depended_by.as_slice_mut()[dependency_1 as usize] |= cast(1u32 << slot.to_usize()).to_signed();
+                        self.rob_depended_by.as_slice_mut()[dependency_1 as usize] |= cast(1u32 << slot.to_usize()).bitwise_as_i32();
                     }
                     if base_2 != 0 {
-                        self.rob_depended_by.as_slice_mut()[dependency_2 as usize] |= cast(1u32 << slot.to_usize()).to_signed();
+                        self.rob_depended_by.as_slice_mut()[dependency_2 as usize] |= cast(1u32 << slot.to_usize()).bitwise_as_i32();
                     }
                 }
             }
             (Some(dependency), None) | (None, Some(dependency)) => {
                 let base = (dependency >> 31) ^ 1;
-                self.rob_dependencies.as_slice_mut()[slot.to_usize()] = cast(base.wrapping_shl(dependency)).to_signed();
+                self.rob_dependencies.as_slice_mut()[slot.to_usize()] = cast(base.wrapping_shl(dependency)).bitwise_as_i32();
                 if T::SHOULD_CALL_ON_EVENT && base != 0 {
-                    self.rob_depended_by.as_slice_mut()[dependency as usize] |= cast(1u32 << slot.to_usize()).to_signed();
+                    self.rob_depended_by.as_slice_mut()[dependency as usize] |= cast(1u32 << slot.to_usize()).bitwise_as_i32();
                 }
             }
             (None, None) => {}
@@ -993,7 +988,7 @@ where
             let dst_mask = REGISTER_MASKS[dst.to_usize()];
             self.registers_written_by_rob_entry =
                 self.registers_written_by_rob_entry.and_not(dst_mask) | (slot_mask.to_i16x32_sext() & dst_mask);
-            self.rob_entry_by_register.as_slice_mut()[dst.to_usize()] = cast(slot.to_u8()).to_signed();
+            self.rob_entry_by_register.as_slice_mut()[dst.to_usize()] = cast(slot.to_u8()).to_signed_or_debug_panic();
         }
 
         self.rob_state += i8x32::splat(1) & slot_mask;
@@ -1419,7 +1414,7 @@ where
             let cycles = self.cycles;
             self.clear();
 
-            let cycles = cast((cast(cycles).to_signed() - GAS_COST_SLACK).max(1)).to_unsigned();
+            let cycles = cast((cast(cycles).to_signed_or_debug_panic() - GAS_COST_SLACK).max(1)).to_unsigned_or_debug_panic();
             Some(cycles)
         } else {
             None
@@ -2627,8 +2622,8 @@ mod tests {
             panic!("Timeline mismatch!\n\nExpected timeline:\n{expected_timeline_s}\nActual timeline:\n{timeline_s}");
         }
 
-        let expected_cycles = cast(expected_cycles).to_signed() - 3;
-        assert_eq!(cast(cycles).to_signed(), expected_cycles);
+        let expected_cycles = cast(expected_cycles).to_i32_or_panic() - 3;
+        assert_eq!(cast(cycles).to_i32_or_panic(), expected_cycles);
 
         #[cfg(feature = "logging")]
         log::debug!("Rerunning with fast-forward enabled...");

@@ -284,7 +284,7 @@ where
 
     if is_gas_metering_enabled {
         // Give back the gas that we've pre-charged.
-        vmctx.gas.fetch_add(cast(bytes_remaining).to_signed(), Ordering::Relaxed);
+        vmctx.gas.fetch_add(cast(bytes_remaining).to_i64_or_panic(), Ordering::Relaxed);
     }
 
     let original_offset = match memset_kind {
@@ -334,7 +334,7 @@ where
                     Size::U32 => self.push(mov_imm(dst, imm32(value))),
                     Size::U64 => {
                         assert_eq!(B::BITNESS, Bitness::B64);
-                        self.push(mov_imm(dst, imm64(cast(value).to_signed())));
+                        self.push(mov_imm(dst, imm64(cast(value).bitwise_as_i32())));
                     }
                 },
             }
@@ -443,7 +443,7 @@ where
             }
             RegImm::Imm(s1) => match reg_size {
                 RegSize::R32 => asm.push(mov_imm(d, imm32(s1))),
-                RegSize::R64 => asm.push(mov_imm(d, imm64(cast(s1).to_signed()))),
+                RegSize::R64 => asm.push(mov_imm(d, imm64(cast(s1).bitwise_as_i32()))),
             },
         };
 
@@ -490,7 +490,7 @@ where
             RegImm::Reg(s2) => asm.push(cmp((reg_size, s1, conv_reg(s2)))),
             RegImm::Imm(s2) => match reg_size {
                 RegSize::R32 => asm.push(cmp((s1, imm32(s2)))),
-                RegSize::R64 => asm.push(cmp((s1, imm64(cast(s2).to_signed())))),
+                RegSize::R64 => asm.push(cmp((s1, imm64(cast(s2).bitwise_as_i32())))),
             },
         };
 
@@ -524,7 +524,7 @@ where
         let asm = asm.push(test((reg_size, c, c)));
         let asm = match reg_size {
             RegSize::R32 => asm.push(mov_imm(TMP_REG, imm32(s))),
-            RegSize::R64 => asm.push(mov_imm(TMP_REG, imm64(cast(s).to_signed()))),
+            RegSize::R64 => asm.push(mov_imm(TMP_REG, imm64(cast(s).bitwise_as_i32()))),
         };
         let asm = asm.push(cmov(condition, reg_size, d, TMP_REG));
         asm.assert_reserved_exactly_as_needed();
@@ -795,8 +795,8 @@ where
         if matches!(kind, Signedness::Signed) {
             // rdx = (dividend == i32::MIN) ? 1 : 0
             match reg_size {
-                RegSize::R32 => self.push(mov_imm(rdx, imm32(cast(i32::MIN).to_unsigned()))),
-                RegSize::R64 => self.push(mov_imm64(rdx, cast(i64::MIN).to_unsigned())),
+                RegSize::R32 => self.push(mov_imm(rdx, imm32(cast(i32::MIN).bitwise_as_u32()))),
+                RegSize::R64 => self.push(mov_imm64(rdx, cast(i64::MIN).bitwise_as_u64())),
             }
 
             self.push(cmp((reg_size, rax, rdx)));
@@ -805,7 +805,7 @@ where
             // r12 = (divisor == -1) ? 1 : 0
             self.push(xor((RegSize::R32, r12, r12)));
             match reg_size {
-                RegSize::R32 => self.push(cmp((TMP_REG, imm32(cast(-1_i32).to_unsigned())))),
+                RegSize::R32 => self.push(cmp((TMP_REG, imm32(cast(-1_i32).bitwise_as_u32())))),
                 RegSize::R64 => self.push(cmp((TMP_REG, imm64(-1_i32)))),
             }
             self.push(setcc(Condition::Equal, r12));
@@ -1007,7 +1007,7 @@ where
                 let asm = if let Some((return_register, return_address)) = load_imm {
                     match B::BITNESS {
                         Bitness::B32 => asm.push(mov_imm(conv_reg(return_register), imm32(return_address))),
-                        Bitness::B64 => asm.push(mov_imm(conv_reg(return_register), imm64(cast(return_address).to_signed()))),
+                        Bitness::B64 => asm.push(mov_imm(conv_reg(return_register), imm64(cast(return_address).bitwise_as_i32()))),
                     }
                 } else {
                     asm.push_none()
@@ -1048,7 +1048,7 @@ where
                 if let Some((return_register, return_address)) = load_imm {
                     match B::BITNESS {
                         Bitness::B32 => self.push(mov_imm(conv_reg(return_register), imm32(return_address))),
-                        Bitness::B64 => self.push(mov_imm(conv_reg(return_register), imm64(cast(return_address).to_signed()))),
+                        Bitness::B64 => self.push(mov_imm(conv_reg(return_register), imm64(cast(return_address).bitwise_as_i32()))),
                     }
                 }
 
@@ -1618,7 +1618,7 @@ where
             if s2 != 0 {
                 match reg_size {
                     RegSize::R32 => asm.push(add((d, imm32(s2)))),
-                    RegSize::R64 => asm.push(add((d, imm64(cast(s2).to_signed())))),
+                    RegSize::R64 => asm.push(add((d, imm64(cast(s2).bitwise_as_i32())))),
                 }
             } else {
                 asm.push_none()
@@ -1631,7 +1631,7 @@ where
             } else {
                 let asm = match reg_size {
                     RegSize::R32 => asm.push(mov_imm(d, imm32(s2))),
-                    RegSize::R64 => asm.push(mov_imm(d, imm64(cast(s2).to_signed()))),
+                    RegSize::R64 => asm.push(mov_imm(d, imm64(cast(s2).bitwise_as_i32()))),
                 };
                 asm.push(sub((reg_size, d, s1)))
             }
@@ -1981,7 +1981,7 @@ where
         // d = s1 | s2
         let asm = match reg_size {
             RegSize::R32 => asm.push(or((d, imm32(s2)))),
-            RegSize::R64 => asm.push(or((d, imm64(cast(s2).to_signed())))),
+            RegSize::R64 => asm.push(or((d, imm64(cast(s2).bitwise_as_i32())))),
         };
         asm.assert_reserved_exactly_as_needed();
     }
@@ -1998,7 +1998,7 @@ where
         // d = s1 & s2
         let asm = match reg_size {
             RegSize::R32 => asm.push(and((d, imm32(s2)))),
-            RegSize::R64 => asm.push(and((d, imm64(cast(s2).to_signed())))),
+            RegSize::R64 => asm.push(and((d, imm64(cast(s2).bitwise_as_i32())))),
         };
         asm.assert_reserved_exactly_as_needed();
     }
@@ -2015,7 +2015,7 @@ where
             // d = s1 ^ s2
             match reg_size {
                 RegSize::R32 => asm.push(xor((d, imm32(s2)))),
-                RegSize::R64 => asm.push(xor((d, imm64(cast(s2).to_signed())))),
+                RegSize::R64 => asm.push(xor((d, imm64(cast(s2).bitwise_as_i32())))),
             }
         } else {
             // d = s1 ^ 0xfffffff
@@ -2028,7 +2028,7 @@ where
     pub fn load_imm(&mut self, dst: RawReg, s2: u32) {
         match B::BITNESS {
             Bitness::B32 => self.push(mov_imm(conv_reg(dst), imm32(s2))),
-            Bitness::B64 => self.push(mov_imm(conv_reg(dst), imm64(cast(s2).to_signed()))),
+            Bitness::B64 => self.push(mov_imm(conv_reg(dst), imm64(cast(s2).bitwise_as_i32()))),
         }
     }
 
@@ -2156,7 +2156,7 @@ where
         let asm = asm.push(mov(reg_size, rcx, s));
         let asm = match reg_size {
             RegSize::R32 => asm.push(mov_imm(d, imm32(c))),
-            RegSize::R64 => asm.push(mov_imm(d, imm64(cast(c).to_signed()))),
+            RegSize::R64 => asm.push(mov_imm(d, imm64(cast(c).bitwise_as_i32()))),
         };
         let asm = asm.push(ror_cl(reg_size, d));
 
@@ -2192,7 +2192,7 @@ where
             } else {
                 match reg_size {
                     RegSize::R32 => asm.push(add((d, imm32(s2)))),
-                    RegSize::R64 => asm.push(add((d, imm64(cast(s2).to_signed())))),
+                    RegSize::R64 => asm.push(add((d, imm64(cast(s2).bitwise_as_i32())))),
                 }
             }
         } else {
@@ -2477,7 +2477,7 @@ where
         let asm = self.asm.reserve::<U2>();
         let asm = match B::BITNESS {
             Bitness::B32 => asm.push(mov_imm(conv_reg(ra), imm32(value))),
-            Bitness::B64 => asm.push(mov_imm(conv_reg(ra), imm64(cast(value).to_signed()))),
+            Bitness::B64 => asm.push(mov_imm(conv_reg(ra), imm64(cast(value).bitwise_as_i32()))),
         };
         let asm = jump_to_label(asm, label);
         asm.assert_reserved_exactly_as_needed();

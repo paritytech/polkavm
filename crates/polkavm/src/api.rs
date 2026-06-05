@@ -337,7 +337,7 @@ impl Module {
     }
 
     pub(crate) fn code_len(&self) -> u32 {
-        cast(self.state().blob.code().len()).assert_always_fits_in_u32()
+        cast(self.state().blob.code().len()).to_u32_or_debug_panic()
     }
 
     pub(crate) fn instructions_bounded_at(&self, offset: ProgramCounter) -> Instructions<InstructionSetKind> {
@@ -565,7 +565,7 @@ impl Module {
                     blob.bitmask(),
                     &exports,
                     config.step_tracing || engine.crosscheck,
-                    cast(blob.code().len()).assert_always_fits_in_u32(),
+                    cast(blob.code().len()).to_u32_or_panic(),
                     init,
                     $gas_visitor,
                 )?;
@@ -1600,7 +1600,7 @@ impl RawInstance {
         }
 
         if cfg!(debug_assertions) {
-            let is_inaccessible = !self.is_memory_accessible(address, cast(length).assert_always_fits_in_u32(), MemoryProtection::Read);
+            let is_inaccessible = !self.is_memory_accessible(address, cast(length).to_u32_or_panic(), MemoryProtection::Read);
             if is_inaccessible != matches!(result, Err(MemoryAccessError::OutOfRangeAccess { .. })) {
                 panic!(
                     "'read_memory_into' doesn't match with 'is_memory_accessible' for 0x{:x}-0x{:x} (read_memory_into = {:?}, is_memory_accessible = {})",
@@ -1658,8 +1658,7 @@ impl RawInstance {
         }
 
         if cfg!(debug_assertions) {
-            let is_inaccessible =
-                !self.is_memory_accessible(address, cast(data.len()).assert_always_fits_in_u32(), MemoryProtection::ReadWrite);
+            let is_inaccessible = !self.is_memory_accessible(address, cast(data.len()).to_u32_or_panic(), MemoryProtection::ReadWrite);
             if is_inaccessible != matches!(result, Err(MemoryAccessError::OutOfRangeAccess { .. })) {
                 panic!(
                     "'write_memory' doesn't match with 'is_memory_accessible' for 0x{:x}-0x{:x} (write_memory = {:?}, is_memory_accessible = {})",

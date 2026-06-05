@@ -2835,7 +2835,7 @@ fn try_parse_epilogue(
             return Ok(false);
         }
 
-        regs.push((cast(offset).to_unsigned(), dst));
+        regs.push((cast(offset).to_u32_or_panic(), dst));
     }
 
     let Inst::RegImm {
@@ -2861,7 +2861,7 @@ fn try_parse_epilogue(
             offset_range: AddressRange::from(source.offset_range.start..current_pc as u64),
         },
         InstExt::Basic(BasicInst::Epilogue {
-            stack_space: cast(stack_space).to_unsigned(),
+            stack_space: cast(stack_space).to_u32_or_panic(),
             regs,
         }),
     ));
@@ -2927,7 +2927,7 @@ fn try_parse_prologue(
             break;
         }
 
-        regs.push((cast(offset).to_unsigned(), src));
+        regs.push((cast(offset).to_u32_or_panic(), src));
         current_pc += inst_size as usize;
         remaining += native_reg_size;
     }
@@ -2939,7 +2939,7 @@ fn try_parse_prologue(
             offset_range: AddressRange::from(source.offset_range.start..current_pc as u64),
         },
         InstExt::Basic(BasicInst::Prologue {
-            stack_space: cast(imm * -1).to_unsigned(),
+            stack_space: cast(imm * -1).to_u32_or_panic(),
             regs,
         }),
     ));
@@ -3137,7 +3137,7 @@ fn parse_code_section(
                                 if offset >= 0 && offset < section.data().len() as i32 {
                                     let target = SectionTarget {
                                         section_index,
-                                        offset: u64::from(cast(offset).to_unsigned()),
+                                        offset: u64::from(cast(offset).to_u32_or_panic()),
                                     };
 
                                     let inst = if target == current_location {
@@ -3168,8 +3168,8 @@ fn parse_code_section(
                         if base_upper == add_src
                             && ((elf.is_64() && kind == RegImmKind::Add64) || (!elf.is_64() && kind == RegImmKind::Add32))
                         {
-                            let offset = value_upper.wrapping_add(cast(value_lower).to_unsigned());
-                            let offset = cast(offset).to_signed();
+                            let offset = value_upper.wrapping_add(cast(value_lower).bitwise_as_u32());
+                            let offset = cast(offset).bitwise_as_i32();
                             let offset = cast(offset).to_i64_sign_extend();
                             let offset = current_location.offset.wrapping_add_signed(offset);
                             if offset >= section.size() {
@@ -3821,7 +3821,7 @@ fn perform_meta_instruction_lowering(is_rv64: bool, all_blocks: &mut [BasicBlock
                         kind: add_kind,
                         dst: Reg::SP,
                         src1: Reg::SP.into(),
-                        src2: (cast(stack_space).to_signed() * -1).into(),
+                        src2: (cast(stack_space).to_i32_or_panic() * -1).into(),
                     },
                 ));
                 for &(offset, src) in regs {
@@ -3831,7 +3831,7 @@ fn perform_meta_instruction_lowering(is_rv64: bool, all_blocks: &mut [BasicBlock
                             kind: store_kind,
                             src: src.into(),
                             base: Reg::SP,
-                            offset: cast(offset).to_signed(),
+                            offset: cast(offset).to_i32_or_panic(),
                         },
                     ));
                 }
@@ -3844,7 +3844,7 @@ fn perform_meta_instruction_lowering(is_rv64: bool, all_blocks: &mut [BasicBlock
                             kind: load_kind,
                             dst,
                             base: Reg::SP,
-                            offset: cast(offset).to_signed(),
+                            offset: cast(offset).to_i32_or_panic(),
                         },
                     ));
                 }
@@ -3855,7 +3855,7 @@ fn perform_meta_instruction_lowering(is_rv64: bool, all_blocks: &mut [BasicBlock
                         kind: add_kind,
                         dst: Reg::SP,
                         src1: Reg::SP.into(),
-                        src2: cast(stack_space).to_signed().into(),
+                        src2: cast(stack_space).to_i32_or_panic().into(),
                     },
                 ));
             }
@@ -4554,12 +4554,12 @@ impl OperationKind {
 
         macro_rules! op32_on_64 {
             (|$lhs:ident, $rhs:ident| $e:expr) => {{
-                let $lhs: u64 = cast($lhs).to_unsigned();
+                let $lhs: u64 = cast($lhs).bitwise_as_u64();
                 let $lhs: u32 = cast($lhs).truncate_to_u32();
-                let $lhs: i32 = cast($lhs).to_signed();
-                let $rhs: u64 = cast($rhs).to_unsigned();
+                let $lhs: i32 = cast($lhs).bitwise_as_i32();
+                let $rhs: u64 = cast($rhs).bitwise_as_u64();
                 let $rhs: u32 = cast($rhs).truncate_to_u32();
-                let $rhs: i32 = cast($rhs).to_signed();
+                let $rhs: i32 = cast($rhs).bitwise_as_i32();
                 let out: i32 = $e;
                 cast(out).to_i64_sign_extend()
             }};
@@ -4591,13 +4591,13 @@ impl OperationKind {
                 div64(lhs, rhs)
             },
             Self::DivUnsigned32 => {
-                op32!(|lhs, rhs| cast(divu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
+                op32!(|lhs, rhs| cast(divu(cast(lhs).bitwise_as_u32(), cast(rhs).bitwise_as_u32())).bitwise_as_i32())
             }
             Self::DivUnsigned32AndSignExtend => {
-                op32_on_64!(|lhs, rhs| cast(divu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
+                op32_on_64!(|lhs, rhs| cast(divu(cast(lhs).bitwise_as_u32(), cast(rhs).bitwise_as_u32())).bitwise_as_i32())
             }
             Self::DivUnsigned64 => {
-                cast(divu64(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed()
+                cast(divu64(cast(lhs).bitwise_as_u64(), cast(rhs).bitwise_as_u64())).bitwise_as_i64()
             },
             Self::Eq32 => {
                 op32!(|lhs, rhs| i32::from(lhs == rhs))
@@ -4621,16 +4621,16 @@ impl OperationKind {
                 mulh64(lhs, rhs)
             },
             Self::MulUpperSignedUnsigned32 => {
-                op32!(|lhs, rhs| mulhsu(lhs, cast(rhs).to_unsigned()))
+                op32!(|lhs, rhs| mulhsu(lhs, cast(rhs).bitwise_as_u32()))
             },
             Self::MulUpperSignedUnsigned64 => {
-                mulhsu64(lhs, cast(rhs).to_unsigned())
+                mulhsu64(lhs, cast(rhs).bitwise_as_u64())
             },
             Self::MulUpperUnsignedUnsigned32 => {
-                op32!(|lhs, rhs| cast(mulhu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
+                op32!(|lhs, rhs| cast(mulhu(cast(lhs).bitwise_as_u32(), cast(rhs).bitwise_as_u32())).bitwise_as_i32())
             },
             Self::MulUpperUnsignedUnsigned64 => {
-                cast(mulhu64(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed()
+                cast(mulhu64(cast(lhs).bitwise_as_u64(), cast(rhs).bitwise_as_u64())).bitwise_as_i64()
             },
             Self::NotEq32 => {
                 op32!(|lhs, rhs| i32::from(lhs != rhs))
@@ -4654,13 +4654,13 @@ impl OperationKind {
                 rem64(lhs, rhs)
             },
             Self::RemUnsigned32 => {
-                op32!(|lhs, rhs| cast(remu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
+                op32!(|lhs, rhs| cast(remu(cast(lhs).bitwise_as_u32(), cast(rhs).bitwise_as_u32())).bitwise_as_i32())
             },
             Self::RemUnsigned32AndSignExtend => {
-                op32_on_64!(|lhs, rhs| cast(remu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
+                op32_on_64!(|lhs, rhs| cast(remu(cast(lhs).bitwise_as_u32(), cast(rhs).bitwise_as_u32())).bitwise_as_i32())
             }
             Self::RemUnsigned64 => {
-                remu64(cast(lhs).to_unsigned(), cast(rhs).to_unsigned()) as i64
+                cast(remu64(cast(lhs).bitwise_as_u64(), cast(rhs).bitwise_as_u64())).bitwise_as_i64()
             },
             Self::SetGreaterOrEqualSigned32 => {
                 op32!(|lhs, rhs| i32::from(lhs >= rhs))
@@ -4669,10 +4669,10 @@ impl OperationKind {
                 i64::from(lhs >= rhs)
             },
             Self::SetGreaterOrEqualUnsigned32 => {
-                op32!(|lhs, rhs| i32::from(cast(lhs).to_unsigned() >= cast(rhs).to_unsigned()))
+                op32!(|lhs, rhs| i32::from(cast(lhs).bitwise_as_u32() >= cast(rhs).bitwise_as_u32()))
             },
             Self::SetGreaterOrEqualUnsigned64 => {
-                i64::from(cast(lhs).to_unsigned() >= cast(rhs).to_unsigned())
+                i64::from(cast(lhs).bitwise_as_u64() >= cast(rhs).bitwise_as_u64())
             },
             Self::SetLessThanSigned32 => {
                 op32!(|lhs, rhs| i32::from(lhs < rhs))
@@ -4681,38 +4681,38 @@ impl OperationKind {
                 i64::from(lhs < rhs)
             },
             Self::SetLessThanUnsigned32 => {
-                op32!(|lhs, rhs| i32::from(cast(lhs).to_unsigned() < cast(rhs).to_unsigned()))
+                op32!(|lhs, rhs| i32::from(cast(lhs).bitwise_as_u32() < cast(rhs).bitwise_as_u32()))
             },
             Self::SetLessThanUnsigned64 => {
                 i64::from((lhs as u64) < (rhs as u64))
             },
             Self::ShiftArithmeticRight32 => {
-                op32!(|lhs, rhs| lhs.wrapping_shr(cast(rhs).to_unsigned()))
+                op32!(|lhs, rhs| lhs.wrapping_shr(cast(rhs).bitwise_as_u32()))
             },
             Self::ShiftArithmeticRight32AndSignExtend => {
-                op32_on_64!(|lhs, rhs| lhs.wrapping_shr(cast(rhs).to_unsigned()))
+                op32_on_64!(|lhs, rhs| lhs.wrapping_shr(cast(rhs).bitwise_as_u32()))
             },
             Self::ShiftArithmeticRight64 => {
-                let rhs = cast(rhs).to_unsigned();
+                let rhs = cast(rhs).bitwise_as_u64();
                 let rhs = cast(rhs).truncate_to_u32();
                 lhs.wrapping_shr(rhs)
             },
             Self::ShiftLogicalLeft32 => {
-                op32!(|lhs, rhs| lhs.wrapping_shl(cast(rhs).to_unsigned()))
+                op32!(|lhs, rhs| lhs.wrapping_shl(cast(rhs).bitwise_as_u32()))
             },
             Self::ShiftLogicalLeft32AndSignExtend => {
-                op32_on_64!(|lhs, rhs| lhs.wrapping_shl(cast(rhs).to_unsigned()))
+                op32_on_64!(|lhs, rhs| lhs.wrapping_shl(cast(rhs).bitwise_as_u32()))
             },
             Self::ShiftLogicalLeft64 => {
-                let rhs = cast(rhs).to_unsigned();
+                let rhs = cast(rhs).bitwise_as_u64();
                 let rhs = cast(rhs).truncate_to_u32();
                 (lhs as u64).wrapping_shl(rhs) as i64
             },
             Self::ShiftLogicalRight32 => {
-                op32!(|lhs, rhs| cast(cast(lhs).to_unsigned().wrapping_shr(cast(rhs).to_unsigned())).to_signed())
+                op32!(|lhs, rhs| cast(cast(lhs).bitwise_as_u32().wrapping_shr(cast(rhs).bitwise_as_u32())).bitwise_as_i32())
             },
             Self::ShiftLogicalRight32AndSignExtend => {
-                op32_on_64!(|lhs, rhs| cast(cast(lhs).to_unsigned().wrapping_shr(cast(rhs).to_unsigned())).to_signed())
+                op32_on_64!(|lhs, rhs| cast(cast(lhs).bitwise_as_u32().wrapping_shr(cast(rhs).bitwise_as_u32())).bitwise_as_i32())
             }
             Self::ShiftLogicalRight64 => {
                 (lhs as u64).wrapping_shr(rhs as u32) as i64
@@ -4749,7 +4749,7 @@ impl OperationKind {
                 op32_on_64!(|lhs, rhs| lhs.rotate_left(rhs as u32))
             },
             Self::RotateLeft64 => {
-                let rhs = cast(rhs).to_unsigned();
+                let rhs = cast(rhs).bitwise_as_u64();
                 let rhs = cast(rhs).truncate_to_u32();
                 lhs.rotate_left(rhs)
             },
@@ -4760,7 +4760,7 @@ impl OperationKind {
                 op32_on_64!(|lhs, rhs| lhs.rotate_right(rhs as u32))
             },
             Self::RotateRight64 => {
-                let rhs = cast(rhs).to_unsigned();
+                let rhs = cast(rhs).bitwise_as_u64();
                 let rhs = cast(rhs).truncate_to_u32();
                 lhs.rotate_right(rhs)
             },
@@ -4778,7 +4778,7 @@ impl OperationKind {
                 C(self.apply_const(lhs, rhs))
             },
             (O::Add32, RegValue::DataAddress(lhs), C(rhs)) => {
-                let offset = cast(cast(lhs.offset).to_signed().wrapping_add(rhs)).to_unsigned();
+                let offset = cast(cast(lhs.offset).bitwise_as_i64().wrapping_add(rhs)).bitwise_as_u64();
                 if offset <= elf.section_by_index(lhs.section_index).size() {
                     RegValue::DataAddress(SectionTarget {
                         section_index: lhs.section_index,
@@ -4789,11 +4789,11 @@ impl OperationKind {
                 }
             },
             (O::Sub32, RegValue::DataAddress(lhs), C(rhs)) => {
-                let offset = cast(lhs.offset).to_signed().wrapping_sub(rhs);
+                let offset = cast(lhs.offset).bitwise_as_i64().wrapping_sub(rhs);
                 if offset >= 0 {
                     RegValue::DataAddress(SectionTarget {
                         section_index: lhs.section_index,
-                        offset: cast(offset).to_unsigned(),
+                        offset: cast(offset).bitwise_as_u64(),
                     })
                 } else {
                     return None;
@@ -5001,7 +5001,7 @@ impl RegValue {
                 if addend == 0 {
                     bits_used
                 } else {
-                    let addend = cast(addend).to_unsigned();
+                    let addend = cast(addend).bitwise_as_u64();
                     bits_used | (bits_used << 1) | addend | (addend << 1)
                 }
             }
@@ -5592,13 +5592,13 @@ impl BlockRegs {
                         kind,
                         dst: Reg::SP,
                         src1: Reg::SP.into(),
-                        src2: (cast(stack_space).to_signed() * -1).into(),
+                        src2: (cast(stack_space).to_i32_or_panic() * -1).into(),
                     },
                 );
 
                 let sp = self.get_reg(Reg::SP);
                 for (offset, reg) in regs {
-                    let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(cast(offset).to_signed()).to_i64_sign_extend())) else {
+                    let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(offset).to_i64())) else {
                         continue;
                     };
 
@@ -5627,13 +5627,13 @@ impl BlockRegs {
                         kind: add_kind,
                         dst: Reg::SP,
                         src1: Reg::SP.into(),
-                        src2: cast(stack_space).to_signed().into(),
+                        src2: cast(stack_space).to_i32_or_panic().into(),
                     },
                 );
 
                 let mut restored = [false; Reg::ALL.len()];
                 for &(offset, reg) in &regs {
-                    let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(cast(offset).to_signed()).to_i64_sign_extend())) else {
+                    let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(offset).to_i64())) else {
                         continue;
                     };
 
@@ -5657,7 +5657,7 @@ impl BlockRegs {
                             kind: load_kind,
                             base: Reg::SP,
                             dst,
-                            offset: cast(offset).to_signed(),
+                            offset: cast(offset).to_i32_or_panic(),
                         },
                     );
                 }
@@ -5790,7 +5790,7 @@ fn perform_constant_propagation(
             let mut simplified = false;
             let sp = regs.get_reg(Reg::SP);
             epilogue_regs.retain(|&(offset, reg)| {
-                if let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(cast(offset).to_signed()).to_i64_sign_extend())) {
+                if let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(offset).to_i64())) {
                     if let Some(&restored_value) = stack.get(&key) {
                         let current_value = regs.get_reg(reg);
                         if current_value == restored_value {
@@ -5840,13 +5840,13 @@ fn perform_constant_propagation(
                         .data()
                         .get(target.offset as usize..target.offset as usize + 8)
                         .map(|xs| u64::from_le_bytes([xs[0], xs[1], xs[2], xs[3], xs[4], xs[5], xs[6], xs[7]]))
-                        .map(|x| cast(x).to_signed()),
+                        .map(|x| cast(x).bitwise_as_i64()),
                     LoadKind::U32 => section
                         .data()
                         .get(target.offset as usize..target.offset as usize + 4)
                         .map(|xs| u32::from_le_bytes([xs[0], xs[1], xs[2], xs[3]]))
                         .map(|x| cast(x).to_u64())
-                        .map(|x| cast(x).to_signed()),
+                        .map(|x| cast(x).bitwise_as_i64()),
                     LoadKind::I32 => section
                         .data()
                         .get(target.offset as usize..target.offset as usize + 4)
@@ -5857,7 +5857,7 @@ fn perform_constant_propagation(
                         .get(target.offset as usize..target.offset as usize + 2)
                         .map(|xs| u16::from_le_bytes([xs[0], xs[1]]))
                         .map(|x| cast(x).to_u64())
-                        .map(|x| cast(x).to_signed()),
+                        .map(|x| cast(x).bitwise_as_i64()),
                     LoadKind::I16 => section
                         .data()
                         .get(target.offset as usize..target.offset as usize + 2)
@@ -5866,14 +5866,14 @@ fn perform_constant_propagation(
                     LoadKind::I8 => section
                         .data()
                         .get(target.offset as usize)
-                        .map(|&x| cast(x).to_signed())
+                        .map(|&x| cast(x).bitwise_as_i8())
                         .map(|x| cast(x).to_i64_sign_extend()),
                     LoadKind::U8 => section
                         .data()
                         .get(target.offset as usize)
                         .copied()
                         .map(|x| cast(x).to_u64())
-                        .map(|x| cast(x).to_signed()),
+                        .map(|x| cast(x).bitwise_as_i64()),
                 };
 
                 if let Some(imm) = value {
@@ -6548,7 +6548,7 @@ mod test {
                     Instruction::load_imm(dst, imm) => {
                         *out = BasicInst::LoadImmediate {
                             dst: dst.into(),
-                            imm: cast(imm).to_signed(),
+                            imm: cast(imm).bitwise_as_i32(),
                         }
                         .into();
                     }
@@ -6557,7 +6557,7 @@ mod test {
                             kind: AnyAnyKind::Add32,
                             dst: dst.into(),
                             src1: src.into(),
-                            src2: cast(imm).to_signed().into(),
+                            src2: cast(imm).bitwise_as_i32().into(),
                         }
                         .into();
                     }
@@ -6580,7 +6580,7 @@ mod test {
                                 _ => unreachable!(),
                             },
                             src1: src1.into(),
-                            src2: cast(src2).to_signed().into(),
+                            src2: cast(src2).bitwise_as_i32().into(),
                             target_true,
                             target_false,
                         }
@@ -6612,7 +6612,7 @@ mod test {
                             kind: StoreKind::U32,
                             src: src.into(),
                             base: base.into(),
-                            offset: cast(offset).to_signed(),
+                            offset: cast(offset).bitwise_as_i32(),
                         }
                         .into();
                     }
@@ -8324,12 +8324,12 @@ fn emit_code(
 
         for (source, op) in &block.ops {
             let op = match *op {
-                BasicInst::LoadImmediate { dst, imm } => Instruction::load_imm(conv_reg(dst), cast(imm).to_unsigned()),
+                BasicInst::LoadImmediate { dst, imm } => Instruction::load_imm(conv_reg(dst), cast(imm).bitwise_as_u32()),
                 BasicInst::LoadImmediate64 { dst, imm } => {
                     if !is_rv64 {
                         unreachable!("internal error: load_imm64 found when processing 32-bit binary")
                     } else {
-                        Instruction::load_imm64(conv_reg(dst), cast(imm).to_unsigned())
+                        Instruction::load_imm64(conv_reg(dst), cast(imm).bitwise_as_u64())
                     }
                 }
                 BasicInst::LoadHeapBase { dst } => Instruction::load_imm(conv_reg(dst), heap_base),
@@ -8365,7 +8365,7 @@ fn emit_code(
                         }
                         RegImm::Imm(value) => {
                             codegen! {
-                                args = (target, cast(value).to_unsigned()),
+                                args = (target, cast(value).bitwise_as_u32()),
                                 kind = kind,
                                 {
                                     StoreKind::U64 => store_imm_u64,
@@ -8379,7 +8379,7 @@ fn emit_code(
                 }
                 BasicInst::LoadIndirect { kind, dst, base, offset } => {
                     codegen! {
-                        args = (conv_reg(dst), conv_reg(base), cast(offset).to_unsigned()),
+                        args = (conv_reg(dst), conv_reg(base), cast(offset).bitwise_as_u32()),
                         kind = kind,
                         {
                             LoadKind::I8 => load_indirect_i8,
@@ -8395,7 +8395,7 @@ fn emit_code(
                 BasicInst::StoreIndirect { kind, src, base, offset } => match src {
                     RegImm::Reg(src) => {
                         codegen! {
-                            args = (conv_reg(src), conv_reg(base), cast(offset).to_unsigned()),
+                            args = (conv_reg(src), conv_reg(base), cast(offset).bitwise_as_u32()),
                             kind = kind,
                             {
                                 StoreKind::U64 => store_indirect_u64,
@@ -8407,7 +8407,7 @@ fn emit_code(
                     }
                     RegImm::Imm(value) => {
                         codegen! {
-                            args = (conv_reg(base), cast(offset).to_unsigned(), cast(value).to_unsigned()),
+                            args = (conv_reg(base), cast(offset).bitwise_as_u32(), cast(value).bitwise_as_u32()),
                             kind = kind,
                             {
                                 StoreKind::U64 => store_imm_indirect_u64,
@@ -8553,14 +8553,14 @@ fn emit_code(
                         }
                         (RegImm::Reg(src1), RegImm::Imm(src2)) => {
                             let src1 = conv_reg(src1);
-                            let src2 = cast(src2).to_unsigned();
+                            let src2 = cast(src2).bitwise_as_u32();
                             match kind {
                                 K::Add32 => I::add_imm_32(dst, src1, src2),
                                 K::Add32AndSignExtend => I::add_imm_32(dst, src1, src2),
                                 K::Add64 => I::add_imm_64(dst, src1, src2),
-                                K::Sub32 => I::add_imm_32(dst, src1, cast(-cast(src2).to_signed()).to_unsigned()),
-                                K::Sub32AndSignExtend => I::add_imm_32(dst, src1, cast(-cast(src2).to_signed()).to_unsigned()),
-                                K::Sub64 => I::add_imm_64(dst, src1, cast(-cast(src2).to_signed()).to_unsigned()),
+                                K::Sub32 => I::add_imm_32(dst, src1, cast(-cast(src2).bitwise_as_i32()).bitwise_as_u32()),
+                                K::Sub32AndSignExtend => I::add_imm_32(dst, src1, cast(-cast(src2).bitwise_as_i32()).bitwise_as_u32()),
+                                K::Sub64 => I::add_imm_64(dst, src1, cast(-cast(src2).bitwise_as_i32()).bitwise_as_u32()),
                                 K::ShiftLogicalLeft32 => I::shift_logical_left_imm_32(dst, src1, src2),
                                 K::ShiftLogicalLeft32AndSignExtend => I::shift_logical_left_imm_32(dst, src1, src2),
                                 K::ShiftLogicalLeft64 => I::shift_logical_left_imm_64(dst, src1, src2),
@@ -8586,7 +8586,7 @@ fn emit_code(
                             }
                         }
                         (RegImm::Imm(src1), RegImm::Reg(src2)) => {
-                            let src1 = cast(src1).to_unsigned();
+                            let src1 = cast(src1).bitwise_as_u32();
                             let src2 = conv_reg(src2);
                             match kind {
                                 K::Add32 => I::add_imm_32(dst, src2, src1),
@@ -8647,7 +8647,7 @@ fn emit_code(
                     }
                     RegImm::Imm(imm) => {
                         codegen! {
-                            args = (conv_reg(dst), conv_reg(cond), cast(imm).to_unsigned()),
+                            args = (conv_reg(dst), conv_reg(cond), cast(imm).bitwise_as_u32()),
                             kind = kind,
                             {
                                 CmovKind::EqZero => cmov_if_zero_imm,
@@ -8773,7 +8773,7 @@ fn emit_code(
                     }
                     (RegImm::Imm(src1), RegImm::Reg(src2)) => {
                         codegen! {
-                            args = (conv_reg(src2), cast(src1).to_unsigned(), target_true.static_target),
+                            args = (conv_reg(src2), cast(src1).bitwise_as_u32(), target_true.static_target),
                             kind = kind,
                             {
                                 BranchKind::Eq32 | BranchKind::Eq64 => branch_eq_imm,
@@ -8787,7 +8787,7 @@ fn emit_code(
                     }
                     (RegImm::Reg(src1), RegImm::Imm(src2)) => {
                         codegen! {
-                            args = (conv_reg(src1), cast(src2).to_unsigned(), target_true.static_target),
+                            args = (conv_reg(src1), cast(src2).bitwise_as_u32(), target_true.static_target),
                             kind = kind,
                             {
                                 BranchKind::Eq32 | BranchKind::Eq64 => branch_eq_imm,
@@ -10684,21 +10684,21 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
                         if range.end < range.start {
                             match size {
                                 RelocationSize::U8 => {
-                                    if let Ok(new_value) = cast(value).to_signed().try_into() {
+                                    if let Ok(new_value) = cast(value).bitwise_as_i64().try_into() {
                                         let new_value: i8 = new_value;
-                                        value = cast(cast(new_value).to_unsigned()).to_u64();
+                                        value = cast(cast(new_value).bitwise_as_u8()).to_u64();
                                     }
                                 }
                                 RelocationSize::U16 => {
-                                    if let Ok(new_value) = cast(value).to_signed().try_into() {
+                                    if let Ok(new_value) = cast(value).bitwise_as_i64().try_into() {
                                         let new_value: i16 = new_value;
-                                        value = cast(cast(new_value).to_unsigned()).to_u64();
+                                        value = cast(cast(new_value).bitwise_as_u16()).to_u64();
                                     }
                                 }
                                 RelocationSize::U32 => {
-                                    if let Ok(new_value) = cast(value).to_signed().try_into() {
+                                    if let Ok(new_value) = cast(value).bitwise_as_i64().try_into() {
                                         let new_value: i32 = new_value;
-                                        value = cast(cast(new_value).to_unsigned()).to_u64();
+                                        value = cast(cast(new_value).bitwise_as_u32()).to_u64();
                                     }
                                 }
                                 RelocationSize::U64 => {}
