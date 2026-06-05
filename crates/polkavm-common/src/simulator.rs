@@ -2250,6 +2250,50 @@ impl<'a> Default for TimelineConfig<'a> {
     }
 }
 
+fn run_simulator_for_first_block<T: Tracer>(
+    code: &[u8],
+    isa: InstructionSetKind,
+    cache_model: CacheModel,
+    instructions: &[crate::program::ParsedInstruction],
+    tracer: T,
+) -> (alloc::vec::Vec<crate::program::ParsedInstruction>, u32, u32) {
+    let count = instructions
+        .iter()
+        .take_while(|inst| !inst.kind.opcode().starts_new_basic_block())
+        .count();
+
+    let mut instructions = instructions[..(count + 1).min(instructions.len())].to_vec();
+    if !instructions
+        .last()
+        .map(|instruction| instruction.kind.opcode().starts_new_basic_block())
+        .unwrap_or(false)
+    {
+        let next_pc = instructions.last().map(|instruction| instruction.next_offset.0).unwrap_or(0);
+        instructions.push(crate::program::ParsedInstruction {
+            kind: crate::program::Instruction::invalid,
+            offset: crate::program::ProgramCounter(next_pc),
+            next_offset: crate::program::ProgramCounter(next_pc + 1),
+        });
+    }
+
+    let mut sim = Simulator::<B64, _>::new(code, isa, cache_model, tracer);
+    for &instruction in &instructions {
+        assert!(sim.take_block_cost().is_none());
+        instruction.visit_parsing(&mut sim);
+    }
+
+    let total_cycles = sim.cycles;
+    let block_cost = sim.take_block_cost().unwrap();
+
+    #[cfg(all(test, feature = "logging"))]
+    log::debug!("Total cycles: {}", total_cycles);
+
+    #[cfg(all(test, feature = "logging"))]
+    log::debug!("Block cost: {block_cost}");
+
+    (instructions, total_cycles, block_cost)
+}
+
 pub fn timeline_for_instructions(
     code: &[u8],
     isa: InstructionSetKind,
@@ -2291,49 +2335,19 @@ pub fn timeline_for_instructions(
         }
     }
 
-    let count = instructions
-        .iter()
-        .take_while(|inst| !inst.kind.opcode().starts_new_basic_block())
-        .count();
-
-    let mut instructions = instructions[..(count + 1).min(instructions.len())].to_vec();
-    if !instructions
-        .last()
-        .map(|instruction| instruction.kind.opcode().starts_new_basic_block())
-        .unwrap_or(false)
-    {
-        let next_pc = instructions.last().map(|instruction| instruction.next_offset.0).unwrap_or(0);
-        instructions.push(crate::program::ParsedInstruction {
-            kind: crate::program::Instruction::invalid,
-            offset: crate::program::ProgramCounter(next_pc),
-            next_offset: crate::program::ProgramCounter(next_pc + 1),
-        });
-    }
-
     let mut timeline_map = BTreeMap::new();
-    let mut sim = Simulator::<B64, _>::new(
+    let (instructions, total_cycles, block_cost) = run_simulator_for_first_block(
         code,
         isa,
         cache_model,
+        instructions,
         TimelineTracer {
             should_enable_fast_forward: config.should_enable_fast_forward,
             timeline: &mut timeline_map,
         },
     );
 
-    for &instruction in &instructions {
-        assert!(sim.take_block_cost().is_none());
-        instruction.visit_parsing(&mut sim);
-    }
-
-    let total_cycles = cast(sim.cycles).to_usize();
-    let block_cost = sim.take_block_cost().unwrap();
-    #[cfg(all(test, feature = "logging"))]
-    log::debug!("Total cycles: {total_cycles}");
-
-    #[cfg(all(test, feature = "logging"))]
-    log::debug!("Block cost: {block_cost}");
-
+    let total_cycles = cast(total_cycles).to_usize();
     let mut timeline = vec!['.'; total_cycles * instructions.len()];
     for ((cycle, instruction), event) in timeline_map {
         let index = instruction as usize * total_cycles + cycle as usize;
@@ -2450,6 +2464,9 @@ mod tests {
         if timeline_ff_s != expected_timeline_s {
             panic!("Timeline mismatch for fast-forward!\n\nExpected timeline:\n{expected_timeline_s}\nActual timeline:\n{timeline_ff_s}");
         }
+
+        let (_, _, block_cost) = super::run_simulator_for_first_block(blob.code(), InstructionSetKind::Latest64, config, &instructions, ());
+        assert_eq!(block_cost, expected_cycles.try_into().unwrap());
     }
 
     #[test]
@@ -2949,6 +2966,93 @@ mod tests {
                 D.....  a1 = t0
                 D.....  a2 = s1
                 .DeeER  trap
+            ",
+        )
+    }
+
+    #[test]
+    fn test_another_complex_block_1() {
+        assert_timeline(
+            CacheModel::L2Hit,
+            "
+                unlikely
+                a4 = u64 [sp + 0x30]
+                a0 = a4 << 0x8
+                a1 = a4 << 0x30
+                a1 = a1 >> 0x38
+                a0 = a0 | a1
+                u16 [s1] = a0
+                a1 = u64 [sp + 0x20]
+                a3 = a1 << 0x8
+                a2 = a1 << 0x30
+                a2 = a2 >> 0x38
+                t0 = a3 | a2
+                u16 [s1 + 0x2] = t0
+                a3 = u64 [sp + 0x38]
+                a2 = a3 << 0x8
+                a3 = a3 << 0x30
+                a3 = a3 >> 0x38
+                a2 = a2 | a3
+                u16 [s1 + 0x4] = a2
+                a3 = u64 [sp + 0x28]
+                a2 = a3 << 0x8
+                a3 = a3 << 0x30
+                a3 = a3 >> 0x38
+                a2 = a2 | a3
+                u16 [s1 + 0x6] = a2
+                a2 = a4 << 0x38
+                a2 = a2 >> 0x3f
+                a0 = a0 + a2
+                a0 = a0 << 0x30
+                a0 = a0 >>a 0x31
+                a2 = a1 << 0x38
+                a2 = a2 >> 0x3f
+                a1 = t0 + a2
+                a1 = a1 << 0x30
+                a1 = a1 >>a 0x31
+                a0 = a0 + a1
+                jump @next
+                @next:
+                trap
+            ",
+            "
+                DeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeER......................  unlikely
+                DeeeeeeeeeeeeeeeeeeeeeeeeeE---------------R......................  a4 = u64 [sp + 0x30]
+                D=========================eE--------------R......................  a0 = a4 << 0x8
+                .D=========================eE-------------R......................  a1 = a4 << 0x30
+                .D==========================eE------------R......................  a1 = a1 >> 0x38
+                .D===========================eE-----------R......................  a0 = a0 | a1
+                ..D===========================eeeeeeeeeeeeeeeeeeeeeeeeeER........  u16 [s1] = a0
+                ..DeeeeeeeeeeeeeeeeeeeeeeeeeE---------------------------R........  a1 = u64 [sp + 0x20]
+                ..D=========================eE--------------------------R........  a3 = a1 << 0x8
+                ...D=========================eE-------------------------R........  a2 = a1 << 0x30
+                ...D==========================eE------------------------R........  a2 = a2 >> 0x38
+                ....D==========================eE-----------------------R........  t0 = a3 | a2
+                ....D===========================eeeeeeeeeeeeeeeeeeeeeeeeeER......  u16 [s1 + 0x2] = t0
+                ....DeeeeeeeeeeeeeeeeeeeeeeeeeE---------------------------R......  a3 = u64 [sp + 0x38]
+                .....D========================eE--------------------------R......  a2 = a3 << 0x8
+                .....D=========================eE-------------------------R......  a3 = a3 << 0x30
+                .....D==========================eE------------------------R......  a3 = a3 >> 0x38
+                ......D==========================eE-----------------------R......  a2 = a2 | a3
+                ......D===========================eeeeeeeeeeeeeeeeeeeeeeeeeER....  u16 [s1 + 0x4] = a2
+                ......DeeeeeeeeeeeeeeeeeeeeeeeeeE---------------------------R....  a3 = u64 [sp + 0x28]
+                .......D========================eE--------------------------R....  a2 = a3 << 0x8
+                .......D=========================eE-------------------------R....  a3 = a3 << 0x30
+                .......D==========================eE------------------------R....  a3 = a3 >> 0x38
+                ........D==========================eE-----------------------R....  a2 = a2 | a3
+                ........D===========================eeeeeeeeeeeeeeeeeeeeeeeeeER..  u16 [s1 + 0x6] = a2
+                ........D==============================================eE-----R..  a2 = a4 << 0x38
+                .........D==============================================eE----R..  a2 = a2 >> 0x3f
+                .........D===============================================eE---R..  a0 = a0 + a2
+                .........D================================================eE--R..  a0 = a0 << 0x30
+                .........D=================================================eE-R..  a0 = a0 >>a 0x31
+                ..........D==============================================eE---R..  a2 = a1 << 0x38
+                ..........D===============================================eE--R..  a2 = a2 >> 0x3f
+                ...........................................D===============eE-R..  a1 = t0 + a2
+                ...........................................D================eER..  a1 = a1 << 0x30
+                ...........................................D=================eER.  a1 = a1 >>a 0x31
+                ............................................D=================eER  a0 = a0 + a1
+                ............................................DeeeeeeeeeeeeeeeE---R  jump 107
             ",
         )
     }
