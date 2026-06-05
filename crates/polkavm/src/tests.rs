@@ -38,9 +38,16 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
         .join(std::env!("CARGO_MANIFEST_DIR"))
         .join("../../guest-programs");
 
-    let envs: alloc::collections::BTreeMap<String, String> = std::env::vars()
+    let mut envs: alloc::collections::BTreeMap<String, String> = std::env::vars()
         .filter(|(k, _)| !["CARGO", "RUSTC", "RUSTUP"].iter().any(|e| k.contains(e)))
         .collect();
+
+    let target_dir = if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        envs.insert("CARGO_TARGET_DIR".to_owned(), target_dir.clone());
+        std::path::PathBuf::from(target_dir)
+    } else {
+        path.join("target")
+    };
 
     let mut args = polkavm_linker::TargetJsonArgs::default();
     args.is_64_bit = is_64_bit;
@@ -84,9 +91,7 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
         panic!("{}", String::from_utf8_lossy(&res.stderr));
     }
 
-    let blob = std::fs::read(path.join("target").join(target).join(profile).join(filename))
-        .unwrap()
-        .leak();
+    let blob = std::fs::read(target_dir.join(target).join(profile).join(filename)).unwrap().leak();
 
     elf_map.insert((kind, is_64_bit), blob);
     blob
