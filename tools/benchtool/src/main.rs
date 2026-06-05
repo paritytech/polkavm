@@ -71,6 +71,13 @@ fn benchmark_oneshot<T: Backend>(engine_cache: &mut Option<T::Engine>, count: u6
         .take()
         .unwrap_or_else(|| backend.create(CreateArgs { is_compile_only: false }));
     let blob = backend.load(path);
+    {
+        let module = backend.compile(&mut engine, &blob);
+        let mut instance = backend.spawn(&mut engine, &module);
+        backend.initialize(&mut instance);
+        backend.run(&mut instance);
+    }
+
     let start = std::time::Instant::now();
     for _ in 0..count {
         let module = backend.compile(&mut engine, &blob);
