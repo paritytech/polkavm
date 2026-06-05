@@ -206,6 +206,12 @@ pub enum RegImmKind {
     RotateRight64,
 }
 
+enum Bitness {
+    B32,
+    B64,
+    Both,
+}
+
 impl RegImmKind {
     #[inline(always)]
     const fn decode(value: u32, rv64: bool) -> Option<Self> {
@@ -223,6 +229,38 @@ impl RegImmKind {
             0b110 => Some(Self::Or32),
             0b111 => Some(Self::And32),
             _ => None,
+        }
+    }
+
+    fn bitness(self) -> Bitness {
+        use RegImmKind::*;
+        match self {
+            Add32
+            | SetLessThanSigned32
+            | SetLessThanUnsigned32
+            | Xor32
+            | Or32
+            | And32
+            | ShiftLogicalLeft32
+            | ShiftLogicalRight32
+            | ShiftArithmeticRight32
+            | RotateRight32 => Bitness::B32,
+
+            Add32AndSignExtend
+            | Add64
+            | SetLessThanSigned64
+            | SetLessThanUnsigned64
+            | Xor64
+            | Or64
+            | And64
+            | ShiftLogicalLeft32AndSignExtend
+            | ShiftLogicalLeft64
+            | ShiftLogicalRight32AndSignExtend
+            | ShiftLogicalRight64
+            | ShiftArithmeticRight32AndSignExtend
+            | ShiftArithmeticRight64
+            | RotateRight32AndSignExtend
+            | RotateRight64 => Bitness::B64,
         }
     }
 }
@@ -289,6 +327,69 @@ pub enum RegRegKind {
     RotateRight32,
     RotateRight32AndSignExtend,
     RotateRight64,
+}
+
+impl RegRegKind {
+    fn bitness(self) -> Bitness {
+        use RegRegKind::*;
+        match self {
+            Add32
+            | Sub32
+            | SetLessThanSigned32
+            | SetLessThanUnsigned32
+            | Xor32
+            | ShiftLogicalLeft32
+            | ShiftLogicalRight32
+            | ShiftArithmeticRight32
+            | Or32
+            | And32
+            | Mul32
+            | MulUpperSignedSigned32
+            | MulUpperSignedUnsigned32
+            | MulUpperUnsignedUnsigned32
+            | Div32
+            | DivUnsigned32
+            | Rem32
+            | RemUnsigned32
+            | RotateLeft32
+            | RotateRight32 => Bitness::B32,
+
+            Add32AndSignExtend
+            | Add64
+            | Sub32AndSignExtend
+            | Sub64
+            | SetLessThanSigned64
+            | SetLessThanUnsigned64
+            | Xor64
+            | ShiftLogicalLeft32AndSignExtend
+            | ShiftLogicalLeft64
+            | ShiftLogicalRight32AndSignExtend
+            | ShiftLogicalRight64
+            | ShiftArithmeticRight32AndSignExtend
+            | ShiftArithmeticRight64
+            | Or64
+            | And64
+            | Mul32AndSignExtend
+            | Mul64
+            | MulUpperSignedSigned64
+            | MulUpperSignedUnsigned64
+            | MulUpperUnsignedUnsigned64
+            | Div32AndSignExtend
+            | Div64
+            | DivUnsigned32AndSignExtend
+            | DivUnsigned64
+            | Rem32AndSignExtend
+            | Rem64
+            | RemUnsigned32AndSignExtend
+            | RemUnsigned64
+            | RotateLeft32AndSignExtend
+            | RotateLeft64
+            | RotateRight32AndSignExtend
+            | RotateRight64 => Bitness::B64,
+
+            AndInverted | OrInverted | Xnor | Maximum | MaximumUnsigned | Minimum | MinimumUnsigned => Bitness::Both,
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
@@ -797,8 +898,8 @@ impl Inst {
                             (0b0, 0b01) => xlen!(RegRegKind, Xor32, Xor64),
                             (0b0, 0b10) => xlen!(RegRegKind, Or32, Or64),
                             (0b0, 0b11) => xlen!(RegRegKind, And32, And64),
-                            (0b1, 0b00) if config.rv64 => RegRegKind::Sub32,
-                            (0b1, 0b01) if config.rv64 => RegRegKind::Add32,
+                            (0b1, 0b00) if config.rv64 => RegRegKind::Sub32AndSignExtend,
+                            (0b1, 0b01) if config.rv64 => RegRegKind::Add32AndSignExtend,
                             _ => return None,
                         },
                         dst: rd,
@@ -919,6 +1020,29 @@ impl Inst {
     }
 
     pub fn decode(config: &DecoderConfig, op: u32) -> Option<Self> {
+        let instruction = Self::decode_impl(config, op)?;
+        let bitness = match instruction {
+            Inst::RegImm { kind, .. } => kind.bitness(),
+            Inst::RegReg { kind, .. } => kind.bitness(),
+            _ => return Some(instruction),
+        };
+
+        match bitness {
+            Bitness::B32 => assert!(
+                !config.rv64,
+                "internal error: emitted RV32-exclusive instruction in RV64 mode: {op:#x} -> {instruction:?}"
+            ),
+            Bitness::B64 => assert!(
+                config.rv64,
+                "internal error: emitted RV64-exclusive instruction in RV32 mode: {op:#x} -> {instruction:?}"
+            ),
+            Bitness::Both => {}
+        }
+
+        Some(instruction)
+    }
+
+    fn decode_impl(config: &DecoderConfig, op: u32) -> Option<Self> {
         ctx!(config.rv64);
 
         if Inst::is_compressed((op & 0xff) as u8) {
@@ -2016,7 +2140,7 @@ mod test_decode_compressed {
         assert_eq!(
             Inst::decode_compressed(&config64, op),
             Some(Inst::RegReg {
-                kind: RegRegKind::Sub32,
+                kind: RegRegKind::Sub32AndSignExtend,
                 dst: Reg::A0,
                 src1: Reg::A0,
                 src2: Reg::S0
@@ -2030,7 +2154,7 @@ mod test_decode_compressed {
         assert_eq!(
             Inst::decode_compressed(&DecoderConfig::new_64bit(), 0x9c89),
             Some(Inst::RegReg {
-                kind: RegRegKind::Sub32,
+                kind: RegRegKind::Sub32AndSignExtend,
                 dst: Reg::S1,
                 src1: Reg::S1,
                 src2: Reg::A0
@@ -2379,7 +2503,7 @@ mod test_decode_compressed {
         assert_eq!(
             Inst::decode_compressed(&config64, op),
             Some(Inst::RegReg {
-                kind: RegRegKind::Add32,
+                kind: RegRegKind::Add32AndSignExtend,
                 dst: Reg::A0,
                 src1: Reg::A0,
                 src2: Reg::S0
@@ -2497,6 +2621,20 @@ mod test_decode_compressed {
             let op = 0b100_1_11_000_11_000_01 | value;
             // reserved
             assert_eq!(Inst::decode_compressed(&config, op), None);
+        }
+    }
+
+    #[test]
+    fn enumerate_all_compressed_32bit() {
+        for op in 0..u16::MAX {
+            super::Inst::decode(&DecoderConfig::new_32bit(), u32::from(op));
+        }
+    }
+
+    #[test]
+    fn enumerate_all_compressed_64bit() {
+        for op in 0..u16::MAX {
+            super::Inst::decode(&DecoderConfig::new_64bit(), u32::from(op));
         }
     }
 }

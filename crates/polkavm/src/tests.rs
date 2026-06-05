@@ -3945,6 +3945,24 @@ fn test_blob_get_self_address_naked(args: TestBlobArgs) {
     assert_ne!(addr, 0);
 }
 
+fn test_blob_sub_i32_min_64(args: TestBlobArgs) {
+    if !args.is_64_bit {
+        return;
+    }
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    assert_eq!(i.call::<(u64,), u64>("sub_i32_min_64", (0,)).unwrap(), 0x80000000);
+}
+
+fn test_blob_sub_i32_min_32(args: TestBlobArgs) {
+    if !args.is_64_bit {
+        return;
+    }
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    assert_eq!(i.call::<(u64,), u64>("sub_i32_min_32", (0,)).unwrap(), 0xffffffff80000000);
+}
+
 fn test_asm_reloc_add_sub(config: Config, optimize: bool) {
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_add_sub_64.elf");
 
@@ -5369,6 +5387,8 @@ run_test_blob_tests! {
     test_blob_get_heap_base
     test_blob_get_self_address
     test_blob_get_self_address_naked
+    test_blob_sub_i32_min_64
+    test_blob_sub_i32_min_32
 }
 
 run_asm_tests! {

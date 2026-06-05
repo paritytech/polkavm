@@ -486,3 +486,33 @@ fn get_address_dummy() -> usize {
     // To make sure it's not removed as dead code.
     infinite_loop_without_relocation as usize
 }
+
+#[cfg(target_pointer_width = "64")]
+#[polkavm_derive::polkavm_export]
+extern "C" fn sub_i32_min_64(a0: u64) -> u64 {
+    unsafe {
+        let output;
+        core::arch::asm!(
+            "lui a1, 0x80000",
+            "sub a0, a0, a1",
+            "lui a1, 1",
+            inout("a0") a0 => output,
+        );
+        output
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+#[polkavm_derive::polkavm_export]
+extern "C" fn sub_i32_min_32(a0: u64) -> u64 {
+    unsafe {
+        let output;
+        core::arch::asm!(
+            "lui a1, 0x80000",
+            "subw a0, a0, a1",
+            "lui a1, 1",
+            inout("a0") a0 => output,
+        );
+        output
+    }
+}
