@@ -8613,21 +8613,31 @@ fn emit_code(
                                 K::Add32 => I::add_imm_32(dst, src1, src2),
                                 K::Add32AndSignExtend => I::add_imm_32(dst, src1, src2),
                                 K::Add64 => I::add_imm_64(dst, src1, src2),
-                                K::Sub32 => I::add_imm_32(
-                                    dst,
-                                    src1,
-                                    src2.checked_neg().expect("internal error: overflow when negating an immediate"),
-                                ),
-                                K::Sub32AndSignExtend => I::add_imm_32(
-                                    dst,
-                                    src1,
-                                    src2.checked_neg().expect("internal error: overflow when negating an immediate"),
-                                ),
-                                K::Sub64 => I::add_imm_64(
-                                    dst,
-                                    src1,
-                                    src2.checked_neg().expect("internal error: overflow when negating an immediate"),
-                                ),
+                                K::Sub32 => {
+                                    if let Some(src2_neg) = src2.checked_neg() {
+                                        I::add_imm_32(dst, src1, src2_neg)
+                                    } else {
+                                        code.push((
+                                            source.clone(),
+                                            I::add_imm_32(dst, src1, src2.wrapping_add(1).checked_neg().unwrap()),
+                                        ));
+                                        code.push((source.clone(), I::add_imm_32(dst, dst, 1)));
+                                        continue;
+                                    }
+                                }
+                                K::Sub32AndSignExtend => I::add_imm_32(dst, src1, src2.wrapping_neg()),
+                                K::Sub64 => {
+                                    if let Some(src2_neg) = src2.checked_neg() {
+                                        I::add_imm_64(dst, src1, src2_neg)
+                                    } else {
+                                        code.push((
+                                            source.clone(),
+                                            I::add_imm_64(dst, src1, src2.wrapping_add(1).checked_neg().unwrap()),
+                                        ));
+                                        code.push((source.clone(), I::add_imm_64(dst, dst, 1)));
+                                        continue;
+                                    }
+                                }
                                 K::ShiftLogicalLeft32 => I::shift_logical_left_imm_32(dst, src1, src2),
                                 K::ShiftLogicalLeft32AndSignExtend => I::shift_logical_left_imm_32(dst, src1, src2),
                                 K::ShiftLogicalLeft64 => I::shift_logical_left_imm_64(dst, src1, src2),
