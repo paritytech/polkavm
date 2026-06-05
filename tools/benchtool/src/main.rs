@@ -224,19 +224,25 @@ fn find_benchmarks_in(root_path: &Path) -> Result<Vec<Benchmark>, std::io::Error
 
 fn find_benchmarks() -> Result<Vec<Benchmark>, std::io::Error> {
     let mut output = Vec::new();
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest-programs");
-    let paths = [
-        root.join("target/riscv32emac-unknown-none-polkavm/release"),
-        root.join("target/riscv64emac-unknown-none-polkavm/release"),
-        root.join("target/riscv64imac-unknown-none-elf/release"),
-        root.join("target/wasm32-unknown-unknown/release"),
-        root.join("target/sbf-solana-solana/release"),
-        #[cfg(target_arch = "x86_64")]
-        root.join("target/x86_64-unknown-linux-gnu/release"),
-        #[cfg(target_arch = "x86")]
-        root.join("target/i686-unknown-linux-gnu/release"),
-        PathBuf::from("."),
-    ];
+    let mut roots = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest-programs/target")];
+    if let Ok(root) = std::env::var("CARGO_TARGET_DIR") {
+        roots.push(PathBuf::from(root));
+    }
+
+    let mut paths = vec![PathBuf::from(".")];
+    for root in roots {
+        paths.extend([
+            root.join("riscv32emac-unknown-none-polkavm/release"),
+            root.join("riscv64emac-unknown-none-polkavm/release"),
+            root.join("riscv64imac-unknown-none-elf/release"),
+            root.join("wasm32-unknown-unknown/release"),
+            root.join("sbf-solana-solana/release"),
+            #[cfg(target_arch = "x86_64")]
+            root.join("x86_64-unknown-linux-gnu/release"),
+            #[cfg(target_arch = "x86")]
+            root.join("i686-unknown-linux-gnu/release"),
+        ]);
+    }
 
     for path in paths {
         if !path.exists() {
