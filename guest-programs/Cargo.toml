@@ -18,6 +18,7 @@ members = [
     # Benchmarks:
     "bench-minimal",
     "bench-memset",
+    "bench-ed25519",
     "bench-pinky",
     "bench-prime-sieve",
 
