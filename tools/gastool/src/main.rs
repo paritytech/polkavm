@@ -16,6 +16,7 @@ use polkavm_assembler::amd64::Reg::rsp;
 use polkavm_assembler::amd64::RegIndex::*;
 use polkavm_assembler::amd64::{Condition, LoadKind, RegSize, Size};
 use polkavm_assembler::{Assembler, Label};
+use polkavm_common::cast::cast;
 use polkavm_common::program::{InstructionFormat, InstructionSetKind};
 use polkavm_common::writer::ProgramBlobBuilder;
 use polkavm_linker::TargetInstructionSet;
@@ -84,10 +85,10 @@ fn test_pcg() {
             }
             Instruction::xor(dst, src1, src2) => regs[dst.get() as usize] = regs[src1.get() as usize] ^ regs[src2.get() as usize],
             Instruction::shift_logical_right_imm_64(dst, src1, src2) => {
-                regs[dst.get() as usize] = regs[src1.get() as usize].wrapping_shr(src2)
+                regs[dst.get() as usize] = regs[src1.get() as usize].wrapping_shr(cast(src2).bitwise_as_u32())
             }
             Instruction::shift_logical_left_imm_64(dst, src1, src2) => {
-                regs[dst.get() as usize] = regs[src1.get() as usize].wrapping_shl(src2)
+                regs[dst.get() as usize] = regs[src1.get() as usize].wrapping_shl(cast(src2).bitwise_as_u32())
             }
             Instruction::rotate_right_32(dst, src1, src2) => {
                 regs[dst.get() as usize] =
@@ -1183,12 +1184,12 @@ impl<'a, C> BenchmarkBuilder<'a, C> {
 
         let mut code = Vec::new();
         code.extend_from_slice(&self.init_code);
-        code.push(ecalli(ECALLI_BENCHMARK_PROLOGUE));
+        code.push(ecalli(cast(ECALLI_BENCHMARK_PROLOGUE).bitwise_as_i32()));
         for _ in 0..self.repeat_code {
             (self.codegen)(InstructionBuffer { code: &mut code });
         }
-        code.push(ecalli(ECALLI_BENCHMARK_EPILOGUE));
-        code.push(ecalli(ECALLI_BENCHMARK_ON_FINISH));
+        code.push(ecalli(cast(ECALLI_BENCHMARK_EPILOGUE).bitwise_as_i32()));
+        code.push(ecalli(cast(ECALLI_BENCHMARK_ON_FINISH).bitwise_as_i32()));
         code.push(ret());
 
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
@@ -1651,7 +1652,7 @@ fn main_cache_miss_benchmark(isolation_args: IsolationArgs, output_chart: Option
                 .benchmark(format!("cache_miss_test_{name}_{memory}_{increment}"), |mut code| {
                     let mut offset = 0x20000;
                     for _ in 0..iterations {
-                        code.push(load_indirect_u64(A0, A0, offset));
+                        code.push(load_indirect_u64(A0, A0, offset.try_into().unwrap()));
                         offset += increment;
                     }
                 })
@@ -2142,7 +2143,7 @@ fn maximize_cache_misses_for_cache(ctx: &Context, kind: CacheKind) -> BenchmarkR
 
     ctx.benchmark(name, |mut code| {
             for &address in &addresses {
-                code.push(load_indirect_u64(A0, A0, address));
+                code.push(load_indirect_u64(A0, A0, address.try_into().unwrap()));
             }
         })
         .cost_divisor(iterations)
@@ -2295,13 +2296,13 @@ fn main_generate_model(
                 code.push(fallthrough());
 
                 for _ in 0..copies {
-                    code.push(add_imm_64(A1, A1, -1_i32 as u32));
+                    code.push(add_imm_64(A1, A1, -1));
                     code.push(branch_eq_imm(A1, 0, copies * 2 + 1));
                     pcg_rand_u32(code.code, pcg_increment, pcg_state_reg, pcg_tmp_reg, A0);
                     code.push(and_imm(A0, A0, 1024 * 1024 / 2));
                     code.push(shift_logical_left_imm_64(A0, A0, 1));
                     if should_load_imm {
-                        code.push(load_imm_and_jump_indirect(A2, A0, 0xffffffff, 2));
+                        code.push(load_imm_and_jump_indirect(A2, A0, i32::MIN, 2));
                     } else {
                         code.push(jump_indirect(A0, 2));
                     }
@@ -2403,7 +2404,7 @@ fn main_generate_model(
     }
 
     for (branch_kind_name, branch_kind) in [
-        ("branch_eq_imm", branch_eq_imm as fn(Reg, u32, u32) -> Instruction),
+        ("branch_eq_imm", branch_eq_imm as fn(Reg, i32, u32) -> Instruction),
         ("branch_not_eq_imm", branch_not_eq_imm),
     ] {
         for arg in [0, 1] {
@@ -2481,7 +2482,7 @@ fn main_generate_model(
     model.load_imm_and_jump = {
         let mut n = 0;
         ctx.benchmark("load_imm_and_jump", |mut code| {
-            code.push(load_imm_and_jump(A0, 0xffffffff, n + 1));
+            code.push(load_imm_and_jump(A0, i32::MIN, n + 1));
             n += 1;
         })
         .repeat_code(10000)
@@ -2524,22 +2525,22 @@ fn main_generate_model(
     define_simple_benches! {
         add_32(A0, A0, A1),
         add_64(A0, A0, A1),
-        add_imm_32(A0, A0, 0xffffffff),
-        add_imm_64(A0, A0, 0xffffffff),
+        add_imm_32(A0, A0, i32::MIN),
+        add_imm_64(A0, A0, i32::MIN),
         and(A0, A0, A1),
-        and_imm(A0, A0, 0xffffffff),
+        and_imm(A0, A0, i32::MIN),
         and_inverted(A0, A0, A1),
         cmov_if_not_zero(A1, A0, A1),
-        cmov_if_not_zero_imm(A0, A0, 0xffffffff),
+        cmov_if_not_zero_imm(A0, A0, i32::MIN),
         cmov_if_zero(A1, A0, A1),
-        cmov_if_zero_imm(A0, A0, 0xffffffff),
+        cmov_if_zero_imm(A0, A0, i32::MIN),
         count_leading_zero_bits_32(A0, A0),
         count_leading_zero_bits_64(A0, A0),
         count_set_bits_32(A0, A0),
         count_set_bits_64(A0, A0),
         count_trailing_zero_bits_32(A0, A0),
         count_trailing_zero_bits_64(A0, A0),
-        load_imm(A0, 0xffffffff),
+        load_imm(A0, i32::MIN),
         load_imm64(A0, 0xffffffffffffffff),
         maximum(A0, A0, A1),
         maximum_unsigned(A0, A0, A1),
@@ -2549,60 +2550,60 @@ fn main_generate_model(
         move_reg(A0, A1),
         mul_32(A0, A0, A1),
         mul_64(A0, A0, A1),
-        mul_imm_32(A0, A0, 0xffffffff),
-        mul_imm_64(A0, A0, 0xffffffff),
+        mul_imm_32(A0, A0, i32::MIN),
+        mul_imm_64(A0, A0, i32::MIN),
         mul_upper_signed_signed(A0, A0, A1),
         mul_upper_signed_unsigned(A0, A0, A1),
         mul_upper_unsigned_unsigned(A0, A0, A1),
-        negate_and_add_imm_32(A0, A0, 0xffffffff),
-        negate_and_add_imm_64(A0, A0, 0xffffffff),
+        negate_and_add_imm_32(A0, A0, i32::MIN),
+        negate_and_add_imm_64(A0, A0, i32::MIN),
         or(A0, A0, A1),
-        or_imm(A0, A0, 0xffffffff),
+        or_imm(A0, A0, i32::MIN),
         or_inverted(A0, A0, A1),
         reverse_byte(A0, A0),
         rotate_left_32(A0, A0, A1),
         rotate_left_64(A0, A0, A1),
         rotate_right_32(A0, A0, A1),
         rotate_right_64(A0, A0, A1),
-        rotate_right_imm_32(A0, A0, 0xffffffff),
-        rotate_right_imm_64(A0, A0, 0xffffffff),
-        rotate_right_imm_alt_32(A0, A0, 0xffffffff),
-        rotate_right_imm_alt_64(A0, A0, 0xffffffff),
+        rotate_right_imm_32(A0, A0, i32::MIN),
+        rotate_right_imm_64(A0, A0, i32::MIN),
+        rotate_right_imm_alt_32(A0, A0, i32::MIN),
+        rotate_right_imm_alt_64(A0, A0, i32::MIN),
         // sbrk: 1,
-        set_greater_than_signed_imm(A0, A0, 0xffffffff),
-        set_greater_than_unsigned_imm(A0, A0, 0xffffffff),
+        set_greater_than_signed_imm(A0, A0, i32::MIN),
+        set_greater_than_unsigned_imm(A0, A0, i32::MIN),
         set_less_than_signed(A0, A0, A1),
-        set_less_than_signed_imm(A0, A0, 0xffffffff),
+        set_less_than_signed_imm(A0, A0, i32::MIN),
         set_less_than_unsigned(A0, A0, A1),
-        set_less_than_unsigned_imm(A0, A0, 0xffffffff),
+        set_less_than_unsigned_imm(A0, A0, i32::MIN),
         shift_arithmetic_right_32(A0, A0, A1),
         shift_arithmetic_right_64(A0, A0, A1),
-        shift_arithmetic_right_imm_32(A0, A0, 0xffffffff),
-        shift_arithmetic_right_imm_64(A0, A0, 0xffffffff),
-        shift_arithmetic_right_imm_alt_32(A0, A0, 0xffffffff),
-        shift_arithmetic_right_imm_alt_64(A0, A0, 0xffffffff),
+        shift_arithmetic_right_imm_32(A0, A0, i32::MIN),
+        shift_arithmetic_right_imm_64(A0, A0, i32::MIN),
+        shift_arithmetic_right_imm_alt_32(A0, A0, i32::MIN),
+        shift_arithmetic_right_imm_alt_64(A0, A0, i32::MIN),
         shift_logical_left_32(A0, A0, A1),
         shift_logical_left_64(A0, A0, A1),
-        shift_logical_left_imm_32(A0, A0, 0xffffffff),
-        shift_logical_left_imm_64(A0, A0, 0xffffffff),
-        shift_logical_left_imm_alt_32(A0, A0, 0xffffffff),
-        shift_logical_left_imm_alt_64(A0, A0, 0xffffffff),
+        shift_logical_left_imm_32(A0, A0, i32::MIN),
+        shift_logical_left_imm_64(A0, A0, i32::MIN),
+        shift_logical_left_imm_alt_32(A0, A0, i32::MIN),
+        shift_logical_left_imm_alt_64(A0, A0, i32::MIN),
         shift_logical_right_32(A0, A0, A1),
         shift_logical_right_64(A0, A0, A1),
-        shift_logical_right_imm_32(A0, A0, 0xffffffff),
-        shift_logical_right_imm_64(A0, A0, 0xffffffff),
-        shift_logical_right_imm_alt_32(A0, A0, 0xffffffff),
-        shift_logical_right_imm_alt_64(A0, A0, 0xffffffff),
+        shift_logical_right_imm_32(A0, A0, i32::MIN),
+        shift_logical_right_imm_64(A0, A0, i32::MIN),
+        shift_logical_right_imm_alt_32(A0, A0, i32::MIN),
+        shift_logical_right_imm_alt_64(A0, A0, i32::MIN),
         sign_extend_16(A0, A0),
         sign_extend_8(A0, A0),
-        store_imm_indirect_u16(A0, 0x20000 + 4096 - 1, 0xffffffff),
-        store_imm_indirect_u32(A0, 0x20000 + 4096 - 2, 0xffffffff),
-        store_imm_indirect_u64(A0, 0x20000 + 4096 - 4, 0xffffffff),
-        store_imm_indirect_u8(A0, 0x20000 + 4096, 0xffffffff),
-        store_imm_u16(0x20000 + 4096 - 1, 0xffffffff),
-        store_imm_u32(0x20000 + 4096 - 2, 0xffffffff),
-        store_imm_u64(0x20000 + 4096 - 4, 0xffffffff),
-        store_imm_u8(0x20000 + 4096, 0xffffffff),
+        store_imm_indirect_u16(A0, 0x20000 + 4096 - 1, i32::MIN),
+        store_imm_indirect_u32(A0, 0x20000 + 4096 - 2, i32::MIN),
+        store_imm_indirect_u64(A0, 0x20000 + 4096 - 4, i32::MIN),
+        store_imm_indirect_u8(A0, 0x20000 + 4096, i32::MIN),
+        store_imm_u16(0x20000 + 4096 - 1, i32::MIN),
+        store_imm_u32(0x20000 + 4096 - 2, i32::MIN),
+        store_imm_u64(0x20000 + 4096 - 4, i32::MIN),
+        store_imm_u8(0x20000 + 4096, i32::MIN),
         store_indirect_u16(A0, A0, 0x20000 + 4096 - 1),
         store_indirect_u32(A0, A0, 0x20000 + 4096 - 2),
         store_indirect_u64(A0, A0, 0x20000 + 4096 - 4),
@@ -2615,7 +2616,7 @@ fn main_generate_model(
         sub_64(A0, A0, A1),
         xnor(A0, A0, A1),
         xor(A0, A0, A1),
-        xor_imm(A0, A0, 0xffffffff),
+        xor_imm(A0, A0, i32::MIN),
         zero_extend_16(A0, A0),
     }
 

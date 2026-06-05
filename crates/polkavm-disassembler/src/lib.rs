@@ -1,6 +1,7 @@
 use std::{collections::HashMap, io::Write};
 
 use polkavm::CostModelKind;
+use polkavm_common::cast::cast;
 use polkavm_common::program::{ParsedInstruction, ProgramBlob, ProgramCounter};
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -361,7 +362,7 @@ impl<'a> Disassembler<'a> {
 
             let instruction_s = instruction.display(&disassembly_format);
             let instruction_s = if let polkavm_common::program::Instruction::ecalli(nth_import) = instruction {
-                if let Some(import) = self.blob.imports().get(nth_import) {
+                if let Some(import) = self.blob.imports().get(cast(nth_import).bitwise_as_u32()) {
                     format!("{instruction_s} // {}", import)
                 } else {
                     format!("{instruction_s} // INVALID")
@@ -548,7 +549,7 @@ mod tests {
         builder.add_import(b"hostcall");
         builder.set_code(
             &[
-                asm::store_imm_u32(memory_map.rw_data_address(), 0x12345678),
+                asm::store_imm_u32(memory_map.rw_data_address().try_into().unwrap(), 0x12345678),
                 asm::add_32(S0, A0, A1),
                 asm::ecalli(0),
                 asm::add_32(A0, A0, S0),

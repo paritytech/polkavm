@@ -874,9 +874,9 @@ fn main() {
             builder.set_code(
                 &[
                     if store {
-                        asm::store_u64(Reg::A1, memory_map.rw_data_address())
+                        asm::store_u64(Reg::A1, memory_map.rw_data_address().try_into().unwrap())
                     } else {
-                        asm::load_u64(Reg::A0, memory_map.rw_data_address())
+                        asm::load_u64(Reg::A0, memory_map.rw_data_address().try_into().unwrap())
                     },
                     asm::add_imm_64(Reg::A1, Reg::A1, 1),
                     asm::branch_less_unsigned_imm(Reg::A1, times, 0),
@@ -923,7 +923,7 @@ fn main() {
                 instance.set_reg(Reg::A1, 0);
                 let timestamp = std::time::Instant::now();
                 assert!(matches!(instance.run().unwrap(), polkavm::InterruptKind::Finished));
-                println!("{}", format_time_with_div(timestamp.elapsed(), times));
+                println!("{}", format_time_with_div(timestamp.elapsed(), times.try_into().unwrap()));
             }
         }
     }

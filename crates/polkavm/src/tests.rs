@@ -322,7 +322,7 @@ fn basic_test_blob() -> ProgramBlob {
     builder.add_import(b"hostcall");
     builder.set_code(
         &[
-            asm::store_imm_u32(memory_map.rw_data_address(), 0x12345678),
+            asm::store_imm_u32(memory_map.rw_data_address().try_into().unwrap(), 0x12345678),
             asm::add_32(S0, A0, A1),
             asm::ecalli(0),
             asm::add_32(A0, A0, S0),
@@ -811,9 +811,9 @@ fn zero_memory(engine_config: Config) {
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
-            asm::store_imm_u32(memory_map.rw_data_address(), 0x12345678),
+            asm::store_imm_u32(memory_map.rw_data_address().try_into().unwrap(), 0x12345678),
             asm::ecalli(0),
-            asm::load_i32(A0, memory_map.rw_data_address()),
+            asm::load_i32(A0, memory_map.rw_data_address().try_into().unwrap()),
             asm::ret(),
         ],
         &[],
@@ -1147,7 +1147,7 @@ fn dynamic_paging_basic(mut engine_config: Config) {
             asm::store_imm_u32(0x10004, 1),
             asm::load_i32(Reg::A0, 0x10004),
             asm::load_i32(Reg::A1, 0x10008),
-            asm::load_i32(Reg::A2, 0x10000 + page_size),
+            asm::load_i32(Reg::A2, 0x10000 + cast(page_size).to_i32_or_panic()),
             asm::ret(),
         ],
         &[],
@@ -1403,7 +1403,7 @@ fn dynamic_paging_initialize_multiple_pages(mut engine_config: Config) {
     builder.set_code(
         &[
             asm::load_i32(Reg::A0, 0x10004),
-            asm::load_i32(Reg::A1, 0x10004 + page_size),
+            asm::load_i32(Reg::A1, 0x10004 + cast(page_size).to_i32_or_panic()),
             asm::ret(),
         ],
         &[],
@@ -1440,7 +1440,7 @@ fn dynamic_paging_preinitialize_pages(mut engine_config: Config) {
     builder.set_code(
         &[
             asm::load_i32(Reg::A0, 0x10004),
-            asm::load_i32(Reg::A1, 0x10004 + page_size),
+            asm::load_i32(Reg::A1, 0x10004 + cast(page_size).to_i32_or_panic()),
             asm::ret(),
         ],
         &[],
@@ -1538,7 +1538,7 @@ fn dynamic_paging_read_at_top_of_address_space(mut engine_config: Config) {
     let page_size = get_native_page_size() as u32;
     let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
-    builder.set_code(&[asm::load_i32(Reg::A0, 0xffffffff), asm::ret()], &[]);
+    builder.set_code(&[asm::load_i32(Reg::A0, cast(0xffffffff_u32).bitwise_as_i32()), asm::ret()], &[]);
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let mut module_config = ModuleConfig::new();
@@ -3111,94 +3111,151 @@ fn access_memory_from_within(config: Config) {
     };
 
     // RO data
-    let mut instance = spawn(&[asm::load_u32(Reg::A0, memory_map.ro_data_address() + page_size * 3 - 3), asm::ret()]);
+    let mut instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.ro_data_address() + page_size * 3 - 3).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
 
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.ro_data_address() + page_size * 3 - 4), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.ro_data_address() + page_size * 3 - 4).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0);
 
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.ro_data_address()), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.ro_data_address()).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0x42424242);
 
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.ro_data_address() + page_size - 6), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.ro_data_address() + page_size - 6).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0x42424242);
 
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.ro_data_address() + page_size - 2), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.ro_data_address() + page_size - 2).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0);
 
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.ro_data_address() + page_size - 4), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.ro_data_address() + page_size - 4).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0x00004242);
 
     // RW data
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.rw_data_address() + page_size * 3 - 3), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.rw_data_address() + page_size * 3 - 3).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
 
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.rw_data_address() + page_size * 3 - 4), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.rw_data_address() + page_size * 3 - 4).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0);
 
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.rw_data_address()), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.rw_data_address()).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0x73737373);
 
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.rw_data_address() + page_size - 6), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.rw_data_address() + page_size - 6).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0x73737373);
 
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.rw_data_address() + page_size - 2), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.rw_data_address() + page_size - 2).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0);
 
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.rw_data_address() + page_size - 4), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.rw_data_address() + page_size - 4).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0x00007373);
 
     instance = spawn(&[
         asm::load_imm(Reg::A1, 0x12345678),
-        asm::store_u32(Reg::A1, memory_map.rw_data_address() + page_size - 4),
-        asm::load_u32(Reg::A0, memory_map.rw_data_address() + page_size - 3),
+        asm::store_u32(Reg::A1, cast(memory_map.rw_data_address() + page_size - 4).bitwise_as_i32()),
+        asm::load_u32(Reg::A0, cast(memory_map.rw_data_address() + page_size - 3).bitwise_as_i32()),
         asm::ret(),
     ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0x00123456);
 
-    instance = spawn(&[asm::store_imm_u32(memory_map.rw_data_address() + page_size * 3 - 3, 0), asm::ret()]);
+    instance = spawn(&[
+        asm::store_imm_u32(cast(memory_map.rw_data_address() + page_size * 3 - 3).bitwise_as_i32(), 0),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
 
     // Stack.
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.stack_address_high() - 4), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.stack_address_high() - 4).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0);
 
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.stack_address_high() - 3), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.stack_address_high() - 3).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
 
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.stack_address_low()), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.stack_address_low()).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0);
 
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.stack_address_low() - 1), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.stack_address_low() - 1).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
 
     instance = spawn(&[
         asm::load_imm(Reg::A1, 0x12345678),
-        asm::store_u32(Reg::A1, memory_map.stack_address_low() + page_size - 4),
-        asm::load_u32(Reg::A0, memory_map.stack_address_low() + page_size - 2),
+        asm::store_u32(Reg::A1, cast(memory_map.stack_address_low() + page_size - 4).bitwise_as_i32()),
+        asm::load_u32(Reg::A0, cast(memory_map.stack_address_low() + page_size - 2).bitwise_as_i32()),
         asm::ret(),
     ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A0), 0x00001234);
 
-    instance = spawn(&[asm::store_imm_u32(memory_map.stack_address_low() - 1, 0), asm::ret()]);
+    instance = spawn(&[
+        asm::store_imm_u32(cast(memory_map.stack_address_low() - 1).bitwise_as_i32(), 0),
+        asm::ret(),
+    ]);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
 
     // Aux data.
-    instance = spawn(&[asm::load_u32(Reg::A0, memory_map.aux_data_address() + page_size - 2), asm::ret()]);
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.aux_data_address() + page_size - 2).bitwise_as_i32()),
+        asm::ret(),
+    ]);
     instance
         .write_memory(memory_map.aux_data_address(), &vec![0x23_u8; cast(page_size - 1).to_usize()])
         .unwrap();
@@ -4721,7 +4778,13 @@ fn rotate_right_imm_alt_64(config: Config) {
 
     let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
     builder.add_export_by_basic_block(0, b"main");
-    builder.set_code(&[asm::rotate_right_imm_alt_64(Reg::A0, Reg::A0, 0x80000000), asm::ret()], &[]);
+    builder.set_code(
+        &[
+            asm::rotate_right_imm_alt_64(Reg::A0, Reg::A0, cast(0x80000000_u32).bitwise_as_i32()),
+            asm::ret(),
+        ],
+        &[],
+    );
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let engine = Engine::new(&config).unwrap();

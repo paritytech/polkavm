@@ -6546,18 +6546,14 @@ mod test {
                         *out = ControlInst::Jump { target }.into();
                     }
                     Instruction::load_imm(dst, imm) => {
-                        *out = BasicInst::LoadImmediate {
-                            dst: dst.into(),
-                            imm: cast(imm).bitwise_as_i32(),
-                        }
-                        .into();
+                        *out = BasicInst::LoadImmediate { dst: dst.into(), imm }.into();
                     }
                     Instruction::add_imm_32(dst, src, imm) => {
                         *out = BasicInst::AnyAny {
                             kind: AnyAnyKind::Add32,
                             dst: dst.into(),
                             src1: src.into(),
-                            src2: cast(imm).bitwise_as_i32().into(),
+                            src2: imm.into(),
                         }
                         .into();
                     }
@@ -6580,7 +6576,7 @@ mod test {
                                 _ => unreachable!(),
                             },
                             src1: src1.into(),
-                            src2: cast(src2).bitwise_as_i32().into(),
+                            src2: src2.into(),
                             target_true,
                             target_false,
                         }
@@ -6602,7 +6598,7 @@ mod test {
                             src: src.into(),
                             target: SectionTarget {
                                 section_index: self.data_section,
-                                offset: u64::from(address),
+                                offset: address.try_into().unwrap(),
                             },
                         }
                         .into();
@@ -6612,7 +6608,7 @@ mod test {
                             kind: StoreKind::U32,
                             src: src.into(),
                             base: base.into(),
-                            offset: cast(offset).bitwise_as_i32(),
+                            offset,
                         }
                         .into();
                     }
@@ -8247,7 +8243,7 @@ fn emit_code(
     }
 
     let can_fallthrough_to_next_block = calculate_whether_can_fallthrough(all_blocks, used_blocks);
-    let get_data_address = |source: &SourceStack, target: SectionTarget| -> Result<u32, ProgramFromElfError> {
+    let get_data_address = |source: &SourceStack, target: SectionTarget| -> Result<i32, ProgramFromElfError> {
         if let Some(&base_address) = base_address_for_section.get(&target.section_index) {
             let Some(address) = base_address.checked_add(target.offset) else {
                 return Err(ProgramFromElfError::other(format!(
@@ -8324,7 +8320,7 @@ fn emit_code(
 
         for (source, op) in &block.ops {
             let op = match *op {
-                BasicInst::LoadImmediate { dst, imm } => Instruction::load_imm(conv_reg(dst), cast(imm).bitwise_as_u32()),
+                BasicInst::LoadImmediate { dst, imm } => Instruction::load_imm(conv_reg(dst), imm),
                 BasicInst::LoadImmediate64 { dst, imm } => {
                     if !is_rv64 {
                         unreachable!("internal error: load_imm64 found when processing 32-bit binary")
@@ -8332,7 +8328,12 @@ fn emit_code(
                         Instruction::load_imm64(conv_reg(dst), cast(imm).bitwise_as_u64())
                     }
                 }
-                BasicInst::LoadHeapBase { dst } => Instruction::load_imm(conv_reg(dst), heap_base),
+                BasicInst::LoadHeapBase { dst } => Instruction::load_imm(
+                    conv_reg(dst),
+                    heap_base
+                        .try_into()
+                        .map_err(|_| ProgramFromElfError::other("overflow when emitting an address load"))?,
+                ),
                 BasicInst::LoadAbsolute { kind, dst, target } => {
                     codegen! {
                         args = (conv_reg(dst), get_data_address(source, target)?),
@@ -8365,7 +8366,7 @@ fn emit_code(
                         }
                         RegImm::Imm(value) => {
                             codegen! {
-                                args = (target, cast(value).bitwise_as_u32()),
+                                args = (target, value),
                                 kind = kind,
                                 {
                                     StoreKind::U64 => store_imm_u64,
@@ -8379,7 +8380,7 @@ fn emit_code(
                 }
                 BasicInst::LoadIndirect { kind, dst, base, offset } => {
                     codegen! {
-                        args = (conv_reg(dst), conv_reg(base), cast(offset).bitwise_as_u32()),
+                        args = (conv_reg(dst), conv_reg(base), offset),
                         kind = kind,
                         {
                             LoadKind::I8 => load_indirect_i8,
@@ -8395,7 +8396,7 @@ fn emit_code(
                 BasicInst::StoreIndirect { kind, src, base, offset } => match src {
                     RegImm::Reg(src) => {
                         codegen! {
-                            args = (conv_reg(src), conv_reg(base), cast(offset).bitwise_as_u32()),
+                            args = (conv_reg(src), conv_reg(base), offset),
                             kind = kind,
                             {
                                 StoreKind::U64 => store_indirect_u64,
@@ -8407,7 +8408,7 @@ fn emit_code(
                     }
                     RegImm::Imm(value) => {
                         codegen! {
-                            args = (conv_reg(base), cast(offset).bitwise_as_u32(), cast(value).bitwise_as_u32()),
+                            args = (conv_reg(base), offset, value),
                             kind = kind,
                             {
                                 StoreKind::U64 => store_imm_indirect_u64,
@@ -8423,9 +8424,11 @@ fn emit_code(
                         AnyTarget::Code(target) => {
                             let value = get_jump_target(target)?.dynamic_target.expect("missing jump target for address");
                             let Some(value) = value.checked_mul(VM_CODE_ADDRESS_ALIGNMENT) else {
-                                return Err(ProgramFromElfError::other("overflow when emitting an address load"));
+                                return Err(ProgramFromElfError::other("overflow when emitting a code address load"));
                             };
                             value
+                                .try_into()
+                                .map_err(|_| ProgramFromElfError::other("overflow when emitting a code address load"))?
                         }
                         AnyTarget::Data(target) => get_data_address(source, target)?,
                     };
@@ -8553,14 +8556,13 @@ fn emit_code(
                         }
                         (RegImm::Reg(src1), RegImm::Imm(src2)) => {
                             let src1 = conv_reg(src1);
-                            let src2 = cast(src2).bitwise_as_u32();
                             match kind {
                                 K::Add32 => I::add_imm_32(dst, src1, src2),
                                 K::Add32AndSignExtend => I::add_imm_32(dst, src1, src2),
                                 K::Add64 => I::add_imm_64(dst, src1, src2),
-                                K::Sub32 => I::add_imm_32(dst, src1, cast(-cast(src2).bitwise_as_i32()).bitwise_as_u32()),
-                                K::Sub32AndSignExtend => I::add_imm_32(dst, src1, cast(-cast(src2).bitwise_as_i32()).bitwise_as_u32()),
-                                K::Sub64 => I::add_imm_64(dst, src1, cast(-cast(src2).bitwise_as_i32()).bitwise_as_u32()),
+                                K::Sub32 => I::add_imm_32(dst, src1, -src2),
+                                K::Sub32AndSignExtend => I::add_imm_32(dst, src1, -src2),
+                                K::Sub64 => I::add_imm_64(dst, src1, -src2),
                                 K::ShiftLogicalLeft32 => I::shift_logical_left_imm_32(dst, src1, src2),
                                 K::ShiftLogicalLeft32AndSignExtend => I::shift_logical_left_imm_32(dst, src1, src2),
                                 K::ShiftLogicalLeft64 => I::shift_logical_left_imm_64(dst, src1, src2),
@@ -8586,7 +8588,6 @@ fn emit_code(
                             }
                         }
                         (RegImm::Imm(src1), RegImm::Reg(src2)) => {
-                            let src1 = cast(src1).bitwise_as_u32();
                             let src2 = conv_reg(src2);
                             match kind {
                                 K::Add32 => I::add_imm_32(dst, src2, src1),
@@ -8625,10 +8626,10 @@ fn emit_code(
                             if is_optimized {
                                 unreachable!("internal error: instruction with only constant operands: {op:?}")
                             } else {
-                                let imm: u32 = OperationKind::from(kind)
+                                let imm = OperationKind::from(kind)
                                     .apply_const(cast(src1).to_i64_sign_extend(), cast(src2).to_i64_sign_extend())
                                     .try_into()
-                                    .expect("load immediate overflow");
+                                    .expect("internal error: load immediate overflow");
                                 I::load_imm(dst, imm)
                             }
                         }
@@ -8647,7 +8648,7 @@ fn emit_code(
                     }
                     RegImm::Imm(imm) => {
                         codegen! {
-                            args = (conv_reg(dst), conv_reg(cond), cast(imm).bitwise_as_u32()),
+                            args = (conv_reg(dst), conv_reg(cond), imm),
                             kind = kind,
                             {
                                 CmovKind::EqZero => cmov_if_zero_imm,
@@ -8659,7 +8660,9 @@ fn emit_code(
                 BasicInst::Ecalli { nth_import } => {
                     assert!(used_imports.contains(&nth_import));
                     let import = &imports[nth_import];
-                    Instruction::ecalli(import.metadata.index.expect("internal error: no index was assigned to an ecall"))
+                    Instruction::ecalli(
+                        cast(import.metadata.index.expect("internal error: no index was assigned to an ecall")).bitwise_as_i32(),
+                    )
                 }
                 BasicInst::Sbrk { dst, size } => Instruction::sbrk(conv_reg(dst), conv_reg(size)),
                 BasicInst::Memset => Instruction::memset,
@@ -8695,6 +8698,10 @@ fn emit_code(
                 let Some(target_return) = target_return.checked_mul(VM_CODE_ADDRESS_ALIGNMENT) else {
                     return Err(ProgramFromElfError::other("overflow when emitting an indirect call"));
                 };
+
+                let target_return = target_return
+                    .try_into()
+                    .map_err(|_| ProgramFromElfError::other("overflow when emitting an indirect call"))?;
 
                 code.push((
                     block.next.source.clone(),
@@ -8735,6 +8742,10 @@ fn emit_code(
                     return Err(ProgramFromElfError::other("overflow when emitting an indirect call"));
                 };
 
+                let target_return = target_return
+                    .try_into()
+                    .map_err(|_| ProgramFromElfError::other("overflow when emitting a data address load"))?;
+
                 let Ok(offset) = offset.try_into() else {
                     unreachable!("internal error: indirect call with an out-of-range offset");
                 };
@@ -8773,7 +8784,7 @@ fn emit_code(
                     }
                     (RegImm::Imm(src1), RegImm::Reg(src2)) => {
                         codegen! {
-                            args = (conv_reg(src2), cast(src1).bitwise_as_u32(), target_true.static_target),
+                            args = (conv_reg(src2), src1, target_true.static_target),
                             kind = kind,
                             {
                                 BranchKind::Eq32 | BranchKind::Eq64 => branch_eq_imm,
@@ -8787,7 +8798,7 @@ fn emit_code(
                     }
                     (RegImm::Reg(src1), RegImm::Imm(src2)) => {
                         codegen! {
-                            args = (conv_reg(src1), cast(src2).bitwise_as_u32(), target_true.static_target),
+                            args = (conv_reg(src1), src2, target_true.static_target),
                             kind = kind,
                             {
                                 BranchKind::Eq32 | BranchKind::Eq64 => branch_eq_imm,
