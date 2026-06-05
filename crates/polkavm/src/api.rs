@@ -1238,7 +1238,7 @@ impl RawInstance {
                     _ => return,
                 };
 
-                let mut offset = u64::from(offset);
+                let mut offset = cast(i64::from(offset)).bitwise_as_u64();
                 if let Some(base) = base {
                     offset = offset.wrapping_add(self.reg(base.get()));
                 }

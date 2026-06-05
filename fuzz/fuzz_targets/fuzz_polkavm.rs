@@ -235,7 +235,7 @@ enum OperationKind {
     RegImmArgs {
         kind: RegImmKind,
         reg: OperationReg,
-        imm: u32,
+        imm: i32,
     },
     RegOffsetArgs {
         kind: RegOffsetKind,
@@ -244,14 +244,14 @@ enum OperationKind {
     RegImmImmArgs {
         kind: RegImmImmKind,
         reg: OperationReg,
-        imm1: u32,
-        imm2: u32,
+        imm1: i32,
+        imm2: i32,
     },
     RegRegImmArgs {
         kind: RegRegImmKind,
         reg1: OperationReg,
         reg2: OperationReg,
-        imm: u32,
+        imm: i32,
     },
     RegRegOffsetArgs {
         kind: RegRegOffsetKind,
@@ -266,8 +266,8 @@ enum OperationKind {
     },
     ImmImmArgs {
         kind: ImmImmKind,
-        imm1: u32,
-        imm2: u32,
+        imm1: i32,
+        imm2: i32,
     },
     RegRegArgs {
         kind: RegRegKind,
@@ -280,7 +280,7 @@ enum OperationKind {
     },
     RegImmOffsetArgs {
         reg: OperationReg,
-        imm: u32,
+        imm: i32,
     },
 }
 

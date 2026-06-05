@@ -244,6 +244,13 @@ impl cast<usize> {
         self.0 as u32
     }
 
+    #[track_caller]
+    #[inline(always)]
+    pub const fn to_i32_or_panic(self) -> i32 {
+        check!(self.0 <= cast(cast(i32::MAX).to_u32_or_panic()).to_usize());
+        self.0 as i32
+    }
+
     #[inline(always)]
     pub const fn to_u64(self) -> u64 {
         self.0 as u64

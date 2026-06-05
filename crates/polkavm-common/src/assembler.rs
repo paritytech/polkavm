@@ -1,3 +1,4 @@
+use crate::cast::cast;
 use crate::program::{Instruction, InstructionSetKind, RawReg, Reg};
 use crate::utils::{parse_imm, parse_immediate, parse_reg, parse_slice, ParsedImmediate};
 use alloc::borrow::ToOwned;
@@ -170,7 +171,7 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
         Branch(String, ConditionKind, Reg, Reg),
         BranchImm(String, ConditionKind, Reg, i32),
         LoadLabelAddress(Reg, String),
-        LoadImmAndJump(Reg, u32, String),
+        LoadImmAndJump(Reg, i32, String),
     }
 
     impl MaybeInstruction {
@@ -343,7 +344,7 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
         if let Some(line) = line.strip_prefix("ecalli ") {
             let line = line.trim();
             if let Ok(index) = line.parse::<u32>() {
-                emit_and_continue!(Instruction::ecalli(index));
+                emit_and_continue!(Instruction::ecalli(cast(index).bitwise_as_i32()));
             }
         }
 
@@ -380,17 +381,12 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
             }
 
             if let Some((base, offset)) = parse_indirect_memory_access(line) {
-                emit_and_continue!(Instruction::jump_indirect(base.into(), offset as u32));
+                emit_and_continue!(Instruction::jump_indirect(base.into(), offset));
             }
         }
 
         if let Some((dst, base, value, offset)) = parse_load_imm_and_jump_indirect_with_tmp(line) {
-            emit_and_continue!(Instruction::load_imm_and_jump_indirect(
-                dst.into(),
-                base.into(),
-                value as u32,
-                offset as u32
-            ));
+            emit_and_continue!(Instruction::load_imm_and_jump_indirect(dst.into(), base.into(), value, offset));
         }
 
         if let Some(index) = line.find('=') {
@@ -411,7 +407,7 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
                                 emit_and_continue!(MaybeInstruction::LoadImmAndJump(dst, value, label.to_owned()));
                             }
                             if let Some((base, offset)) = parse_indirect_memory_access(line) {
-                                let instruction = Instruction::load_imm_and_jump_indirect(dst.into(), base.into(), value, offset as u32);
+                                let instruction = Instruction::load_imm_and_jump_indirect(dst.into(), base.into(), value, offset);
 
                                 if dst == base {
                                     return Err(format!("cannot parse line {nth_line}, expected: \"{instruction}\""));
@@ -435,10 +431,10 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
                                         Some(Instruction::cmov_if_zero(dst.into(), src.into(), cond.into()))
                                     }
                                     (RegImm::Imm(src), ConditionKind::Eq) => {
-                                        Some(Instruction::cmov_if_zero_imm(dst.into(), cond.into(), src as u32))
+                                        Some(Instruction::cmov_if_zero_imm(dst.into(), cond.into(), src))
                                     }
                                     (RegImm::Imm(src), ConditionKind::NotEq) => {
-                                        Some(Instruction::cmov_if_zero_imm(dst.into(), cond.into(), src as u32))
+                                        Some(Instruction::cmov_if_zero_imm(dst.into(), cond.into(), src))
                                     }
                                     _ => None,
                                 };
@@ -480,7 +476,7 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
 
                 if let Some(instr) = parse_immediate(rhs) {
                     match instr {
-                        ParsedImmediate::U32(value) => {
+                        ParsedImmediate::I32(value) => {
                             emit_and_continue!(Instruction::load_imm(dst.into(), value));
                         }
                         ParsedImmediate::U64(value) => {
@@ -666,7 +662,7 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
                                 OpMarker::I32 => {
                                     emit_and_continue!(match op {
                                         Op::Add => Instruction::add_imm_32(dst, src1, src2),
-                                        Op::Sub => Instruction::add_imm_32(dst, src1, (-(src2 as i32)) as u32),
+                                        Op::Sub => Instruction::add_imm_32(dst, src1, -src2),
                                         Op::And => {
                                             return Err(format!("cannot parse line {nth_line}: i32 not supported for operation"));
                                         }
@@ -721,7 +717,7 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
                                 OpMarker::NONE => {
                                     emit_and_continue!(match op {
                                         Op::Add => Instruction::add_imm_64(dst, src1, src2),
-                                        Op::Sub => Instruction::add_imm_64(dst, src1, (-(src2 as i32)) as u32),
+                                        Op::Sub => Instruction::add_imm_64(dst, src1, -src2),
                                         Op::And => Instruction::and_imm(dst, src1, src2),
                                         Op::Xor => Instruction::xor_imm(dst, src1, src2),
                                         Op::Or => Instruction::or_imm(dst, src1, src2),
@@ -900,7 +896,6 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
                     if let Some((base, offset)) = parse_indirect_memory_access(rhs) {
                         let dst = dst.into();
                         let base = base.into();
-                        let offset = offset as u32;
                         emit_and_continue!(match kind {
                             LoadKind::I8 => Instruction::load_indirect_i8(dst, base, offset),
                             LoadKind::I16 => Instruction::load_indirect_i16(dst, base, offset),
@@ -912,7 +907,6 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
                         });
                     } else if let Some(offset) = parse_absolute_memory_access(rhs) {
                         let dst = dst.into();
-                        let offset = offset as u32;
                         emit_and_continue!(match kind {
                             LoadKind::I8 => Instruction::load_i8(dst, offset),
                             LoadKind::I16 => Instruction::load_i16(dst, offset),
@@ -941,7 +935,6 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
 
             if let Some((kind, lhs)) = store_kind {
                 if let Some(offset) = parse_absolute_memory_access(lhs) {
-                    let offset = offset as u32;
                     if let Some(rhs) = parse_reg(rhs) {
                         let rhs = rhs.into();
                         emit_and_continue!(match kind {
@@ -966,7 +959,6 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
                     }
                 } else if let Some((base, offset)) = parse_indirect_memory_access(lhs) {
                     let base = base.into();
-                    let offset = offset as u32;
                     if let Some(rhs) = parse_reg(rhs) {
                         let rhs = rhs.into();
                         emit_and_continue!(match kind {
@@ -1011,7 +1003,7 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
                 jump_table.push(target_index);
                 code.push(Instruction::load_imm(
                     dst.into(),
-                    (jump_table.len() as u32) * crate::abi::VM_CODE_ADDRESS_ALIGNMENT,
+                    cast(jump_table.len()).to_i32_or_panic() * cast(crate::abi::VM_CODE_ADDRESS_ALIGNMENT).to_i32_or_panic(),
                 ));
             }
             MaybeInstruction::LoadImmAndJump(dst, value, label) => {
@@ -1055,7 +1047,6 @@ pub fn assemble(mut isa: Option<InstructionSetKind>, code: &str) -> Result<Vec<u
                 };
 
                 let lhs = lhs.into();
-                let rhs = rhs as u32;
                 let instruction = match kind {
                     ConditionKind::Eq => Instruction::branch_eq_imm(lhs, rhs, target_index),
                     ConditionKind::NotEq => Instruction::branch_not_eq_imm(lhs, rhs, target_index),

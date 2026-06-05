@@ -480,38 +480,38 @@ static TABLE_1: LookupTable = LookupTable::build(1);
 static TABLE_2: LookupTable = LookupTable::build(2);
 
 #[inline(always)]
-pub fn read_args_imm(chunk: u128, skip: u32) -> u32 {
-    read_simple_varint(chunk as u32, skip)
+pub fn read_args_imm(chunk: u128, skip: u32) -> i32 {
+    cast(read_simple_varint(chunk as u32, skip)).bitwise_as_i32()
 }
 
 #[inline(always)]
 pub fn read_args_offset(chunk: u128, instruction_offset: u32, skip: u32) -> u32 {
-    instruction_offset.wrapping_add(read_args_imm(chunk, skip))
+    instruction_offset.wrapping_add(cast(read_args_imm(chunk, skip)).bitwise_as_u32())
 }
 
 #[inline(always)]
-pub fn read_args_imm2(chunk: u128, skip: u32) -> (u32, u32) {
+pub fn read_args_imm2(chunk: u128, skip: u32) -> (i32, i32) {
     let (imm1_bits, imm1_skip, imm2_bits) = TABLE_1.get(skip, chunk as u32);
     let chunk = chunk >> 8;
     let chunk = chunk as u64;
     let imm1 = sign_extend_at(chunk as u32, imm1_bits);
     let chunk = chunk >> imm1_skip;
     let imm2 = sign_extend_at(chunk as u32, imm2_bits);
-    (imm1, imm2)
+    (cast(imm1).bitwise_as_i32(), cast(imm2).bitwise_as_i32())
 }
 
 #[inline(always)]
-pub fn read_args_reg_imm(chunk: u128, skip: u32) -> (RawReg, u32) {
+pub fn read_args_reg_imm(chunk: u128, skip: u32) -> (RawReg, i32) {
     let chunk = chunk as u64;
     let reg = RawReg(chunk as u32);
     let chunk = chunk >> 8;
     let (_, _, imm_bits) = TABLE_1.get(skip, 0);
     let imm = sign_extend_at(chunk as u32, imm_bits);
-    (reg, imm)
+    (reg, cast(imm).bitwise_as_i32())
 }
 
 #[inline(always)]
-pub fn read_args_reg_imm2(chunk: u128, skip: u32) -> (RawReg, u32, u32) {
+pub fn read_args_reg_imm2(chunk: u128, skip: u32) -> (RawReg, i32, i32) {
     let reg = RawReg(chunk as u32);
     let (imm1_bits, imm1_skip, imm2_bits) = TABLE_1.get(skip, chunk as u32 >> 4);
     let chunk = chunk >> 8;
@@ -519,18 +519,18 @@ pub fn read_args_reg_imm2(chunk: u128, skip: u32) -> (RawReg, u32, u32) {
     let imm1 = sign_extend_at(chunk as u32, imm1_bits);
     let chunk = chunk >> imm1_skip;
     let imm2 = sign_extend_at(chunk as u32, imm2_bits);
-    (reg, imm1, imm2)
+    (reg, cast(imm1).bitwise_as_i32(), cast(imm2).bitwise_as_i32())
 }
 
 #[inline(always)]
-pub fn read_args_reg_imm_offset(chunk: u128, instruction_offset: u32, skip: u32) -> (RawReg, u32, u32) {
+pub fn read_args_reg_imm_offset(chunk: u128, instruction_offset: u32, skip: u32) -> (RawReg, i32, u32) {
     let (reg, imm1, imm2) = read_args_reg_imm2(chunk, skip);
-    let imm2 = instruction_offset.wrapping_add(imm2);
+    let imm2 = instruction_offset.wrapping_add(cast(imm2).bitwise_as_u32());
     (reg, imm1, imm2)
 }
 
 #[inline(always)]
-pub fn read_args_regs2_imm2(chunk: u128, skip: u32) -> (RawReg, RawReg, u32, u32) {
+pub fn read_args_regs2_imm2(chunk: u128, skip: u32) -> (RawReg, RawReg, i32, i32) {
     let (reg1, reg2, imm1_aux) = {
         let value = chunk as u32;
         (RawReg(value), RawReg(value >> 4), value >> 8)
@@ -542,7 +542,7 @@ pub fn read_args_regs2_imm2(chunk: u128, skip: u32) -> (RawReg, RawReg, u32, u32
     let imm1 = sign_extend_at(chunk as u32, imm1_bits);
     let chunk = chunk >> imm1_skip;
     let imm2 = sign_extend_at(chunk as u32, imm2_bits);
-    (reg1, reg2, imm1, imm2)
+    (reg1, reg2, cast(imm1).bitwise_as_i32(), cast(imm2).bitwise_as_i32())
 }
 
 #[inline(always)]
@@ -553,7 +553,7 @@ pub fn read_args_reg_imm64(chunk: u128, _skip: u32) -> (RawReg, u64) {
 }
 
 #[inline(always)]
-pub fn read_args_regs2_imm(chunk: u128, skip: u32) -> (RawReg, RawReg, u32) {
+pub fn read_args_regs2_imm(chunk: u128, skip: u32) -> (RawReg, RawReg, i32) {
     let chunk = chunk as u64;
     let (reg1, reg2) = {
         let value = chunk as u32;
@@ -562,13 +562,13 @@ pub fn read_args_regs2_imm(chunk: u128, skip: u32) -> (RawReg, RawReg, u32) {
     let chunk = chunk >> 8;
     let (_, _, imm_bits) = TABLE_1.get(skip, 0);
     let imm = sign_extend_at(chunk as u32, imm_bits);
-    (reg1, reg2, imm)
+    (reg1, reg2, cast(imm).bitwise_as_i32())
 }
 
 #[inline(always)]
 pub fn read_args_regs2_offset(chunk: u128, instruction_offset: u32, skip: u32) -> (RawReg, RawReg, u32) {
     let (reg1, reg2, imm) = read_args_regs2_imm(chunk, skip);
-    let imm = instruction_offset.wrapping_add(imm);
+    let imm = instruction_offset.wrapping_add(cast(imm).bitwise_as_u32());
     (reg1, reg2, imm)
 }
 
@@ -588,6 +588,7 @@ pub fn read_args_regs2(chunk: u128) -> (RawReg, RawReg) {
 
 #[cfg(kani)]
 mod kani {
+    use crate::cast::cast;
     use core::cmp::min;
 
     fn clamp<T>(range: core::ops::RangeInclusive<T>, value: T) -> T
@@ -647,9 +648,9 @@ mod kani {
 
     #[kani::proof]
     fn verify_read_args_imm() {
-        fn simple_read_args_imm(code: &[u8], skip: u32) -> u32 {
+        fn simple_read_args_imm(code: &[u8], skip: u32) -> i32 {
             let imm_length = min(4, skip);
-            sext(read(code, 0, imm_length), imm_length)
+            cast(sext(read(code, 0, imm_length), imm_length)).bitwise_as_i32()
         }
 
         let (code, chunk, skip) = args!();
@@ -658,11 +659,13 @@ mod kani {
 
     #[kani::proof]
     fn verify_read_args_imm2() {
-        fn simple_read_args_imm2(code: &[u8], skip: i32) -> (u32, u32) {
+        fn simple_read_args_imm2(code: &[u8], skip: i32) -> (i32, i32) {
             let imm1_length = min(4, i32::from(code[0]) & 0b111);
             let imm2_length = clamp(0..=4, skip - imm1_length - 1);
             let imm1 = sext(read(code, 1, imm1_length), imm1_length);
             let imm2 = sext(read(code, 1 + imm1_length, imm2_length), imm2_length);
+            let imm1 = cast(imm1).bitwise_as_i32();
+            let imm2 = cast(imm2).bitwise_as_i32();
             (imm1, imm2)
         }
 
@@ -672,10 +675,11 @@ mod kani {
 
     #[kani::proof]
     fn verify_read_args_reg_imm() {
-        fn simple_read_args_reg_imm(code: &[u8], skip: i32) -> (u8, u32) {
+        fn simple_read_args_reg_imm(code: &[u8], skip: i32) -> (u8, i32) {
             let reg = min(12, code[0] & 0b1111);
             let imm_length = clamp(0..=4, skip - 1);
             let imm = sext(read(code, 1, imm_length), imm_length);
+            let imm = cast(imm).bitwise_as_i32();
             (reg, imm)
         }
 
@@ -687,12 +691,14 @@ mod kani {
 
     #[kani::proof]
     fn verify_read_args_reg_imm2() {
-        fn simple_read_args_reg_imm2(code: &[u8], skip: i32) -> (u8, u32, u32) {
+        fn simple_read_args_reg_imm2(code: &[u8], skip: i32) -> (u8, i32, i32) {
             let reg = min(12, code[0] & 0b1111);
             let imm1_length = min(4, i32::from(code[0] >> 4) & 0b111);
             let imm2_length = clamp(0..=4, skip - imm1_length - 1);
             let imm1 = sext(read(code, 1, imm1_length), imm1_length);
             let imm2 = sext(read(code, 1 + imm1_length, imm2_length), imm2_length);
+            let imm1 = cast(imm1).bitwise_as_i32();
+            let imm2 = cast(imm2).bitwise_as_i32();
             (reg, imm1, imm2)
         }
 
@@ -704,13 +710,15 @@ mod kani {
 
     #[kani::proof]
     fn verify_read_args_regs2_imm2() {
-        fn simple_read_args_regs2_imm2(code: &[u8], skip: i32) -> (u8, u8, u32, u32) {
+        fn simple_read_args_regs2_imm2(code: &[u8], skip: i32) -> (u8, u8, i32, i32) {
             let reg1 = min(12, code[0] & 0b1111);
             let reg2 = min(12, code[0] >> 4);
             let imm1_length = min(4, i32::from(code[1]) & 0b111);
             let imm2_length = clamp(0..=4, skip - imm1_length - 2);
             let imm1 = sext(read(code, 2, imm1_length), imm1_length);
             let imm2 = sext(read(code, 2 + imm1_length, imm2_length), imm2_length);
+            let imm1 = cast(imm1).bitwise_as_i32();
+            let imm2 = cast(imm2).bitwise_as_i32();
             (reg1, reg2, imm1, imm2)
         }
 
@@ -723,11 +731,12 @@ mod kani {
 
     #[kani::proof]
     fn verify_read_args_regs2_imm() {
-        fn simple_read_args_regs2_imm(code: &[u8], skip: u32) -> (u8, u8, u32) {
+        fn simple_read_args_regs2_imm(code: &[u8], skip: u32) -> (u8, u8, i32) {
             let reg1 = min(12, code[0] & 0b1111);
             let reg2 = min(12, code[0] >> 4);
             let imm_length = clamp(0..=4, skip as i32 - 1);
             let imm = sext(read(code, 1, imm_length), imm_length);
+            let imm = cast(imm).bitwise_as_i32();
             (reg1, reg2, imm)
         }
 
@@ -899,17 +908,17 @@ macro_rules! define_all_instructions {
                     type ReturnTy = <$visitor_ty as $crate::program::InstructionVisitor>::ReturnTy;
 
                     $(fn $name_argless(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_argless(self) })+
-                    $(fn $name_reg_imm(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm(self, reg, imm) })+
-                    $(fn $name_reg_imm_offset(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm_offset(self, reg, imm1, imm2) })+
-                    $(fn $name_reg_imm_imm(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm_imm(self, reg, imm1, imm2) })+
-                    $(fn $name_reg_reg_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm(self, reg1, reg2, imm) })+
+                    $(fn $name_reg_imm(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm(self, reg, imm) })+
+                    $(fn $name_reg_imm_offset(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm1: i32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm_offset(self, reg, imm1, imm2) })+
+                    $(fn $name_reg_imm_imm(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm1: i32, imm2: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm_imm(self, reg, imm1, imm2) })+
+                    $(fn $name_reg_reg_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm(self, reg1, reg2, imm) })+
                     $(fn $name_reg_reg_offset(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_offset(self, reg1, reg2, imm) })+
                     $(fn $name_reg_reg_reg(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_reg(self, reg1, reg2, reg3) })+
                     $(fn $name_offset(&mut self, _offset: u32, _args_length: u32, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_offset(self, imm) })+
-                    $(fn $name_imm(&mut self, _offset: u32, _args_length: u32, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm(self, imm) })+
-                    $(fn $name_imm_imm(&mut self, _offset: u32, _args_length: u32, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm_imm(self, imm1, imm2) })+
+                    $(fn $name_imm(&mut self, _offset: u32, _args_length: u32, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm(self, imm) })+
+                    $(fn $name_imm_imm(&mut self, _offset: u32, _args_length: u32, imm1: i32, imm2: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm_imm(self, imm1, imm2) })+
                     $(fn $name_reg_reg(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg(self, reg1, reg2) })+
-                    $(fn $name_reg_reg_imm_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm_imm(self, reg1, reg2, imm1, imm2) })+
+                    $(fn $name_reg_reg_imm_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm1: i32, imm2: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm_imm(self, reg1, reg2, imm1, imm2) })+
                     $(fn $name_reg_imm64(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm: u64) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm64(self, reg, imm) })+
 
                     fn invalid(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::invalid(self) }
@@ -921,17 +930,17 @@ macro_rules! define_all_instructions {
             type ReturnTy;
 
             $(fn $name_argless(&mut self, offset: u32, args_length: u32) -> Self::ReturnTy;)+
-            $(fn $name_reg_imm(&mut self, offset: u32, args_length: u32, reg: RawReg, imm: u32) -> Self::ReturnTy;)+
-            $(fn $name_reg_imm_offset(&mut self, offset: u32, args_length: u32, reg: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy;)+
-            $(fn $name_reg_imm_imm(&mut self, offset: u32, args_length: u32, reg: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy;)+
-            $(fn $name_reg_reg_imm(&mut self, offset: u32, args_length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy;)+
+            $(fn $name_reg_imm(&mut self, offset: u32, args_length: u32, reg: RawReg, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_reg_imm_offset(&mut self, offset: u32, args_length: u32, reg: RawReg, imm1: i32, imm2: u32) -> Self::ReturnTy;)+
+            $(fn $name_reg_imm_imm(&mut self, offset: u32, args_length: u32, reg: RawReg, imm1: i32, imm2: i32) -> Self::ReturnTy;)+
+            $(fn $name_reg_reg_imm(&mut self, offset: u32, args_length: u32, reg1: RawReg, reg2: RawReg, imm: i32) -> Self::ReturnTy;)+
             $(fn $name_reg_reg_offset(&mut self, offset: u32, args_length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy;)+
             $(fn $name_reg_reg_reg(&mut self, offset: u32, args_length: u32, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> Self::ReturnTy;)+
             $(fn $name_offset(&mut self, offset: u32, args_length: u32, imm: u32) -> Self::ReturnTy;)+
-            $(fn $name_imm(&mut self, offset: u32, args_length: u32, imm: u32) -> Self::ReturnTy;)+
-            $(fn $name_imm_imm(&mut self, offset: u32, args_length: u32, imm1: u32, imm2: u32) -> Self::ReturnTy;)+
+            $(fn $name_imm(&mut self, offset: u32, args_length: u32, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_imm_imm(&mut self, offset: u32, args_length: u32, imm1: i32, imm2: i32) -> Self::ReturnTy;)+
             $(fn $name_reg_reg(&mut self, offset: u32, args_length: u32, reg1: RawReg, reg2: RawReg) -> Self::ReturnTy;)+
-            $(fn $name_reg_reg_imm_imm(&mut self, offset: u32, args_length: u32, reg1: RawReg, reg2: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy;)+
+            $(fn $name_reg_reg_imm_imm(&mut self, offset: u32, args_length: u32, reg1: RawReg, reg2: RawReg, imm1: i32, imm2: i32) -> Self::ReturnTy;)+
             $(fn $name_reg_imm64(&mut self, offset: u32, args_length: u32, reg: RawReg, imm: u64) -> Self::ReturnTy;)+
 
             fn invalid(&mut self, offset: u32, args_length: u32) -> Self::ReturnTy;
@@ -941,17 +950,17 @@ macro_rules! define_all_instructions {
             type ReturnTy;
 
             $(fn $name_argless(&mut self) -> Self::ReturnTy;)+
-            $(fn $name_reg_imm(&mut self, reg: RawReg, imm: u32) -> Self::ReturnTy;)+
-            $(fn $name_reg_imm_offset(&mut self, reg: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy;)+
-            $(fn $name_reg_imm_imm(&mut self, reg: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy;)+
-            $(fn $name_reg_reg_imm(&mut self, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy;)+
+            $(fn $name_reg_imm(&mut self, reg: RawReg, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_reg_imm_offset(&mut self, reg: RawReg, imm1: i32, imm2: u32) -> Self::ReturnTy;)+
+            $(fn $name_reg_imm_imm(&mut self, reg: RawReg, imm1: i32, imm2: i32) -> Self::ReturnTy;)+
+            $(fn $name_reg_reg_imm(&mut self, reg1: RawReg, reg2: RawReg, imm: i32) -> Self::ReturnTy;)+
             $(fn $name_reg_reg_offset(&mut self, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy;)+
             $(fn $name_reg_reg_reg(&mut self, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> Self::ReturnTy;)+
             $(fn $name_offset(&mut self, imm: u32) -> Self::ReturnTy;)+
-            $(fn $name_imm(&mut self, imm: u32) -> Self::ReturnTy;)+
-            $(fn $name_imm_imm(&mut self, imm1: u32, imm2: u32) -> Self::ReturnTy;)+
+            $(fn $name_imm(&mut self, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_imm_imm(&mut self, imm1: i32, imm2: i32) -> Self::ReturnTy;)+
             $(fn $name_reg_reg(&mut self, reg1: RawReg, reg2: RawReg) -> Self::ReturnTy;)+
-            $(fn $name_reg_reg_imm_imm(&mut self, reg1: RawReg, reg2: RawReg, imm1: u32, imm2: u32) -> Self::ReturnTy;)+
+            $(fn $name_reg_reg_imm_imm(&mut self, reg1: RawReg, reg2: RawReg, imm1: i32, imm2: i32) -> Self::ReturnTy;)+
             $(fn $name_reg_imm64(&mut self, reg: RawReg, imm: u64) -> Self::ReturnTy;)+
 
             fn invalid(&mut self) -> Self::ReturnTy;
@@ -963,17 +972,17 @@ macro_rules! define_all_instructions {
         #[repr(u32)]
         pub enum Instruction {
             $($name_argless,)+
-            $($name_reg_imm(RawReg, u32),)+
-            $($name_reg_imm_offset(RawReg, u32, u32),)+
-            $($name_reg_imm_imm(RawReg, u32, u32),)+
-            $($name_reg_reg_imm(RawReg, RawReg, u32),)+
+            $($name_reg_imm(RawReg, i32),)+
+            $($name_reg_imm_offset(RawReg, i32, u32),)+
+            $($name_reg_imm_imm(RawReg, i32, i32),)+
+            $($name_reg_reg_imm(RawReg, RawReg, i32),)+
             $($name_reg_reg_offset(RawReg, RawReg, u32),)+
             $($name_reg_reg_reg(RawReg, RawReg, RawReg),)+
             $($name_offset(u32),)+
-            $($name_imm(u32),)+
-            $($name_imm_imm(u32, u32),)+
+            $($name_imm(i32),)+
+            $($name_imm_imm(i32, i32),)+
             $($name_reg_reg(RawReg, RawReg),)+
-            $($name_reg_reg_imm_imm(RawReg, RawReg, u32, u32),)+
+            $($name_reg_reg_imm_imm(RawReg, RawReg, i32, i32),)+
             $($name_reg_imm64(RawReg, u64),)+
             invalid = INVALID_INSTRUCTION_INDEX as u32,
         }
@@ -1067,25 +1076,25 @@ macro_rules! define_all_instructions {
             )+
 
             $(
-                pub fn $name_reg_imm(reg: Reg, imm: u32) -> Instruction {
+                pub fn $name_reg_imm(reg: Reg, imm: i32) -> Instruction {
                     Instruction::$name_reg_imm(reg.into(), imm)
                 }
             )+
 
             $(
-                pub fn $name_reg_imm_offset(reg: Reg, imm1: u32, imm2: u32) -> Instruction {
+                pub fn $name_reg_imm_offset(reg: Reg, imm1: i32, imm2: u32) -> Instruction {
                     Instruction::$name_reg_imm_offset(reg.into(), imm1, imm2)
                 }
             )+
 
             $(
-                pub fn $name_reg_imm_imm(reg: Reg, imm1: u32, imm2: u32) -> Instruction {
+                pub fn $name_reg_imm_imm(reg: Reg, imm1: i32, imm2: i32) -> Instruction {
                     Instruction::$name_reg_imm_imm(reg.into(), imm1, imm2)
                 }
             )+
 
             $(
-                pub fn $name_reg_reg_imm(reg1: Reg, reg2: Reg, imm: u32) -> Instruction {
+                pub fn $name_reg_reg_imm(reg1: Reg, reg2: Reg, imm: i32) -> Instruction {
                     Instruction::$name_reg_reg_imm(reg1.into(), reg2.into(), imm)
                 }
             )+
@@ -1109,13 +1118,13 @@ macro_rules! define_all_instructions {
             )+
 
             $(
-                pub fn $name_imm(imm: u32) -> Instruction {
+                pub fn $name_imm(imm: i32) -> Instruction {
                     Instruction::$name_imm(imm)
                 }
             )+
 
             $(
-                pub fn $name_imm_imm(imm1: u32, imm2: u32) -> Instruction {
+                pub fn $name_imm_imm(imm1: i32, imm2: i32) -> Instruction {
                     Instruction::$name_imm_imm(imm1, imm2)
                 }
             )+
@@ -1127,7 +1136,7 @@ macro_rules! define_all_instructions {
             )+
 
             $(
-                pub fn $name_reg_reg_imm_imm(reg1: Reg, reg2: Reg, imm1: u32, imm2: u32) -> Instruction {
+                pub fn $name_reg_reg_imm_imm(reg1: Reg, reg2: Reg, imm1: i32, imm2: i32) -> Instruction {
                     Instruction::$name_reg_reg_imm_imm(reg1.into(), reg2.into(), imm1, imm2)
                 }
             )+
@@ -2589,7 +2598,8 @@ impl Instruction {
         1
     }
 
-    fn serialize_reg_imm_offset(buffer: &mut [u8], position: u32, opcode: u8, reg: RawReg, imm1: u32, imm2: u32) -> usize {
+    fn serialize_reg_imm_offset(buffer: &mut [u8], position: u32, opcode: u8, reg: RawReg, imm1: i32, imm2: u32) -> usize {
+        let imm1 = cast(imm1).bitwise_as_u32();
         let imm2 = imm2.wrapping_sub(position);
         buffer[0] = opcode;
         let mut position = 2;
@@ -2600,7 +2610,9 @@ impl Instruction {
         position
     }
 
-    fn serialize_reg_imm_imm(buffer: &mut [u8], opcode: u8, reg: RawReg, imm1: u32, imm2: u32) -> usize {
+    fn serialize_reg_imm_imm(buffer: &mut [u8], opcode: u8, reg: RawReg, imm1: i32, imm2: i32) -> usize {
+        let imm1 = cast(imm1).bitwise_as_u32();
+        let imm2 = cast(imm2).bitwise_as_u32();
         buffer[0] = opcode;
         let mut position = 2;
         let imm1_length = write_simple_varint(imm1, &mut buffer[position..]);
@@ -2609,7 +2621,9 @@ impl Instruction {
         position += write_simple_varint(imm2, &mut buffer[position..]);
         position
     }
-    fn serialize_reg_reg_imm_imm(buffer: &mut [u8], opcode: u8, reg1: RawReg, reg2: RawReg, imm1: u32, imm2: u32) -> usize {
+    fn serialize_reg_reg_imm_imm(buffer: &mut [u8], opcode: u8, reg1: RawReg, reg2: RawReg, imm1: i32, imm2: i32) -> usize {
+        let imm1 = cast(imm1).bitwise_as_u32();
+        let imm2 = cast(imm2).bitwise_as_u32();
         buffer[0] = opcode;
         buffer[1] = reg1.0 as u8 | (reg2.0 as u8) << 4;
         let mut position = 3;
@@ -2634,7 +2648,8 @@ impl Instruction {
         3
     }
 
-    fn serialize_reg_reg_imm(buffer: &mut [u8], opcode: u8, reg1: RawReg, reg2: RawReg, imm: u32) -> usize {
+    fn serialize_reg_reg_imm(buffer: &mut [u8], opcode: u8, reg1: RawReg, reg2: RawReg, imm: i32) -> usize {
+        let imm = cast(imm).bitwise_as_u32();
         buffer[0] = opcode;
         buffer[1] = reg1.0 as u8 | (reg2.0 as u8) << 4;
         write_simple_varint(imm, &mut buffer[2..]) + 2
@@ -2647,7 +2662,8 @@ impl Instruction {
         write_simple_varint(imm, &mut buffer[2..]) + 2
     }
 
-    fn serialize_reg_imm(buffer: &mut [u8], opcode: u8, reg: RawReg, imm: u32) -> usize {
+    fn serialize_reg_imm(buffer: &mut [u8], opcode: u8, reg: RawReg, imm: i32) -> usize {
+        let imm = cast(imm).bitwise_as_u32();
         buffer[0] = opcode;
         buffer[1] = reg.0 as u8;
         write_simple_varint(imm, &mut buffer[2..]) + 2
@@ -2659,12 +2675,15 @@ impl Instruction {
         write_simple_varint(imm, &mut buffer[1..]) + 1
     }
 
-    fn serialize_imm(buffer: &mut [u8], opcode: u8, imm: u32) -> usize {
+    fn serialize_imm(buffer: &mut [u8], opcode: u8, imm: i32) -> usize {
+        let imm = cast(imm).bitwise_as_u32();
         buffer[0] = opcode;
         write_simple_varint(imm, &mut buffer[1..]) + 1
     }
 
-    fn serialize_imm_imm(buffer: &mut [u8], opcode: u8, imm1: u32, imm2: u32) -> usize {
+    fn serialize_imm_imm(buffer: &mut [u8], opcode: u8, imm1: i32, imm2: i32) -> usize {
+        let imm1 = cast(imm1).bitwise_as_u32();
+        let imm2 = cast(imm2).bitwise_as_u32();
         buffer[0] = opcode;
         let mut position = 2;
         let imm1_length = write_simple_varint(imm1, &mut buffer[position..]);
@@ -2732,9 +2751,9 @@ impl<'a, 'b, 'c> InstructionFormatter<'a, 'b, 'c> {
         Formatter(self.format.jump_target_formatter, imm)
     }
 
-    fn format_imm(&self, imm: u32) -> impl core::fmt::Display {
+    fn format_imm(&self, imm: i32) -> impl core::fmt::Display {
         struct Formatter {
-            imm: u32,
+            imm: i32,
             is_64_bit: bool,
         }
 
@@ -2745,8 +2764,7 @@ impl<'a, 'b, 'c> InstructionFormatter<'a, 'b, 'c> {
                 } else if !self.is_64_bit {
                     write!(fmt, "0x{:x}", self.imm)
                 } else {
-                    let imm: i32 = cast(self.imm).bitwise_as_i32();
-                    let imm: i64 = cast(imm).to_i64_sign_extend();
+                    let imm: i64 = cast(self.imm).to_i64_sign_extend();
                     write!(fmt, "0x{:x}", imm)
                 }
             }
@@ -2790,8 +2808,8 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "[a0..a0 + a2] = u8 a1")
     }
 
-    fn ecalli(&mut self, nth_import: u32) -> Self::ReturnTy {
-        write!(self, "ecalli {nth_import}")
+    fn ecalli(&mut self, nth_import: i32) -> Self::ReturnTy {
+        write!(self, "ecalli {}", cast(nth_import).bitwise_as_u32())
     }
 
     fn set_less_than_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
@@ -2937,7 +2955,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "{d} = {s1} * {s2}")
     }
 
-    fn mul_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn mul_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
@@ -2948,7 +2966,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn mul_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn mul_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
@@ -3133,35 +3151,35 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "{d} = {s1} >>r {s2}")
     }
 
-    fn set_less_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn set_less_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
         write!(self, "{d} = {s1} <u {s2}")
     }
 
-    fn set_greater_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn set_greater_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
         write!(self, "{d} = {s1} >u {s2}")
     }
 
-    fn set_less_than_signed_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn set_less_than_signed_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
         write!(self, "{d} = {s1} <s {s2}")
     }
 
-    fn set_greater_than_signed_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn set_greater_than_signed_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
         write!(self, "{d} = {s1} >s {s2}")
     }
 
-    fn shift_logical_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
@@ -3172,7 +3190,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn shift_logical_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_imm(s1);
         let s2 = self.format_reg(s2);
@@ -3183,7 +3201,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn shift_arithmetic_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
@@ -3194,28 +3212,28 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn shift_logical_right_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
         write!(self, "{d} = {s1} >> {s2}")
     }
 
-    fn shift_logical_right_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_imm(s1);
         let s2 = self.format_reg(s2);
         write!(self, "{d} = {s1} >> {s2}")
     }
 
-    fn shift_arithmetic_right_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
         write!(self, "{d} = {s1} >>a {s2}")
     }
 
-    fn shift_arithmetic_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_imm(s1);
         let s2 = self.format_reg(s2);
@@ -3226,7 +3244,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn shift_logical_left_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
@@ -3237,7 +3255,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn shift_logical_left_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_imm(s1);
         let s2 = self.format_reg(s2);
@@ -3248,49 +3266,49 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn shift_arithmetic_right_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_imm(s1);
         let s2 = self.format_reg(s2);
         write!(self, "{d} = {s1} >>a {s2}")
     }
 
-    fn shift_logical_left_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
         write!(self, "{d} = {s1} << {s2}")
     }
 
-    fn shift_logical_left_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: u32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_imm(s1);
         let s2 = self.format_reg(s2);
         write!(self, "{d} = {s1} << {s2}")
     }
 
-    fn or_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn or_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
         write!(self, "{d} = {s1} | {s2}")
     }
 
-    fn and_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn and_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
         write!(self, "{d} = {s1} & {s2}")
     }
 
-    fn xor_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn xor_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_imm(s2);
         write!(self, "{d} = {s1} ^ {s2}")
     }
 
-    fn load_imm(&mut self, d: RawReg, a: u32) -> Self::ReturnTy {
+    fn load_imm(&mut self, d: RawReg, a: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let a = self.format_imm(a);
         write!(self, "{d} = {a}")
@@ -3393,21 +3411,21 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "{d} = {s} if {c} != 0")
     }
 
-    fn cmov_if_zero_imm(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
+    fn cmov_if_zero_imm(&mut self, d: RawReg, c: RawReg, s: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let c = self.format_reg(c);
         let s = self.format_imm(s);
         write!(self, "{d} = {s} if {c} == 0")
     }
 
-    fn cmov_if_not_zero_imm(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
+    fn cmov_if_not_zero_imm(&mut self, d: RawReg, c: RawReg, s: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let c = self.format_reg(c);
         let s = self.format_imm(s);
         write!(self, "{d} = {s} if {c} != 0")
     }
 
-    fn rotate_right_imm_32(&mut self, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
+    fn rotate_right_imm_32(&mut self, d: RawReg, s: RawReg, c: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
         let c = self.format_imm(c);
@@ -3418,7 +3436,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn rotate_right_imm_alt_32(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
+    fn rotate_right_imm_alt_32(&mut self, d: RawReg, c: RawReg, s: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let c = self.format_reg(c);
         let s = self.format_imm(s);
@@ -3429,21 +3447,21 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn rotate_right_imm_64(&mut self, d: RawReg, s: RawReg, c: u32) -> Self::ReturnTy {
+    fn rotate_right_imm_64(&mut self, d: RawReg, s: RawReg, c: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
         let c = self.format_imm(c);
         write!(self, "{d} = {s} >>r {c}")
     }
 
-    fn rotate_right_imm_alt_64(&mut self, d: RawReg, c: RawReg, s: u32) -> Self::ReturnTy {
+    fn rotate_right_imm_alt_64(&mut self, d: RawReg, c: RawReg, s: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let c = self.format_reg(c);
         let s = self.format_imm(s);
         write!(self, "{d} = {s} >>r {c}")
     }
 
-    fn add_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn add_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         if !self.format.prefer_unaliased && i64::from(s2) < 0 && i64::from(s2) > -4096 {
@@ -3454,7 +3472,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let prefix = if self.format.is_64_bit { "i32 " } else { "" };
@@ -3466,7 +3484,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn negate_and_add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn negate_and_add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let prefix = if self.format.is_64_bit { "i32 " } else { "" };
@@ -3478,7 +3496,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn negate_and_add_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) -> Self::ReturnTy {
+    fn negate_and_add_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         if !self.format.prefer_unaliased && s2 == 0 {
@@ -3489,31 +3507,31 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn store_imm_indirect_u8(&mut self, base: RawReg, offset: u32, value: u32) -> Self::ReturnTy {
+    fn store_imm_indirect_u8(&mut self, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         let base = self.format_reg(base);
         let value = self.format_imm(value);
         write!(self, "u8 [{base} + {offset}] = {value}")
     }
 
-    fn store_imm_indirect_u16(&mut self, base: RawReg, offset: u32, value: u32) -> Self::ReturnTy {
+    fn store_imm_indirect_u16(&mut self, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         let base = self.format_reg(base);
         let value = self.format_imm(value);
         write!(self, "u16 [{base} + {offset}] = {value}")
     }
 
-    fn store_imm_indirect_u32(&mut self, base: RawReg, offset: u32, value: u32) -> Self::ReturnTy {
+    fn store_imm_indirect_u32(&mut self, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         let base = self.format_reg(base);
         let value = self.format_imm(value);
         write!(self, "u32 [{base} + {offset}] = {value}")
     }
 
-    fn store_imm_indirect_u64(&mut self, base: RawReg, offset: u32, value: u32) -> Self::ReturnTy {
+    fn store_imm_indirect_u64(&mut self, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         let base = self.format_reg(base);
         let value = self.format_imm(value);
         write!(self, "u64 [{base} + {offset}] = {value}")
     }
 
-    fn store_indirect_u8(&mut self, src: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+    fn store_indirect_u8(&mut self, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let base = self.format_reg(base);
         if self.format.prefer_unaliased || offset != 0 {
             let offset = self.format_imm(offset);
@@ -3523,7 +3541,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn store_indirect_u16(&mut self, src: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+    fn store_indirect_u16(&mut self, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let src = self.format_reg(src);
         let base = self.format_reg(base);
         if self.format.prefer_unaliased || offset != 0 {
@@ -3534,7 +3552,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn store_indirect_u32(&mut self, src: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+    fn store_indirect_u32(&mut self, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let src = self.format_reg(src);
         let base = self.format_reg(base);
         if self.format.prefer_unaliased || offset != 0 {
@@ -3545,7 +3563,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn store_indirect_u64(&mut self, src: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+    fn store_indirect_u64(&mut self, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let src = self.format_reg(src);
         let base = self.format_reg(base);
         if self.format.prefer_unaliased || offset != 0 {
@@ -3556,55 +3574,55 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn store_imm_u8(&mut self, offset: u32, value: u32) -> Self::ReturnTy {
+    fn store_imm_u8(&mut self, offset: i32, value: i32) -> Self::ReturnTy {
         let offset = self.format_imm(offset);
         let value = self.format_imm(value);
         write!(self, "u8 [{offset}] = {value}")
     }
 
-    fn store_imm_u16(&mut self, offset: u32, value: u32) -> Self::ReturnTy {
+    fn store_imm_u16(&mut self, offset: i32, value: i32) -> Self::ReturnTy {
         let offset = self.format_imm(offset);
         let value = self.format_imm(value);
         write!(self, "u16 [{offset}] = {value}")
     }
 
-    fn store_imm_u32(&mut self, offset: u32, value: u32) -> Self::ReturnTy {
+    fn store_imm_u32(&mut self, offset: i32, value: i32) -> Self::ReturnTy {
         let offset = self.format_imm(offset);
         let value = self.format_imm(value);
         write!(self, "u32 [{offset}] = {value}")
     }
 
-    fn store_imm_u64(&mut self, offset: u32, value: u32) -> Self::ReturnTy {
+    fn store_imm_u64(&mut self, offset: i32, value: i32) -> Self::ReturnTy {
         let offset = self.format_imm(offset);
         let value = self.format_imm(value);
         write!(self, "u64 [{offset}] = {value}")
     }
 
-    fn store_u8(&mut self, src: RawReg, offset: u32) -> Self::ReturnTy {
+    fn store_u8(&mut self, src: RawReg, offset: i32) -> Self::ReturnTy {
         let src = self.format_reg(src);
         let offset = self.format_imm(offset);
         write!(self, "u8 [{offset}] = {src}")
     }
 
-    fn store_u16(&mut self, src: RawReg, offset: u32) -> Self::ReturnTy {
+    fn store_u16(&mut self, src: RawReg, offset: i32) -> Self::ReturnTy {
         let src = self.format_reg(src);
         let offset = self.format_imm(offset);
         write!(self, "u16 [{offset}] = {src}")
     }
 
-    fn store_u32(&mut self, src: RawReg, offset: u32) -> Self::ReturnTy {
+    fn store_u32(&mut self, src: RawReg, offset: i32) -> Self::ReturnTy {
         let src = self.format_reg(src);
         let offset = self.format_imm(offset);
         write!(self, "u32 [{offset}] = {src}")
     }
 
-    fn store_u64(&mut self, src: RawReg, offset: u32) -> Self::ReturnTy {
+    fn store_u64(&mut self, src: RawReg, offset: i32) -> Self::ReturnTy {
         let src = self.format_reg(src);
         let offset = self.format_imm(offset);
         write!(self, "u64 [{offset}] = {src}")
     }
 
-    fn load_indirect_u8(&mut self, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+    fn load_indirect_u8(&mut self, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let base = self.format_reg(base);
         if self.format.prefer_unaliased || offset != 0 {
@@ -3615,7 +3633,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn load_indirect_i8(&mut self, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+    fn load_indirect_i8(&mut self, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let base = self.format_reg(base);
         if self.format.prefer_unaliased || offset != 0 {
@@ -3626,7 +3644,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn load_indirect_u16(&mut self, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+    fn load_indirect_u16(&mut self, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let base = self.format_reg(base);
         if self.format.prefer_unaliased || offset != 0 {
@@ -3637,7 +3655,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn load_indirect_i16(&mut self, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+    fn load_indirect_i16(&mut self, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let base = self.format_reg(base);
         if self.format.prefer_unaliased || offset != 0 {
@@ -3648,7 +3666,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn load_indirect_u32(&mut self, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+    fn load_indirect_u32(&mut self, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let base = self.format_reg(base);
         if self.format.prefer_unaliased || offset != 0 {
@@ -3659,7 +3677,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn load_indirect_i32(&mut self, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+    fn load_indirect_i32(&mut self, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let base = self.format_reg(base);
         if self.format.prefer_unaliased || offset != 0 {
@@ -3670,7 +3688,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn load_indirect_u64(&mut self, dst: RawReg, base: RawReg, offset: u32) -> Self::ReturnTy {
+    fn load_indirect_u64(&mut self, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let base = self.format_reg(base);
         if self.format.prefer_unaliased || offset != 0 {
@@ -3681,43 +3699,43 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
-    fn load_u8(&mut self, dst: RawReg, offset: u32) -> Self::ReturnTy {
+    fn load_u8(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let offset = self.format_imm(offset);
         write!(self, "{} = u8 [{}]", dst, offset)
     }
 
-    fn load_i8(&mut self, dst: RawReg, offset: u32) -> Self::ReturnTy {
+    fn load_i8(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let offset = self.format_imm(offset);
         write!(self, "{} = i8 [{}]", dst, offset)
     }
 
-    fn load_u16(&mut self, dst: RawReg, offset: u32) -> Self::ReturnTy {
+    fn load_u16(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let offset = self.format_imm(offset);
         write!(self, "{} = u16 [{}]", dst, offset)
     }
 
-    fn load_i16(&mut self, dst: RawReg, offset: u32) -> Self::ReturnTy {
+    fn load_i16(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let offset = self.format_imm(offset);
         write!(self, "{} = i16 [{}]", dst, offset)
     }
 
-    fn load_i32(&mut self, dst: RawReg, offset: u32) -> Self::ReturnTy {
+    fn load_i32(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let offset = self.format_imm(offset);
         write!(self, "{} = i32 [{}]", dst, offset)
     }
 
-    fn load_u32(&mut self, dst: RawReg, offset: u32) -> Self::ReturnTy {
+    fn load_u32(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let offset = self.format_imm(offset);
         write!(self, "{} = u32 [{}]", dst, offset)
     }
 
-    fn load_u64(&mut self, dst: RawReg, offset: u32) -> Self::ReturnTy {
+    fn load_u64(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let offset = self.format_imm(offset);
         write!(self, "{} = u64 [{}]", dst, offset)
@@ -3737,13 +3755,13 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "jump {} if {} <s {}", imm, s1, s2)
     }
 
-    fn branch_less_unsigned_imm(&mut self, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
+    fn branch_less_unsigned_imm(&mut self, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
         let s1 = self.format_reg(s1);
         let imm = self.format_jump(imm);
         write!(self, "jump {} if {} <u {}", imm, s1, s2)
     }
 
-    fn branch_less_signed_imm(&mut self, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
+    fn branch_less_signed_imm(&mut self, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
         let s1 = self.format_reg(s1);
         let imm = self.format_jump(imm);
         write!(self, "jump {} if {} <s {}", imm, s1, s2)
@@ -3763,13 +3781,13 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "jump {} if {} >=s {}", imm, s1, s2)
     }
 
-    fn branch_greater_or_equal_unsigned_imm(&mut self, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
+    fn branch_greater_or_equal_unsigned_imm(&mut self, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
         let s1 = self.format_reg(s1);
         let imm = self.format_jump(imm);
         write!(self, "jump {} if {} >=u {}", imm, s1, s2)
     }
 
-    fn branch_greater_or_equal_signed_imm(&mut self, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
+    fn branch_greater_or_equal_signed_imm(&mut self, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
         let s1 = self.format_reg(s1);
         let imm = self.format_jump(imm);
         write!(self, "jump {} if {} >=s {}", imm, s1, s2)
@@ -3789,37 +3807,37 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "jump {} if {} != {}", imm, s1, s2)
     }
 
-    fn branch_eq_imm(&mut self, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
+    fn branch_eq_imm(&mut self, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
         let s1 = self.format_reg(s1);
         let imm = self.format_jump(imm);
         write!(self, "jump {} if {} == {}", imm, s1, s2)
     }
 
-    fn branch_not_eq_imm(&mut self, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
+    fn branch_not_eq_imm(&mut self, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
         let s1 = self.format_reg(s1);
         let imm = self.format_jump(imm);
         write!(self, "jump {} if {} != {}", imm, s1, s2)
     }
 
-    fn branch_less_or_equal_unsigned_imm(&mut self, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
+    fn branch_less_or_equal_unsigned_imm(&mut self, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
         let s1 = self.format_reg(s1);
         let imm = self.format_jump(imm);
         write!(self, "jump {} if {} <=u {}", imm, s1, s2)
     }
 
-    fn branch_less_or_equal_signed_imm(&mut self, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
+    fn branch_less_or_equal_signed_imm(&mut self, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
         let s1 = self.format_reg(s1);
         let imm = self.format_jump(imm);
         write!(self, "jump {} if {} <=s {}", imm, s1, s2)
     }
 
-    fn branch_greater_unsigned_imm(&mut self, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
+    fn branch_greater_unsigned_imm(&mut self, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
         let s1 = self.format_reg(s1);
         let imm = self.format_jump(imm);
         write!(self, "jump {} if {} >u {}", imm, s1, s2)
     }
 
-    fn branch_greater_signed_imm(&mut self, s1: RawReg, s2: u32, imm: u32) -> Self::ReturnTy {
+    fn branch_greater_signed_imm(&mut self, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
         let s1 = self.format_reg(s1);
         let imm = self.format_jump(imm);
         write!(self, "jump {} if {} >s {}", imm, s1, s2)
@@ -3830,13 +3848,13 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "jump {}", target)
     }
 
-    fn load_imm_and_jump(&mut self, ra: RawReg, value: u32, target: u32) -> Self::ReturnTy {
+    fn load_imm_and_jump(&mut self, ra: RawReg, value: i32, target: u32) -> Self::ReturnTy {
         let ra = self.format_reg(ra);
         let target = self.format_jump(target);
         write!(self, "{ra} = {value}, jump {target}")
     }
 
-    fn jump_indirect(&mut self, base: RawReg, offset: u32) -> Self::ReturnTy {
+    fn jump_indirect(&mut self, base: RawReg, offset: i32) -> Self::ReturnTy {
         if !self.format.prefer_unaliased {
             match (base, offset) {
                 (_, 0) if base == Reg::RA.into() => return write!(self, "ret"),
@@ -3849,7 +3867,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         write!(self, "jump [{} + {}]", self.format_reg(base), offset)
     }
 
-    fn load_imm_and_jump_indirect(&mut self, ra: RawReg, base: RawReg, value: u32, offset: u32) -> Self::ReturnTy {
+    fn load_imm_and_jump_indirect(&mut self, ra: RawReg, base: RawReg, value: i32, offset: i32) -> Self::ReturnTy {
         let ra = self.format_reg(ra);
         let base = self.format_reg(base);
         if ra != base {
