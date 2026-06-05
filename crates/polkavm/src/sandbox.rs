@@ -296,7 +296,7 @@ where
 
     let origin_address = compiled_module.native_code_offset_to_address(origin);
     let gas_cost = crate::compiler::extract_gas_cost::<S>(compiled_module.machine_code(), cast(origin).to_usize());
-    let gas_cost = cast(cast(gas_cost).to_u64()).to_signed();
+    let gas_cost = cast(gas_cost).to_i64();
     if gas_cost > gas {
         log::debug!("Not enough gas to start execution at {pc} (0x{native_address:x}, gas metering stub at 0x{origin_address:x}): required={gas_cost}, got={gas}");
         return Some(Err(()));

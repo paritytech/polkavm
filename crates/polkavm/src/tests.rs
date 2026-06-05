@@ -792,7 +792,7 @@ fn step_tracing_out_of_gas(engine_config: Config) {
         }
     }
 
-    instance.set_next_program_counter(ProgramCounter(cast(module.blob().code().len()).assert_always_fits_in_u32()));
+    instance.set_next_program_counter(ProgramCounter(cast(module.blob().code().len()).to_u32_or_panic()));
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
     assert_eq!(instance.gas(), 2);
 
@@ -3221,7 +3221,7 @@ fn interpreter_max_allocation_size() {
     let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
 
     let limit: usize = 1024 * 32;
-    let limit_u32 = cast(limit).assert_always_fits_in_u32();
+    let limit_u32 = cast(limit).to_u32_or_panic();
     let mut module_config = ModuleConfig::new();
     module_config.set_aux_data_size(128 * 1024);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
@@ -3275,7 +3275,7 @@ fn interpreter_guest_memory_limit() {
     let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
 
     let limit: usize = 1024 * 32;
-    let limit_u32 = cast(limit).assert_always_fits_in_u32();
+    let limit_u32 = cast(limit).to_u32_or_panic();
     let mut module_config = ModuleConfig::new();
     module_config.set_aux_data_size(128 * 1024);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();

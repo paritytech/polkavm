@@ -26,6 +26,7 @@ blake3 = ["dep:blake3"]
 unique-id = []
 export-internals-for-testing = []
 simd = []
+paranoid = []
 
 [dev-dependencies]
 env_logger = { workspace = true }

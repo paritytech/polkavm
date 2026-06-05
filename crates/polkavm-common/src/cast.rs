@@ -4,13 +4,30 @@
 //!   * Casts should fail to compile if a) the source or the target type changes, and b) the cast between the new pair of types would now be incorrect.
 //!   * `usize` is assumed to be always at least 32-bit.
 
+macro_rules! check {
+    ($e:expr) => {
+        if !$e {
+            panic!("internal error: numerical overflow; this is a bug - please report it");
+        }
+    };
+}
+
+macro_rules! check_debug {
+    ($e:expr) => {
+        #[cfg(any(debug_assertions, feature = "paranoid"))]
+        if !$e {
+            panic!("internal error: numerical overflow; this is a bug - please report it");
+        }
+    };
+}
+
 #[allow(non_camel_case_types)]
 #[repr(transparent)]
 pub struct cast<T>(pub T);
 
 impl cast<i8> {
     #[inline(always)]
-    pub const fn to_unsigned(self) -> u8 {
+    pub const fn bitwise_as_u8(self) -> u8 {
         self.0 as u8
     }
 
@@ -27,7 +44,7 @@ impl cast<i8> {
 
 impl cast<i16> {
     #[inline(always)]
-    pub const fn to_unsigned(self) -> u16 {
+    pub const fn bitwise_as_u16(self) -> u16 {
         self.0 as u16
     }
 
@@ -44,34 +61,50 @@ impl cast<i16> {
 
 impl cast<i32> {
     #[inline(always)]
-    pub const fn to_unsigned(self) -> u32 {
+    pub const fn bitwise_as_u32(self) -> u32 {
         self.0 as u32
+    }
+
+    #[track_caller]
+    #[inline(always)]
+    pub const fn to_unsigned_or_debug_panic(self) -> u32 {
+        check_debug!(self.0 >= 0);
+        self.bitwise_as_u32()
+    }
+
+    #[track_caller]
+    #[inline(always)]
+    pub const fn to_u32_or_panic(self) -> u32 {
+        check!(self.0 >= 0);
+        self.bitwise_as_u32()
     }
 
     #[inline(always)]
     pub const fn to_i64_sign_extend(self) -> i64 {
         self.0 as i64
     }
-
-    #[inline(always)]
-    pub const fn to_u64_sign_extend(self) -> u64 {
-        self.0 as u64
-    }
 }
 
 impl cast<i64> {
     #[inline(always)]
-    pub const fn to_unsigned(self) -> u64 {
+    pub const fn bitwise_as_u64(self) -> u64 {
         self.0 as u64
     }
 }
 
 impl cast<u8> {
     #[inline(always)]
-    pub const fn to_signed(self) -> i8 {
+    pub const fn bitwise_as_i8(self) -> i8 {
         self.0 as i8
     }
 
+    #[track_caller]
+    #[inline(always)]
+    pub const fn to_signed_or_debug_panic(self) -> i8 {
+        check_debug!(self.0 <= cast(i8::MAX).bitwise_as_u8());
+        self.bitwise_as_i8()
+    }
+
     #[inline(always)]
     pub const fn to_u64(self) -> u64 {
         self.0 as u64
@@ -87,7 +120,7 @@ impl cast<u16> {
 
 impl cast<u16> {
     #[inline(always)]
-    pub const fn to_signed(self) -> i16 {
+    pub const fn bitwise_as_i16(self) -> i16 {
         self.0 as i16
     }
 
@@ -99,8 +132,22 @@ impl cast<u16> {
 
 impl cast<u32> {
     #[inline(always)]
-    pub const fn to_signed(self) -> i32 {
+    pub const fn bitwise_as_i32(self) -> i32 {
         self.0 as i32
+    }
+
+    #[track_caller]
+    #[inline(always)]
+    pub const fn to_signed_or_debug_panic(self) -> i32 {
+        check_debug!(self.0 <= cast(i32::MAX).bitwise_as_u32());
+        self.bitwise_as_i32()
+    }
+
+    #[track_caller]
+    #[inline(always)]
+    pub const fn to_i32_or_panic(self) -> i32 {
+        check!(self.0 <= cast(i32::MAX).bitwise_as_u32());
+        self.bitwise_as_i32()
     }
 
     #[inline(always)]
@@ -110,7 +157,12 @@ impl cast<u32> {
 
     #[inline(always)]
     pub const fn to_u64_sign_extend(self) -> u64 {
-        cast(self.0 as i32).to_u64_sign_extend()
+        cast(cast(self.bitwise_as_i32()).to_i64_sign_extend()).bitwise_as_u64()
+    }
+
+    #[inline(always)]
+    pub const fn to_i64(self) -> i64 {
+        cast(self.to_u64()).bitwise_as_i64()
     }
 
     #[inline(always)]
@@ -127,17 +179,37 @@ impl cast<u32> {
     pub const fn truncate_to_u16(self) -> u16 {
         self.0 as u16
     }
+
+    #[inline(always)]
+    pub const fn truncate_to_i16(self) -> i16 {
+        cast(self.truncate_to_u16()).bitwise_as_i16()
+    }
 }
 
 impl cast<u64> {
+    #[track_caller]
     #[inline(always)]
-    pub const fn assert_always_fits_in_u32(self) -> u32 {
-        debug_assert!(self.0 <= u32::MAX as u64);
+    pub const fn to_u32_or_debug_panic(self) -> u32 {
+        check_debug!(self.0 <= u32::MAX as u64);
         self.0 as u32
     }
 
+    #[track_caller]
     #[inline(always)]
-    pub const fn to_signed(self) -> i64 {
+    pub const fn to_u32_or_panic(self) -> u32 {
+        check!(self.0 <= cast(u32::MAX).to_u64());
+        self.0 as u32
+    }
+
+    #[track_caller]
+    #[inline(always)]
+    pub const fn to_i64_or_panic(self) -> i64 {
+        check!(self.0 <= cast(i64::MAX).bitwise_as_u64());
+        self.bitwise_as_i64()
+    }
+
+    #[inline(always)]
+    pub const fn bitwise_as_i64(self) -> i64 {
         self.0 as i64
     }
 
@@ -158,9 +230,17 @@ impl cast<u64> {
 }
 
 impl cast<usize> {
+    #[track_caller]
     #[inline(always)]
-    pub const fn assert_always_fits_in_u32(self) -> u32 {
-        debug_assert!(self.0 <= u32::MAX as usize);
+    pub const fn to_u32_or_debug_panic(self) -> u32 {
+        check_debug!(self.0 <= u32::MAX as usize);
+        self.0 as u32
+    }
+
+    #[track_caller]
+    #[inline(always)]
+    pub const fn to_u32_or_panic(self) -> u32 {
+        check!(self.0 <= cast(u32::MAX).to_usize());
         self.0 as u32
     }
 

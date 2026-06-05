@@ -2745,7 +2745,7 @@ impl<'a, 'b, 'c> InstructionFormatter<'a, 'b, 'c> {
                 } else if !self.is_64_bit {
                     write!(fmt, "0x{:x}", self.imm)
                 } else {
-                    let imm: i32 = cast(self.imm).to_signed();
+                    let imm: i32 = cast(self.imm).bitwise_as_i32();
                     let imm: i64 = cast(imm).to_i64_sign_extend();
                     write!(fmt, "0x{:x}", imm)
                 }
