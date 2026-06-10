@@ -524,10 +524,33 @@ fn transform_code(data: Vec<OperationKind>) -> Vec<Instruction> {
 fn build_program_blob(data: Vec<OperationKind>) -> ProgramBlob {
     let code = transform_code(data);
 
+    if std::env::var("DEBUG_FUZZ_PROG").is_ok() {
+        eprintln!("[prog] {} instructions:", code.len());
+        for inst in &code {
+            eprintln!("  {inst:?}");
+        }
+    }
+
     let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&code, &[]);
     ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap()
+}
+
+fn native_page_size() -> u32 {
+    // SAFETY: `sysconf` has no preconditions and `_SC_PAGESIZE` always resolves to a positive value.
+    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    u32::try_from(size).unwrap_or(4096)
+}
+
+/// Selects the recompiler; enables the experimental generic sandbox off x86-64 Linux (e.g. macOS/AArch64).
+fn configure_recompiler(config: &mut polkavm::Config) {
+    config.set_backend(Some(polkavm::BackendKind::Compiler));
+    #[cfg(not(all(target_arch = "x86_64", target_os = "linux")))]
+    {
+        config.set_allow_experimental(true);
+        config.set_sandbox(Some(polkavm::SandboxKind::Generic));
+    }
 }
 
 fn interpreter_fuzzer_harness(data: Vec<OperationKind>, cache_config: Option<CacheSizeConfig>) {
@@ -540,6 +563,7 @@ fn interpreter_fuzzer_harness(data: Vec<OperationKind>, cache_config: Option<Cac
 
     let mut module_config = ModuleConfig::default();
     module_config.set_strict(true);
+    module_config.set_page_size(native_page_size());
     module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
 
     let module = polkavm::Module::from_blob(&engine, &module_config, blob).unwrap();
@@ -569,6 +593,8 @@ fn correctness_fuzzer_harness(data: Vec<OperationKind>) {
 
         let mut module_config = ModuleConfig::default();
         module_config.set_strict(false);
+        // Both backends must share a page size so their memory maps (and thus the comparison) agree.
+        module_config.set_page_size(native_page_size());
         module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
 
         let module = polkavm::Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
@@ -582,12 +608,13 @@ fn correctness_fuzzer_harness(data: Vec<OperationKind>) {
 
     let mut instance_recompiler = {
         let mut config = polkavm::Config::new();
-        config.set_backend(Some(polkavm::BackendKind::Compiler));
+        configure_recompiler(&mut config);
 
         let engine = Engine::new(&config).unwrap();
 
         let mut module_config = ModuleConfig::default();
         module_config.set_strict(false);
+        module_config.set_page_size(native_page_size());
         module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
 
         let module = polkavm::Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
