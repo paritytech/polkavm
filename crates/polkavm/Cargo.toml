@@ -20,7 +20,7 @@ schnellru = { workspace = true, optional = true }
 [target.'cfg(all(not(miri), target_arch = "x86_64", target_os = "linux"))'.dependencies]
 polkavm-linux-raw = { workspace = true, features = ["std"] }
 
-[target.'cfg(all(not(miri), target_arch = "x86_64", any(target_os = "macos", target_os = "freebsd")))'.dependencies]
+[target.'cfg(all(not(miri), any(all(target_arch = "x86_64", any(target_os = "macos", target_os = "freebsd")), all(target_arch = "aarch64", target_os = "macos"))))'.dependencies]
 libc = { workspace = true }
 
 [dev-dependencies]

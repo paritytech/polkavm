@@ -10,10 +10,12 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = { version = "1.4.2", features = ["derive"] }
 libfuzzer-sys = "0.4"
+libc = "0.2"
 
 [dependencies.polkavm]
 path = "../crates/polkavm"
-features = ["export-internals-for-testing"]
+# `generic-sandbox` runs the recompiler where the zygote sandbox is absent (macOS, AArch64); unused on x86-64 Linux.
+features = ["export-internals-for-testing", "generic-sandbox"]
 
 [dependencies.polkavm-linker]
 path = "../crates/polkavm-linker"
