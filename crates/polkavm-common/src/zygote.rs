@@ -124,6 +124,10 @@ pub const VM_SHARED_MEMORY_SIZE: u64 = u32::MAX as u64;
 ///
 /// This does *not* affect the VM ABI and can be changed at will,
 /// but should be high enough that it's never hit.
+// AArch64 needs more headroom (fixed 4-byte insns, immediate expansion, gas stub on first insn).
+#[cfg(target_arch = "aarch64")]
+pub const VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH: u32 = 112;
+#[cfg(not(target_arch = "aarch64"))]
 pub const VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH: u32 = 67;
 
 /// The maximum number of bytes the jump table can be.
@@ -136,6 +140,10 @@ pub const VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE: u64 = 0x100000000 * core::
 
 // TODO: Make this smaller.
 /// The maximum number of bytes the native code can be.
+// Must be >= VM_MAXIMUM_CODE_SIZE * VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH (see static assert below).
+#[cfg(target_arch = "aarch64")]
+pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = 3584 * 1024 * 1024; // 32 MiB * 112
+#[cfg(not(target_arch = "aarch64"))]
 pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = 2176 * 1024 * 1024 - 1;
 
 #[repr(C)]
