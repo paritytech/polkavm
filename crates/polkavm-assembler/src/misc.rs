@@ -65,12 +65,14 @@ impl<T> Instruction<T> {
 pub(crate) struct FixupKind(pub u32);
 
 impl FixupKind {
+    #[cfg(not(target_arch = "aarch64"))]
     #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
     #[inline]
     pub const fn offset(self) -> u32 {
         (self.0 >> 24) & 0b11
     }
 
+    #[cfg(not(target_arch = "aarch64"))]
     #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
     #[inline]
     pub const fn length(self) -> u32 {
@@ -92,6 +94,42 @@ impl FixupKind {
     pub const fn new_3(opcode: [u32; 3], length: u32) -> Self {
         let opcode = opcode[0] | (opcode[1] << 8) | (opcode[2] << 16);
         FixupKind((3 << 24) | (length << 28) | opcode)
+    }
+
+    /// AArch64 branch fixup: signed `width`-bit immediate at bit `lsb`, scaled by 4, relative to the
+    /// instruction start. Same `u32` storage as the x86 constructors; `finalize` interprets per-arch.
+    #[cfg(target_arch = "aarch64")]
+    #[inline]
+    pub const fn aarch64_branch(lsb: u32, width: u32) -> Self {
+        FixupKind(lsb | (width << 8))
+    }
+
+    /// `ADR` fixup: signed 21-bit byte offset split across `immlo` (30:29) / `immhi` (23:5); tagged by bit 16.
+    #[cfg(target_arch = "aarch64")]
+    #[inline]
+    pub const fn aarch64_adr() -> Self {
+        FixupKind(1 << 16)
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    #[inline]
+    pub const fn aarch64_is_adr(self) -> bool {
+        (self.0 >> 16) & 1 == 1
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    #[inline]
+    pub const fn aarch64_lsb(self) -> u32 {
+        self.0 & 0xff
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    #[inline]
+    pub const fn aarch64_width(self) -> u32 {
+        (self.0 >> 8) & 0xff
     }
 }
 

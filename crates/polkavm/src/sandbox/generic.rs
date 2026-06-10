@@ -114,13 +114,42 @@ mod sys {
 #[cfg(not(target_os = "linux"))]
 use libc as sys;
 
+// Apple Silicon W^X: MAP_JIT regions toggle writability per-thread via pthread_jit_write_protect_np,
+// and the icache must be flushed (sys_icache_invalidate) after writing code.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod jit_mem {
+    use super::{c_int, c_void, size_t};
+
+    extern "C" {
+        pub fn sys_icache_invalidate(start: *mut c_void, len: size_t);
+    }
+
+    #[inline]
+    pub unsafe fn set_writable(writable: bool) {
+        // 1 = executable (write-protected), 0 = writable.
+        libc::pthread_jit_write_protect_np(c_int::from(!writable));
+    }
+
+    #[inline]
+    pub unsafe fn flush_icache(ptr: *mut c_void, len: size_t) {
+        sys_icache_invalidate(ptr, len);
+    }
+}
+
 use core::ffi::c_void;
 use sys::{c_int, size_t, MADV_DONTNEED, MADV_FREE, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
 
 pub(crate) const GUEST_MEMORY_TO_VMCTX_OFFSET: isize = -4096;
 
+// These must match the gas-metering stub layout emitted by the compiler backend for this target.
+#[cfg(target_arch = "x86_64")]
 const GAS_METERING_TRAP_OFFSET: u64 = 3;
+#[cfg(target_arch = "x86_64")]
 const GAS_COST_GENERIC_SANDBOX_OFFSET: usize = 7;
+#[cfg(target_arch = "aarch64")]
+const GAS_METERING_TRAP_OFFSET: u64 = 36;
+#[cfg(target_arch = "aarch64")]
+const GAS_COST_GENERIC_SANDBOX_OFFSET: usize = 8;
 
 fn get_guest_memory_offset() -> usize {
     get_native_page_size()
@@ -150,6 +179,8 @@ impl From<std::io::Error> for Error {
 pub struct Mmap {
     pointer: *mut c_void,
     length: usize,
+    // MAP_JIT region (Apple Silicon): uses per-thread write-protect toggling instead of mprotect.
+    is_jit: bool,
 }
 
 // SAFETY: The ownership of an mmapped piece of memory can be safely transferred to other threads.
@@ -168,7 +199,33 @@ impl Mmap {
             pointer
         };
 
-        Ok(Self { pointer, length })
+        Ok(Self {
+            pointer,
+            length,
+            is_jit: false,
+        })
+    }
+
+    /// Like [`Mmap::reserve_address_space`], but uses `MAP_JIT` on Apple Silicon for executable code.
+    pub fn reserve_jit_address_space(length: size_t) -> Result<Self, Error> {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            // SAFETY: `MAP_FIXED` is not specified, so this is always safe.
+            let mut map = unsafe {
+                Mmap::raw_mmap(
+                    core::ptr::null_mut(),
+                    length,
+                    PROT_READ | PROT_WRITE | PROT_EXEC,
+                    MAP_ANONYMOUS | MAP_PRIVATE | sys::MAP_JIT,
+                )?
+            };
+            map.is_jit = true;
+            Ok(map)
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        {
+            Mmap::reserve_address_space(length)
+        }
     }
 
     fn mmap_within(&mut self, offset: usize, length: usize, protection: c_int) -> Result<(), Error> {
@@ -252,6 +309,24 @@ impl Mmap {
         protection: c_int,
         callback: impl FnOnce(&mut [u8]),
     ) -> Result<(), Error> {
+        // MAP_JIT regions toggle per-thread write protection + flush the icache instead of mprotect.
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        if self.is_jit {
+            if !offset.checked_add(length).map_or(false, |end| end <= self.length) {
+                return Err("out of bounds modify_and_protect".into());
+            }
+
+            // SAFETY: We're toggling write protection around the write of code we own.
+            unsafe {
+                jit_mem::set_writable(true);
+                callback(&mut self.as_slice_mut()[offset..offset + length]);
+                jit_mem::set_writable(false);
+                let ptr = self.pointer.cast::<u8>().add(offset).cast::<c_void>();
+                jit_mem::flush_icache(ptr, length);
+            }
+            return Ok(());
+        }
+
         self.mprotect(offset, length, PROT_READ | PROT_WRITE)?;
         callback(&mut self.as_slice_mut()[offset..offset + length]);
         if protection != PROT_READ | PROT_WRITE {
@@ -298,6 +373,7 @@ impl Default for Mmap {
         Self {
             pointer: core::ptr::NonNull::<u8>::dangling().as_ptr().cast::<c_void>(),
             length: 0,
+            is_jit: false,
         }
     }
 }
@@ -325,169 +401,209 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
 
     let vmctx = THREAD_VMCTX.with(|thread_ctx| *thread_ctx.get());
     if !vmctx.is_null() {
-        #[cfg(target_os = "macos")]
-        macro_rules! macos_reg_field {
-            (rax) => {
-                (*context.uc_mcontext).__ss.__rax
-            };
-            (rbx) => {
-                (*context.uc_mcontext).__ss.__rbx
-            };
-            (rcx) => {
-                (*context.uc_mcontext).__ss.__rcx
-            };
-            (rdx) => {
-                (*context.uc_mcontext).__ss.__rdx
-            };
-            (rdi) => {
-                (*context.uc_mcontext).__ss.__rdi
-            };
-            (rsi) => {
-                (*context.uc_mcontext).__ss.__rsi
-            };
-            (rbp) => {
-                (*context.uc_mcontext).__ss.__rbp
-            };
-            (rsp) => {
-                (*context.uc_mcontext).__ss.__rsp
-            };
-            (r8) => {
-                (*context.uc_mcontext).__ss.__r8
-            };
-            (r9) => {
-                (*context.uc_mcontext).__ss.__r9
-            };
-            (r10) => {
-                (*context.uc_mcontext).__ss.__r10
-            };
-            (r11) => {
-                (*context.uc_mcontext).__ss.__r11
-            };
-            (r12) => {
-                (*context.uc_mcontext).__ss.__r12
-            };
-            (r13) => {
-                (*context.uc_mcontext).__ss.__r13
-            };
-            (r14) => {
-                (*context.uc_mcontext).__ss.__r14
-            };
-            (r15) => {
-                (*context.uc_mcontext).__ss.__r15
-            };
-            (rip) => {
-                (*context.uc_mcontext).__ss.__rip
-            };
-        }
-
-        macro_rules! fetch_reg {
-            ($reg:ident) => {{
-                #[cfg(target_os = "linux")]
-                {
-                    context.uc_mcontext.$reg as u64
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    macos_reg_field!($reg) as u64
-                }
-                #[cfg(target_os = "freebsd")]
-                {
-                    context.uc_mcontext.mc_($reg) as u64
-                }
-            }};
-        }
-
-        const X86_TRAP_PF: u64 = 14;
-        let is_page_fault = {
-            #[cfg(target_os = "linux")]
-            {
-                signal == sys::SIGSEGV && context.uc_mcontext.trapno == X86_TRAP_PF
-            }
-            #[cfg(target_os = "macos")]
-            {
-                signal == sys::SIGBUS && (*context.uc_mcontext).__es.__trapno as u64 == X86_TRAP_PF
-            }
-            #[cfg(target_os = "freebsd")]
-            {
-                signal == sys::SIGBUS && context.uc_mcontext.mc_trapno == X86_TRAP_PF
-            }
-        };
-
-        let rip = fetch_reg!(rip);
-        let vmctx = &mut *vmctx;
-
-        // On Rosetta 2, the JMP emulation logic doesn't work same as on x64.
-        // Instead of triggering a GPF immdiately, it jumps to that address and then trigger a PF.
-        // Therefore the original program counter is lost.
-        // We fix this problem by storing the program counter in vmctx before jumping.
-        // See jump_indirect_impl for more details.
-        #[cfg(target_os = "macos")]
+        #[cfg(target_arch = "aarch64")]
         {
-            let is_invalid_rip = (rip >> 48) != 0;
-            if is_invalid_rip {
-                log::trace!("Jump table invalid address hit, returning to host");
+            // SAFETY: On a fault inside guest code the kernel hands us a valid thread state.
+            let ss = &(*context.uc_mcontext).__ss;
+            let pc = ss.__pc;
+            let vmctx = &mut *vmctx;
+
+            use polkavm_common::regmap::{to_native_reg, NativeReg, TMP_REG};
+            // Guest registers and TMP_REG live in x0..x13, so we can index `__x` directly.
+            for reg in polkavm_common::program::Reg::ALL {
+                let idx = to_native_reg(reg).idx() as usize;
+                vmctx.regs[reg as usize] = ss.__x[idx];
+            }
+            polkavm_common::static_assert!(TMP_REG.equals(NativeReg::X13));
+            vmctx.tmp_reg.store(ss.__x[TMP_REG.idx() as usize], Ordering::Relaxed);
+
+            if vmctx.program_range.contains(&pc) {
+                vmctx.next_native_program_counter.store(pc, Ordering::Relaxed);
+                // No `trapno` on AArch64: treat in-range SIGSEGV/SIGBUS as a page fault (gas UDF is SIGILL).
+                let is_page_fault = signal == sys::SIGSEGV || signal == sys::SIGBUS;
+                if is_page_fault {
+                    let fault_address = info.si_addr as u64;
+                    log::trace!("Page fault at 0x{fault_address:x} (pc: 0x{pc:x})");
+                    trigger_exit(vmctx, ExitReason::Segfault(fault_address));
+                } else {
+                    log::trace!("Signal received at 0x{pc:x}");
+                    trigger_exit(vmctx, ExitReason::Signal);
+                }
+            } else {
+                // Out-of-range pc during guest execution: a `br` to an invalid jump-table entry (sentinel
+                // or zeroed slot) jumped there and faulted. jump_indirect stashed the site in
+                // next_native_program_counter, so report a trap there.
+                log::trace!("Invalid jump to 0x{pc:x}");
                 trigger_exit(vmctx, ExitReason::Signal);
             }
         }
 
-        if vmctx.program_range.contains(&rip) {
-            use polkavm_common::regmap::NativeReg;
-            for reg in polkavm_common::program::Reg::ALL {
-                let value = match polkavm_common::regmap::to_native_reg(reg) {
-                    NativeReg::rax => fetch_reg!(rax),
-                    NativeReg::rcx => fetch_reg!(rcx),
-                    NativeReg::rdx => fetch_reg!(rdx),
-                    NativeReg::rbx => fetch_reg!(rbx),
-                    NativeReg::rbp => fetch_reg!(rbp),
-                    NativeReg::rsi => fetch_reg!(rsi),
-                    NativeReg::rdi => fetch_reg!(rdi),
-                    NativeReg::r8 => fetch_reg!(r8),
-                    NativeReg::r9 => fetch_reg!(r9),
-                    NativeReg::r10 => fetch_reg!(r10),
-                    NativeReg::r11 => fetch_reg!(r11),
-                    NativeReg::r12 => fetch_reg!(r12),
-                    NativeReg::r13 => fetch_reg!(r13),
-                    NativeReg::r14 => fetch_reg!(r14),
-                    NativeReg::r15 => fetch_reg!(r15),
+        #[cfg(target_arch = "x86_64")]
+        {
+            #[cfg(target_os = "macos")]
+            macro_rules! macos_reg_field {
+                (rax) => {
+                    (*context.uc_mcontext).__ss.__rax
                 };
-                vmctx.regs[reg as usize] = value;
+                (rbx) => {
+                    (*context.uc_mcontext).__ss.__rbx
+                };
+                (rcx) => {
+                    (*context.uc_mcontext).__ss.__rcx
+                };
+                (rdx) => {
+                    (*context.uc_mcontext).__ss.__rdx
+                };
+                (rdi) => {
+                    (*context.uc_mcontext).__ss.__rdi
+                };
+                (rsi) => {
+                    (*context.uc_mcontext).__ss.__rsi
+                };
+                (rbp) => {
+                    (*context.uc_mcontext).__ss.__rbp
+                };
+                (rsp) => {
+                    (*context.uc_mcontext).__ss.__rsp
+                };
+                (r8) => {
+                    (*context.uc_mcontext).__ss.__r8
+                };
+                (r9) => {
+                    (*context.uc_mcontext).__ss.__r9
+                };
+                (r10) => {
+                    (*context.uc_mcontext).__ss.__r10
+                };
+                (r11) => {
+                    (*context.uc_mcontext).__ss.__r11
+                };
+                (r12) => {
+                    (*context.uc_mcontext).__ss.__r12
+                };
+                (r13) => {
+                    (*context.uc_mcontext).__ss.__r13
+                };
+                (r14) => {
+                    (*context.uc_mcontext).__ss.__r14
+                };
+                (r15) => {
+                    (*context.uc_mcontext).__ss.__r15
+                };
+                (rip) => {
+                    (*context.uc_mcontext).__ss.__rip
+                };
             }
 
-            //
-            // RCX is TMP_REG, which is not mapped to any guest register.
-            // therefore we store it separately here.
-            //
-            // N.B Even though it's a volatile register, we still need to
-            // restore it to handle page faults correctly.
-            //
-            polkavm_common::static_assert!(polkavm_common::regmap::TMP_REG.equals(NativeReg::rcx));
-            vmctx.tmp_reg.store(fetch_reg!(rcx), Ordering::Relaxed);
-
-            vmctx.next_native_program_counter.store(rip, Ordering::Relaxed);
-
-            if is_page_fault {
-                let fault_address = {
+            macro_rules! fetch_reg {
+                ($reg:ident) => {{
                     #[cfg(target_os = "linux")]
                     {
-                        info.__bindgen_anon_1.__bindgen_anon_1._sifields._sigfault._addr as u64
+                        context.uc_mcontext.$reg as u64
                     }
                     #[cfg(target_os = "macos")]
                     {
-                        info.si_addr as u64
+                        macos_reg_field!($reg) as u64
                     }
                     #[cfg(target_os = "freebsd")]
                     {
-                        info.si_addr as u64
+                        context.uc_mcontext.mc_($reg) as u64
                     }
-                };
-
-                log::trace!("Page fault at 0x{fault_address:x} (rip: 0x{rip:x})");
-                trigger_exit(vmctx, ExitReason::Segfault(fault_address));
-            } else {
-                log::trace!("Signal received at 0x{rip:x}");
-                trigger_exit(vmctx, ExitReason::Signal);
+                }};
             }
-        }
+
+            const X86_TRAP_PF: u64 = 14;
+            let is_page_fault = {
+                #[cfg(target_os = "linux")]
+                {
+                    signal == sys::SIGSEGV && context.uc_mcontext.trapno == X86_TRAP_PF
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    signal == sys::SIGBUS && (*context.uc_mcontext).__es.__trapno as u64 == X86_TRAP_PF
+                }
+                #[cfg(target_os = "freebsd")]
+                {
+                    signal == sys::SIGBUS && context.uc_mcontext.mc_trapno == X86_TRAP_PF
+                }
+            };
+
+            let rip = fetch_reg!(rip);
+            let vmctx = &mut *vmctx;
+
+            // On Rosetta 2, the JMP emulation logic doesn't work same as on x64.
+            // Instead of triggering a GPF immdiately, it jumps to that address and then trigger a PF.
+            // Therefore the original program counter is lost.
+            // We fix this problem by storing the program counter in vmctx before jumping.
+            // See jump_indirect_impl for more details.
+            #[cfg(target_os = "macos")]
+            {
+                let is_invalid_rip = (rip >> 48) != 0;
+                if is_invalid_rip {
+                    log::trace!("Jump table invalid address hit, returning to host");
+                    trigger_exit(vmctx, ExitReason::Signal);
+                }
+            }
+
+            if vmctx.program_range.contains(&rip) {
+                use polkavm_common::regmap::NativeReg;
+                for reg in polkavm_common::program::Reg::ALL {
+                    let value = match polkavm_common::regmap::to_native_reg(reg) {
+                        NativeReg::rax => fetch_reg!(rax),
+                        NativeReg::rcx => fetch_reg!(rcx),
+                        NativeReg::rdx => fetch_reg!(rdx),
+                        NativeReg::rbx => fetch_reg!(rbx),
+                        NativeReg::rbp => fetch_reg!(rbp),
+                        NativeReg::rsi => fetch_reg!(rsi),
+                        NativeReg::rdi => fetch_reg!(rdi),
+                        NativeReg::r8 => fetch_reg!(r8),
+                        NativeReg::r9 => fetch_reg!(r9),
+                        NativeReg::r10 => fetch_reg!(r10),
+                        NativeReg::r11 => fetch_reg!(r11),
+                        NativeReg::r12 => fetch_reg!(r12),
+                        NativeReg::r13 => fetch_reg!(r13),
+                        NativeReg::r14 => fetch_reg!(r14),
+                        NativeReg::r15 => fetch_reg!(r15),
+                    };
+                    vmctx.regs[reg as usize] = value;
+                }
+
+                //
+                // RCX is TMP_REG, which is not mapped to any guest register.
+                // therefore we store it separately here.
+                //
+                // N.B Even though it's a volatile register, we still need to
+                // restore it to handle page faults correctly.
+                //
+                polkavm_common::static_assert!(polkavm_common::regmap::TMP_REG.equals(NativeReg::rcx));
+                vmctx.tmp_reg.store(fetch_reg!(rcx), Ordering::Relaxed);
+
+                vmctx.next_native_program_counter.store(rip, Ordering::Relaxed);
+
+                if is_page_fault {
+                    let fault_address = {
+                        #[cfg(target_os = "linux")]
+                        {
+                            info.__bindgen_anon_1.__bindgen_anon_1._sifields._sigfault._addr as u64
+                        }
+                        #[cfg(target_os = "macos")]
+                        {
+                            info.si_addr as u64
+                        }
+                        #[cfg(target_os = "freebsd")]
+                        {
+                            info.si_addr as u64
+                        }
+                    };
+
+                    log::trace!("Page fault at 0x{fault_address:x} (rip: 0x{rip:x})");
+                    trigger_exit(vmctx, ExitReason::Segfault(fault_address));
+                } else {
+                    log::trace!("Signal received at 0x{rip:x}");
+                    trigger_exit(vmctx, ExitReason::Signal);
+                }
+            }
+        } // end #[cfg(target_arch = "x86_64")]
     }
 
     // This signal is unrelated to anything the guest program did; proceed normally.
@@ -572,6 +688,7 @@ unsafe fn sysreturn(vmctx: &mut VmCtx) -> ! {
     debug_assert_ne!(vmctx.return_stack_pointer, 0);
 
     // SAFETY: This function can only be called while we're executing guest code.
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!(r#"
             // Restore the stack pointer to its original value.
@@ -579,6 +696,23 @@ unsafe fn sysreturn(vmctx: &mut VmCtx) -> ! {
 
             // Jump back
             jmp [{vmctx}]
+        "#,
+            vmctx = in(reg) vmctx,
+            options(noreturn)
+        );
+    }
+
+    // SAFETY: This function can only be called while we're executing guest code.
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!(r#"
+            // Restore the stack pointer to its original value.
+            ldr x17, [{vmctx}, #8]
+            mov sp, x17
+
+            // Jump back to the saved return address.
+            ldr x17, [{vmctx}]
+            br x17
         "#,
             vmctx = in(reg) vmctx,
             options(noreturn)
@@ -1137,9 +1271,11 @@ impl Sandbox {
         };
 
         if let Some(is_write_protected) = segfault_kind {
-            self.vmctx()
-                .next_native_program_counter
-                .store(machine_code_address, Ordering::Relaxed);
+            // Native address to re-enter the faulting instruction (raw fault PC on x86; recomputed on
+            // AArch64 — see `resume_native_address_for_pagefault`).
+            let resume_address =
+                compiled_module.resume_native_address_for_pagefault(program_counter, machine_code_address, self.gas_metering);
+            self.vmctx().next_native_program_counter.store(resume_address, Ordering::Relaxed);
 
             Ok(InterruptKind::Segfault(Segfault {
                 page_address,
@@ -1194,20 +1330,36 @@ impl Sandbox {
     fn madvise_remove(&mut self, address: u32, length: u32) -> Result<(), Error> {
         assert!(self.dynamic_paging_enabled);
 
-        self.memory.madvise(
-            self.guest_memory_offset + cast(address).to_usize(),
-            cast(length).to_usize(),
-            MADV_DONTNEED,
-        )?;
+        // macOS MADV_DONTNEED/MADV_FREE don't zero-fill private anon pages like Linux does, so remap
+        // fresh zero pages to actually clear the region (dev host only; Linux uses the madvise path).
+        #[cfg(target_os = "macos")]
+        {
+            self.memory.mmap_within(
+                self.guest_memory_offset + cast(address).to_usize(),
+                cast(length).to_usize(),
+                PROT_READ | PROT_WRITE,
+            )?;
+            return Ok(());
+        }
 
-        self.memory.madvise(
-            self.guest_memory_offset + cast(address).to_usize(),
-            cast(length).to_usize(),
-            MADV_FREE,
-        )?;
+        #[cfg(not(target_os = "macos"))]
+        {
+            self.memory.madvise(
+                self.guest_memory_offset + cast(address).to_usize(),
+                cast(length).to_usize(),
+                MADV_DONTNEED,
+            )?;
 
-        Ok(())
+            self.memory.madvise(
+                self.guest_memory_offset + cast(address).to_usize(),
+                cast(length).to_usize(),
+                MADV_FREE,
+            )?;
+
+            Ok(())
+        }
     }
+
 }
 
 impl super::SandboxAddressSpace for Mmap {
@@ -1253,7 +1405,8 @@ impl super::Sandbox for Sandbox {
     }
 
     fn reserve_address_space() -> Result<Self::AddressSpace, Self::Error> {
-        Mmap::reserve_address_space(VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE as usize + VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE as usize)
+        // This region holds executable JIT code, so on Apple Silicon it must be `MAP_JIT`.
+        Mmap::reserve_jit_address_space(VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE as usize + VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE as usize)
     }
 
     fn prepare_program(
@@ -1306,11 +1459,12 @@ impl super::Sandbox for Sandbox {
         let mut memory_map = Vec::new();
         if cfg.ro_data_size() > 0 {
             let mut ro_data = init.guest_init.ro_data.to_vec();
-            let physical_size = align_to_next_page_usize(native_page_size, ro_data.len()).unwrap();
-            ro_data.resize(physical_size, 0);
-            let physical_size = physical_size.try_into().expect("overflow");
-
             let virtual_size = cfg.ro_data_size();
+            // Clamp to the guest region: a 16K native page can exceed it, underflowing `padding` below.
+            let physical_size: u32 = u32::try_from(align_to_next_page_usize(native_page_size, ro_data.len()).unwrap())
+                .expect("overflow")
+                .min(virtual_size);
+            ro_data.resize(physical_size as usize, 0);
             if physical_size > 0 {
                 memory_map.push(ProgramMap {
                     address: cfg.ro_data_address(),
@@ -1333,11 +1487,12 @@ impl super::Sandbox for Sandbox {
 
         if cfg.rw_data_size() > 0 {
             let mut rw_data = init.guest_init.rw_data.to_vec();
-            let physical_size = align_to_next_page_usize(native_page_size, rw_data.len()).unwrap();
-            rw_data.resize(physical_size, 0);
-            let physical_size = physical_size.try_into().expect("overflow");
-
             let virtual_size = cfg.rw_data_size();
+            // See the ro_data clamp.
+            let physical_size: u32 = u32::try_from(align_to_next_page_usize(native_page_size, rw_data.len()).unwrap())
+                .expect("overflow")
+                .min(virtual_size);
+            rw_data.resize(physical_size as usize, 0);
             if physical_size > 0 {
                 memory_map.push(ProgramMap {
                     address: cfg.rw_data_address(),
@@ -1602,6 +1757,7 @@ impl super::Sandbox for Sandbox {
             let guest_memory = self.memory.as_ptr().cast::<u8>().add(self.guest_memory_offset);
             let tmp_reg = self.vmctx().tmp_reg.load(Ordering::Relaxed);
 
+            #[cfg(target_arch = "x86_64")]
             core::arch::asm!(r#"
                 push rbp
                 push rbx
@@ -1644,6 +1800,45 @@ impl super::Sandbox for Sandbox {
                 inlateout("rcx") tmp_reg => _,
                 inlateout("r14") vmctx => _,
                 in("r15") guest_memory,
+            );
+
+            #[cfg(target_arch = "aarch64")]
+            core::arch::asm!(r#"
+                // Save callee-saved regs (x19..x30): the guest path re-enters at `2:` via sysreturn's
+                // branch, and the `-> !` syscall trampolines clobber them without running an epilogue.
+                // LLVM forbids x19 as an asm operand/clobber, so preserve them manually (like x86's
+                // push rbp/rbx). The return sp is saved *after* the pushes so sysreturn pops correctly.
+                stp x19, x20, [sp, #-96]!
+                stp x21, x22, [sp, #16]
+                stp x23, x24, [sp, #32]
+                stp x25, x26, [sp, #48]
+                stp x27, x28, [sp, #64]
+                stp x29, x30, [sp, #80]
+
+                adr x17, 2f
+                str x17, [{vmctx}]
+                mov x17, sp
+                str x17, [{vmctx}, #8]
+
+                // sysenter loads the guest registers from the vmctx via x14/AUX_TMP_REG (memory base).
+                br {entry_point}
+
+                // We re-enter here on exit (via `sysreturn`).
+                2:
+                ldp x21, x22, [sp, #16]
+                ldp x23, x24, [sp, #32]
+                ldp x25, x26, [sp, #48]
+                ldp x27, x28, [sp, #64]
+                ldp x29, x30, [sp, #80]
+                ldp x19, x20, [sp], #96
+            "#,
+                entry_point = in(reg) entry_point,
+                vmctx = in(reg) vmctx,
+                // x14 = AUX_TMP_REG holds the guest memory base; x13 = TMP_REG.
+                in("x14") guest_memory,
+                in("x13") tmp_reg,
+                // Caller-saved regs (x0..x17) are clobbered by the guest; callee-saved are preserved above.
+                clobber_abi("C"),
             );
 
             THREAD_VMCTX.with(|thread_ctx| core::ptr::write(thread_ctx.get(), core::ptr::null_mut()));

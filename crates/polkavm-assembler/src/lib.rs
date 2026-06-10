@@ -5,6 +5,9 @@
 
 pub mod amd64;
 
+#[cfg(target_arch = "aarch64")]
+pub mod aarch64;
+
 #[cfg(feature = "alloc")]
 mod assembler;
 mod misc;
