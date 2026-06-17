@@ -2829,7 +2829,10 @@ fn pinky_dynamic_paging_64(mut config: Config) {
 // macOS has 16K native pages; recompiler tests using the default 4K guest page can't run faithfully
 // there. Such tests skip on macOS (they pass on 4K-page hosts, including the production target).
 fn skip_on_16k_native_page(config: &Config) -> bool {
-    crate::sandbox::init_native_page_size();
+    // `get_native_page_size()` returns 4096 when the compiler/sandbox isn't built, so this is false there.
+    if_compiler_is_supported! {
+        { crate::sandbox::init_native_page_size(); } else {}
+    }
     cfg!(target_os = "macos") && config.backend() == Some(BackendKind::Compiler) && get_native_page_size() > 0x1000
 }
 
