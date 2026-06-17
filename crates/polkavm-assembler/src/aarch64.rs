@@ -242,34 +242,34 @@ a64_inst! {
     // ---- Move wide immediate (MOVN/MOVZ/MOVK) ----
     // sf | opc(2) | 100101 | hw(2) | imm16 | Rd
     movn(size: RegSize, rd: Reg, imm16: u16, hw: u32) =>
-        (size.sf() << 31) | (0b00 << 29) | (0b100101 << 23) | (hw << 21) | ((imm16 as u32) << 5) | rd.idx();
+        (size.sf() << 31) | (0b100101 << 23) | (hw << 21) | ((u32::from(imm16)) << 5) | rd.idx();
     movz(size: RegSize, rd: Reg, imm16: u16, hw: u32) =>
-        (size.sf() << 31) | (0b10 << 29) | (0b100101 << 23) | (hw << 21) | ((imm16 as u32) << 5) | rd.idx();
+        (size.sf() << 31) | (0b10 << 29) | (0b100101 << 23) | (hw << 21) | ((u32::from(imm16)) << 5) | rd.idx();
     movk(size: RegSize, rd: Reg, imm16: u16, hw: u32) =>
-        (size.sf() << 31) | (0b11 << 29) | (0b100101 << 23) | (hw << 21) | ((imm16 as u32) << 5) | rd.idx();
+        (size.sf() << 31) | (0b11 << 29) | (0b100101 << 23) | (hw << 21) | ((u32::from(imm16)) << 5) | rd.idx();
 
     // ---- Add/Subtract (immediate) ----
     // sf | op | S | 100010 | sh | imm12 | Rn | Rd
     add_imm(size: RegSize, rd: Reg, rn: Reg, imm12: u32, shift12: bool) =>
-        (size.sf() << 31) | (0 << 30) | (0 << 29) | (0b100010 << 23) | ((shift12 as u32) << 22) | ((imm12 & 0xfff) << 10) | (rn.idx() << 5) | rd.idx();
+        (size.sf() << 31) | (0b100010 << 23) | ((u32::from(shift12)) << 22) | ((imm12 & 0xfff) << 10) | (rn.idx() << 5) | rd.idx();
     sub_imm(size: RegSize, rd: Reg, rn: Reg, imm12: u32, shift12: bool) =>
-        (size.sf() << 31) | (1 << 30) | (0 << 29) | (0b100010 << 23) | ((shift12 as u32) << 22) | ((imm12 & 0xfff) << 10) | (rn.idx() << 5) | rd.idx();
+        (size.sf() << 31) | (1 << 30) | (0b100010 << 23) | ((u32::from(shift12)) << 22) | ((imm12 & 0xfff) << 10) | (rn.idx() << 5) | rd.idx();
     subs_imm(size: RegSize, rd: Reg, rn: Reg, imm12: u32, shift12: bool) =>
-        (size.sf() << 31) | (1 << 30) | (1 << 29) | (0b100010 << 23) | ((shift12 as u32) << 22) | ((imm12 & 0xfff) << 10) | (rn.idx() << 5) | rd.idx();
+        (size.sf() << 31) | (1 << 30) | (1 << 29) | (0b100010 << 23) | ((u32::from(shift12)) << 22) | ((imm12 & 0xfff) << 10) | (rn.idx() << 5) | rd.idx();
 
     // ---- Add/Subtract (shifted register), shift amount 0 ----
     // sf | op | S | 01011 | shift(2) | 0 | Rm | imm6 | Rn | Rd
     add_reg(size: RegSize, rd: Reg, rn: Reg, rm: Reg) =>
-        (size.sf() << 31) | (0 << 30) | (0 << 29) | (0b01011 << 24) | (rm.idx() << 16) | (rn.idx() << 5) | rd.idx();
+        (size.sf() << 31) | (0b01011 << 24) | (rm.idx() << 16) | (rn.idx() << 5) | rd.idx();
     sub_reg(size: RegSize, rd: Reg, rn: Reg, rm: Reg) =>
-        (size.sf() << 31) | (1 << 30) | (0 << 29) | (0b01011 << 24) | (rm.idx() << 16) | (rn.idx() << 5) | rd.idx();
+        (size.sf() << 31) | (1 << 30) | (0b01011 << 24) | (rm.idx() << 16) | (rn.idx() << 5) | rd.idx();
     subs_reg(size: RegSize, rd: Reg, rn: Reg, rm: Reg) =>
         (size.sf() << 31) | (1 << 30) | (1 << 29) | (0b01011 << 24) | (rm.idx() << 16) | (rn.idx() << 5) | rd.idx();
 
     // ---- Logical (shifted register), shift amount 0, N=0 ----
     // sf | opc(2) | 01010 | shift(2) | N | Rm | imm6 | Rn | Rd
     and_reg(size: RegSize, rd: Reg, rn: Reg, rm: Reg) =>
-        (size.sf() << 31) | (0b00 << 29) | (0b01010 << 24) | (rm.idx() << 16) | (rn.idx() << 5) | rd.idx();
+        (size.sf() << 31) | (0b01010 << 24) | (rm.idx() << 16) | (rn.idx() << 5) | rd.idx();
     orr_reg(size: RegSize, rd: Reg, rn: Reg, rm: Reg) =>
         (size.sf() << 31) | (0b01 << 29) | (0b01010 << 24) | (rm.idx() << 16) | (rn.idx() << 5) | rd.idx();
     eor_reg(size: RegSize, rd: Reg, rn: Reg, rm: Reg) =>
@@ -278,7 +278,7 @@ a64_inst! {
     // ---- Load/Store register (unsigned immediate offset), offset scaled by access size ----
     // size(2) | 111 | 0 | 01 | opc(2) | imm12 | Rn | Rt
     str_imm(size: Size, rt: Reg, rn: Reg, imm12_scaled: u32) =>
-        (size.raw() << 30) | (0b111 << 27) | (0b01 << 24) | (0b00 << 22) | ((imm12_scaled & 0xfff) << 10) | (rn.idx() << 5) | rt.idx();
+        (size.raw() << 30) | (0b111 << 27) | (0b01 << 24) | ((imm12_scaled & 0xfff) << 10) | (rn.idx() << 5) | rt.idx();
     ldr_imm(size: Size, rt: Reg, rn: Reg, imm12_scaled: u32) =>
         (size.raw() << 30) | (0b111 << 27) | (0b01 << 24) | (0b01 << 22) | ((imm12_scaled & 0xfff) << 10) | (rn.idx() << 5) | rt.idx();
     // Sign-extending load into a 64-bit register (opc = 10).
@@ -288,9 +288,9 @@ a64_inst! {
     // ---- Load/Store register (unscaled signed 9-bit immediate): LDUR/STUR ----
     // size(2) | 111 | 0 | 00 | opc(2) | 0 | imm9 | 00 | Rn | Rt
     stur(size: Size, rt: Reg, rn: Reg, imm9: i32) =>
-        (size.raw() << 30) | (0b111 << 27) | (0b00 << 24) | (0b00 << 22) | (((imm9 as u32) & 0x1ff) << 12) | (rn.idx() << 5) | rt.idx();
+        (size.raw() << 30) | (0b111 << 27) | (((imm9 as u32) & 0x1ff) << 12) | (rn.idx() << 5) | rt.idx();
     ldur(size: Size, rt: Reg, rn: Reg, imm9: i32) =>
-        (size.raw() << 30) | (0b111 << 27) | (0b00 << 24) | (0b01 << 22) | (((imm9 as u32) & 0x1ff) << 12) | (rn.idx() << 5) | rt.idx();
+        (size.raw() << 30) | (0b111 << 27) | (0b01 << 22) | (((imm9 as u32) & 0x1ff) << 12) | (rn.idx() << 5) | rt.idx();
 
     // ---- Unconditional branch (immediate) ----
     // op | 00101 | imm26
@@ -304,7 +304,7 @@ a64_inst! {
     // ---- Compare and branch ----
     // sf | 011010 | op | imm19 | Rt
     cbz(size: RegSize, rt: Reg, label: Label) =>
-        (size.sf() << 31) | (0b011010 << 25) | (0 << 24) | rt.idx(), fixup = Some((label, FixupKind::aarch64_branch(5, 19)));
+        (size.sf() << 31) | (0b011010 << 25) | rt.idx(), fixup = Some((label, FixupKind::aarch64_branch(5, 19)));
     cbnz(size: RegSize, rt: Reg, label: Label) =>
         (size.sf() << 31) | (0b011010 << 25) | (1 << 24) | rt.idx(), fixup = Some((label, FixupKind::aarch64_branch(5, 19)));
 
@@ -319,7 +319,7 @@ a64_inst! {
 
     // ---- Logical (shifted register), inverted forms (N=1), shift amount 0 ----
     bic_reg(size: RegSize, rd: Reg, rn: Reg, rm: Reg) =>
-        (size.sf() << 31) | (0b00 << 29) | (0b01010 << 24) | (1 << 21) | (rm.idx() << 16) | (rn.idx() << 5) | rd.idx();
+        (size.sf() << 31) | (0b01010 << 24) | (1 << 21) | (rm.idx() << 16) | (rn.idx() << 5) | rd.idx();
     orn_reg(size: RegSize, rd: Reg, rn: Reg, rm: Reg) =>
         (size.sf() << 31) | (0b01 << 29) | (0b01010 << 24) | (1 << 21) | (rm.idx() << 16) | (rn.idx() << 5) | rd.idx();
     eon_reg(size: RegSize, rd: Reg, rn: Reg, rm: Reg) =>
@@ -330,7 +330,7 @@ a64_inst! {
     // ---- Multiply (3-source) ----
     // sf 00 11011 000 Rm o0 Ra Rn Rd  (MADD o0=0, MSUB o0=1)
     madd(size: RegSize, rd: Reg, rn: Reg, rm: Reg, ra: Reg) =>
-        (size.sf() << 31) | (0b0011011 << 24) | (rm.idx() << 16) | (0 << 15) | (ra.idx() << 10) | (rn.idx() << 5) | rd.idx();
+        (size.sf() << 31) | (0b0011011 << 24) | (rm.idx() << 16) | (ra.idx() << 10) | (rn.idx() << 5) | rd.idx();
     msub(size: RegSize, rd: Reg, rn: Reg, rm: Reg, ra: Reg) =>
         (size.sf() << 31) | (0b0011011 << 24) | (rm.idx() << 16) | (1 << 15) | (ra.idx() << 10) | (rn.idx() << 5) | rd.idx();
     // SMULH / UMULH (64-bit high half), Ra = xzr
@@ -369,14 +369,14 @@ a64_inst! {
     // ---- Bitfield move (SBFM / UBFM): used for shifts-by-immediate and sign/zero extension ----
     // sf opc(2) 100110 N immr(6) imms(6) Rn Rd ; for 64-bit N=1, for 32-bit N=0
     sbfm(size: RegSize, rd: Reg, rn: Reg, immr: u32, imms: u32) =>
-        (size.sf() << 31) | (0b00 << 29) | (0b100110 << 23) | (size.sf() << 22) | ((immr & 0x3f) << 16) | ((imms & 0x3f) << 10) | (rn.idx() << 5) | rd.idx();
+        (size.sf() << 31) | (0b100110 << 23) | (size.sf() << 22) | ((immr & 0x3f) << 16) | ((imms & 0x3f) << 10) | (rn.idx() << 5) | rd.idx();
     ubfm(size: RegSize, rd: Reg, rn: Reg, immr: u32, imms: u32) =>
         (size.sf() << 31) | (0b10 << 29) | (0b100110 << 23) | (size.sf() << 22) | ((immr & 0x3f) << 16) | ((imms & 0x3f) << 10) | (rn.idx() << 5) | rd.idx();
 
     // ---- Conditional select ----
     // sf 0 0 11010100 Rm cond op2(2) Rn Rd
     csel(size: RegSize, rd: Reg, rn: Reg, rm: Reg, cond: Cond) =>
-        (size.sf() << 31) | (0b0011010100 << 21) | (rm.idx() << 16) | (cond.raw() << 12) | (0b00 << 10) | (rn.idx() << 5) | rd.idx();
+        (size.sf() << 31) | (0b0011010100 << 21) | (rm.idx() << 16) | (cond.raw() << 12) | (rn.idx() << 5) | rd.idx();
     csinc(size: RegSize, rd: Reg, rn: Reg, rm: Reg, cond: Cond) =>
         (size.sf() << 31) | (0b0011010100 << 21) | (rm.idx() << 16) | (cond.raw() << 12) | (0b01 << 10) | (rn.idx() << 5) | rd.idx();
     // CSINV: rd = cond ? rn : ~rm
@@ -386,15 +386,15 @@ a64_inst! {
     // ---- Load/Store register (register offset), option = LSL/UXTX (#0) ----
     // size 111 0 00 opc 1 Rm option(3)=011 S=0 10 Rn Rt
     str_reg(size: Size, rt: Reg, rn: Reg, rm: Reg) =>
-        (size.raw() << 30) | (0b111 << 27) | (0b00 << 24) | (0b00 << 22) | (1 << 21) | (rm.idx() << 16) | (0b011 << 13) | (0b10 << 10) | (rn.idx() << 5) | rt.idx();
+        (size.raw() << 30) | (0b111 << 27) | (1 << 21) | (rm.idx() << 16) | (0b011 << 13) | (0b10 << 10) | (rn.idx() << 5) | rt.idx();
     ldr_reg(size: Size, rt: Reg, rn: Reg, rm: Reg) =>
-        (size.raw() << 30) | (0b111 << 27) | (0b00 << 24) | (0b01 << 22) | (1 << 21) | (rm.idx() << 16) | (0b011 << 13) | (0b10 << 10) | (rn.idx() << 5) | rt.idx();
+        (size.raw() << 30) | (0b111 << 27) | (0b01 << 22) | (1 << 21) | (rm.idx() << 16) | (0b011 << 13) | (0b10 << 10) | (rn.idx() << 5) | rt.idx();
     // Sign-extending load (unsigned immediate offset) to a 32-bit register (opc = 11).
     ldrs32_imm(size: Size, rt: Reg, rn: Reg, imm12_scaled: u32) =>
         (size.raw() << 30) | (0b111 << 27) | (0b01 << 24) | (0b11 << 22) | ((imm12_scaled & 0xfff) << 10) | (rn.idx() << 5) | rt.idx();
     // Sign-extending load (register offset) into a 64-bit register (opc = 10).
     ldrs64_reg(size: Size, rt: Reg, rn: Reg, rm: Reg) =>
-        (size.raw() << 30) | (0b111 << 27) | (0b00 << 24) | (0b10 << 22) | (1 << 21) | (rm.idx() << 16) | (0b011 << 13) | (0b10 << 10) | (rn.idx() << 5) | rt.idx();
+        (size.raw() << 30) | (0b111 << 27) | (0b10 << 22) | (1 << 21) | (rm.idx() << 16) | (0b011 << 13) | (0b10 << 10) | (rn.idx() << 5) | rt.idx();
 
     // ---- NEON: used for popcount (cnt). SIMD registers are passed as raw indices 0..31. ----
     fmov_gpr_to_s(sd: u32, wn: Reg) => 0x1E27_0000 | (wn.idx() << 5) | sd; // 32-bit GPR -> SIMD
@@ -405,9 +405,9 @@ a64_inst! {
 
     // ---- Exceptions / hint ----
     // UDF #imm16 — permanently undefined; raises an Undefined Instruction exception (SIGILL).
-    udf(imm16: u16) => imm16 as u32;
+    udf(imm16: u16) => u32::from(imm16);
     // BRK #imm16 — software breakpoint (SIGTRAP).
-    brk(imm16: u16) => 0xD4200000 | ((imm16 as u32) << 5);
+    brk(imm16: u16) => 0xD4200000 | ((u32::from(imm16)) << 5);
     nop() => 0xD503201F;
 }
 

@@ -109,6 +109,8 @@ where
     rem32s_label: Label,
     rem64u_label: Label,
     rem64s_label: Label,
+    // Used by the x86 backend; the AArch64 backend traps invalid targets via `trap_label` instead.
+    #[allow(dead_code)]
     invalid_jump_label: Label,
     instruction_set: InstructionSetKind,
     memset_trampoline_start: usize,
@@ -600,6 +602,7 @@ where
         }
     }
 
+    #[allow(dead_code)] // Used by the x86 backend; the AArch64 backend defines labels via the assembler directly.
     fn define_label(&mut self, label: Label) {
         log::trace!("Label: {} -> {:08x}", label, self.asm.current_address());
         self.asm.define_label(label);
@@ -1829,9 +1832,12 @@ where
     gas_metering_stub_offsets: Vec<u32>,
     cache: CompilerCache,
     pub(crate) step_tracing: bool,
+    // Read by the x86 backend / step tracing; unused on the generic AArch64 build.
+    #[allow(dead_code)]
     pub(crate) bitness: Bitness,
-
+    #[allow(dead_code)]
     pub(crate) memset_trampoline_start: u64,
+    #[allow(dead_code)]
     pub(crate) memset_trampoline_end: u64,
 }
 
