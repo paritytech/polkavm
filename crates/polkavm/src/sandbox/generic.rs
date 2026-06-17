@@ -1215,7 +1215,7 @@ impl Sandbox {
 
             self.vmctx()
                 .next_native_program_counter
-                .store(compiled_module.native_code_origin + offset as u64, Ordering::Relaxed);
+                .store(compiled_module.native_code_origin + offset, Ordering::Relaxed);
 
             let offset = offset as usize + GAS_COST_GENERIC_SANDBOX_OFFSET;
             let Some(gas_cost) = &compiled_module.machine_code().get(offset..offset + 4) else {
@@ -1330,33 +1330,15 @@ impl Sandbox {
     fn madvise_remove(&mut self, address: u32, length: u32) -> Result<(), Error> {
         assert!(self.dynamic_paging_enabled);
 
-        // macOS MADV_DONTNEED/MADV_FREE don't zero-fill private anon pages like Linux does, so remap
-        // fresh zero pages to actually clear the region (dev host only; Linux uses the madvise path).
-        #[cfg(target_os = "macos")]
-        {
-            self.memory.mmap_within(
-                self.guest_memory_offset + cast(address).to_usize(),
-                cast(length).to_usize(),
-                PROT_READ | PROT_WRITE,
-            )?;
-            return Ok(());
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.memory.madvise(
-                self.guest_memory_offset + cast(address).to_usize(),
-                cast(length).to_usize(),
-                MADV_DONTNEED,
-            )?;
-
-            self.memory.madvise(
-                self.guest_memory_offset + cast(address).to_usize(),
-                cast(length).to_usize(),
-                MADV_FREE,
-            )?;
-
-            Ok(())
+        let offset = self.guest_memory_offset + cast(address).to_usize();
+        let length = cast(length).to_usize();
+        if cfg!(target_os = "macos") {
+            // macOS MADV_DONTNEED/MADV_FREE don't zero-fill private anon pages like Linux does, so
+            // remap fresh zero pages to actually clear the region (dev host only).
+            self.memory.mmap_within(offset, length, PROT_READ | PROT_WRITE)
+        } else {
+            self.memory.madvise(offset, length, MADV_DONTNEED)?;
+            self.memory.madvise(offset, length, MADV_FREE)
         }
     }
 
@@ -1383,6 +1365,8 @@ impl super::Sandbox for Sandbox {
     }
 
     fn downcast_module(module: &Module) -> &CompiledModule<Self> {
+        // The `_` arm is for the other sandbox kinds (Linux); on a generic-only build it's unreachable.
+        #[allow(unreachable_patterns, clippy::match_wildcard_for_single_variants)]
         match module.compiled_module() {
             CompiledModuleKind::Generic(ref module) => module,
             _ => unreachable!(),
@@ -1390,7 +1374,7 @@ impl super::Sandbox for Sandbox {
     }
 
     fn downcast_global_state(global: &crate::sandbox::GlobalStateKind) -> &Self::GlobalState {
-        #[allow(clippy::match_wildcard_for_single_variants)]
+        #[allow(unreachable_patterns, clippy::match_wildcard_for_single_variants)]
         match global {
             crate::sandbox::GlobalStateKind::Generic(global) => global,
             _ => unreachable!(),
@@ -1747,7 +1731,7 @@ impl super::Sandbox for Sandbox {
         let entry_point = compiled_module.sandbox_program.0.sysenter_address;
 
         log::trace!("Jumping into guest program: 0x{:x}", entry_point);
-        self.set_aux_data_permission_for_guest().map_err(Error::from)?;
+        self.set_aux_data_permission_for_guest()?;
 
         #[allow(clippy::undocumented_unsafe_blocks)]
         unsafe {
@@ -1845,7 +1829,7 @@ impl super::Sandbox for Sandbox {
         };
 
         log::trace!("Returned from guest program");
-        self.set_aux_data_permission_for_host().map_err(Error::from)?;
+        self.set_aux_data_permission_for_host()?;
         self.poison = Poison::None;
 
         if self.module.as_ref().unwrap().gas_metering() == Some(GasMeteringKind::Async) && self.gas() < 0 {
@@ -1864,12 +1848,12 @@ impl super::Sandbox for Sandbox {
                 log::error!("Sandbox poisoned");
                 InterruptKind::Trap
             }
-            ExitReason::Signal => self.handle_guest_signal().map_err(Error::from)?,
+            ExitReason::Signal => self.handle_guest_signal()?,
             ExitReason::NotEnoughGas => InterruptKind::NotEnoughGas,
             ExitReason::Trap => InterruptKind::Trap,
             ExitReason::Step => InterruptKind::Step,
             ExitReason::Ecalli(num) => InterruptKind::Ecalli(num),
-            ExitReason::Segfault(address) => self.handle_guest_pagefault(address).map_err(Error::from)?,
+            ExitReason::Segfault(address) => self.handle_guest_pagefault(address)?,
         })
     }
 
@@ -2110,10 +2094,10 @@ impl super::Sandbox for Sandbox {
             debug_assert!(memory_protection.is_none());
         }
 
-        let Some(slice) = self.get_memory_slice_mut(address, length as u32) else {
+        let Some(slice) = self.get_memory_slice_mut(address, length) else {
             return Err(MemoryAccessError::OutOfRangeAccess {
                 address,
-                length: length as u64,
+                length: u64::from(length),
             });
         };
 
@@ -2167,7 +2151,7 @@ impl super::Sandbox for Sandbox {
         if address <= 0x10000 && length >= 0xffff0000 {
             self.page_set_present.clear();
             self.page_set_writable.clear();
-            self.memory.mprotect(self.guest_memory_offset, 0x100000000 as usize, 0)?;
+            self.memory.mprotect(self.guest_memory_offset, 0x100000000_usize, 0)?;
         } else {
             let module = self.module.as_ref().unwrap();
             let page_start = module.address_to_page(module.round_to_page_size_down(address));

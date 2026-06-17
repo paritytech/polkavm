@@ -82,6 +82,7 @@ pub struct OffsetTable {
     pub next_program_counter: usize,
     pub program_counter: usize,
     pub regs: usize,
+    #[allow(dead_code)] // Used by the Linux zygote sandbox; unused by the generic sandbox.
     pub futex: usize,
 }
 
@@ -111,6 +112,7 @@ pub(crate) trait Sandbox: Sized {
     fn recycle(sandbox: Box<Self>, global: &Self::GlobalState) -> Result<(), Self::Error>;
     fn address_table() -> AddressTable;
     fn offset_table() -> OffsetTable;
+    #[allow(dead_code)] // Used by the Linux zygote sandbox tooling; unused by the generic sandbox.
     fn idle_worker_pids(global: &Self::GlobalState) -> Vec<u32>;
 
     fn run(&mut self) -> Result<InterruptKind, Self::Error>;

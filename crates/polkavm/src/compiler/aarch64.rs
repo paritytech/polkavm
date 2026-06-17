@@ -664,6 +664,8 @@ where
         let p = offset + GAS_COST_OFFSET;
         self.0.asm.code_mut()[p..p + 4].copy_from_slice(&cost.to_le_bytes());
     }
+    #[allow(clippy::unused_self)]
+    #[allow(clippy::needless_pass_by_ref_mut)]
     pub fn fallthrough(&mut self) {}
     pub fn invalid(&mut self, code_offset: u32) {
         log::debug!("Encountered invalid instruction");
@@ -1189,7 +1191,7 @@ where
     }
     pub fn store_imm_u64(&mut self, offset: i32, value: i32) {
         let offset = offset as u32;
-        self.emit_guest_store_imm(value as i64 as u64, None, offset, a64::Size::U64);
+        self.emit_guest_store_imm(i64::from(value) as u64, None, offset, a64::Size::U64);
     }
     pub fn store_imm_indirect_u8(&mut self, base: RawReg, offset: i32, value: i32) {
         let offset = offset as u32;
@@ -1205,7 +1207,7 @@ where
     }
     pub fn store_imm_indirect_u64(&mut self, base: RawReg, offset: i32, value: i32) {
         let offset = offset as u32;
-        self.emit_guest_store_imm(value as i64 as u64, Some(base), offset, a64::Size::U64);
+        self.emit_guest_store_imm(i64::from(value) as u64, Some(base), offset, a64::Size::U64);
     }
     pub fn sub_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         self.push(a64::sub_reg(a64::RegSize::W, conv_reg(d), conv_reg(s1), conv_reg(s2)));
