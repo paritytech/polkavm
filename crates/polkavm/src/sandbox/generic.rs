@@ -1410,7 +1410,6 @@ impl Sandbox {
             self.memory.madvise(offset, length, MADV_FREE)
         }
     }
-
 }
 
 impl super::SandboxAddressSpace for Mmap {
