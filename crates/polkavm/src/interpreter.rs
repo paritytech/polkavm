@@ -25,7 +25,19 @@ use polkavm_common::program::{
 use polkavm_common::utils::{align_to_next_page_usize, slice_assume_init_mut, ArcBytes, GasVisitorT};
 
 type Target = u32;
+
+#[cfg(feature = "interpreter-musttail-dispatch")]
+type HandlerResult = InterruptKind;
+#[cfg(not(feature = "interpreter-musttail-dispatch"))]
 type HandlerResult = Target;
+
+// `become` is parse-gated; hiding it in a macro keeps the parser happy when the feature is off.
+#[cfg(feature = "interpreter-musttail-dispatch")]
+macro_rules! tail_call {
+    ($e:expr) => {
+        become $e
+    };
+}
 
 #[derive(Copy, Clone)]
 pub enum RegImm {
@@ -1710,16 +1722,30 @@ impl InterpretedInstance {
             log::trace!("Implicitly resuming at: [{}]", self.next_compiled_offset);
         }
 
-        let mut offset = self.next_compiled_offset;
-        loop {
-            if DEBUG {
-                self.cycle_counter += 1;
-            }
-
-            if let Some(handler) = self.compiled_handlers.get(cast(offset).to_usize()) {
-                offset = handler(self, offset);
+        #[cfg(feature = "interpreter-musttail-dispatch")]
+        {
+            // Ordinary call: `run_impl`'s signature can't join the handlers' `become` chain. Each
+            // handler counts its own cycle, so none here.
+            let off = self.next_compiled_offset;
+            if let Some(&handler) = self.compiled_handlers.get(cast(off).to_usize()) {
+                handler(self, off)
             } else {
-                return self.interrupt.clone();
+                self.interrupt.clone()
+            }
+        }
+        #[cfg(not(feature = "interpreter-musttail-dispatch"))]
+        {
+            let mut offset = self.next_compiled_offset;
+            loop {
+                let Some(handler) = self.compiled_handlers.get(cast(offset).to_usize()) else {
+                    return self.interrupt.clone();
+                };
+
+                // Count the instruction about to execute (the no-handler case isn't one).
+                if DEBUG {
+                    self.cycle_counter += 1;
+                }
+                offset = handler(self, offset);
             }
         }
     }
@@ -3078,7 +3104,24 @@ macro_rules! define_interpreter {
                 #[allow(clippy::needless_lifetimes)]
                 pub fn $handler_name<'a, $(M: $M_ty,)? $(const $const: $const_ty),+>($self: &'a mut InterpretedInstance, compiled_offset: Target) -> HandlerResult {
                     let $compiled_offset = compiled_offset;
-                    define_interpreter!(@define $handler_name $body $self $compiled_offset $($arg)*)
+                    // Count this instruction before executing it (like the non-tail dispatch loop).
+                    #[cfg(feature = "interpreter-musttail-dispatch")]
+                    if DEBUG {
+                        $self.cycle_counter += 1;
+                    }
+                    let next_off: Target = define_interpreter!(@define $handler_name $body $self $compiled_offset $($arg)*);
+                    #[cfg(feature = "interpreter-musttail-dispatch")]
+                    {
+                        if let Some(&handler) = $self.compiled_handlers.get(cast(next_off).to_usize()) {
+                            tail_call!(handler($self, next_off))
+                        } else {
+                            $self.interrupt.clone()
+                        }
+                    }
+                    #[cfg(not(feature = "interpreter-musttail-dispatch"))]
+                    {
+                        next_off
+                    }
                 }
             )+
         }
