@@ -1913,11 +1913,11 @@ where
             .map(|native_offset| self.native_code_origin + u64::from(native_offset))
     }
 
-    /// Native address at which to re-enter a faulting guest instruction after a page-fault. On AArch64
-    /// the access's address/value are recomputed from guest registers, so we resume at the instruction's
-    /// code start; for a block-first instruction that means skipping the block prologue (step prelude +
-    /// gas stub) so the gas isn't re-charged. On x86 the faulting instruction is self-contained.
-    #[allow(unused_variables)]
+    /// Native address to resume at after a page-fault. On AArch64 the access's address/value are
+    /// recomputed from guest registers, so we skip the block prologue (step prelude + gas stub) to
+    /// avoid re-charging gas; on x86 the faulting instruction is self-contained.
+    #[cfg(feature = "generic-sandbox")]
+    #[allow(unused_variables, clippy::unused_self)]
     pub(crate) fn resume_native_address_for_pagefault(
         &self,
         program_counter: ProgramCounter,
