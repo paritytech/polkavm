@@ -5,6 +5,8 @@ use alloc::vec::Vec;
 struct Fixup {
     target_label: Label,
     instruction_offset: usize,
+    // AArch64 instructions are always 4 bytes.
+    #[cfg(not(target_arch = "aarch64"))]
     instruction_length: u8,
     kind: FixupKind,
 }
@@ -230,17 +232,24 @@ impl Assembler {
     #[inline(always)]
     fn add_fixup(&mut self, instruction_offset: usize, instruction_length: usize, target_label: Label, kind: FixupKind) {
         debug_assert!((target_label.raw() as usize) < self.labels.len());
-        debug_assert!(
-            (kind.offset() as usize) < instruction_length,
-            "instruction is {} bytes long and yet its target fixup starts at {}",
-            instruction_length,
-            kind.offset()
-        );
-        debug_assert!((kind.length() as usize) < instruction_length);
-        debug_assert!((kind.offset() as usize + kind.length() as usize) <= instruction_length);
+        // AArch64 bit-packs the offset.
+        #[cfg(target_arch = "x86_64")]
+        {
+            debug_assert!(
+                (kind.offset() as usize) < instruction_length,
+                "instruction is {} bytes long and yet its target fixup starts at {}",
+                instruction_length,
+                kind.offset()
+            );
+            debug_assert!((kind.length() as usize) < instruction_length);
+            debug_assert!((kind.offset() as usize + kind.length() as usize) <= instruction_length);
+        }
+        #[cfg(target_arch = "aarch64")]
+        let _ = instruction_length;
         self.fixups.push(Fixup {
             target_label,
             instruction_offset,
+            #[cfg(not(target_arch = "aarch64"))]
             instruction_length: instruction_length as u8,
             kind,
         });
@@ -304,6 +313,17 @@ impl Assembler {
     }
 
     pub fn finalize(&mut self) -> AssembledCode {
+        #[cfg(target_arch = "aarch64")]
+        self.finalize_aarch64();
+        #[cfg(not(target_arch = "aarch64"))]
+        self.finalize_x86();
+
+        AssembledCode(self)
+    }
+
+    /// Resolves x86 fixups: a 1/4-byte LE displacement after the opcode, relative to the instruction end.
+    #[cfg(not(target_arch = "aarch64"))]
+    fn finalize_x86(&mut self) {
         for fixup in self.fixups.drain(..) {
             let origin = fixup.instruction_offset + fixup.instruction_length as usize;
             let target_absolute = self.labels[fixup.target_label.raw() as usize];
@@ -342,8 +362,53 @@ impl Assembler {
                 unreachable!()
             }
         }
+    }
 
-        AssembledCode(self)
+    /// Resolves AArch64 fixups: offset bitfield packed inside the 4-byte word, relative to instruction start.
+    #[cfg(target_arch = "aarch64")]
+    fn finalize_aarch64(&mut self) {
+        for fixup in self.fixups.drain(..) {
+            let target_absolute = self.labels[fixup.target_label.raw() as usize];
+            if target_absolute == isize::MAX {
+                log::trace!("Undefined label found: {}", fixup.target_label);
+                continue;
+            }
+
+            // Both ADR and branches are PC-relative to the start of the instruction.
+            let offset = target_absolute - fixup.instruction_offset as isize;
+            let p = fixup.instruction_offset;
+            let mut word = u32::from_le_bytes([self.code[p], self.code[p + 1], self.code[p + 2], self.code[p + 3]]);
+
+            if fixup.kind.aarch64_is_adr() {
+                // 21-bit signed *byte* offset, split into immlo (bits 30:29) and immhi (bits 23:5).
+                let limit = 1isize << 20;
+                if offset >= limit || offset < -limit {
+                    panic!("out of range ADR");
+                }
+                let imm = (offset as u32) & 0x001f_ffff;
+                let immlo = imm & 0b11;
+                let immhi = (imm >> 2) & 0x7_ffff;
+                word &= !((0b11 << 29) | (0x7_ffff << 5));
+                word |= (immlo << 29) | (immhi << 5);
+            } else {
+                let lsb = fixup.kind.aarch64_lsb();
+                let width = fixup.kind.aarch64_width();
+
+                debug_assert_eq!(offset & 0b11, 0, "AArch64 branch target is not 4-byte aligned");
+                let imm = offset >> 2;
+
+                // Range-check against the signed field width.
+                let limit = 1isize << (width - 1);
+                if imm >= limit || imm < -limit {
+                    panic!("out of range jump");
+                }
+
+                let mask = ((1u32 << width) - 1) << lsb;
+                word = (word & !mask) | (((imm as u32) << lsb) & mask);
+            }
+
+            self.code[p..p + 4].copy_from_slice(&word.to_le_bytes());
+        }
     }
 
     pub fn is_empty(&self) -> bool {

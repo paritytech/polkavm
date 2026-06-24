@@ -23,6 +23,12 @@ mod amd64;
 #[cfg(target_arch = "x86_64")]
 pub use crate::compiler::amd64::{extract_gas_cost, on_page_fault, on_signal_trap, step_prelude_length};
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+
+#[cfg(target_arch = "aarch64")]
+pub use crate::compiler::aarch64::{extract_gas_cost, step_prelude_length};
+
 /// The address to which to jump to for invalid dynamic jumps.
 ///
 /// This needs to be at least 0x800000000000 on modern CPUs, but ideally should have
@@ -103,6 +109,8 @@ where
     rem32s_label: Label,
     rem64u_label: Label,
     rem64s_label: Label,
+    // Used by the x86 backend; the AArch64 backend traps invalid targets via `trap_label` instead.
+    #[allow(dead_code)]
     invalid_jump_label: Label,
     instruction_set: InstructionSetKind,
     memset_trampoline_start: usize,
@@ -167,7 +175,14 @@ where
         S: Sandbox,
     {
         let native_page_size = crate::sandbox::get_native_page_size();
-        if native_page_size > config.page_size as usize || config.page_size as usize % native_page_size != 0 {
+        // macOS (dev only) also allows a guest page smaller than the 16K Apple-Silicon native page, as
+        // long as one divides the other; bounds checks are then host-page-coarse (see the sandbox).
+        let compatible = if cfg!(target_os = "macos") {
+            config.page_size as usize % native_page_size == 0 || native_page_size % config.page_size as usize == 0
+        } else {
+            native_page_size <= config.page_size as usize && config.page_size as usize % native_page_size == 0
+        };
+        if !compatible {
             return Err(format!(
                 "configured page size of {} is incompatible with the native page size of {}",
                 config.page_size, native_page_size
@@ -587,6 +602,7 @@ where
         }
     }
 
+    #[allow(dead_code)] // Used by the x86 backend; the AArch64 backend defines labels via the assembler directly.
     fn define_label(&mut self, label: Label) {
         log::trace!("Label: {} -> {:08x}", label, self.asm.current_address());
         self.asm.define_label(label);
@@ -1815,10 +1831,13 @@ where
     // Basic block offsets.
     gas_metering_stub_offsets: Vec<u32>,
     cache: CompilerCache,
-    step_tracing: bool,
+    pub(crate) step_tracing: bool,
+    // Read by the x86 backend / step tracing; unused on the generic AArch64 build.
+    #[allow(dead_code)]
     pub(crate) bitness: Bitness,
-
+    #[allow(dead_code)]
     pub(crate) memset_trampoline_start: u64,
+    #[allow(dead_code)]
     pub(crate) memset_trampoline_end: u64,
 }
 
@@ -1892,6 +1911,45 @@ where
                 Some(self.program_counter_to_machine_code_offset_list[index].1)
             })
             .map(|native_offset| self.native_code_origin + u64::from(native_offset))
+    }
+
+    /// Native address at which to re-enter a faulting guest instruction after a page-fault. On AArch64
+    /// the access's address/value are recomputed from guest registers, so we resume at the instruction's
+    /// code start; for a block-first instruction that means skipping the block prologue (step prelude +
+    /// gas stub) so the gas isn't re-charged. On x86 the faulting instruction is self-contained.
+    #[allow(unused_variables)]
+    pub(crate) fn resume_native_address_for_pagefault(
+        &self,
+        program_counter: ProgramCounter,
+        machine_code_address: u64,
+        gas_metering: Option<crate::config::GasMeteringKind>,
+    ) -> u64 {
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            machine_code_address
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let Some(base) = self.lookup_native_code_address(program_counter) else {
+                return machine_code_address;
+            };
+            // Resume at the faulting instruction's body (past the step prelude): its address/value are
+            // recomputed from the (possibly host-changed) guest registers, and the step prelude must NOT
+            // re-fire (the interpreter re-executes the instruction without a new step on resume).
+            let mut resume = base;
+            if self.step_tracing {
+                resume += step_prelude_length::<S>() as u64;
+            }
+            // If the resume point is a block's gas-metering stub (i.e. this is a block-first
+            // instruction), skip past it so the stub isn't re-executed and gas isn't re-charged.
+            if let Some(kind) = gas_metering {
+                let offset = (resume - self.native_code_origin) as u32;
+                if self.gas_metering_stub_offsets.binary_search(&offset).is_ok() {
+                    resume += crate::compiler::aarch64::gas_metering_stub_length(kind) as u64;
+                }
+            }
+            resume
+        }
     }
 
     pub fn program_counter_by_native_code_offset(&self, offset: u64, strict: bool) -> Option<ProgramCounter> {

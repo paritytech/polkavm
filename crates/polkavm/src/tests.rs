@@ -363,6 +363,361 @@ fn basic_test(config: Config) {
     assert_eq!(result, 111);
 }
 
+// End-to-end tests for the AArch64 recompiler backend, exercising it through the generic sandbox.
+// They run only where that sandbox is available (notably aarch64-apple-darwin) and a real CPU executes
+// the generated code.
+#[cfg(feature = "generic-sandbox")]
+mod aarch64_backend {
+    use super::*;
+    use crate::{RawInstance, RegValue};
+    use polkavm_common::program::Instruction;
+
+    /// Assembles `code` (one exported entry block, terminated by `trap` or `ret`), runs it on the
+    /// compiler + generic sandbox with `inputs` preloaded, and returns the interrupt and instance.
+    fn run(isa: InstructionSetKind, rw_size: u32, code: &[Instruction], inputs: &[(Reg, RegValue)]) -> (InterruptKind, RawInstance) {
+        let _ = env_logger::try_init();
+        let mut builder = ProgramBlobBuilder::new(isa);
+        if rw_size > 0 {
+            builder.set_rw_data_size(rw_size);
+        }
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(code, &[]);
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+        let mut config = Config::default();
+        config.set_allow_experimental(true);
+        config.set_backend(Some(BackendKind::Compiler));
+        config.set_sandbox(Some(crate::SandboxKind::Generic));
+        let engine = Engine::new(&config).unwrap();
+        let mut module_config = ModuleConfig::default();
+        module_config.set_page_size(get_native_page_size().try_into().unwrap());
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let entry = module.exports().find(|e| e == "main").unwrap().program_counter();
+
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        for &(reg, value) in inputs {
+            instance.set_reg(reg, value);
+        }
+        instance.set_next_program_counter(entry);
+        (instance.run().unwrap(), instance)
+    }
+
+    fn run32(code: &[Instruction], inputs: &[(Reg, RegValue)]) -> RawInstance {
+        let (interrupt, instance) = run(InstructionSetKind::Latest32, 0, code, inputs);
+        assert!(matches!(interrupt, InterruptKind::Trap), "unexpected interrupt: {interrupt:?}");
+        instance
+    }
+
+    #[test]
+    fn add_trap() {
+        // Validates entry/exit, sysenter register restore, the add handler and the trap trampoline.
+        let i = run32(&[asm::add_32(A0, A0, A1), asm::trap()], &[(A0, 1), (A1, 10)]);
+        assert_eq!(i.reg(A0), 11);
+    }
+
+    #[test]
+    fn arithmetic() {
+        let i = run32(
+            &[
+                asm::add_32(S0, A0, A1),
+                asm::sub_32(S1, A0, A1),
+                asm::mul_32(A2, A0, A1),
+                asm::add_imm_32(T0, A0, 5),
+                asm::negate_and_add_imm_32(T1, A0, 100),
+                asm::trap(),
+            ],
+            &[(A0, 20), (A1, 6)],
+        );
+        assert_eq!(i.reg(S0), 26);
+        assert_eq!(i.reg(S1), 14);
+        assert_eq!(i.reg(A2), 120);
+        assert_eq!(i.reg(T0), 25);
+        assert_eq!(i.reg(T1), 80); // 100 - 20
+    }
+
+    #[test]
+    fn division() {
+        let i = run32(
+            &[asm::div_unsigned_32(S0, A0, A1), asm::rem_unsigned_32(S1, A0, A1), asm::trap()],
+            &[(A0, 20), (A1, 6)],
+        );
+        assert_eq!(i.reg(S0), 3);
+        assert_eq!(i.reg(S1), 2);
+
+        // Divide-by-zero: RISC-V yields an all-ones quotient and a remainder equal to the dividend.
+        let i = run32(
+            &[asm::div_unsigned_32(S0, A0, A1), asm::rem_unsigned_32(S1, A0, A1), asm::trap()],
+            &[(A0, 7), (A1, 0)],
+        );
+        assert_eq!(i.reg(S0), 0xffff_ffff);
+        assert_eq!(i.reg(S1), 7);
+
+        // Signed overflow (INT_MIN / -1): quotient INT_MIN, remainder 0.
+        let i = run32(
+            &[asm::div_signed_32(S0, A0, A1), asm::rem_signed_32(S1, A0, A1), asm::trap()],
+            &[(A0, 0x8000_0000), (A1, 0xffff_ffff)],
+        );
+        assert_eq!(i.reg(S0), 0x8000_0000);
+        assert_eq!(i.reg(S1), 0);
+    }
+
+    #[test]
+    fn logical() {
+        let i = run32(
+            &[
+                asm::and(S0, A0, A1),
+                asm::or(S1, A0, A1),
+                asm::xor(A2, A0, A1),
+                asm::and_inverted(T0, A0, A1),
+                asm::xnor(T1, A0, A1),
+                asm::trap(),
+            ],
+            &[(A0, 0b1100), (A1, 0b1010)],
+        );
+        assert_eq!(i.reg(S0), 0b1000);
+        assert_eq!(i.reg(S1), 0b1110);
+        assert_eq!(i.reg(A2), 0b0110);
+        assert_eq!(i.reg(T0), 0b0100); // a0 & ~a1
+        assert_eq!(i.reg(T1), 0xffff_fff9); // ~(a0 ^ a1), 32-bit
+    }
+
+    #[test]
+    fn shifts() {
+        let i = run32(
+            &[
+                asm::shift_logical_left_imm_32(S0, A0, 4),
+                asm::shift_logical_right_imm_32(S1, A0, 4),
+                asm::shift_arithmetic_right_imm_32(A3, A1, 4),
+                asm::shift_logical_left_32(T0, A0, A2),
+                asm::trap(),
+            ],
+            &[(A0, 0xf0), (A1, 0x8000_0000), (A2, 8)],
+        );
+        assert_eq!(i.reg(S0), 0xf00);
+        assert_eq!(i.reg(S1), 0xf);
+        assert_eq!(i.reg(A3), 0xf800_0000);
+        assert_eq!(i.reg(T0), 0xf000);
+    }
+
+    #[test]
+    fn compare_and_select() {
+        let i = run32(
+            &[
+                asm::set_less_than_unsigned(S0, A0, A1),
+                asm::set_less_than_signed(S1, A1, A0),
+                asm::minimum(A2, A0, A1),
+                asm::maximum_unsigned(T0, A0, A1),
+                asm::set_greater_than_unsigned_imm(T1, A1, 5),
+                asm::trap(),
+            ],
+            &[(A0, 5), (A1, 10)],
+        );
+        assert_eq!(i.reg(S0), 1);
+        assert_eq!(i.reg(S1), 0);
+        assert_eq!(i.reg(A2), 5);
+        assert_eq!(i.reg(T0), 10);
+        assert_eq!(i.reg(T1), 1);
+
+        // `cmov` keeps the destination's previous value when the condition does not hold.
+        let i = run32(
+            &[
+                asm::load_imm(S0, 99),
+                asm::cmov_if_zero(S0, A0, A2),
+                asm::load_imm(S1, 99),
+                asm::cmov_if_not_zero(S1, A0, A2),
+                asm::trap(),
+            ],
+            &[(A0, 5), (A2, 0)],
+        );
+        assert_eq!(i.reg(S0), 5);
+        assert_eq!(i.reg(S1), 99);
+    }
+
+    #[test]
+    fn bit_ops() {
+        let i = run32(
+            &[
+                asm::count_leading_zero_bits_32(S0, A0),
+                asm::count_trailing_zero_bits_32(S1, A1),
+                asm::sign_extend_8(A5, A2),
+                asm::zero_extend_16(T0, A3),
+                asm::reverse_byte(T1, A4),
+                asm::trap(),
+            ],
+            &[(A0, 1), (A1, 0x100), (A2, 0x80), (A3, 0xffff_1234), (A4, 0x1234_5678)],
+        );
+        assert_eq!(i.reg(S0), 31);
+        assert_eq!(i.reg(S1), 8);
+        assert_eq!(i.reg(A5), 0xffff_ff80);
+        assert_eq!(i.reg(T0), 0x1234);
+        assert_eq!(i.reg(T1), 0x7856_3412);
+    }
+
+    #[test]
+    fn memory_roundtrip() {
+        let _ = env_logger::try_init();
+        let mut config = Config::default();
+        config.set_allow_experimental(true);
+        config.set_backend(Some(BackendKind::Compiler));
+        config.set_sandbox(Some(crate::SandboxKind::Generic));
+        // Creating the engine initializes the native page size queried below.
+        let engine = Engine::new(&config).unwrap();
+        let page = u32::try_from(get_native_page_size()).unwrap();
+        let addr = i32::try_from(MemoryMapBuilder::new(page).rw_data_size(0x4000).build().unwrap().rw_data_address()).unwrap();
+
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+        builder.set_rw_data_size(0x4000);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(
+            &[
+                asm::store_imm_u32(addr, 0x1234_5678),
+                asm::load_u32(S0, addr),
+                asm::load_u8(S1, addr),
+                asm::load_u16(A2, addr),
+                asm::load_imm(T2, addr),
+                asm::load_indirect_u32(T0, T2, 0),
+                asm::store_u8(A0, addr + 8),
+                asm::load_u8(T1, addr + 8),
+                asm::trap(),
+            ],
+            &[],
+        );
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let mut module_config = ModuleConfig::default();
+        module_config.set_page_size(page);
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let entry = module.exports().find(|e| e == "main").unwrap().program_counter();
+
+        let mut i = module.instantiate().unwrap();
+        i.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        i.set_reg(A0, 0xab);
+        i.set_next_program_counter(entry);
+        assert!(matches!(i.run().unwrap(), InterruptKind::Trap));
+        assert_eq!(i.reg(S0), 0x1234_5678);
+        assert_eq!(i.reg(S1), 0x78);
+        assert_eq!(i.reg(A2), 0x5678);
+        assert_eq!(i.reg(T0), 0x1234_5678);
+        assert_eq!(i.reg(T1), 0xab);
+    }
+
+    #[test]
+    fn conditional_branch() {
+        // block 0: branch; block 1 (fallthrough): S0 = 100; block 2 (taken): S0 = 200.
+        let code = &[
+            asm::branch_less_unsigned(A0, A1, 2),
+            asm::load_imm(S0, 100),
+            asm::trap(),
+            asm::load_imm(S0, 200),
+            asm::trap(),
+        ];
+        assert_eq!(run32(code, &[(A0, 5), (A1, 10)]).reg(S0), 200); // taken
+        assert_eq!(run32(code, &[(A0, 10), (A1, 5)]).reg(S0), 100); // not taken
+    }
+
+    #[test]
+    fn fallthrough_trap_gas_64() {
+        // Mirrors the differential fuzzer: interpreter + recompiler instances of `[fallthrough, trap]`
+        // (Latest64 + Sync gas), engines/modules dropped before running.
+        let blob = {
+            let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+            builder.add_export_by_basic_block(0, b"main");
+            builder.set_code(&[asm::fallthrough(), asm::trap()], &[]);
+            ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap()
+        };
+
+        let make = |backend, generic: bool| {
+            let mut config = Config::default();
+            config.set_allow_experimental(true);
+            config.set_backend(Some(backend));
+            if generic {
+                config.set_sandbox(Some(crate::SandboxKind::Generic));
+            }
+            let engine = Engine::new(&config).unwrap();
+            let mut module_config = ModuleConfig::default();
+            module_config.set_page_size(get_native_page_size().try_into().unwrap());
+            module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+            let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+            let mut i = module.instantiate().unwrap();
+            i.set_gas(10000);
+            i.set_next_program_counter(ProgramCounter(0));
+            i.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+            i
+        };
+
+        let mut interp = make(BackendKind::Interpreter, false);
+        let mut recomp = make(BackendKind::Compiler, true);
+        assert!(matches!(interp.run().unwrap(), InterruptKind::Trap));
+        assert!(matches!(recomp.run().unwrap(), InterruptKind::Trap));
+    }
+
+    #[test]
+    fn return_to_host() {
+        // `ret` exits through the jump table back to the host (InterruptKind::Finished).
+        let (interrupt, i) = run(
+            InstructionSetKind::Latest32,
+            0,
+            &[asm::add_32(A0, A0, A1), asm::ret()],
+            &[(A0, 1), (A1, 10)],
+        );
+        assert!(matches!(interrupt, InterruptKind::Finished), "unexpected interrupt: {interrupt:?}");
+        assert_eq!(i.reg(A0), 11);
+    }
+
+    #[test]
+    fn arithmetic_64bit() {
+        let (interrupt, i) = run(
+            InstructionSetKind::Latest64,
+            0,
+            &[
+                asm::load_imm64(S0, 0x1_0000_0000),
+                asm::add_64(S1, S0, S0),
+                asm::mul_64(A2, A0, A1),
+                asm::trap(),
+            ],
+            &[(A0, 0x1_0000_0000), (A1, 3)],
+        );
+        assert!(matches!(interrupt, InterruptKind::Trap), "unexpected interrupt: {interrupt:?}");
+        assert_eq!(i.reg(S0), 0x1_0000_0000);
+        assert_eq!(i.reg(S1), 0x2_0000_0000);
+        assert_eq!(i.reg(A2), 0x3_0000_0000);
+    }
+
+    #[test]
+    fn gas_metering() {
+        let mut config = Config::default();
+        config.set_allow_experimental(true);
+        config.set_backend(Some(BackendKind::Compiler));
+        config.set_sandbox(Some(crate::SandboxKind::Generic));
+        let engine = Engine::new(&config).unwrap();
+
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::add_32(A0, A0, A1), asm::trap()], &[]);
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+        let mut module_config = ModuleConfig::default();
+        module_config.set_page_size(get_native_page_size().try_into().unwrap());
+        module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let entry = module.exports().find(|e| e == "main").unwrap().program_counter();
+
+        // Enough gas: the block runs and gas is charged.
+        let mut instance = module.instantiate().unwrap();
+        instance.set_gas(1000);
+        instance.prepare_call_typed(entry, (1u32, 10u32));
+        assert!(matches!(instance.run().unwrap(), InterruptKind::Trap));
+        assert_eq!(instance.reg(A0), 11);
+        assert!(instance.gas() < 1000 && instance.gas() >= 0, "gas not charged: {}", instance.gas());
+
+        // No gas: the metering stub underflows and traps into NotEnoughGas via the UDF→SIGILL path.
+        let mut instance = module.instantiate().unwrap();
+        instance.set_gas(0);
+        instance.prepare_call_typed(entry, (1u32, 10u32));
+        assert!(matches!(instance.run().unwrap(), InterruptKind::NotEnoughGas));
+    }
+}
+
 fn fallback_hostcall_handler_works(config: Config) {
     let _ = env_logger::try_init();
     let blob = basic_test_blob();
@@ -910,6 +1265,58 @@ fn out_of_range_execution(engine_config: Config) {
     instance.set_next_program_counter(ProgramCounter(0));
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
     assert_eq!(instance.program_counter(), Some(offsets[2]));
+}
+
+/// Crosscheck the interpreter and recompiler when `run()` is entered with an
+/// out-of-range `next_program_counter` under sync gas metering.
+///
+/// Both backends correctly stop with `InterruptKind::Trap`, but the recompiler
+/// charges 1 unit of gas via the basic-block prologue's pre-charge while the
+/// interpreter's dispatch lookup short-circuits before any gas is deducted.
+/// The two should agree.
+#[cfg(target_os = "linux")]
+#[test]
+fn out_of_range_pc_charges_consistent_gas_across_backends() {
+    fn run(backend: BackendKind) -> (InterruptKind, i64) {
+        let mut engine_config = Config::default();
+        engine_config.set_backend(Some(backend));
+        if backend == BackendKind::Compiler {
+            engine_config.set_sandbox(Some(crate::SandboxKind::Linux));
+            engine_config.set_worker_count(1);
+        }
+        let engine = Engine::new(&engine_config).unwrap();
+
+        let mut module_config = ModuleConfig::new();
+        module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::fallthrough()], &[]);
+
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let mut instance = module.instantiate().unwrap();
+
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_gas(10_000);
+        instance.set_next_program_counter(ProgramCounter(1)); // past the only block
+
+        let interrupt = instance.run().unwrap();
+        (interrupt, instance.gas())
+    }
+
+    let (interp_int, interp_gas) = run(BackendKind::Interpreter);
+    let (comp_int, comp_gas) = run(BackendKind::Compiler);
+
+    // Both backends agree the run trapped.
+    assert_eq!(interp_int, comp_int, "interrupt kind diverged");
+    assert_eq!(interp_int, InterruptKind::Trap);
+
+    // ...but they currently disagree on the gas cost.
+    assert_eq!(
+        interp_gas, comp_gas,
+        "gas accounting diverged for an out-of-range PC: interpreter left {interp_gas}, recompiler left {comp_gas}"
+    );
 }
 
 fn jump_into_middle_of_basic_block_from_outside(engine_config: Config) {
@@ -1551,7 +1958,7 @@ fn dynamic_paging_read_at_top_of_address_space(mut engine_config: Config) {
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(offsets[0]);
     let segfault = expect_segfault(instance.run().unwrap());
-    assert_eq!(segfault.page_address, 0xfffff000);
+    assert_eq!(segfault.page_address, 0xffffffff & !(page_size - 1)); // 0xfffff000 at 4K
 }
 
 fn dynamic_paging_read_with_upper_bits_set(mut engine_config: Config) {
@@ -1645,9 +2052,12 @@ fn dynamic_paging_write_at_page_boundary_with_no_pages(mut engine_config: Config
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
+    // Straddle the boundary between the first and second page (page-size-relative; == 0x10ffe/0x11000 at 4K).
+    let second_page = 0x10000 + page_size;
+    let straddle = second_page - 2;
     let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
-    builder.set_code(&[asm::store_imm_u32(0x10ffe, 0x12345678), asm::ret()], &[]);
+    builder.set_code(&[asm::store_imm_u32(cast(straddle).to_i32_or_panic(), 0x12345678), asm::ret()], &[]);
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let mut module_config = ModuleConfig::new();
@@ -1666,14 +2076,14 @@ fn dynamic_paging_write_at_page_boundary_with_no_pages(mut engine_config: Config
         .unwrap();
 
     let segfault = expect_segfault(instance.run().unwrap());
-    assert_eq!(segfault.page_address, 0x11000);
-    assert_eq!(instance.read_memory(0x10ffe, 2).unwrap(), vec![0, 0]);
+    assert_eq!(segfault.page_address, second_page);
+    assert_eq!(instance.read_memory(straddle, 2).unwrap(), vec![0, 0]);
     instance
-        .zero_memory_with_memory_protection(0x11000, page_size, MemoryProtection::ReadWrite)
+        .zero_memory_with_memory_protection(second_page, page_size, MemoryProtection::ReadWrite)
         .unwrap();
 
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
-    assert_eq!(instance.read_memory(0x10ffe, 2).unwrap(), vec![0x78, 0x56]);
+    assert_eq!(instance.read_memory(straddle, 2).unwrap(), vec![0x78, 0x56]);
 }
 
 fn dynamic_paging_write_at_page_boundary_with_first_page(mut engine_config: Config) {
@@ -1683,9 +2093,11 @@ fn dynamic_paging_write_at_page_boundary_with_first_page(mut engine_config: Conf
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
+    let second_page = 0x10000 + page_size;
+    let straddle = second_page - 2;
     let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
-    builder.set_code(&[asm::store_imm_u32(0x10ffe, 0x12345678), asm::ret()], &[]);
+    builder.set_code(&[asm::store_imm_u32(cast(straddle).to_i32_or_panic(), 0x12345678), asm::ret()], &[]);
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let mut module_config = ModuleConfig::new();
@@ -1702,14 +2114,14 @@ fn dynamic_paging_write_at_page_boundary_with_first_page(mut engine_config: Conf
         .unwrap();
 
     let segfault = expect_segfault(instance.run().unwrap());
-    assert_eq!(segfault.page_address, 0x11000);
-    assert_eq!(instance.read_memory(0x10ffe, 2).unwrap(), vec![0, 0]);
+    assert_eq!(segfault.page_address, second_page);
+    assert_eq!(instance.read_memory(straddle, 2).unwrap(), vec![0, 0]);
     instance
-        .zero_memory_with_memory_protection(0x11000, page_size, MemoryProtection::ReadWrite)
+        .zero_memory_with_memory_protection(second_page, page_size, MemoryProtection::ReadWrite)
         .unwrap();
 
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
-    assert_eq!(instance.read_memory(0x10ffe, 2).unwrap(), vec![0x78, 0x56]);
+    assert_eq!(instance.read_memory(straddle, 2).unwrap(), vec![0x78, 0x56]);
 }
 
 fn dynamic_paging_write_at_page_boundary_with_second_page(mut engine_config: Config) {
@@ -1719,9 +2131,11 @@ fn dynamic_paging_write_at_page_boundary_with_second_page(mut engine_config: Con
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
+    let second_page = 0x10000 + page_size;
+    let straddle = second_page - 2;
     let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
-    builder.set_code(&[asm::store_imm_u32(0x10ffe, 0x12345678), asm::ret()], &[]);
+    builder.set_code(&[asm::store_imm_u32(cast(straddle).to_i32_or_panic(), 0x12345678), asm::ret()], &[]);
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let mut module_config = ModuleConfig::new();
@@ -1734,18 +2148,18 @@ fn dynamic_paging_write_at_page_boundary_with_second_page(mut engine_config: Con
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(offsets[0]);
     instance
-        .zero_memory_with_memory_protection(0x11000, page_size, MemoryProtection::ReadWrite)
+        .zero_memory_with_memory_protection(second_page, page_size, MemoryProtection::ReadWrite)
         .unwrap();
 
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x10000);
-    assert_eq!(instance.read_memory(0x11000, 2).unwrap(), vec![0, 0]);
+    assert_eq!(instance.read_memory(second_page, 2).unwrap(), vec![0, 0]);
     instance
         .zero_memory_with_memory_protection(0x10000, page_size, MemoryProtection::ReadWrite)
         .unwrap();
 
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
-    assert_eq!(instance.read_memory(0x11000, 2).unwrap(), vec![0x34, 0x12]);
+    assert_eq!(instance.read_memory(second_page, 2).unwrap(), vec![0x34, 0x12]);
 }
 
 fn dynamic_paging_change_written_value_and_address_during_segfault(mut engine_config: Config) {
@@ -1800,18 +2214,19 @@ fn dynamic_paging_cancel_segfault_by_changing_address(mut engine_config: Config)
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
     let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
+    let other_page = 0x10000 + page_size; // 0x11000 at 4K; a separate, page-aligned page
     let mut instance = module.instantiate().unwrap();
     instance
-        .zero_memory_with_memory_protection(0x11000, page_size, MemoryProtection::ReadWrite)
+        .zero_memory_with_memory_protection(other_page, page_size, MemoryProtection::ReadWrite)
         .unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(offsets[0]);
     instance.set_reg(Reg::A0, 0x10000);
     let segfault = expect_segfault(instance.run().unwrap());
     assert_eq!(segfault.page_address, 0x10000);
-    instance.set_reg(Reg::A0, 0x11000);
+    instance.set_reg(Reg::A0, u64::from(other_page));
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
-    assert_eq!(instance.read_memory(0x11000, 4).unwrap(), vec![0x78, 0x56, 0x34, 0x12]);
+    assert_eq!(instance.read_memory(other_page, 4).unwrap(), vec![0x78, 0x56, 0x34, 0x12]);
 }
 
 fn dynamic_paging_worker_recycle_turn_dynamic_paging_on_and_off(mut engine_config: Config) {
@@ -1822,6 +2237,7 @@ fn dynamic_paging_worker_recycle_turn_dynamic_paging_on_and_off(mut engine_confi
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
+    let next_page = 0x20000 + page_size; // 0x21000 at 4K; a separate page from the 0x20000 target
     let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_rw_data_size(1);
@@ -1856,17 +2272,17 @@ fn dynamic_paging_worker_recycle_turn_dynamic_paging_on_and_off(mut engine_confi
             assert_eq!(segfault.page_address, 0x20000);
             assert_eq!(segfault.page_size, page_size);
             let segfault = expect_segfault(instance.run().unwrap());
-            assert_out_of_range_access(instance.read_u32(0x21000), 0x21000, 4);
+            assert_out_of_range_access(instance.read_u32(next_page), next_page, 4);
             instance
                 .zero_memory_with_memory_protection(segfault.page_address, page_size + 4, MemoryProtection::ReadWrite)
                 .unwrap();
             match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
             assert_eq!(instance.read_u32(0x20000).unwrap(), 0x12345678);
-            assert_eq!(instance.read_u32(0x21000).unwrap(), 0);
+            assert_eq!(instance.read_u32(next_page).unwrap(), 0);
             instance.set_next_program_counter(ProgramCounter(0));
             match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
         } else {
-            assert_out_of_range_access(instance.read_u32(0x21000), 0x21000, 4);
+            assert_out_of_range_access(instance.read_u32(next_page), next_page, 4);
             assert_eq!(instance.read_u32(0x20000).unwrap(), 0);
             match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
             assert_eq!(instance.read_u32(0x20000).unwrap(), 0x12345678);
@@ -1934,13 +2350,14 @@ fn dynamic_paging_change_program_counter_during_segfault(mut engine_config: Conf
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
+    let second_page = 0x10000 + page_size; // 0x11000 at 4K; a separate page
     let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
             asm::store_imm_u32(0x10000, 1),
             asm::ret(),
-            asm::store_imm_u32(0x11000, 2),
+            asm::store_imm_u32(cast(second_page).to_i32_or_panic(), 2),
             asm::ret(),
         ],
         &[],
@@ -1961,12 +2378,12 @@ fn dynamic_paging_change_program_counter_during_segfault(mut engine_config: Conf
 
     instance.set_next_program_counter(offsets[2]);
     let segfault = expect_segfault(instance.run().unwrap());
-    assert_eq!(segfault.page_address, 0x11000);
+    assert_eq!(segfault.page_address, second_page);
     instance
         .zero_memory_with_memory_protection(segfault.page_address, page_size, MemoryProtection::ReadWrite)
         .unwrap();
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
-    assert_eq!(instance.read_u32(0x11000).unwrap(), 2);
+    assert_eq!(instance.read_u32(second_page).unwrap(), 2);
 }
 
 fn dynamic_paging_run_out_of_gas(mut engine_config: Config) {
@@ -2409,11 +2826,27 @@ fn pinky_dynamic_paging_64(mut config: Config) {
     pinky_impl(config, true);
 }
 
+// macOS has 16K native pages; recompiler tests using the default 4K guest page can't run faithfully
+// there. Such tests skip on macOS (they pass on 4K-page hosts, including the production target).
+fn skip_on_16k_native_page(config: &Config) -> bool {
+    // `get_native_page_size()` returns 4096 when the compiler/sandbox isn't built, so this is false there.
+    if_compiler_is_supported! {
+        { crate::sandbox::init_native_page_size(); } else {}
+    }
+    cfg!(target_os = "macos") && config.backend() == Some(BackendKind::Compiler) && get_native_page_size() > 0x1000
+}
+
 fn pinky_standard_32(config: Config) {
+    if skip_on_16k_native_page(&config) {
+        return;
+    }
     pinky_impl(config, false)
 }
 
 fn pinky_standard_64(config: Config) {
+    if skip_on_16k_native_page(&config) {
+        return;
+    }
     pinky_impl(config, true)
 }
 
@@ -2429,6 +2862,8 @@ fn pinky_impl(config: Config, is_64_bit: bool) {
     let mut module_config = ModuleConfig::default();
     if config.allow_dynamic_paging() {
         module_config.set_dynamic_paging(true);
+        // Dynamic paging requires the module page size to match the native one (== 4096 on x86).
+        module_config.set_page_size(get_native_page_size() as u32);
     }
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
     let linker: Linker = Linker::new();
@@ -3752,6 +4187,9 @@ fn test_blob_out_of_bounds_memory_access_generates_a_trap(args: TestBlobArgs) {
 }
 
 fn test_blob_call_sbrk_impl(args: TestBlobArgs, mut call_sbrk: impl FnMut(&mut TestInstance, u32) -> u32) {
+    if skip_on_16k_native_page(&args.config) {
+        return;
+    }
     let elf = args.get_test_program();
     let mut i = TestInstance::new(&args.config, elf, args.optimize);
     let memory_map = i.module.memory_map().clone();
@@ -4000,6 +4438,9 @@ fn test_blob_max_zero_const_64(args: TestBlobArgs) {
 }
 
 fn test_asm_reloc_add_sub(config: Config, optimize: bool) {
+    if skip_on_16k_native_page(&config) {
+        return;
+    }
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_add_sub_64.elf");
 
     let elf = BLOB_64;
@@ -4016,6 +4457,9 @@ fn test_asm_reloc_add_sub(config: Config, optimize: bool) {
 }
 
 fn test_asm_reloc_hi_lo(config: Config, optimize: bool) {
+    if skip_on_16k_native_page(&config) {
+        return;
+    }
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_hi_lo_64.elf");
 
     let elf = BLOB_64;
@@ -4478,6 +4922,9 @@ fn trapping_preserves_all_registers_segfault(config: Config) {
 }
 
 fn memset_basic(config: Config) {
+    if skip_on_16k_native_page(&config) {
+        return;
+    }
     let _ = env_logger::try_init();
 
     let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
