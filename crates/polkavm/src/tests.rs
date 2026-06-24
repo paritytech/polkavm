@@ -3963,6 +3963,42 @@ fn test_blob_sub_i32_min_32(args: TestBlobArgs) {
     assert_eq!(i.call::<(u64,), u64>("sub_i32_min_32", (0,)).unwrap(), 0xffffffff80000000);
 }
 
+fn test_blob_orn_zero_const_64(args: TestBlobArgs) {
+    if !args.is_64_bit {
+        return;
+    }
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    assert_eq!(i.call::<(), u64>("orn_zero_const_64", ()).unwrap(), 0x80000001);
+}
+
+fn test_blob_xnor_zero_const_64(args: TestBlobArgs) {
+    if !args.is_64_bit {
+        return;
+    }
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    assert_eq!(i.call::<(), u64>("xnor_zero_const_64", ()).unwrap(), 0x80000001);
+}
+
+fn test_blob_min_zero_const_64(args: TestBlobArgs) {
+    if !args.is_64_bit {
+        return;
+    }
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    assert_eq!(i.call::<(), u64>("min_zero_const_64", ()).unwrap(), 0xffffffff7ffffffe);
+}
+
+fn test_blob_max_zero_const_64(args: TestBlobArgs) {
+    if !args.is_64_bit {
+        return;
+    }
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    assert_eq!(i.call::<(), u64>("max_zero_const_64", ()).unwrap(), 0);
+}
+
 fn test_asm_reloc_add_sub(config: Config, optimize: bool) {
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_add_sub_64.elf");
 
@@ -5389,6 +5425,10 @@ run_test_blob_tests! {
     test_blob_get_self_address_naked
     test_blob_sub_i32_min_64
     test_blob_sub_i32_min_32
+    test_blob_orn_zero_const_64
+    test_blob_xnor_zero_const_64
+    test_blob_min_zero_const_64
+    test_blob_max_zero_const_64
 }
 
 run_asm_tests! {

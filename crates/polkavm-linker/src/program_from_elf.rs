@@ -1813,12 +1813,14 @@ fn resolve_simple_zero_register_usage(
     dst: Reg,
     src1: RReg,
     src2: RReg,
+    rv64: bool,
     mut emit: impl FnMut(InstExt<SectionTarget, SectionTarget>),
 ) -> bool {
     use crate::riscv::RegRegKind as K;
+    let xor = if rv64 { AnyAnyKind::Xor64 } else { AnyAnyKind::Xor32 };
     if kind == K::OrInverted && src1 == RReg::Zero && src2 != RReg::Zero {
         emit(InstExt::Basic(BasicInst::AnyAny {
-            kind: AnyAnyKind::Xor32,
+            kind: xor,
             dst,
             src1: RegImm::Imm(!0),
             src2: cast_reg_any(src2).unwrap(),
@@ -1828,7 +1830,7 @@ fn resolve_simple_zero_register_usage(
 
     if kind == K::Xnor && src1 == RReg::Zero && src2 != RReg::Zero {
         emit(InstExt::Basic(BasicInst::AnyAny {
-            kind: AnyAnyKind::Xor32,
+            kind: xor,
             dst,
             src1: RegImm::Imm(!0),
             src2: cast_reg_any(src2).unwrap(),
@@ -1838,7 +1840,7 @@ fn resolve_simple_zero_register_usage(
 
     if kind == K::Xnor && src1 != RReg::Zero && src2 == RReg::Zero {
         emit(InstExt::Basic(BasicInst::AnyAny {
-            kind: AnyAnyKind::Xor32,
+            kind: xor,
             dst,
             src1: cast_reg_any(src1).unwrap(),
             src2: RegImm::Imm(!0),
@@ -1855,9 +1857,14 @@ fn resolve_simple_zero_register_usage(
         let tmp = Reg::E2;
         let src1 = cast_reg_any(src1).unwrap();
         let src2 = cast_reg_any(src2).unwrap();
+        let less_than = if rv64 {
+            AnyAnyKind::SetLessThanSigned64
+        } else {
+            AnyAnyKind::SetLessThanSigned32
+        };
         let (kind, cmp_src1, cmp_src2) = match kind {
-            K::Minimum => (AnyAnyKind::SetLessThanSigned32, src1, src2),
-            K::Maximum => (AnyAnyKind::SetLessThanSigned32, src2, src1),
+            K::Minimum => (less_than, src1, src2),
+            K::Maximum => (less_than, src2, src1),
             _ => unreachable!(),
         };
 
@@ -2273,7 +2280,7 @@ fn convert_instruction(
                 };
             }
 
-            if resolve_simple_zero_register_usage(kind, dst, src1, src2, &mut emit) {
+            if resolve_simple_zero_register_usage(kind, dst, src1, src2, rv64, &mut emit) {
                 emit(InstExt::nop());
                 return Ok(());
             };
