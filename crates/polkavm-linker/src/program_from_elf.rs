@@ -1808,11 +1808,6 @@ fn emit_minmax(
     }));
 }
 
-/// Rewrites `orn`/`xnor`/`min`/`max` with a zero source register into simpler
-/// instructions. These are XLEN-wide ops with no 32-bit variant, so on RV64
-/// the rewrite must use the 64-bit forms: a 32-bit op would sign-extend the low
-/// 32 bits and corrupt the upper half when the operand is not a sign-extended
-/// 32-bit value.
 fn resolve_simple_zero_register_usage(
     kind: crate::riscv::RegRegKind,
     dst: Reg,
