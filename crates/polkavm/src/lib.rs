@@ -58,6 +58,8 @@ mod error;
 
 mod api;
 mod config;
+#[cfg(target_arch = "x86_64")]
+mod cpuid;
 mod gas;
 mod interpreter;
 mod linker;
