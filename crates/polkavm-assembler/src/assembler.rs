@@ -1,4 +1,4 @@
-use crate::misc::{FixupKind, InstBuf, Instruction, Label};
+use crate::misc::{EncodeFlags, FixupKind, InstBuf, InstructionT, Label};
 use alloc::vec::Vec;
 
 #[derive(Copy, Clone)]
@@ -96,10 +96,10 @@ impl<'a> ReservedAssembler<'a, U0> {
 
 impl<'a, R> ReservedAssembler<'a, R> {
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn push<T>(self, instruction: Instruction<T>) -> ReservedAssembler<'a, R::Next>
+    pub fn push<T>(self, instruction: T) -> ReservedAssembler<'a, R::Next>
     where
         R: NonZero,
-        T: core::fmt::Display,
+        T: InstructionT,
     {
         // SAFETY: `R: NonZero`, so we still have space in the buffer.
         unsafe {
@@ -110,10 +110,10 @@ impl<'a, R> ReservedAssembler<'a, R> {
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn push_if<T>(self, condition: bool, instruction: Instruction<T>) -> ReservedAssembler<'a, R::Next>
+    pub fn push_if<T>(self, condition: bool, instruction: T) -> ReservedAssembler<'a, R::Next>
     where
         R: NonZero,
-        T: core::fmt::Display,
+        T: InstructionT,
     {
         if condition {
             // SAFETY: `R: NonZero`, so we still have space in the buffer.
@@ -200,9 +200,9 @@ impl Assembler {
         self
     }
 
-    pub fn push_with_label<T>(&mut self, label: Label, instruction: Instruction<T>) -> &mut Self
+    pub fn push_with_label<T>(&mut self, label: Label, instruction: T) -> &mut Self
     where
-        T: core::fmt::Display,
+        T: InstructionT,
     {
         self.define_label(label);
         self.push(instruction)
@@ -258,9 +258,9 @@ impl Assembler {
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub fn push<T>(&mut self, instruction: Instruction<T>) -> &mut Self
+    pub fn push<T>(&mut self, instruction: T) -> &mut Self
     where
-        T: core::fmt::Display,
+        T: InstructionT,
     {
         if self.guaranteed_capacity == 0 {
             InstBuf::reserve_const::<1>(&mut self.code);
@@ -273,9 +273,9 @@ impl Assembler {
 
     // SAFETY: The buffer *must* have space for at least one instruction.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    unsafe fn push_unchecked<T>(&mut self, instruction: Instruction<T>) -> &mut Self
+    unsafe fn push_unchecked<T>(&mut self, instruction: T) -> &mut Self
     where
-        T: core::fmt::Display,
+        T: InstructionT,
     {
         #[cfg(debug_assertions)]
         log::trace!("{:08x}: {}", self.origin + self.code.len() as u64, instruction);
@@ -283,14 +283,17 @@ impl Assembler {
         debug_assert!(self.guaranteed_capacity > 0);
         let instruction_offset = self.code.len();
 
+        let bytes = instruction.encode(EncodeFlags::default());
+        let bytes_len = bytes.len();
+
         // SAFETY: The caller reserved space for at least one instruction.
         unsafe {
-            instruction.bytes.encode_into_vec_unsafe(&mut self.code);
+            bytes.encode_into_vec_unsafe(&mut self.code);
         }
         self.guaranteed_capacity -= 1;
 
-        if let Some((label, fixup)) = instruction.fixup {
-            self.add_fixup(instruction_offset, instruction.bytes.len(), label, fixup);
+        if let Some((label, fixup)) = instruction.fixup(EncodeFlags::default()) {
+            self.add_fixup(instruction_offset, bytes_len, label, fixup);
         }
 
         self

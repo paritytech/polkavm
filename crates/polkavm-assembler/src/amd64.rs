@@ -1,6 +1,6 @@
 #![allow(non_camel_case_types)]
 
-use crate::misc::{FixupKind, InstBuf, Instruction, Label};
+use crate::misc::{EncodeFlags, FixupKind, InstBuf, InstructionT, Label};
 
 /// The REX prefix.
 const REX: u8 = 0x40;
@@ -702,7 +702,11 @@ impl Inst {
     }
 
     #[inline]
-    fn encode(self) -> InstBuf {
+    fn encode(mut self, flags: EncodeFlags) -> InstBuf {
+        if flags.force_rex {
+            self.rex |= REX;
+        }
+
         let mut enc = InstBuf::new();
         self.encode_into(&mut enc);
         enc
@@ -834,15 +838,22 @@ macro_rules! impl_inst {
                     }
                 }
 
-                impl $name {
+                impl InstructionT for $name {
                     #[inline(always)]
-                    pub fn encode($self) -> InstBuf {
-                        $body.encode()
+                    fn encode($self, flags: EncodeFlags) -> InstBuf {
+                        $body.encode(flags)
                     }
 
                     #[inline(always)]
-                    pub(crate) fn fixup($self) -> Option<(Label, FixupKind)> {
+                    fn fixup($self, _flags: EncodeFlags) -> Option<(Label, FixupKind)> {
                         $fixup
+                    }
+                }
+
+                impl $name {
+                    #[inline(always)]
+                    pub fn len(self) -> usize {
+                        self.encode(EncodeFlags::default()).len()
                     }
                 }
 
@@ -875,13 +886,8 @@ macro_rules! impl_inst {
 
     (@ctor_impl $name:ident, $(($arg_name:ident: $arg_ty:tt)),*) => {
         #[inline(always)]
-        pub fn $name($($arg_name: impl_inst!(@conv_ty $arg_ty)),*) -> Instruction<types::$name> {
-            let instruction = self::types::$name($($arg_name.into()),*);
-            Instruction {
-                instruction,
-                bytes: instruction.encode(),
-                fixup: instruction.fixup(),
-            }
+        pub fn $name($($arg_name: impl_inst!(@conv_ty $arg_ty)),*) -> types::$name {
+            self::types::$name($($arg_name.into()),*)
         }
     };
 
@@ -1084,6 +1090,37 @@ pub mod addr {
 pub mod inst {
     use super::*;
     use crate::misc::InstBuf;
+
+    #[repr(transparent)]
+    #[derive(Copy, Clone)]
+    pub struct rex<T>(pub T)
+    where
+        T: InstructionT;
+    impl<T> InstructionT for rex<T>
+    where
+        T: InstructionT,
+    {
+        #[inline(always)]
+        fn encode(self, mut flags: EncodeFlags) -> InstBuf {
+            flags.force_rex = true;
+            self.0.encode(flags)
+        }
+
+        #[inline(always)]
+        fn fixup(self, mut flags: EncodeFlags) -> Option<(Label, FixupKind)> {
+            flags.force_rex = true;
+            self.0.fixup(flags)
+        }
+    }
+
+    impl<T> core::fmt::Display for rex<T>
+    where
+        T: InstructionT,
+    {
+        fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+            self.0.fmt(fmt)
+        }
+    }
 
     #[inline(always)]
     const fn new_rm(op: u8, size: Size, regmem: RegMem, reg: Option<Reg>) -> Inst {
@@ -1341,14 +1378,14 @@ pub mod inst {
         mov_imm64(Reg, u64) =>
             {
                 if self.1 <= 0x7fffffff {
-                    mov_imm(RegMem::Reg(self.0), ImmKind::I32(self.1 as u32)).encode()
+                    crate::misc::InstructionOrBuffer::from(mov_imm(RegMem::Reg(self.0), ImmKind::I32(self.1 as u32)))
                 } else {
                     let xs = self.1.to_le_bytes();
-                    InstBuf::from_array([
+                    crate::misc::InstructionOrBuffer::from(InstBuf::from_array([
                         REX_64B_OP | self.0.rex_bit(),
                         0xb8 | self.0.modrm_rm_bits(),
                         xs[0], xs[1], xs[2], xs[3], xs[4], xs[5], xs[6], xs[7]
-                    ])
+                    ]))
                 }
             },
             None,
@@ -2345,9 +2382,9 @@ mod tests {
             }
         }
 
-        fn run<T>(&mut self, inst: crate::Instruction<T>)
+        fn run<T>(&mut self, inst: T)
         where
-            T: Copy + core::fmt::Display + core::fmt::Debug,
+            T: crate::misc::InstructionT + core::fmt::Debug,
         {
             use core::fmt::Write;
 
@@ -2383,11 +2420,7 @@ mod tests {
                 fn $inst_name() {
                     let mut test = TestAsm::new();
                     <super::inst::types::$inst_name as GenerateTestValues>::generate_test_values(|instruction| {
-                        test.run(crate::Instruction {
-                            bytes: instruction.encode(),
-                            fixup: None,
-                            instruction
-                        })
+                        test.run(instruction)
                     });
                 }
             )+
