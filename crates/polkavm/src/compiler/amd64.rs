@@ -2080,13 +2080,18 @@ where
 
     #[inline(always)]
     pub fn rotate_right_imm_generic(&mut self, reg_size: RegSize, d: RawReg, s: RawReg, c: i32) {
+        let size_mask = match reg_size {
+            RegSize::R32 => 32 - 1,
+            RegSize::R64 => 64 - 1,
+        };
+
         let d = conv_reg(d);
         let s = conv_reg(s);
+        let c = c & size_mask;
 
-        let asm = self.asm.reserve::<polkavm_assembler::U4>();
-        let asm = asm.push(mov_imm(rcx, imm32(cast(c).bitwise_as_u32())));
+        let asm = self.asm.reserve::<polkavm_assembler::U3>();
         let asm = asm.push_if(d != s, rex(mov(reg_size, d, s)));
-        let asm = asm.push(rex(ror_cl(reg_size, d)));
+        let asm = asm.push(rex(ror_imm(reg_size, d, c as u8)));
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
             asm.push(movsxd_32_to_64(d, d))
