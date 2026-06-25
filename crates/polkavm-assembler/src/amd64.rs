@@ -1658,6 +1658,16 @@ pub mod inst {
             None,
             (fmt.write_fmt(core::format_args!("sarx {}, {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0)), self.3.name_from(self.0)))),
 
+        // https://www.felixcloutier.com/x86/andn
+        andn(RegSize, Reg, Reg, RegMem) =>
+            Inst::new(0xf2)
+                .vex(0b00010, self.2, 0b00)
+                .rex_64b_if(matches!(self.0, RegSize::R64))
+                .modrm_reg(self.1)
+                .regmem(self.3),
+            None,
+            (fmt.write_fmt(core::format_args!("andn {}, {}, {}", self.1.name_from(self.0), self.2.name_from(self.0), self.3.display_without_prefix(Size::from(self.0))))),
+
         // https://www.felixcloutier.com/x86/mulx
         mulx(RegSize, Reg, Reg, RegMem) =>
             Inst::new(0xf6)
@@ -2562,6 +2572,7 @@ mod tests {
         shrx,
         sarx,
         mulx,
+        andn,
         popcnt,
         lzcnt,
         tzcnt,
