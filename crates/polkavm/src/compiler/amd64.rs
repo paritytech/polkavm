@@ -1971,15 +1971,10 @@ where
         let asm = self.asm.reserve::<U2>();
         let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
 
-        if s2 != !0 {
-            // d = s1 ^ s2
-            match reg_size {
-                RegSize::R32 => asm.push(xor((d, imm32(cast(s2).bitwise_as_u32())))),
-                RegSize::R64 => asm.push(xor((d, imm64(s2)))),
-            }
-        } else {
-            // d = s1 ^ 0xfffffff
-            asm.push(not(reg_size, d))
+        // d = s1 ^ s2
+        match reg_size {
+            RegSize::R32 => asm.push(xor((d, imm32(cast(s2).bitwise_as_u32())))),
+            RegSize::R64 => asm.push(xor((d, imm64(s2)))),
         }
         .assert_reserved_exactly_as_needed();
     }
