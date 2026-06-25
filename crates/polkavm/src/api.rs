@@ -430,8 +430,8 @@ impl Module {
 
         // TODO: Use cpuid instead so that we don't have to gate this to 'std'-only.
         #[cfg(all(target_arch = "x86_64", feature = "std"))]
-        if engine.selected_backend == BackendKind::Compiler && !std::is_x86_feature_detected!("bmi1") {
-            return Err(Error::from_static_str("on AMD64 the compiler backend requires a CPU with BMI1 support").into());
+        if engine.selected_backend == BackendKind::Compiler && !std::is_x86_feature_detected!("bmi2") {
+            return Err(Error::from_static_str("on AMD64 the recompiler backend requires a CPU with BMI2 support").into());
         }
 
         #[cfg(all(target_arch = "x86_64", feature = "std"))]
