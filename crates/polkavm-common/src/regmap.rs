@@ -12,13 +12,13 @@ pub const fn to_native_reg(reg: Reg) -> NativeReg {
         Reg::SP => rsi,
         Reg::RA => rbx,
         Reg::A2 => rdx,
-        Reg::A3 => rbp,
+        Reg::A3 => r14,
         Reg::S0 => r8,
         Reg::S1 => r9,
         Reg::A4 => r10,
         Reg::A5 => r11,
         Reg::T0 => r15,
-        Reg::T1 => r14,
+        Reg::T1 => rbp,
         Reg::T2 => r12,
     }
 }
