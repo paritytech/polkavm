@@ -2018,7 +2018,13 @@ where
     pub fn load_imm(&mut self, dst: RawReg, s2: i32) {
         match B::BITNESS {
             Bitness::B32 => self.push(mov_imm(conv_reg(dst), imm32(cast(s2).bitwise_as_u32()))),
-            Bitness::B64 => self.push(mov_imm(conv_reg(dst), imm64(s2))),
+            Bitness::B64 => {
+                if s2 >= 0 {
+                    self.push(mov_imm(conv_reg(dst), imm32(cast(s2).bitwise_as_u32())));
+                } else {
+                    self.push(mov_imm(conv_reg(dst), imm64(s2)));
+                }
+            }
         }
     }
 
