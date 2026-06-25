@@ -2159,18 +2159,19 @@ where
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
 
-        let asm = self.asm.reserve::<U2>();
+        let asm = self.asm.reserve::<polkavm_assembler::U3>();
         let asm = if d == s1 {
-            if s2 == 1 {
-                asm.push(rex(inc(reg_size, d)))
-            } else {
-                match reg_size {
-                    RegSize::R32 => asm.push(rex(add((d, imm32(cast(s2).bitwise_as_u32()))))),
-                    RegSize::R64 => asm.push(rex(add((d, imm64(s2))))),
-                }
-            }
+            let asm = match reg_size {
+                RegSize::R32 => asm.push(rex(add((d, imm32(cast(s2).bitwise_as_u32()))))),
+                RegSize::R64 => asm.push(rex(add((d, imm64(s2))))),
+            };
+            asm.push_none()
         } else {
-            asm.push(rex(lea(reg_size, d, reg_indirect(reg_size, s1 + s2))))
+            let asm = asm.push(rex(mov(reg_size, d, s1)));
+            match reg_size {
+                RegSize::R32 => asm.push(rex(add((d, imm32(cast(s2).bitwise_as_u32()))))),
+                RegSize::R64 => asm.push(rex(add((d, imm64(s2))))),
+            }
         };
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
