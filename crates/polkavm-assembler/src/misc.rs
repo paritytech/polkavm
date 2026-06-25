@@ -25,44 +25,52 @@ impl core::fmt::Display for Label {
     }
 }
 
+#[derive(Copy, Clone, Default)]
+pub struct EncodeFlags {
+    pub(crate) force_rex: bool,
+}
+
+pub trait InstructionT: Copy + core::fmt::Display {
+    fn encode(self, flags: EncodeFlags) -> InstBuf;
+    fn fixup(self, flags: EncodeFlags) -> Option<(Label, FixupKind)>;
+}
+
 #[derive(Copy, Clone)]
-pub struct Instruction<T> {
-    pub(crate) instruction: T,
-    pub(crate) bytes: InstBuf,
-
-    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
-    pub(crate) fixup: Option<(Label, FixupKind)>,
+pub enum InstructionOrBuffer<T> {
+    Instruction(T),
+    Buffer(InstBuf),
 }
 
-impl<T> core::fmt::Debug for Instruction<T>
+impl<T> InstructionOrBuffer<T>
 where
-    T: core::fmt::Debug,
+    T: InstructionT,
 {
-    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
-        self.instruction.fmt(fmt)
+    pub fn encode(self, flags: EncodeFlags) -> InstBuf {
+        match self {
+            InstructionOrBuffer::Instruction(instruction) => instruction.encode(flags),
+            InstructionOrBuffer::Buffer(buffer) => buffer,
+        }
     }
 }
 
-impl<T> core::fmt::Display for Instruction<T>
+impl<T> From<T> for InstructionOrBuffer<T>
 where
-    T: core::fmt::Display,
+    T: InstructionT,
 {
-    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
-        self.instruction.fmt(fmt)
+    fn from(instruction: T) -> Self {
+        Self::Instruction(instruction)
     }
 }
 
-impl<T> Instruction<T> {
-    #[allow(clippy::len_without_is_empty)]
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.bytes.len()
+impl<T> From<InstBuf> for InstructionOrBuffer<T> {
+    fn from(buffer: InstBuf) -> Self {
+        Self::Buffer(buffer)
     }
 }
 
 #[derive(Copy, Clone)]
 #[repr(transparent)]
-pub(crate) struct FixupKind(pub u32);
+pub struct FixupKind(pub u32);
 
 impl FixupKind {
     #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
@@ -199,7 +207,7 @@ impl InstBuf {
     }
 
     #[inline(always)]
-    pub fn encode(self) -> Self {
+    pub fn encode(self, _flags: EncodeFlags) -> Self {
         self
     }
 }
