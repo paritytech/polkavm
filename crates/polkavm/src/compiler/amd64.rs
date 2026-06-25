@@ -320,14 +320,14 @@ where
         let src = src.into();
         load_store_operand!(self, S::KIND, base, offset, |dst| {
             match src {
-                RegImm::Reg(src) => self.push(store(kind, dst, conv_reg(src))),
+                RegImm::Reg(src) => self.push(rex(store(kind, dst, conv_reg(src)))),
                 RegImm::Imm(value) => match kind {
-                    Size::U8 => self.push(mov_imm(dst, imm8(value as u8))),
-                    Size::U16 => self.push(mov_imm(dst, imm16(value as u16))),
-                    Size::U32 => self.push(mov_imm(dst, imm32(cast(value).bitwise_as_u32()))),
+                    Size::U8 => self.push(rex(mov_imm(dst, imm8(value as u8)))),
+                    Size::U16 => self.push(rex(mov_imm(dst, imm16(value as u16)))),
+                    Size::U32 => self.push(rex(mov_imm(dst, imm32(cast(value).bitwise_as_u32())))),
                     Size::U64 => {
                         assert_eq!(B::BITNESS, Bitness::B64);
-                        self.push(mov_imm(dst, imm64(value)));
+                        self.push(rex(mov_imm(dst, imm64(value))));
                     }
                 },
             }
@@ -337,7 +337,7 @@ where
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn load(&mut self, dst: RawReg, base: Option<RawReg>, offset: i32, kind: LoadKind) {
         load_store_operand!(self, S::KIND, base, offset, |src| {
-            self.push(load(kind, conv_reg(dst), src));
+            self.push(rex(load(kind, conv_reg(dst), src)));
         });
     }
 
@@ -349,13 +349,13 @@ where
         let d = conv_reg(d);
         let asm = self.asm.reserve::<U3>();
         if d == s1 || d == s2 {
-            let asm = asm.push(cmp((reg_size, s1, s2)));
-            let asm = asm.push(setcc(condition, d));
-            asm.push(and((d, imm32(1))));
+            let asm = asm.push(rex(cmp((reg_size, s1, s2))));
+            let asm = asm.push(rex(setcc(condition, d)));
+            asm.push(rex(and((d, imm32(1)))));
         } else {
-            let asm = asm.push(xor((RegSize::R32, d, d)));
-            let asm = asm.push(cmp((reg_size, s1, s2)));
-            asm.push(setcc(condition, d));
+            let asm = asm.push(rex(xor((RegSize::R32, d, d))));
+            let asm = asm.push(rex(cmp((reg_size, s1, s2))));
+            asm.push(rex(setcc(condition, d)));
         }
     }
 
@@ -367,28 +367,28 @@ where
 
         let asm = self.asm.reserve::<U4>();
         let asm = if d != s1 {
-            asm.push(xor((RegSize::R32, d, d)))
+            asm.push(rex(xor((RegSize::R32, d, d))))
         } else {
             asm.push_none()
         };
 
         let asm = if condition == Condition::Below && s2 == 1 {
             // d = s1 <u 1  =>  d = s1 == 0
-            let asm = asm.push(test((reg_size, s1, s1)));
-            asm.push(setcc(Condition::Equal, d))
+            let asm = asm.push(rex(test((reg_size, s1, s1))));
+            asm.push(rex(setcc(Condition::Equal, d)))
         } else if condition == Condition::Above && s2 == 0 {
             // d = s1 >u 0  =>  d = s1 != 0
-            let asm = asm.push(test((reg_size, s1, s1)));
-            asm.push(setcc(Condition::NotEqual, d))
+            let asm = asm.push(rex(test((reg_size, s1, s1))));
+            asm.push(rex(setcc(Condition::NotEqual, d)))
         } else {
             let asm = match reg_size {
-                RegSize::R32 => asm.push(cmp((s1, imm32(cast(s2).bitwise_as_u32())))),
-                RegSize::R64 => asm.push(cmp((s1, imm64(s2)))),
+                RegSize::R32 => asm.push(rex(cmp((s1, imm32(cast(s2).bitwise_as_u32()))))),
+                RegSize::R64 => asm.push(rex(cmp((s1, imm64(s2))))),
             };
-            asm.push(setcc(condition, d))
+            asm.push(rex(setcc(condition, d)))
         };
 
-        let asm = asm.push_if(d == s1, and((d, imm32(1))));
+        let asm = asm.push_if(d == s1, rex(and((d, imm32(1)))));
         asm.assert_reserved_exactly_as_needed();
     }
 
@@ -403,13 +403,13 @@ where
             RegSize::R64 => 64 - 1,
         };
 
-        let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
+        let asm = asm.push_if(d != s1, rex(mov(reg_size, d, s1)));
 
         // d = d << s2
         let asm = match kind {
-            ShiftKind::LogicalLeft => asm.push(shl_imm(reg_size, d, s2 as u8)),
-            ShiftKind::LogicalRight => asm.push(shr_imm(reg_size, d, s2 as u8)),
-            ShiftKind::ArithmeticRight => asm.push(sar_imm(reg_size, d, s2 as u8)),
+            ShiftKind::LogicalLeft => asm.push(rex(shl_imm(reg_size, d, s2 as u8))),
+            ShiftKind::LogicalRight => asm.push(rex(shr_imm(reg_size, d, s2 as u8))),
+            ShiftKind::ArithmeticRight => asm.push(rex(sar_imm(reg_size, d, s2 as u8))),
         };
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
@@ -428,23 +428,23 @@ where
         let asm = self.asm.reserve::<polkavm_assembler::U4>();
 
         // TODO: Consider using shlx/shrx/sarx when BMI2 is available.
-        let asm = asm.push(mov(reg_size, rcx, s2));
+        let asm = asm.push(rex(mov(reg_size, rcx, s2)));
         let asm = match s1.into() {
             RegImm::Reg(s1) => {
                 let s1 = conv_reg(s1);
-                asm.push_if(d != s1, mov(reg_size, d, s1))
+                asm.push_if(d != s1, rex(mov(reg_size, d, s1)))
             }
             RegImm::Imm(s1) => match reg_size {
-                RegSize::R32 => asm.push(mov_imm(d, imm32(cast(s1).bitwise_as_u32()))),
-                RegSize::R64 => asm.push(mov_imm(d, imm64(s1))),
+                RegSize::R32 => asm.push(rex(mov_imm(d, imm32(cast(s1).bitwise_as_u32())))),
+                RegSize::R64 => asm.push(rex(mov_imm(d, imm64(s1)))),
             },
         };
 
         // d = d << s2
         let asm = match kind {
-            ShiftKind::LogicalLeft => asm.push(shl_cl(reg_size, d)),
-            ShiftKind::LogicalRight => asm.push(shr_cl(reg_size, d)),
-            ShiftKind::ArithmeticRight => asm.push(sar_cl(reg_size, d)),
+            ShiftKind::LogicalLeft => asm.push(rex(shl_cl(reg_size, d))),
+            ShiftKind::LogicalRight => asm.push(rex(shr_cl(reg_size, d))),
+            ShiftKind::ArithmeticRight => asm.push(rex(sar_cl(reg_size, d))),
         };
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
@@ -984,10 +984,10 @@ where
 
                 let asm = self.asm.reserve::<U3>();
                 let (asm, target) = if offset != 0 || load_imm.map_or(false, |(t, _)| t == base) {
-                    let asm = asm.push(lea(RegSize::R32, TMP_REG, reg_indirect(RegSize::R32, conv_reg(base) + offset)));
+                    let asm = asm.push(rex(lea(RegSize::R32, TMP_REG, reg_indirect(RegSize::R32, conv_reg(base) + offset))));
                     (asm, TMP_REG)
                 } else if B::BITNESS == Bitness::B64 {
-                    let asm = asm.push(mov(RegSize::R32, TMP_REG, conv_reg(base)));
+                    let asm = asm.push(rex(mov(RegSize::R32, TMP_REG, conv_reg(base))));
                     (asm, TMP_REG)
                 } else {
                     (asm.push_none(), conv_reg(base))
@@ -1024,20 +1024,23 @@ where
 
                 // TODO: This also could be more efficient.
                 self.push(lea_rip_label(TMP_REG, self.jump_table_label));
-                self.push(push(conv_reg(base)));
+                self.push(rex(push(conv_reg(base))));
                 self.push(shl_imm(RegSize::R64, conv_reg(base), 3));
                 if offset != 0 {
                     let offset = offset.wrapping_mul(8);
-                    self.push(add((conv_reg(base), imm32(cast(offset).bitwise_as_u32()))));
+                    self.push(rex(add((conv_reg(base), imm32(cast(offset).bitwise_as_u32())))));
                 }
                 self.push(add((RegSize::R64, TMP_REG, conv_reg(base))));
-                self.push(pop(conv_reg(base)));
+                self.push(rex(pop(conv_reg(base))));
                 self.push(load(LoadKind::U64, TMP_REG, reg_indirect(RegSize::R64, TMP_REG)));
 
                 if let Some((return_register, return_address)) = load_imm {
                     match B::BITNESS {
-                        Bitness::B32 => self.push(mov_imm(conv_reg(return_register), imm32(cast(return_address).bitwise_as_u32()))),
-                        Bitness::B64 => self.push(mov_imm(conv_reg(return_register), imm64(return_address))),
+                        Bitness::B32 => self.push(rex(mov_imm(
+                            conv_reg(return_register),
+                            imm32(cast(return_address).bitwise_as_u32()),
+                        ))),
+                        Bitness::B64 => self.push(rex(mov_imm(conv_reg(return_register), imm64(return_address)))),
                     }
                 }
 
@@ -1165,9 +1168,9 @@ where
         let s2 = conv_reg(s2);
 
         let asm = self.asm.reserve::<polkavm_assembler::U4>();
-        let asm = asm.push(mov(reg_size, rcx, s2));
-        let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
-        let asm = asm.push(rol_cl(reg_size, d));
+        let asm = asm.push(rex(mov(reg_size, rcx, s2)));
+        let asm = asm.push_if(d != s1, rex(mov(reg_size, d, s1)));
+        let asm = asm.push(rex(rol_cl(reg_size, d)));
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
             asm.push(movsxd_32_to_64(d, d))
@@ -1196,9 +1199,9 @@ where
         let s2 = conv_reg(s2);
 
         let asm = self.asm.reserve::<polkavm_assembler::U4>();
-        let asm = asm.push(mov(reg_size, rcx, s2));
-        let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
-        let asm = asm.push(ror_cl(reg_size, d));
+        let asm = asm.push(rex(mov(reg_size, rcx, s2)));
+        let asm = asm.push_if(d != s1, rex(mov(reg_size, d, s1)));
+        let asm = asm.push(rex(ror_cl(reg_size, d)));
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
             asm.push(movsxd_32_to_64(d, d))
@@ -1506,13 +1509,13 @@ where
         let asm = self.asm.reserve::<U3>();
         let asm = match (d, s1, s2) {
             // d = d + s2
-            (_, _, _) if d == s1 => asm.push(add((reg_size, d, s2))).push_none(),
+            (_, _, _) if d == s1 => asm.push(rex(add((reg_size, d, s2)))).push_none(),
             // d = s1 + d
-            (_, _, _) if d == s2 => asm.push(add((reg_size, d, s1))).push_none(),
+            (_, _, _) if d == s2 => asm.push(rex(add((reg_size, d, s1)))).push_none(),
             // d = s1 + s2
             _ => {
-                let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
-                asm.push(add((reg_size, d, s2)))
+                let asm = asm.push_if(d != s1, rex(mov(reg_size, d, s1)));
+                asm.push(rex(add((reg_size, d, s2))))
             }
         };
 
@@ -1545,16 +1548,16 @@ where
         let asm = self.asm.reserve::<U3>();
         let asm = match (d, s1, s2) {
             // d = d - s2
-            (_, _, _) if d == s1 => asm.push(sub((reg_size, d, s2))).push_none(),
+            (_, _, _) if d == s1 => asm.push(rex(sub((reg_size, d, s2)))).push_none(),
             // d = s1 - d
             (_, _, _) if d == s2 => {
-                let asm = asm.push(neg(reg_size, d));
-                asm.push(add((reg_size, d, s1)))
+                let asm = asm.push(rex(neg(reg_size, d)));
+                asm.push(rex(add((reg_size, d, s1))))
             }
             // d = s1 - s2
             _ => {
-                let asm = asm.push(mov(reg_size, d, s1));
-                asm.push(sub((reg_size, d, s2)))
+                let asm = asm.push(rex(mov(reg_size, d, s1)));
+                asm.push(rex(sub((reg_size, d, s2))))
             }
         };
 
@@ -1586,11 +1589,11 @@ where
         let asm = self.asm.reserve::<U3>();
         let asm = if d == s1 {
             // d = -d + s2
-            let asm = asm.push(neg(reg_size, d));
+            let asm = asm.push(rex(neg(reg_size, d)));
             if s2 != 0 {
                 match reg_size {
-                    RegSize::R32 => asm.push(add((d, imm32(cast(s2).bitwise_as_u32())))),
-                    RegSize::R64 => asm.push(add((d, imm64(s2)))),
+                    RegSize::R32 => asm.push(rex(add((d, imm32(cast(s2).bitwise_as_u32()))))),
+                    RegSize::R64 => asm.push(rex(add((d, imm64(s2))))),
                 }
             } else {
                 asm.push_none()
@@ -1598,14 +1601,14 @@ where
         } else {
             // d = -s1 + s2  =>  d = s2 - s1
             if s2 == 0 {
-                let asm = asm.push(mov(reg_size, d, s1));
-                asm.push(neg(reg_size, d))
+                let asm = asm.push(rex(mov(reg_size, d, s1)));
+                asm.push(rex(neg(reg_size, d)))
             } else {
                 let asm = match reg_size {
-                    RegSize::R32 => asm.push(mov_imm(d, imm32(cast(s2).bitwise_as_u32()))),
-                    RegSize::R64 => asm.push(mov_imm(d, imm64(s2))),
+                    RegSize::R32 => asm.push(rex(mov_imm(d, imm32(cast(s2).bitwise_as_u32())))),
+                    RegSize::R64 => asm.push(rex(mov_imm(d, imm64(s2)))),
                 };
-                asm.push(sub((reg_size, d, s1)))
+                asm.push(rex(sub((reg_size, d, s1))))
             }
         };
 
@@ -1638,14 +1641,14 @@ where
         let asm = self.asm.reserve::<U3>();
         let asm = if d == s1 {
             // d = d * s2
-            asm.push(imul(reg_size, d, s2)).push_none()
+            asm.push(rex(imul(reg_size, d, s2))).push_none()
         } else if d == s2 {
             // d = s1 * d
-            asm.push(imul(reg_size, d, s1)).push_none()
+            asm.push(rex(imul(reg_size, d, s1))).push_none()
         } else {
             // d = s1 * s2
-            let asm = asm.push(mov(reg_size, d, s1));
-            asm.push(imul(reg_size, d, s2))
+            let asm = asm.push(rex(mov(reg_size, d, s1)));
+            asm.push(rex(imul(reg_size, d, s2)))
         };
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
@@ -1674,7 +1677,7 @@ where
         let s1 = conv_reg(s1);
 
         let asm = self.asm.reserve::<U2>();
-        let asm = asm.push(imul_imm(RegSize::R32, d, s1, s2));
+        let asm = asm.push(rex(imul_imm(RegSize::R32, d, s1, s2)));
 
         let asm = if B::BITNESS == Bitness::B64 {
             asm.push(movsxd_32_to_64(d, d))
@@ -1852,10 +1855,10 @@ where
         let s2 = conv_reg(s2);
 
         let asm = self.asm.reserve::<polkavm_assembler::U5>();
-        let asm = asm.push(mov(reg_size, TMP_REG, s2));
-        let asm = asm.push(push(s1));
+        let asm = asm.push(rex(mov(reg_size, TMP_REG, s2)));
+        let asm = asm.push(rex(push(s1)));
         let asm = asm.push(call_label32(label));
-        let asm = asm.push(pop(d));
+        let asm = asm.push(rex(pop(d)));
         let asm = asm.push(mov(RegSize::R64, d, TMP_REG));
         asm.assert_reserved_exactly_as_needed();
     }
@@ -1995,7 +1998,7 @@ where
             Bitness::B32 => self.push(mov_imm(conv_reg(dst), imm32(cast(s2).bitwise_as_u32()))),
             Bitness::B64 => {
                 if s2 >= 0 {
-                    self.push(mov_imm(conv_reg(dst), imm32(cast(s2).bitwise_as_u32())));
+                    self.push(rex(mov_imm(conv_reg(dst), imm32(cast(s2).bitwise_as_u32()))));
                 } else {
                     self.push(mov_imm(conv_reg(dst), imm64(s2)));
                 }
@@ -2006,7 +2009,7 @@ where
     #[inline(always)]
     pub fn load_imm64(&mut self, dst: RawReg, s2: u64) {
         assert_eq!(B::BITNESS, Bitness::B64);
-        self.push(mov_imm64(conv_reg(dst), s2));
+        self.push(rex(mov_imm64(conv_reg(dst), s2)));
     }
 
     #[inline(always)]
@@ -2016,7 +2019,7 @@ where
 
     #[inline(always)]
     pub fn count_leading_zero_bits_32(&mut self, d: RawReg, s: RawReg) {
-        self.push(lzcnt(RegSize::R32, conv_reg(d), conv_reg(s)))
+        self.push(rex(lzcnt(RegSize::R32, conv_reg(d), conv_reg(s))))
     }
 
     #[inline(always)]
@@ -2026,7 +2029,7 @@ where
 
     #[inline(always)]
     pub fn count_trailing_zero_bits_32(&mut self, d: RawReg, s: RawReg) {
-        self.push(tzcnt(RegSize::R32, conv_reg(d), conv_reg(s)))
+        self.push(rex(tzcnt(RegSize::R32, conv_reg(d), conv_reg(s))))
     }
 
     #[inline(always)]
@@ -2036,7 +2039,7 @@ where
 
     #[inline(always)]
     pub fn count_set_bits_32(&mut self, d: RawReg, s: RawReg) {
-        self.push(popcnt(RegSize::R32, conv_reg(d), conv_reg(s)))
+        self.push(rex(popcnt(RegSize::R32, conv_reg(d), conv_reg(s))))
     }
 
     #[inline(always)]
@@ -2095,8 +2098,8 @@ where
 
         let asm = self.asm.reserve::<polkavm_assembler::U4>();
         let asm = asm.push(mov_imm(rcx, imm32(cast(c).bitwise_as_u32())));
-        let asm = asm.push_if(d != s, mov(reg_size, d, s));
-        let asm = asm.push(ror_cl(reg_size, d));
+        let asm = asm.push_if(d != s, rex(mov(reg_size, d, s)));
+        let asm = asm.push(rex(ror_cl(reg_size, d)));
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
             asm.push(movsxd_32_to_64(d, d))
@@ -2124,12 +2127,12 @@ where
         let s = conv_reg(s);
 
         let asm = self.asm.reserve::<polkavm_assembler::U4>();
-        let asm = asm.push(mov(reg_size, rcx, s));
+        let asm = asm.push(rex(mov(reg_size, rcx, s)));
         let asm = match reg_size {
-            RegSize::R32 => asm.push(mov_imm(d, imm32(cast(c).bitwise_as_u32()))),
-            RegSize::R64 => asm.push(mov_imm(d, imm64(c))),
+            RegSize::R32 => asm.push(rex(mov_imm(d, imm32(cast(c).bitwise_as_u32())))),
+            RegSize::R64 => asm.push(rex(mov_imm(d, imm64(c)))),
         };
-        let asm = asm.push(ror_cl(reg_size, d));
+        let asm = asm.push(rex(ror_cl(reg_size, d)));
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
             asm.push(movsxd_32_to_64(d, d))
@@ -2159,15 +2162,15 @@ where
         let asm = self.asm.reserve::<U2>();
         let asm = if d == s1 {
             if s2 == 1 {
-                asm.push(inc(reg_size, d))
+                asm.push(rex(inc(reg_size, d)))
             } else {
                 match reg_size {
-                    RegSize::R32 => asm.push(add((d, imm32(cast(s2).bitwise_as_u32())))),
-                    RegSize::R64 => asm.push(add((d, imm64(s2)))),
+                    RegSize::R32 => asm.push(rex(add((d, imm32(cast(s2).bitwise_as_u32()))))),
+                    RegSize::R64 => asm.push(rex(add((d, imm64(s2))))),
                 }
             }
         } else {
-            asm.push(lea(reg_size, d, reg_indirect(reg_size, s1 + s2)))
+            asm.push(rex(lea(reg_size, d, reg_indirect(reg_size, s1 + s2))))
         };
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
