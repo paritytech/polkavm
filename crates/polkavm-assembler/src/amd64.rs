@@ -1561,15 +1561,14 @@ pub mod inst {
             (fmt.write_fmt(core::format_args!("sar {}, cl", self.1.display(Size::from(self.0))))),
 
         sar_imm(RegSize, RegMem, u8) =>
-            {
-                if self.2 == 1 {
-                    Inst::new(0xd1)
-                } else {
-                    Inst::new(0xc1).imm8(self.2)
-                }.rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b111)
-            },
+            Inst::new(0xc1).imm8(self.2).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b111),
             None,
             (fmt.write_fmt(core::format_args!("sar {}, 0x{:x}", self.1.display(Size::from(self.0)), self.2))),
+
+        sar_imm_1(RegSize, RegMem) =>
+            Inst::new(0xd1).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b111),
+            None,
+            (fmt.write_fmt(core::format_args!("sar {}, 0x1", self.1.display(Size::from(self.0))))),
 
         shl_cl(RegSize, RegMem) =>
             Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b100),
@@ -1577,15 +1576,14 @@ pub mod inst {
             (fmt.write_fmt(core::format_args!("shl {}, cl", self.1.display(Size::from(self.0))))),
 
         shl_imm(RegSize, RegMem, u8) =>
-            {
-                if self.2 == 1 {
-                    Inst::new(0xd1)
-                } else {
-                    Inst::new(0xc1).imm8(self.2)
-                }.rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b100)
-            },
+            Inst::new(0xc1).imm8(self.2).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b100),
             None,
             (fmt.write_fmt(core::format_args!("shl {}, 0x{:x}", self.1.display(Size::from(self.0)), self.2))),
+
+        shl_imm_1(RegSize, RegMem) =>
+            Inst::new(0xd1).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b100),
+            None,
+            (fmt.write_fmt(core::format_args!("shl {}, 0x1", self.1.display(Size::from(self.0))))),
 
         shr_cl(RegSize, RegMem) =>
             Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b101),
@@ -1593,27 +1591,25 @@ pub mod inst {
             (fmt.write_fmt(core::format_args!("shr {}, cl", self.1.display(Size::from(self.0))))),
 
         shr_imm(RegSize, RegMem, u8) =>
-            {
-                if self.2 == 1 {
-                    Inst::new(0xd1)
-                } else {
-                    Inst::new(0xc1).imm8(self.2)
-                }.rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b101)
-            },
+            Inst::new(0xc1).imm8(self.2).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b101),
             None,
             (fmt.write_fmt(core::format_args!("shr {}, 0x{:x}", self.1.display(Size::from(self.0)), self.2))),
 
+        shr_imm_1(RegSize, RegMem) =>
+            Inst::new(0xd1).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b101),
+            None,
+            (fmt.write_fmt(core::format_args!("shr {}, 0x1", self.1.display(Size::from(self.0))))),
+
         // https://www.felixcloutier.com/x86/rcl:rcr:rol:ror
         ror_imm(RegSize, RegMem, u8) =>
-            {
-                if self.2 == 1 {
-                    Inst::new(0xd1)
-                } else {
-                    Inst::new(0xc1).imm8(self.2)
-                }.rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b001)
-            },
+            Inst::new(0xc1).imm8(self.2).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b001),
             None,
             (fmt.write_fmt(core::format_args!("ror {}, 0x{:x}", self.1.display(Size::from(self.0)), self.2))),
+
+        ror_imm_1(RegSize, RegMem) =>
+            Inst::new(0xd1).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b001),
+            None,
+            (fmt.write_fmt(core::format_args!("ror {}, 0x1", self.1.display(Size::from(self.0))))),
 
         rol_cl(RegSize, RegMem) =>
             Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b000),
@@ -2488,10 +2484,12 @@ mod tests {
         rdtscp,
         ret,
         ror_imm,
+        ror_imm_1,
         rol_cl,
         ror_cl,
         sar_cl,
         sar_imm,
+        sar_imm_1,
         popcnt,
         lzcnt,
         tzcnt,
@@ -2499,8 +2497,10 @@ mod tests {
         bswap,
         shl_cl,
         shl_imm,
+        shl_imm_1,
         shr_cl,
         shr_imm,
+        shr_imm_1,
         store,
         sub,
         syscall,
