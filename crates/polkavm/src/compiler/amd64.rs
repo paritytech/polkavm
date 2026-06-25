@@ -372,15 +372,7 @@ where
             asm.push_none()
         };
 
-        let asm = if condition == Condition::Below && s2 == 1 {
-            // d = s1 <u 1  =>  d = s1 == 0
-            let asm = asm.push(rex(test((reg_size, s1, s1))));
-            asm.push(rex(setcc(Condition::Equal, d)))
-        } else if condition == Condition::Above && s2 == 0 {
-            // d = s1 >u 0  =>  d = s1 != 0
-            let asm = asm.push(rex(test((reg_size, s1, s1))));
-            asm.push(rex(setcc(Condition::NotEqual, d)))
-        } else {
+        let asm = {
             let asm = match reg_size {
                 RegSize::R32 => asm.push(rex(cmp((s1, imm32(cast(s2).bitwise_as_u32()))))),
                 RegSize::R64 => asm.push(rex(cmp((s1, imm64(s2))))),
