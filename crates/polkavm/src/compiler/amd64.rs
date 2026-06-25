@@ -1712,15 +1712,12 @@ where
 
                 self.push(push(rax));
                 self.push(push(rdx));
-                match (s1 == rax, s2 == rax) {
-                    (true, true) => self.push(imul_dx_ax(RegSize::R64, rax)),
-                    (false, true) => self.push(imul_dx_ax(RegSize::R64, s1)),
-                    (true, false) => self.push(imul_dx_ax(RegSize::R64, s2)),
-                    (false, false) => {
-                        self.push(mov(RegSize::R64, rax, s1));
-                        self.push(imul_dx_ax(RegSize::R64, s2));
-                    }
-                }
+
+                let (arg_maybe_rax, arg_not_rax) = if s2 == rax { (s2, s1) } else { (s1, s2) };
+
+                self.push(mov(RegSize::R64, rax, arg_maybe_rax));
+                self.push(imul_dx_ax(RegSize::R64, arg_not_rax));
+
                 self.push(mov(RegSize::R64, TMP_REG, rdx));
                 self.push(pop(rdx));
                 self.push(pop(rax));
@@ -1758,20 +1755,14 @@ where
                     assert!(TMP_REG as u32 != rax as u32);
                 };
 
-                self.push(push(rax));
                 self.push(push(rdx));
-                match (s1 == rax, s2 == rax) {
-                    (true, true) => self.push(mul_dx_ax(RegSize::R64, rax)),
-                    (false, true) => self.push(mul_dx_ax(RegSize::R64, s1)),
-                    (true, false) => self.push(mul_dx_ax(RegSize::R64, s2)),
-                    (false, false) => {
-                        self.push(mov(RegSize::R64, rax, s1));
-                        self.push(mul(RegSize::R64, s2));
-                    }
-                }
-                self.push(mov(RegSize::R64, TMP_REG, rdx));
+
+                let (arg_maybe_rdx, arg_not_rdx) = if s2 == rdx { (s2, s1) } else { (s1, s2) };
+
+                self.push(mov(RegSize::R64, rdx, arg_maybe_rdx));
+                self.push(mulx(RegSize::R64, TMP_REG, TMP_REG, arg_not_rdx));
+
                 self.push(pop(rdx));
-                self.push(pop(rax));
                 self.push(mov(RegSize::R64, d, TMP_REG));
             }
         }
@@ -1819,23 +1810,25 @@ where
                     assert!(TMP_REG as u32 != rax as u32);
                 };
 
-                // TODO: This is not the most efficient implementation. We can optimize this.
-                self.push(push(AUX_TMP_REG));
                 self.push(push(rax));
                 self.push(push(rdx));
 
                 self.push(mov(RegSize::R64, TMP_REG, s1));
-                self.push(mov(RegSize::R64, AUX_TMP_REG, s2));
-
-                self.push(mov(RegSize::R64, rax, s2));
-                self.push(mul(RegSize::R64, TMP_REG));
                 self.push(sar_imm(RegSize::R64, TMP_REG, 63));
-                self.push(imul(RegSize::R64, TMP_REG, AUX_TMP_REG));
-                self.push(lea(RegSize::R64, TMP_REG, base_index(RegSize::R64, TMP_REG, rdx)));
+                self.push(and((RegSize::R64, TMP_REG, s2)));
 
+                let (arg_maybe_rax, arg_not_rax) = if s2 == rax { (s2, s1) } else { (s1, s2) };
+
+                // rdx = mulhu(s1, s2)
+                self.push(mov(RegSize::R64, rax, arg_maybe_rax));
+                self.push(mul_dx_ax(RegSize::R64, arg_not_rax));
+
+                // mulhsu(s1, s2) = mulhu(s1, s2) - (if s1 < 0 { s2 } else { 0 })
+                self.push(sub((RegSize::R64, rdx, TMP_REG)));
+
+                self.push(mov(RegSize::R64, TMP_REG, rdx));
                 self.push(pop(rdx));
                 self.push(pop(rax));
-                self.push(pop(AUX_TMP_REG));
                 self.push(mov(RegSize::R64, d, TMP_REG));
             }
         }
