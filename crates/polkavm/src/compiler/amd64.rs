@@ -983,7 +983,7 @@ where
                 use polkavm_assembler::amd64::{Scale, SegReg};
 
                 let asm = self.asm.reserve::<U3>();
-                let (asm, target) = if offset != 0 || load_imm.map_or(false, |(t, _)| t == base) {
+                let (asm, target) = if offset != 0 || load_imm.map_or(false, |(t, _)| B::BITNESS == Bitness::B32 && t == base) {
                     let asm = asm.push(rex(lea(RegSize::R32, TMP_REG, reg_indirect(RegSize::R32, conv_reg(base) + offset))));
                     (asm, TMP_REG)
                 } else if B::BITNESS == Bitness::B64 {
