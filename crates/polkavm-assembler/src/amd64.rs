@@ -1377,7 +1377,7 @@ pub mod inst {
 
         mov_imm64(Reg, u64) =>
             {
-                if self.1 <= 0x7fffffff {
+                if self.1 <= 0xffffffff {
                     crate::misc::InstructionOrBuffer::from(mov_imm(RegMem::Reg(self.0), ImmKind::I32(self.1 as u32)))
                 } else {
                     let xs = self.1.to_le_bytes();
@@ -1390,7 +1390,7 @@ pub mod inst {
             },
             None,
             ({
-                if self.1 <= 0x7fffffff {
+                if self.1 <= 0xffffffff {
                     mov_imm(RegMem::Reg(self.0), ImmKind::I32(self.1 as u32)).fmt(fmt)
                 } else {
                     fmt.write_fmt(core::format_args!("mov {}, 0x{:x}", self.0, self.1))
