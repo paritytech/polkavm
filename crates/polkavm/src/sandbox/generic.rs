@@ -1640,10 +1640,10 @@ impl super::Sandbox for Sandbox {
                 lateout("r10") _,
                 lateout("r11") _,
                 lateout("r12") _,
-                lateout("r13") _,
+                lateout("r15") _,
                 inlateout("rcx") tmp_reg => _,
                 inlateout("r14") vmctx => _,
-                in("r15") guest_memory,
+                in("r13") guest_memory,
             );
 
             THREAD_VMCTX.with(|thread_ctx| core::ptr::write(thread_ctx.get(), core::ptr::null_mut()));

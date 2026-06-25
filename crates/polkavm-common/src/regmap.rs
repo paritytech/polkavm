@@ -17,7 +17,7 @@ pub const fn to_native_reg(reg: Reg) -> NativeReg {
         Reg::S1 => r9,
         Reg::A4 => r10,
         Reg::A5 => r11,
-        Reg::T0 => r13,
+        Reg::T0 => r15,
         Reg::T1 => r14,
         Reg::T2 => r12,
     }
@@ -27,7 +27,7 @@ pub const fn to_native_reg(reg: Reg) -> NativeReg {
 pub const TMP_REG: NativeReg = rcx;
 
 /// A temporary register which must be saved/restored.
-pub const AUX_TMP_REG: NativeReg = r15;
+pub const AUX_TMP_REG: NativeReg = r13;
 
 #[inline]
 pub const fn to_guest_reg(reg: NativeReg) -> Option<Reg> {
