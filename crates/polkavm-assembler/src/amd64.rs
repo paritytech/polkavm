@@ -463,6 +463,10 @@ struct Inst {
     immediate: u32,
     immediate_length: u32,
     override_segment: Option<SegReg>,
+    vex: bool,
+    vex_m_mmmm: u8,
+    vex_vvvv: u8,
+    vex_pp: u8,
 }
 
 // See: https://www-user.tu-chemnitz.de/~heha/hsn/chm/x86.chm/x64.htm
@@ -484,6 +488,10 @@ impl Inst {
             immediate: 0,
             immediate_length: 0,
             override_segment: None,
+            vex: false,
+            vex_m_mmmm: 0,
+            vex_vvvv: 0,
+            vex_pp: 0,
         }
     }
 
@@ -551,6 +559,15 @@ impl Inst {
         if cond {
             self.rex |= REX_64B_OP;
         }
+        self
+    }
+
+    #[inline]
+    const fn vex(mut self, m_mmmm: u8, vvvv: Reg, pp: u8) -> Self {
+        self.vex = true;
+        self.vex_m_mmmm = m_mmmm;
+        self.vex_vvvv = (!(vvvv as u8)) & 0xf;
+        self.vex_pp = pp;
         self
     }
 
@@ -715,6 +732,7 @@ impl Inst {
     #[inline(always)]
     fn encode_into(self, buf: &mut InstBuf) {
         if self.op_rep_prefix {
+            debug_assert!(!self.vex);
             buf.append(PREFIX_REP);
         }
 
@@ -725,6 +743,7 @@ impl Inst {
         }
 
         if self.override_op_size {
+            debug_assert!(!self.vex);
             buf.append(PREFIX_OVERRIDE_OP_SIZE);
         }
 
@@ -732,12 +751,23 @@ impl Inst {
             buf.append(PREFIX_OVERRIDE_ADDR_SIZE);
         }
 
-        if self.rex != 0 {
-            buf.append(self.rex);
-        }
+        if self.vex {
+            let rex_r = (self.rex >> 2) & 1;
+            let rex_x = (self.rex >> 1) & 1;
+            let rex_b = self.rex & 1;
+            let rex_w = (self.rex >> 3) & 1;
 
-        if self.op_alt {
-            buf.append(0x0f);
+            buf.append(0xc4);
+            buf.append(((rex_r ^ 1) << 7) | ((rex_x ^ 1) << 6) | ((rex_b ^ 1) << 5) | (self.vex_m_mmmm & 0x1f));
+            buf.append((rex_w << 7) | ((self.vex_vvvv & 0xf) << 3) | (self.vex_pp & 0x3));
+        } else {
+            if self.rex != 0 {
+                buf.append(self.rex);
+            }
+
+            if self.op_alt {
+                buf.append(0x0f);
+            }
         }
 
         buf.append(self.opcode);
@@ -1599,6 +1629,44 @@ pub mod inst {
             Inst::new(0xd1).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b101),
             None,
             (fmt.write_fmt(core::format_args!("shr {}, 0x1", self.1.display(Size::from(self.0))))),
+
+        // https://www.felixcloutier.com/x86/sarx:shlx:shrx
+        shlx(RegSize, Reg, RegMem, Reg) =>
+            Inst::new(0xf7)
+                .vex(0b00010, self.3, 0b01)
+                .rex_64b_if(matches!(self.0, RegSize::R64))
+                .modrm_reg(self.1)
+                .regmem(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("shlx {}, {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0)), self.3.name_from(self.0)))),
+
+        shrx(RegSize, Reg, RegMem, Reg) =>
+            Inst::new(0xf7)
+                .vex(0b00010, self.3, 0b11)
+                .rex_64b_if(matches!(self.0, RegSize::R64))
+                .modrm_reg(self.1)
+                .regmem(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("shrx {}, {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0)), self.3.name_from(self.0)))),
+
+        sarx(RegSize, Reg, RegMem, Reg) =>
+            Inst::new(0xf7)
+                .vex(0b00010, self.3, 0b10)
+                .rex_64b_if(matches!(self.0, RegSize::R64))
+                .modrm_reg(self.1)
+                .regmem(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("sarx {}, {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0)), self.3.name_from(self.0)))),
+
+        // https://www.felixcloutier.com/x86/mulx
+        mulx(RegSize, Reg, Reg, RegMem) =>
+            Inst::new(0xf6)
+                .vex(0b00010, self.2, 0b11)
+                .rex_64b_if(matches!(self.0, RegSize::R64))
+                .modrm_reg(self.1)
+                .regmem(self.3),
+            None,
+            (fmt.write_fmt(core::format_args!("mulx {}, {}, {}", self.1.name_from(self.0), self.2.name_from(self.0), self.3.display_without_prefix(Size::from(self.0))))),
 
         // https://www.felixcloutier.com/x86/rcl:rcr:rol:ror
         ror_imm(RegSize, RegMem, u8) =>
@@ -2490,6 +2558,10 @@ mod tests {
         sar_cl,
         sar_imm,
         sar_imm_1,
+        shlx,
+        shrx,
+        sarx,
+        mulx,
         popcnt,
         lzcnt,
         tzcnt,
