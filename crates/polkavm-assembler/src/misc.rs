@@ -197,6 +197,11 @@ impl InstBuf {
 
         vec
     }
+
+    #[inline(always)]
+    pub fn encode(self) -> Self {
+        self
+    }
 }
 
 #[cfg(feature = "alloc")]
