@@ -10006,6 +10006,7 @@ pub struct Config {
     dispatch_table: Vec<Vec<u8>>,
     min_stack_size: u32,
     gas_cost_model_aware_optimizations: bool,
+    metadata_hash: Option<Vec<u8>>,
 }
 
 impl Default for Config {
@@ -10018,6 +10019,7 @@ impl Default for Config {
             dispatch_table: Vec::new(),
             min_stack_size: VM_MIN_PAGE_SIZE * 2,
             gas_cost_model_aware_optimizations: true,
+            metadata_hash: None,
         }
     }
 }
@@ -10060,6 +10062,11 @@ impl Config {
 
     pub fn set_enable_gas_cost_model_aware_optimizations(&mut self, value: bool) -> &mut Self {
         self.gas_cost_model_aware_optimizations = value;
+        self
+    }
+
+    pub fn set_metadata_hash(&mut self, value: Option<Vec<u8>>) -> &mut Self {
+        self.metadata_hash = value;
         self
     }
 }
@@ -11078,6 +11085,10 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
         assert_eq!(offsets.len(), locations_for_instruction.len());
 
         emit_debug_info(&mut builder, &locations_for_instruction, &offsets);
+    }
+
+    if let Some(metadata_hash) = config.metadata_hash.clone() {
+        builder.add_custom_section(program::SECTION_OPT_METADATA_HASH, metadata_hash);
     }
 
     let raw_blob = builder.to_vec().map_err(ProgramFromElfError::other)?;
