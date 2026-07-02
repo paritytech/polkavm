@@ -605,3 +605,31 @@ impl<'a> Writer<'a> {
         self.buffer.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ProgramBlobBuilder;
+    use crate::program::{Instruction, InstructionSetKind, ProgramBlob, SECTION_OPT_METADATA_HASH};
+
+    fn build_minimal(metadata_hash: Option<&[u8]>) -> ProgramBlob {
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::ReviveV1);
+        builder.set_code(&[Instruction::trap], &[]);
+        if let Some(metadata_hash) = metadata_hash {
+            builder.add_custom_section(SECTION_OPT_METADATA_HASH, metadata_hash.to_vec());
+        }
+        ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap()
+    }
+
+    #[test]
+    fn metadata_hash_section_round_trips() {
+        let metadata_hash = [0xab_u8; 32];
+        let blob = build_minimal(Some(&metadata_hash));
+        assert_eq!(blob.metadata_hash(), metadata_hash);
+    }
+
+    #[test]
+    fn metadata_hash_is_empty_when_absent() {
+        let blob = build_minimal(None);
+        assert!(blob.metadata_hash().is_empty());
+    }
+}
