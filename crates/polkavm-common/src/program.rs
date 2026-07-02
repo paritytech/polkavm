@@ -4111,6 +4111,8 @@ pub struct ProgramBlob {
     debug_strings: ArcBytes,
     debug_line_program_ranges: ArcBytes,
     debug_line_programs: ArcBytes,
+
+    metadata_hash: ArcBytes,
 }
 
 struct Reader<'a, T>
@@ -5118,6 +5120,8 @@ pub struct ProgramParts {
     pub debug_strings: ArcBytes,
     pub debug_line_program_ranges: ArcBytes,
     pub debug_line_programs: ArcBytes,
+
+    pub metadata_hash: ArcBytes,
 }
 
 impl ProgramParts {
@@ -5138,6 +5142,8 @@ impl ProgramParts {
             debug_strings: Default::default(),
             debug_line_program_ranges: Default::default(),
             debug_line_programs: Default::default(),
+
+            metadata_hash: Default::default(),
         }
     }
 
@@ -5212,6 +5218,7 @@ impl ProgramParts {
         parts.debug_strings = reader.read_section_as_bytes(&mut section, SECTION_OPT_DEBUG_STRINGS)?;
         parts.debug_line_programs = reader.read_section_as_bytes(&mut section, SECTION_OPT_DEBUG_LINE_PROGRAMS)?;
         parts.debug_line_program_ranges = reader.read_section_as_bytes(&mut section, SECTION_OPT_DEBUG_LINE_PROGRAM_RANGES)?;
+        parts.metadata_hash = reader.read_section_as_bytes(&mut section, SECTION_OPT_METADATA_HASH)?;
 
         while (section & 0b10000000) != 0 {
             // We don't know this section, but it's optional, so just skip it.
@@ -5276,6 +5283,8 @@ impl ProgramBlob {
             debug_strings: parts.debug_strings,
             debug_line_program_ranges: parts.debug_line_program_ranges,
             debug_line_programs: parts.debug_line_programs,
+
+            metadata_hash: parts.metadata_hash,
         };
 
         if blob.ro_data.len() > blob.ro_data_size as usize {
@@ -5381,6 +5390,11 @@ impl ProgramBlob {
         }
     }
 
+    /// Returns the metadata hash embedded in the blob, or an empty slice if none is present.
+    pub fn metadata_hash(&self) -> &[u8] {
+        &self.metadata_hash
+    }
+
     /// Calculates an unique hash of the program blob.
     pub fn unique_hash(&self, include_debug: bool) -> crate::hasher::Hash {
         let ProgramBlob {
@@ -5402,6 +5416,7 @@ impl ProgramBlob {
             debug_strings,
             debug_line_program_ranges,
             debug_line_programs,
+            metadata_hash: _,
         } = self;
 
         let mut hasher = crate::hasher::Hasher::new();
@@ -5813,6 +5828,7 @@ impl ProgramBlob {
             debug_strings,
             debug_line_program_ranges,
             debug_line_programs,
+            metadata_hash,
         } = self;
 
         let mut ranges = [
@@ -5827,6 +5843,7 @@ impl ProgramBlob {
             debug_strings.parent_address_range(),
             debug_line_program_ranges.parent_address_range(),
             debug_line_programs.parent_address_range(),
+            metadata_hash.parent_address_range(),
         ];
 
         ranges.sort_unstable_by_key(|r| r.start);
@@ -5938,6 +5955,7 @@ fn test_calculate_blob_length() {
         exports: Default::default(),
         debug_line_program_ranges: Default::default(),
         debug_line_programs: Default::default(),
+        metadata_hash: Default::default(),
     };
 
     let blob = ProgramBlob::from_parts(parts).unwrap();
@@ -6455,6 +6473,7 @@ pub const SECTION_CODE_AND_JUMP_TABLE: u8 = 6;
 pub const SECTION_OPT_DEBUG_STRINGS: u8 = 128;
 pub const SECTION_OPT_DEBUG_LINE_PROGRAMS: u8 = 129;
 pub const SECTION_OPT_DEBUG_LINE_PROGRAM_RANGES: u8 = 130;
+pub const SECTION_OPT_METADATA_HASH: u8 = 131;
 pub const SECTION_END_OF_FILE: u8 = 0;
 
 pub const VERSION_DEBUG_LINE_PROGRAM_V1: u8 = 1;

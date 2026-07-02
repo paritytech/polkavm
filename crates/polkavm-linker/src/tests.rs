@@ -181,3 +181,32 @@ fn trap_is_not_injected_at_the_end() {
         .replace("        ", "")
     );
 }
+
+#[test]
+fn metadata_hash_is_embedded_in_blob() {
+    let _ = env_logger::try_init();
+
+    let bytes = create_elf(&[0x00b50533, 0x00008067]);
+    let metadata_hash = [0x42u8; 32];
+
+    let mut config = Config::default();
+    config.set_optimize(false);
+    config.set_metadata_hash(Some(metadata_hash.to_vec()));
+    let program = program_from_elf(config, TargetInstructionSet::Latest, &bytes).unwrap();
+
+    let blob = polkavm_common::program::ProgramBlob::parse(program.as_slice().into()).unwrap();
+    assert_eq!(blob.metadata_hash(), metadata_hash);
+}
+
+#[test]
+fn metadata_hash_is_absent_by_default() {
+    let _ = env_logger::try_init();
+
+    let bytes = create_elf(&[0x00b50533, 0x00008067]);
+    let mut config = Config::default();
+    config.set_optimize(false);
+    let program = program_from_elf(config, TargetInstructionSet::Latest, &bytes).unwrap();
+
+    let blob = polkavm_common::program::ProgramBlob::parse(program.as_slice().into()).unwrap();
+    assert!(blob.metadata_hash().is_empty());
+}
