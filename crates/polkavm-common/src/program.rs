@@ -4712,7 +4712,9 @@ impl ParsedInstruction {
     where
         T: ParsingVisitor,
     {
-        self.kind.visit_parsing(self.offset.0, self.next_offset.0 - self.offset.0, visitor)
+        let args_offset = self.offset.0 + 1;
+        self.kind
+            .visit_parsing(self.offset.0, self.next_offset.0.saturating_sub(args_offset), visitor)
     }
 }
 

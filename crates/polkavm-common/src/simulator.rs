@@ -1129,7 +1129,7 @@ where
 
         if self
             .code
-            .get(cast(offset).to_usize() + cast(args_length).to_usize())
+            .get(cast(offset).to_usize() + cast(args_length).to_usize() + 1)
             .map(|&opcode| opcode == self.opcode_unlikely || opcode == self.opcode_trap)
             .unwrap_or(true)
         {
@@ -2818,6 +2818,29 @@ mod tests {
             "
                 DeeeeER.  a2 = u8 [a0 + 0xb]
                 D====eER  jump 0 if a2 == 0
+            ",
+        );
+    }
+
+    #[test]
+    fn test_branch_with_trap_on_fall_through() {
+        // The branch peeks at the opcode of the next instruction to decide the
+        // branch prediction cost; here the fall-through is a `trap`, so the branch
+        // must be rated as predicted (1 cycle latency, not 20). This is a regression
+        // test for the peek reading the wrong byte (off-by-one on `args_length`).
+        assert_timeline(
+            test_config(),
+            "
+                a0 = a1 + a2
+                jump @skip if a0 == a1
+                trap
+                @skip:
+                a0 = a0 + a1
+                trap
+            ",
+            "
+                DeER.  a0 = a1 + a2
+                D=eER  jump 7 if a0 == a1
             ",
         );
     }
