@@ -2733,6 +2733,43 @@ fn invalid_branch_target(engine_config: Config) {
     }
 }
 
+fn branch_gas_cost_consistent_across_backends(config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    // A basic block ending in a conditional branch whose fall-through is a `trap`.
+    // With the full cost model computing the branch's gas cost requires peeking at the
+    // opcode of the instruction following the branch; the interpreter (via
+    // `visit_parsing`) and the compiler (via the static dispatch tables) used to derive
+    // a different `args_length` for that peek, so they charged a different
+    // branch-prediction cost. Under the tracing config the harness runs both backends
+    // in lockstep and cross-checks the gas, so any divergence fails the test.
+    let blob = crate::program::assemble(
+        Some(InstructionSetKind::Latest64),
+        "
+            a0 = a1 + a2
+            jump @skip if a0 == a1
+            trap
+            @skip:
+            a0 = a0 + a1
+            trap
+        ",
+    )
+    .unwrap();
+    let blob = ProgramBlob::parse(blob.into()).unwrap();
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    module_config.set_cost_model(Some(crate::CostModelKind::Full(crate::CacheModel::L1Hit)));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_gas(100);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert!(instance.gas() >= 0);
+}
+
 fn aux_data_works(config: Config) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
@@ -5350,6 +5387,7 @@ run_tests! {
     implicit_trap_after_fallthrough
     invalid_instruction_after_fallthrough
     invalid_branch_target
+    branch_gas_cost_consistent_across_backends
     aux_data_works
     aux_data_accessible_area
     access_memory_from_host
