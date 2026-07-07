@@ -1610,6 +1610,48 @@ fn dynamic_paging_read_at_bottom_of_address_space(mut engine_config: Config) {
     assert_eq!(instance.run().unwrap(), InterruptKind::Trap);
 }
 
+fn dynamic_paging_read_below_the_guard_threshold(mut engine_config: Config) {
+    engine_config.set_allow_dynamic_paging(true);
+
+    let _ = env_logger::try_init();
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let page_size = get_native_page_size() as u32;
+
+    // Runs a program which does a single 4-byte load from `address` and returns how it stopped.
+    let run_load = |address: i32| {
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::load_i32(Reg::A0, address), asm::ret()], &[]);
+
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let mut module_config = ModuleConfig::new();
+        module_config.set_page_size(page_size);
+        module_config.set_dynamic_paging(true);
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
+
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(offsets[0]);
+        instance.run().unwrap()
+    };
+
+    // Reads fully inside the lowest 64KB of the address space must trap instead of
+    // producing a recoverable segfault, on every backend. (See #390.)
+    for address in [0x1000, 0x4000, 0xf000] {
+        assert_eq!(run_load(address), InterruptKind::Trap);
+    }
+
+    // A read straddling the boundary (partially below 0x10000 and partially at/above it) must
+    // also trap, since its lowest byte still lands in the inaccessible zone.
+    assert_eq!(run_load(0xfffe), InterruptKind::Trap);
+
+    // ...while a read fully at 0x10000 is the first one which segfaults recoverably.
+    let segfault = expect_segfault(run_load(0x10000));
+    assert_eq!(segfault.page_address, 0x10000);
+}
+
 fn dynamic_paging_read_memory_which_is_not_paged_in(mut engine_config: Config) {
     engine_config.set_allow_dynamic_paging(true);
 
@@ -5359,6 +5401,7 @@ run_tests! {
     dynamic_paging_read_at_page_boundary
     dynamic_paging_read_at_top_of_address_space
     dynamic_paging_read_at_bottom_of_address_space
+    dynamic_paging_read_below_the_guard_threshold
     dynamic_paging_read_with_upper_bits_set
     dynamic_paging_read_memory_which_is_not_paged_in
     dynamic_paging_write_at_page_boundary_with_no_pages
