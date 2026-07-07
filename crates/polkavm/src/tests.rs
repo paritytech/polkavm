@@ -5006,6 +5006,36 @@ fn jam_validate_invalid_skip(config: Config) {
     ));
 }
 
+fn jam_branch_target_just_past_the_end_of_code(config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::JamV1);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::branch_eq_imm(Reg::A0, 33, 1), asm::trap()], &[]);
+
+    // Patch the branch so that its target is exactly `code_length + 2`;
+    // compiling this used to panic on the compiler backend. (See #392.)
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let code_length = cast(blob.code().len()).to_u32_or_panic();
+    let instructions: Vec<_> = blob.instructions().collect();
+    let mut raw_code = blob.code().to_vec();
+    raw_code[instructions[0].next_offset.0 as usize - 1] += (code_length + 2 - instructions[0].next_offset.0) as u8;
+    blob.set_code(raw_code.into());
+    assert!(matches!(
+        blob.instructions().next().unwrap().kind,
+        polkavm_common::program::Instruction::branch_eq_imm(_, _, target) if target == code_length + 2
+    ));
+
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+
+    // Taking the branch must trap instead of crashing the VM.
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A0, 33);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+}
+
 fn test_basic_debug_info(raw_blob: &'static [u8]) {
     let _ = env_logger::try_init();
     let program = get_blob(raw_blob);
@@ -5419,6 +5449,7 @@ run_tests! {
     jam_validate_invalid_fallthrough
     jam_validate_invalid_branch
     jam_validate_invalid_skip
+    jam_branch_target_just_past_the_end_of_code
 
     spawn_stress_test
     spawn_inner_vm

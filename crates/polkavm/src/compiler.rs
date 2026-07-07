@@ -574,7 +574,8 @@ where
         match self.program_counter_to_label.get(program_counter) {
             Some(label) => Some(label),
             None => {
-                if program_counter > self.program_counter_to_label.len() {
+                // The map's length is `code_length + 2`, so a target equal to its length is also out of range. (See #392.)
+                if program_counter >= self.program_counter_to_label.len() {
                     return None;
                 }
 
