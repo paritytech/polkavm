@@ -1127,9 +1127,10 @@ where
             };
         }
 
+        // `offset + args_length + 1` is the opcode of the next instruction.
         if self
             .code
-            .get(cast(offset).to_usize() + cast(args_length).to_usize())
+            .get(cast(offset).to_usize() + cast(args_length).to_usize() + 1)
             .map(|&opcode| opcode == self.opcode_unlikely || opcode == self.opcode_trap)
             .unwrap_or(true)
         {
@@ -3229,5 +3230,92 @@ mod tests {
                 ............................................DeeeeeeeeeeeeeeeE---R  jump 107
             ",
         )
+    }
+
+    #[test]
+    fn test_branch_cost_consistent_between_parsed_and_dispatch_paths() {
+        use super::{run_simulator_for_first_block, Simulator};
+        use crate::cast::cast;
+        use crate::program::{Instruction, InstructionSet, Opcode, OpcodeVisitor};
+        use crate::utils::{GasVisitorT, B64};
+
+        let _ = env_logger::try_init();
+
+        // A basic block ending in a conditional branch whose fall-through is a `trap`:
+        // `get_branch_cost` peeks at the opcode of the instruction following the branch
+        // and must charge a branch prediction hit. This used to diverge:
+        // `ParsedInstruction::visit_parsing` (interpreter, `calculate_gas_cost_for`) and
+        // the static dispatch tables (compiler) passed a different `args_length`, so the
+        // peek landed on a different byte depending on the path.
+        let program = assemble(
+            Some(InstructionSetKind::Latest64),
+            "
+                a0 = a1 + a2
+                jump @skip if a0 == a1
+                trap
+                @skip:
+                a0 = a0 + a1
+                trap
+            ",
+        )
+        .unwrap();
+
+        let isa = InstructionSetKind::Latest64;
+        let blob = ProgramBlob::parse(program.into()).unwrap();
+        let code = blob.code();
+        let instructions: Vec<_> = blob.instructions().collect();
+
+        // Sanity check the program's shape; in particular neither the branch's last
+        // argument byte (which the dispatch table path used to peek at) nor the branch
+        // target may alias with a trap/unlikely opcode.
+        let branch = instructions[1];
+        let Instruction::branch_eq(_, _, target) = branch.kind else {
+            panic!("unexpected instruction: {}", branch.kind);
+        };
+        let raw_trap = isa.opcode_to_u8(Opcode::trap).unwrap();
+        let raw_unlikely = isa.opcode_to_u8(Opcode::unlikely).unwrap();
+        assert_eq!(code[cast(branch.next_offset.0).to_usize()], raw_trap);
+        let last_argument_byte = code[cast(branch.next_offset.0).to_usize() - 1];
+        assert!(last_argument_byte != raw_trap && last_argument_byte != raw_unlikely);
+        let target_byte = code[cast(target).to_usize()];
+        assert!(target_byte != raw_trap && target_byte != raw_unlikely);
+
+        // The cost of the first basic block as charged through
+        // `ParsedInstruction::visit_parsing`.
+        let (block, _, cost_of_parsed_path) = run_simulator_for_first_block(code, isa, test_config(), &instructions, ());
+        let block_length = block.len();
+
+        // The cost of the same block as charged through the static dispatch tables,
+        // deriving (opcode, chunk, args_length) the same way `visitor_run` does.
+        type SimulatorVisitor<'a> = Simulator<'a, B64, ()>;
+        // The `allow` is for an unused variable inside the macro itself; the lint is
+        // only suppressed automatically when the macro is invoked from another crate.
+        #[allow(unused_variables)]
+        let dispatch_table = crate::program::build_static_dispatch_table_latest64!(SIMULATOR_DISPATCH_TABLE, SimulatorVisitor<'a>);
+        let mut sim = Simulator::<B64, ()>::new(code, isa, test_config(), ());
+        for instruction in &instructions[..block_length] {
+            let offset = cast(instruction.offset.0).to_usize();
+            let args_length = instruction.next_offset.0 - instruction.offset.0 - 1;
+            let mut chunk = [0; 16];
+            let args = &code[offset + 1..core::cmp::min(offset + 17, code.len())];
+            chunk[..args.len()].copy_from_slice(args);
+            dispatch_table.dispatch(
+                &mut sim,
+                usize::from(code[offset]),
+                u128::from_le_bytes(chunk),
+                instruction.offset.0,
+                args_length,
+            );
+        }
+        let cost_of_dispatch_path = sim.take_block_cost().unwrap();
+        assert_eq!(cost_of_parsed_path, cost_of_dispatch_path);
+
+        // Make sure the branch was actually charged as a prediction hit.
+        let mut sim = Simulator::<B64, ()>::new(code, isa, test_config(), ());
+        sim.set_force_branch_is_cheap(Some(true));
+        for instruction in &instructions[..block_length] {
+            instruction.visit_parsing(&mut sim);
+        }
+        assert_eq!(sim.take_block_cost().unwrap(), cost_of_parsed_path);
     }
 }
