@@ -1127,7 +1127,6 @@ where
             };
         }
 
-        // `offset + args_length + 1` is the opcode of the next instruction.
         if self
             .code
             .get(cast(offset).to_usize() + cast(args_length).to_usize() + 1)

@@ -4712,11 +4712,9 @@ impl ParsedInstruction {
     where
         T: ParsingVisitor,
     {
-        // NOTE: `args_length` excludes the opcode byte, matching the convention used
-        // by the static dispatch tables. Saturating because synthetic instructions
-        // (e.g. in `trap_cost`) can have `next_offset == offset`.
+        let args_offset = self.offset.0 + 1;
         self.kind
-            .visit_parsing(self.offset.0, (self.next_offset.0 - self.offset.0).saturating_sub(1), visitor)
+            .visit_parsing(self.offset.0, self.next_offset.0.saturating_sub(args_offset), visitor)
     }
 }
 
