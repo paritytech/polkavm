@@ -1899,7 +1899,11 @@ impl super::Sandbox for Sandbox {
             let worker_ccx = mutable.per_core[worker_core].ccx_id;
             mutable.per_ccx[worker_ccx].worker_count += 1;
             mutable.per_core[worker_core].worker_count += 1;
-            let worker = mutable.per_core[worker_core].worker_cache.pop();
+            let worker_cache = &mut mutable.per_core[worker_core].worker_cache;
+            let worker = match worker_cache.iter().rposition(|worker| worker.is_idle()) {
+                Some(index) => Some(worker_cache.swap_remove(index)),
+                None => worker_cache.pop(),
+            };
 
             log::trace!("Spawning a new instance: host core = {host_core} (CCX = {host_ccx}), worker core = {worker_core} (CCX = {worker_ccx}), recycled = {}", worker.is_some());
             (host_ccx, worker_core, worker)
@@ -2624,6 +2628,13 @@ impl Sandbox {
         unsafe { &*self.vmctx_mmap.as_ptr().cast::<VmCtx>() }
     }
 
+    /// Whether the worker has finished its asynchronous recycle and is ready for reuse.
+    ///
+    /// Only a hint: `wait` still synchronizes with the worker before it is actually used.
+    fn is_idle(&self) -> bool {
+        self.vmctx().futex.load(Ordering::Relaxed) == VMCTX_FUTEX_IDLE
+    }
+
     fn wake_worker(&mut self) -> Result<(), Error> {
         self.exit_low_latency_mode();
         self.vmctx().futex.store(VMCTX_FUTEX_BUSY, Ordering::Release);
@@ -3024,10 +3035,12 @@ impl Sandbox {
         };
 
         let child_pid = child.pid;
-        if let Err(error) = pin_to_cpu(child_pid, worker_core) {
-            log::warn!("Failed to pin worker #{child_pid} to core {worker_core}: {error}");
-        } else {
-            log::trace!("Pinned worker #{child_pid} to core {worker_core}");
+        if global.core_pinning != CorePinning::Disabled {
+            if let Err(error) = pin_to_cpu(child_pid, worker_core) {
+                log::warn!("Failed to pin worker #{child_pid} to core {worker_core}: {error}");
+            } else {
+                log::trace!("Pinned worker #{child_pid} to core {worker_core}");
+            }
         }
 
         child_socket.close()?;
