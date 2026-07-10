@@ -107,7 +107,7 @@ pub enum CorePinning {
     PinToCore,
     /// Automatically pin the host thread to a single CPU CCX.
     PinToCcx,
-    /// Disable automatic pinning.
+    /// Disable automatic pinning, both of the host threads and of the sandbox worker processes.
     Disabled,
 }
 
