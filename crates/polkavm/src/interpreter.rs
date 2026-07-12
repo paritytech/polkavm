@@ -2263,7 +2263,9 @@ impl InterpretedInstance {
         page_address: u32,
         is_write_protected: bool,
     ) -> Target {
-        if page_address < 1024 * 16 {
+        // The lowest 64KB of the address space is inaccessible and always traps,
+        // matching the recompiler backends. (See #390.)
+        if page_address < 0x10000 {
             return trap_impl::<false>(self, program_counter);
         }
 
