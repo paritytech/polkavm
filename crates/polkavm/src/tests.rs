@@ -5048,6 +5048,36 @@ fn jam_validate_invalid_skip(config: Config) {
     ));
 }
 
+fn jam_reg_nibble_clamped_to_a5(config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    // Register nibbles greater than 12 are clamped to 12 (see `RawReg::get`), so a `load_imm`
+    // whose destination nibble is 13, 14 or 15 must still write to A5 and not to T2.
+    // (See https://github.com/paritytech/polkavm/issues/391.)
+    for nibble in 13..=15 {
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::JamV1);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::load_imm(Reg::A5, 0x12345678), asm::ret()], &[]);
+        let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+        // Rewrite `load_imm`'s destination register nibble from 12 to the out-of-bounds value.
+        let mut raw_code = blob.code().to_vec();
+        assert_eq!(raw_code[1], 12);
+        raw_code[1] = nibble;
+        blob.set_code(raw_code.into());
+        assert!(blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1).is_ok());
+
+        let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+        assert_eq!(instance.reg(Reg::A5), 0x12345678);
+        assert_eq!(instance.reg(Reg::T2), 0);
+    }
+}
+
 fn test_basic_debug_info(raw_blob: &'static [u8]) {
     let _ = env_logger::try_init();
     let program = get_blob(raw_blob);
@@ -5462,6 +5492,7 @@ run_tests! {
     jam_validate_invalid_fallthrough
     jam_validate_invalid_branch
     jam_validate_invalid_skip
+    jam_reg_nibble_clamped_to_a5
 
     spawn_stress_test
     spawn_inner_vm
