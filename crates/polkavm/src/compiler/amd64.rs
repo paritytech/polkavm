@@ -49,8 +49,27 @@ impl From<i32> for RegImm {
     }
 }
 
+/// PVM register operands are 4-bit fields; the spec clamps a nibble greater than the highest
+/// register index down to that register (see `RawReg::get`). This is that clamp target.
+const OUT_OF_BOUNDS_REG: Reg = {
+    let mut index = 1;
+    let mut max_reg = Reg::ALL[0];
+    while index < Reg::ALL.len() {
+        let reg = Reg::ALL[index];
+        if reg as usize > max_reg as usize {
+            max_reg = reg;
+        }
+        index += 1;
+    }
+    assert!(max_reg as usize == Reg::A5 as usize);
+    max_reg
+};
+
 static REG_MAP: [NativeReg; 16] = {
-    let mut output = [conv_reg_const(Reg::T2); 16];
+    // Register nibbles greater than the highest register index are clamped to `OUT_OF_BOUNDS_REG`
+    // (see `RawReg::get`), so map the unused indices there too.
+    // (See https://github.com/paritytech/polkavm/issues/391.)
+    let mut output = [conv_reg_const(OUT_OF_BOUNDS_REG); 16];
     let mut index = 0;
     while index < Reg::ALL.len() {
         assert!(Reg::ALL[index] as usize == index);
@@ -72,6 +91,13 @@ fn conv_reg(reg: RawReg) -> NativeReg {
 fn test_conv_reg() {
     for reg in Reg::ALL {
         assert_eq!(conv_reg(reg.into()), conv_reg_const(reg));
+    }
+
+    // Register nibbles greater than the highest register index are clamped to `OUT_OF_BOUNDS_REG`.
+    for nibble in 13..16 {
+        let reg = polkavm_common::program::read_args_regs2(u128::from(nibble)).0;
+        assert_eq!(reg.raw_unparsed(), nibble);
+        assert_eq!(conv_reg(reg), conv_reg_const(OUT_OF_BOUNDS_REG));
     }
 }
 

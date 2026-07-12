@@ -1610,6 +1610,48 @@ fn dynamic_paging_read_at_bottom_of_address_space(mut engine_config: Config) {
     assert_eq!(instance.run().unwrap(), InterruptKind::Trap);
 }
 
+fn dynamic_paging_read_below_the_guard_threshold(mut engine_config: Config) {
+    engine_config.set_allow_dynamic_paging(true);
+
+    let _ = env_logger::try_init();
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let page_size = get_native_page_size() as u32;
+
+    // Runs a program which does a single 4-byte load from `address` and returns how it stopped.
+    let run_load = |address: i32| {
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::load_i32(Reg::A0, address), asm::ret()], &[]);
+
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let mut module_config = ModuleConfig::new();
+        module_config.set_page_size(page_size);
+        module_config.set_dynamic_paging(true);
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
+
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(offsets[0]);
+        instance.run().unwrap()
+    };
+
+    // Reads fully inside the lowest 64KB of the address space must trap instead of
+    // producing a recoverable segfault, on every backend. (See #390.)
+    for address in [0x1000, 0x4000, 0xf000] {
+        assert_eq!(run_load(address), InterruptKind::Trap);
+    }
+
+    // A read straddling the boundary (partially below 0x10000 and partially at/above it) must
+    // also trap, since its lowest byte still lands in the inaccessible zone.
+    assert_eq!(run_load(0xfffe), InterruptKind::Trap);
+
+    // ...while a read fully at 0x10000 is the first one which segfaults recoverably.
+    let segfault = expect_segfault(run_load(0x10000));
+    assert_eq!(segfault.page_address, 0x10000);
+}
+
 fn dynamic_paging_read_memory_which_is_not_paged_in(mut engine_config: Config) {
     engine_config.set_allow_dynamic_paging(true);
 
@@ -5036,6 +5078,36 @@ fn jam_branch_target_just_past_the_end_of_code(config: Config) {
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
 }
 
+fn jam_reg_nibble_clamped_to_a5(config: Config) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    // Register nibbles greater than 12 are clamped to 12 (see `RawReg::get`), so a `load_imm`
+    // whose destination nibble is 13, 14 or 15 must still write to A5 and not to T2.
+    // (See https://github.com/paritytech/polkavm/issues/391.)
+    for nibble in 13..=15 {
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::JamV1);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::load_imm(Reg::A5, 0x12345678), asm::ret()], &[]);
+        let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+        // Rewrite `load_imm`'s destination register nibble from 12 to the out-of-bounds value.
+        let mut raw_code = blob.code().to_vec();
+        assert_eq!(raw_code[1], 12);
+        raw_code[1] = nibble;
+        blob.set_code(raw_code.into());
+        assert!(blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1).is_ok());
+
+        let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+        assert_eq!(instance.reg(Reg::A5), 0x12345678);
+        assert_eq!(instance.reg(Reg::T2), 0);
+    }
+}
+
 fn test_basic_debug_info(raw_blob: &'static [u8]) {
     let _ = env_logger::try_init();
     let program = get_blob(raw_blob);
@@ -5389,6 +5461,7 @@ run_tests! {
     dynamic_paging_read_at_page_boundary
     dynamic_paging_read_at_top_of_address_space
     dynamic_paging_read_at_bottom_of_address_space
+    dynamic_paging_read_below_the_guard_threshold
     dynamic_paging_read_with_upper_bits_set
     dynamic_paging_read_memory_which_is_not_paged_in
     dynamic_paging_write_at_page_boundary_with_no_pages
@@ -5450,6 +5523,7 @@ run_tests! {
     jam_validate_invalid_branch
     jam_validate_invalid_skip
     jam_branch_target_just_past_the_end_of_code
+    jam_reg_nibble_clamped_to_a5
 
     spawn_stress_test
     spawn_inner_vm
