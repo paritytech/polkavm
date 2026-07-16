@@ -6159,6 +6159,11 @@ struct LineProgramFrame {
     column: u32,
 }
 
+/// The maximum number of line program opcodes parsed for a single region.
+///
+/// Producers of the debug line program must keep every region within this limit.
+pub const INSTRUCTION_LIMIT_PER_REGION: usize = 512;
+
 /// A line program state machine.
 pub struct LineProgram<'a> {
     entry_index: usize,
@@ -6208,9 +6213,6 @@ impl<'a> LineProgram<'a> {
         if self.is_finished {
             return Ok(None);
         }
-
-        // Put an upper limit to how many instructions we'll process.
-        const INSTRUCTION_LIMIT_PER_REGION: usize = 512;
 
         let mark_as_finished_on_drop = SetTrueOnDrop(&mut self.is_finished);
         for _ in 0..INSTRUCTION_LIMIT_PER_REGION {
