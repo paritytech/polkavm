@@ -2,8 +2,8 @@
 use polkavm_common::abi::{MemoryMapBuilder, VM_CODE_ADDRESS_ALIGNMENT, VM_MAX_PAGE_SIZE, VM_MIN_PAGE_SIZE};
 use polkavm_common::cast::cast;
 use polkavm_common::program::{
-    self, FrameKind, Instruction, InstructionFormat, InstructionSet, InstructionSetKind, LineProgramOp, Opcode, ProgramBlob,
-    ProgramCounter, ProgramSymbol,
+    self, FrameKind, Instruction, InstructionFormat, InstructionSet, InstructionSetKind, LineProgramConfig, LineProgramOp, Opcode,
+    ProgramBlob, ProgramCounter, ProgramSymbol,
 };
 use polkavm_common::utils::{align_to_next_page_u32, align_to_next_page_u64};
 use polkavm_common::varint;
@@ -11098,6 +11098,11 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
 
     // Sanity check that our debug info was properly emitted and can be parsed.
     if cfg!(debug_assertions) && !config.strip {
+        // Raise/disable the per-region limit so the check never rejects valid output.
+        // A deeply inlined instruction could produce a region with more opcodes than the default allows.
+        let mut line_program_config = LineProgramConfig::default();
+        line_program_config.instruction_limit_per_region = usize::MAX;
+
         'outer: for (nth_instruction, locations) in locations_for_instruction.iter().enumerate() {
             let (program_counter, _) = offsets[nth_instruction];
             let line_program = blob.get_debug_line_program_at(program_counter).unwrap();
@@ -11107,7 +11112,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
             };
 
             let mut line_program = line_program.unwrap();
-            while let Some(region_info) = line_program.run().unwrap() {
+            while let Some(region_info) = line_program.run_with_config(line_program_config).unwrap() {
                 if !region_info.instruction_range().contains(&program_counter) {
                     continue;
                 }
@@ -11541,4 +11546,73 @@ fn emit_debug_info(
     builder.add_custom_section(program::SECTION_OPT_DEBUG_STRINGS, dbg_strings.section);
     builder.add_custom_section(program::SECTION_OPT_DEBUG_LINE_PROGRAMS, section_line_programs);
     builder.add_custom_section(program::SECTION_OPT_DEBUG_LINE_PROGRAM_RANGES, section_line_program_ranges);
+}
+
+#[cfg(test)]
+mod test_debug_line_program {
+    use super::*;
+    use crate::dwarf::SourceCodeLocation;
+    use polkavm_common::program::{LineProgramConfig, ProgramParseError};
+
+    /// Creates a maximally verbose frame: every field is distinct, so each frame
+    /// forces [`emit_debug_info`] to emit the full set of line program ops.
+    fn create_location(depth: u32) -> Location {
+        Location {
+            kind: if (depth & 1) == 0 { FrameKind::Enter } else { FrameKind::Call },
+            namespace: Some(format!("ns{depth}").into()),
+            function_name: Some(format!("fn{depth}").into()),
+            source_code_location: Some(SourceCodeLocation::Column {
+                path: format!("f{depth}.rs").into(),
+                line: depth,
+                column: depth,
+            }),
+        }
+    }
+
+    /// Attributes `stack` to one instruction, emits the debug info, and walks the
+    /// resulting line program with `config`, surfacing any parse error.
+    fn emit_and_parse(stack: Arc<[Location]>, config: LineProgramConfig) -> Result<(), ProgramParseError> {
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+        builder.set_code(&[Instruction::fallthrough, Instruction::fallthrough], &[]);
+
+        let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+        let offsets: Vec<(ProgramCounter, ProgramCounter)> = blob
+            .instructions()
+            .map(|instruction| (instruction.offset, instruction.next_offset))
+            .collect();
+        assert!(!offsets.is_empty());
+
+        let mut locations: Vec<Option<Arc<[Location]>>> = vec![None; offsets.len()];
+        locations[0] = Some(stack);
+
+        emit_debug_info(&mut builder, &locations, &offsets);
+
+        let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+        let mut line_program = blob.get_debug_line_program_at(offsets[0].0)?.unwrap();
+        while line_program.run_with_config(config)?.is_some() {}
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_deep_frame_stack_parses_only_when_the_limit_is_raised() {
+        let default_config = LineProgramConfig::default();
+
+        // Use as many frames as the default per-region opcode budget. Each frame emits
+        // several opcodes, so the region's opcode count far exceeds the default limit.
+        let deep_frame_count = default_config.instruction_limit_per_region as u32;
+        let deep_stack: Arc<[Location]> = (0..deep_frame_count).map(create_location).collect();
+
+        let error = emit_and_parse(Arc::clone(&deep_stack), default_config)
+            .expect_err("a region with more opcodes than the default limit should fail to parse");
+        assert!(
+            error.to_string().contains("too many instructions"),
+            "unexpected parse error: {error}"
+        );
+
+        // With the limit raised/disabled, the whole region parses.
+        let mut config_no_limit = default_config;
+        config_no_limit.instruction_limit_per_region = usize::MAX;
+        assert!(emit_and_parse(deep_stack, config_no_limit).is_ok());
+    }
 }
