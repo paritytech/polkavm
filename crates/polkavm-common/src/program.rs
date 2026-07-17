@@ -5778,7 +5778,7 @@ impl ProgramBlob {
 
                         self.iteration_limit -= 1;
 
-                        let Ok(Some(region_info)) = line_program.raw_run() else {
+                        let Ok(Some(region_info)) = line_program.raw_run(INSTRUCTION_LIMIT_PER_REGION) else {
                             self.iteration_limit = 0;
                             return None;
                         };
@@ -6159,10 +6159,27 @@ struct LineProgramFrame {
     column: u32,
 }
 
-/// The maximum number of line program opcodes parsed for a single region.
-///
-/// Producers of the debug line program must keep every region within this limit.
+/// The default maximum number of line program opcodes parsed for a single region.
 pub const INSTRUCTION_LIMIT_PER_REGION: usize = 512;
+
+/// A configuration for how a [`LineProgram`] is run.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct LineProgramConfig {
+    /// The maximum number of line program opcodes parsed for a single region.
+    ///
+    /// Parsing fails once a region exceeds this many opcodes, which bounds the work
+    /// a single region can trigger. Set it to [`usize::MAX`] to disable the limit.
+    pub instruction_limit_per_region: usize,
+}
+
+impl Default for LineProgramConfig {
+    fn default() -> Self {
+        LineProgramConfig {
+            instruction_limit_per_region: INSTRUCTION_LIMIT_PER_REGION,
+        }
+    }
+}
 
 /// A line program state machine.
 pub struct LineProgram<'a> {
@@ -6186,7 +6203,13 @@ impl<'a> LineProgram<'a> {
 
     /// Runs the line program until the next region becomes available, or until the program ends.
     pub fn run(&mut self) -> Result<Option<RegionInfo>, ProgramParseError> {
-        match self.raw_run() {
+        self.run_with_config(LineProgramConfig::default())
+    }
+
+    /// Runs the line program until the next region becomes available, or until the program ends,
+    /// using the provided `config` to control how the program is parsed.
+    pub fn run_with_config(&mut self, config: LineProgramConfig) -> Result<Option<RegionInfo>, ProgramParseError> {
+        match self.raw_run(config.instruction_limit_per_region) {
             Ok(Some(region_info)) => Ok(Some(self.convert_region_info(region_info))),
             Ok(None) => Ok(None),
             Err(error) => Err(error),
@@ -6202,7 +6225,7 @@ impl<'a> LineProgram<'a> {
         }
     }
 
-    fn raw_run(&mut self) -> Result<Option<RawRegionInfo>, ProgramParseError> {
+    fn raw_run(&mut self, instruction_limit_per_region: usize) -> Result<Option<RawRegionInfo>, ProgramParseError> {
         struct SetTrueOnDrop<'a>(&'a mut bool);
         impl<'a> Drop for SetTrueOnDrop<'a> {
             fn drop(&mut self) {
@@ -6215,7 +6238,7 @@ impl<'a> LineProgram<'a> {
         }
 
         let mark_as_finished_on_drop = SetTrueOnDrop(&mut self.is_finished);
-        for _ in 0..INSTRUCTION_LIMIT_PER_REGION {
+        for _ in 0..instruction_limit_per_region {
             let byte = match self.reader.read_byte() {
                 Ok(byte) => byte,
                 Err(error) => {
@@ -6361,6 +6384,59 @@ impl<'a> LineProgram<'a> {
             "found a line program with too many instructions",
         )))
     }
+}
+
+#[test]
+fn test_default_line_program_config_uses_the_constant_limit() {
+    assert_eq!(
+        LineProgramConfig::default().instruction_limit_per_region,
+        INSTRUCTION_LIMIT_PER_REGION
+    );
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn test_run_with_config_can_raise_the_instruction_limit() {
+    // One region padded with exactly the default budget of non-finishing opcodes, so its
+    // finishing opcode falls just past the budget and the default parse should give up.
+    let mut line_programs = alloc::vec![VERSION_DEBUG_LINE_PROGRAM_V1];
+    for _ in 0..INSTRUCTION_LIMIT_PER_REGION {
+        line_programs.push(LineProgramOp::IncrementLine as u8);
+    }
+    line_programs.push(LineProgramOp::FinishInstruction as u8);
+    line_programs.push(LineProgramOp::FinishProgram as u8);
+
+    // A single range entry covering program counter 0, whose program starts right after the
+    // one-byte version marker.
+    let mut ranges = alloc::vec::Vec::new();
+    ranges.extend_from_slice(&0_u32.to_le_bytes()); // program_counter_start
+    ranges.extend_from_slice(&1_u32.to_le_bytes()); // program_counter_end
+    ranges.extend_from_slice(&1_u32.to_le_bytes()); // info_offset (past the version marker)
+
+    let mut builder = crate::writer::ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.set_code(&[Instruction::trap], &[]);
+    builder.add_custom_section(SECTION_OPT_DEBUG_LINE_PROGRAMS, line_programs);
+    builder.add_custom_section(SECTION_OPT_DEBUG_LINE_PROGRAM_RANGES, ranges);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+    // The default limit rejects the over-long region, exactly as a runtime consumer would.
+    let mut line_program = blob.get_debug_line_program_at(ProgramCounter(0)).unwrap().unwrap();
+    let Err(error) = line_program.run() else {
+        panic!("the default limit should reject the over-long region");
+    };
+    assert!(
+        alloc::format!("{error}").contains("too many instructions"),
+        "unexpected error: {error}"
+    );
+
+    // Raising the limit lets the same region parse: one region, then the program ends.
+    let config = LineProgramConfig {
+        instruction_limit_per_region: usize::MAX,
+    };
+    let mut line_program = blob.get_debug_line_program_at(ProgramCounter(0)).unwrap().unwrap();
+    assert!(line_program.run_with_config(config).unwrap().is_some());
+    assert!(line_program.run_with_config(config).unwrap().is_none());
 }
 
 struct DisplayName<'a> {
