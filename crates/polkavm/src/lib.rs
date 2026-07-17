@@ -128,7 +128,7 @@ pub use polkavm_common::{
 
 /// Miscellaneous types related to debug info.
 pub mod debug_info {
-    pub use polkavm_common::program::{FrameInfo, FrameKind, LineProgram, RegionInfo, SourceLocation};
+    pub use polkavm_common::program::{FrameInfo, FrameKind, LineProgram, LineProgramConfig, RegionInfo, SourceLocation};
 
     #[cfg(feature = "std")]
     pub use crate::source_cache::SourceCache;

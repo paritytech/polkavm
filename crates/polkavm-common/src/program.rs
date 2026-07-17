@@ -6160,7 +6160,7 @@ struct LineProgramFrame {
 }
 
 /// The default maximum number of line program opcodes parsed for a single region.
-pub const INSTRUCTION_LIMIT_PER_REGION: usize = 512;
+const INSTRUCTION_LIMIT_PER_REGION: usize = 512;
 
 /// A configuration for how a [`LineProgram`] is run.
 #[derive(Clone, Copy, Debug)]

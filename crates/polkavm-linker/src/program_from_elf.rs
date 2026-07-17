@@ -2,8 +2,8 @@
 use polkavm_common::abi::{MemoryMapBuilder, VM_CODE_ADDRESS_ALIGNMENT, VM_MAX_PAGE_SIZE, VM_MIN_PAGE_SIZE};
 use polkavm_common::cast::cast;
 use polkavm_common::program::{
-    self, FrameKind, Instruction, InstructionFormat, InstructionSet, InstructionSetKind, LineProgramOp, Opcode, ProgramBlob,
-    ProgramCounter, ProgramSymbol,
+    self, FrameKind, Instruction, InstructionFormat, InstructionSet, InstructionSetKind, LineProgramConfig, LineProgramOp, Opcode,
+    ProgramBlob, ProgramCounter, ProgramSymbol,
 };
 use polkavm_common::utils::{align_to_next_page_u32, align_to_next_page_u64};
 use polkavm_common::varint;
@@ -11043,7 +11043,18 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
                 }
             }
 
-            locations_for_instruction.push(flatten_location_stack(list));
+            if list.is_empty() {
+                locations_for_instruction.push(None);
+            } else if list.len() == 1 {
+                locations_for_instruction.push(list.into_iter().next())
+            } else {
+                let mut new_list = Vec::new();
+                for sublist in list {
+                    new_list.extend(sublist.iter().cloned());
+                }
+
+                locations_for_instruction.push(Some(new_list.into()));
+            }
         }
 
         log::trace!(
@@ -11087,6 +11098,11 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
 
     // Sanity check that our debug info was properly emitted and can be parsed.
     if cfg!(debug_assertions) && !config.strip {
+        // Raise/disable the per-region limit so the check never rejects valid output.
+        // A deeply inlined instruction could produce a region with more opcodes than the default allows.
+        let mut line_program_config = LineProgramConfig::default();
+        line_program_config.instruction_limit_per_region = usize::MAX;
+
         'outer: for (nth_instruction, locations) in locations_for_instruction.iter().enumerate() {
             let (program_counter, _) = offsets[nth_instruction];
             let line_program = blob.get_debug_line_program_at(program_counter).unwrap();
@@ -11096,7 +11112,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
             };
 
             let mut line_program = line_program.unwrap();
-            while let Some(region_info) = line_program.run().unwrap() {
+            while let Some(region_info) = line_program.run_with_config(line_program_config).unwrap() {
                 if !region_info.instruction_range().contains(&program_counter) {
                     continue;
                 }
@@ -11150,51 +11166,6 @@ fn simplify_path(path: &str) -> Cow<str> {
     }
 
     path.into()
-}
-
-/// The maximum number of line program opcodes [`emit_debug_info`] emits for
-/// one frame: a [`LineProgramOp::SetMutationDepth`] plus the field setters.
-const MAX_LINE_PROGRAM_OPCODES_PER_FRAME: usize = 7;
-
-/// The line program opcodes in one instruction's region that are not per-frame:
-/// a leading [`LineProgramOp::SetStackDepth`] and a trailing finish op.
-const LINE_PROGRAM_OPCODES_PER_INSTRUCTION_OVERHEAD: usize = 2;
-
-/// The maximum number of inline frames recorded for a single instruction.
-///
-/// One machine instruction can be attributed to many source locations at once
-/// (e.g. when identical code from several call sites is merged), and each
-/// contributes its whole inline-frame stack. Left unbounded the merged stack
-/// can grow arbitrarily deep, and since [`emit_debug_info`] emits per-frame ops
-/// with no intervening finish op, a deep stack yields a region the runtime
-/// parser refuses to read.
-///
-/// The value is derived from the parser's per-region budget so a capped
-/// instruction always fits in one region.
-const MAX_FRAMES_PER_INSTRUCTION: usize =
-    (program::INSTRUCTION_LIMIT_PER_REGION - LINE_PROGRAM_OPCODES_PER_INSTRUCTION_OVERHEAD) / MAX_LINE_PROGRAM_OPCODES_PER_FRAME;
-
-/// Merges the per-source inline-frame stacks gathered for one instruction into a
-/// single stack, capping it at [`MAX_FRAMES_PER_INSTRUCTION`] frames.
-///
-/// Returns `None` when there is no location information. The outermost frames are kept.
-fn flatten_location_stack(list: Vec<Arc<[Location]>>) -> Option<Arc<[Location]>> {
-    if list.is_empty() {
-        return None;
-    }
-
-    // Fast path: a lone stack that already fits is reused without copying.
-    if list.len() == 1 && list[0].len() <= MAX_FRAMES_PER_INSTRUCTION {
-        return list.into_iter().next();
-    }
-
-    Some(
-        list.iter()
-            .flat_map(|sublist| sublist.iter())
-            .take(MAX_FRAMES_PER_INSTRUCTION)
-            .cloned()
-            .collect(),
-    )
 }
 
 fn emit_debug_info(
@@ -11581,7 +11552,7 @@ fn emit_debug_info(
 mod test_debug_line_program {
     use super::*;
     use crate::dwarf::SourceCodeLocation;
-    use polkavm_common::program::ProgramParseError;
+    use polkavm_common::program::{LineProgramConfig, ProgramParseError};
 
     /// Creates a maximally verbose frame: every field is distinct, so each frame
     /// forces [`emit_debug_info`] to emit the full set of line program ops.
@@ -11598,44 +11569,9 @@ mod test_debug_line_program {
         }
     }
 
-    /// Creates a stack of one frame at the given depth.
-    fn create_single_frame_stack(depth: u32) -> Arc<[Location]> {
-        [create_location(depth)].into()
-    }
-
-    #[test]
-    fn test_flatten_location_stack_caps_deep_stacks() {
-        let less_than_max_frames: u32 = 3;
-        let more_than_max_frames = MAX_FRAMES_PER_INSTRUCTION.saturating_add(50) as u32;
-
-        // No location information yields no stack.
-        assert!(flatten_location_stack(Vec::new()).is_none());
-
-        // A single stack within the cap is kept as-is.
-        let one_stack_with_few_frames: Vec<Arc<[Location]>> = vec![(0..less_than_max_frames).map(create_location).collect()];
-        assert_eq!(
-            flatten_location_stack(one_stack_with_few_frames).unwrap().len(),
-            less_than_max_frames as usize
-        );
-
-        // A single stack over the cap is truncated.
-        let one_stack_with_many_frames: Vec<Arc<[Location]>> = vec![(0..more_than_max_frames).map(create_location).collect()];
-        assert_eq!(
-            flatten_location_stack(one_stack_with_many_frames).unwrap().len(),
-            MAX_FRAMES_PER_INSTRUCTION
-        );
-
-        // Many stacks are concatenated and capped, keeping the outermost frames in order.
-        let many_stacks_with_one_frame: Vec<Arc<[Location]>> = (0..more_than_max_frames).map(create_single_frame_stack).collect();
-        let flattened_stack = flatten_location_stack(many_stacks_with_one_frame).unwrap();
-        assert_eq!(flattened_stack.len(), MAX_FRAMES_PER_INSTRUCTION);
-        assert_eq!(flattened_stack[0].source_code_location.as_ref().unwrap().line(), Some(0));
-        assert_eq!(flattened_stack[1].source_code_location.as_ref().unwrap().line(), Some(1));
-    }
-
     /// Attributes `stack` to one instruction, emits the debug info, and walks the
-    /// resulting line program, surfacing any parse error.
-    fn emit_and_parse(stack: Arc<[Location]>) -> Result<(), ProgramParseError> {
+    /// resulting line program with `config`, surfacing any parse error.
+    fn emit_and_parse(stack: Arc<[Location]>, config: LineProgramConfig) -> Result<(), ProgramParseError> {
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
         builder.set_code(&[Instruction::fallthrough, Instruction::fallthrough], &[]);
 
@@ -11653,27 +11589,30 @@ mod test_debug_line_program {
 
         let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
         let mut line_program = blob.get_debug_line_program_at(offsets[0].0)?.unwrap();
-        while line_program.run()?.is_some() {}
+        while line_program.run_with_config(config)?.is_some() {}
 
         Ok(())
     }
 
     #[test]
-    fn test_deep_frame_stack_emits_parseable_line_program() {
-        let more_than_max_frames = MAX_FRAMES_PER_INSTRUCTION.saturating_add(50) as u32;
+    fn test_deep_frame_stack_parses_only_when_the_limit_is_raised() {
+        let default_config = LineProgramConfig::default();
 
-        // Without the cap a deep stack overflows the parser's per-region limit.
-        let deep_stack: Arc<[Location]> = (0..more_than_max_frames).map(create_location).collect();
-        let error = emit_and_parse(Arc::clone(&deep_stack)).expect_err("an over-deep stack should overflow the region");
+        // Use as many frames as the default per-region opcode budget. Each frame emits
+        // several opcodes, so the region's opcode count far exceeds the default limit.
+        let deep_frame_count = default_config.instruction_limit_per_region as u32;
+        let deep_stack: Arc<[Location]> = (0..deep_frame_count).map(create_location).collect();
+
+        let error = emit_and_parse(Arc::clone(&deep_stack), default_config)
+            .expect_err("a region with more opcodes than the default limit should fail to parse");
         assert!(
             error.to_string().contains("too many instructions"),
             "unexpected parse error: {error}"
         );
 
-        // Capping it via `flatten_location_stack` keeps the line program parseable,
-        // even with maximally verbose frames.
-        let capped = flatten_location_stack(vec![deep_stack]).unwrap();
-        assert_eq!(capped.len(), MAX_FRAMES_PER_INSTRUCTION);
-        assert!(emit_and_parse(capped).is_ok());
+        // With the limit raised/disabled, the whole region parses.
+        let mut config_no_limit = default_config;
+        config_no_limit.instruction_limit_per_region = usize::MAX;
+        assert!(emit_and_parse(deep_stack, config_no_limit).is_ok());
     }
 }
