@@ -19,7 +19,7 @@
                 all(feature = "generic-sandbox", any(target_os = "macos", target_os = "freebsd"))
             ),
         ),
-        all(target_arch = "aarch64", feature = "generic-sandbox", target_os = "macos"),
+        all(target_arch = "aarch64", feature = "generic-sandbox", any(target_os = "macos", target_os = "linux")),
     ),
 ))]
 macro_rules! if_compiler_is_supported {
@@ -47,7 +47,7 @@ macro_rules! if_compiler_is_supported {
                 all(feature = "generic-sandbox", any(target_os = "macos", target_os = "freebsd"))
             ),
         ),
-        all(target_arch = "aarch64", feature = "generic-sandbox", target_os = "macos"),
+        all(target_arch = "aarch64", feature = "generic-sandbox", any(target_os = "macos", target_os = "linux")),
     ),
 )))]
 macro_rules! if_compiler_is_supported {
@@ -106,13 +106,13 @@ if_compiler_is_supported! {
     mod page_set;
     mod sandbox;
 
-    #[cfg(all(target_os = "linux", not(feature = "export-internals-for-testing")))]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "export-internals-for-testing")))]
     mod generic_allocator;
 
-    #[cfg(all(target_os = "linux", not(feature = "export-internals-for-testing")))]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "export-internals-for-testing")))]
     mod bit_mask;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     mod shm_allocator;
 }
 
