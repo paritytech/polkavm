@@ -90,7 +90,7 @@ impl SandboxKind {
         if_compiler_is_supported! {
             {
                 match self {
-                    SandboxKind::Linux => cfg!(target_os = "linux"),
+                    SandboxKind::Linux => cfg!(all(target_os = "linux", target_arch = "x86_64")),
                     SandboxKind::Generic => cfg!(feature = "generic-sandbox"),
                 }
             } else {

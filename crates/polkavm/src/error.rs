@@ -42,7 +42,7 @@ impl From<ProgramParseError> for Error {
 }
 
 if_compiler_is_supported! {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     impl From<polkavm_linux_raw::Error> for Error {
         #[cold]
         fn from(error: polkavm_linux_raw::Error) -> Self {
