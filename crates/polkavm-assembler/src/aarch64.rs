@@ -3,7 +3,7 @@
 
 #![allow(non_camel_case_types)]
 
-use crate::misc::{FixupKind, InstBuf, Instruction, Label};
+use crate::misc::{EncodeFlags, FixupKind, InstBuf, InstructionT, Label};
 
 /// A GPR (`x0`..`x30`) or the zero register (`xzr`, encoding `31`). `sp` (also `31`) is never emitted here.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -200,9 +200,9 @@ macro_rules! a64_inst {
                     }
                 }
 
-                impl $name {
+                impl InstructionT for $name {
                     #[inline]
-                    pub fn encode(self) -> InstBuf {
+                    fn encode(self, _flags: EncodeFlags) -> InstBuf {
                         #[allow(unused_variables)]
                         let $name { $($an),* } = self;
                         let word: u32 = $enc;
@@ -213,7 +213,7 @@ macro_rules! a64_inst {
 
                     #[inline]
                     #[allow(unused_variables)]
-                    pub(crate) fn fixup(self) -> Option<(Label, FixupKind)> {
+                    fn fixup(self, _flags: EncodeFlags) -> Option<(Label, FixupKind)> {
                         let $name { $($an),* } = self;
                         a64_inst!(@fixup $($fix)?)
                     }
@@ -223,13 +223,8 @@ macro_rules! a64_inst {
 
         $(
             #[inline]
-            pub fn $name($($an: $at),*) -> Instruction<types::$name> {
-                let instruction = types::$name { $($an),* };
-                Instruction {
-                    instruction,
-                    bytes: instruction.encode(),
-                    fixup: instruction.fixup(),
-                }
+            pub fn $name($($an: $at),*) -> types::$name {
+                types::$name { $($an),* }
             }
         )+
     };
@@ -413,19 +408,19 @@ a64_inst! {
 
 /// `mov rd, rm` — encoded as `orr rd, xzr, rm`.
 #[inline]
-pub fn mov_reg(size: RegSize, rd: Reg, rm: Reg) -> Instruction<types::orr_reg> {
+pub fn mov_reg(size: RegSize, rd: Reg, rm: Reg) -> types::orr_reg {
     orr_reg(size, rd, Reg::XZR, rm)
 }
 
 /// `cmp rn, rm` — encoded as `subs xzr, rn, rm`.
 #[inline]
-pub fn cmp_reg(size: RegSize, rn: Reg, rm: Reg) -> Instruction<types::subs_reg> {
+pub fn cmp_reg(size: RegSize, rn: Reg, rm: Reg) -> types::subs_reg {
     subs_reg(size, Reg::XZR, rn, rm)
 }
 
 /// `cmp rn, #imm12` — encoded as `subs xzr, rn, #imm12`.
 #[inline]
-pub fn cmp_imm(size: RegSize, rn: Reg, imm12: u32, shift12: bool) -> Instruction<types::subs_imm> {
+pub fn cmp_imm(size: RegSize, rn: Reg, imm12: u32, shift12: bool) -> types::subs_imm {
     subs_imm(size, Reg::XZR, rn, imm12, shift12)
 }
 
@@ -433,8 +428,8 @@ pub fn cmp_imm(size: RegSize, rn: Reg, imm12: u32, shift12: bool) -> Instruction
 mod tests {
     use super::*;
 
-    fn word<T: core::fmt::Display>(inst: Instruction<T>) -> u32 {
-        let bytes = inst.bytes.to_vec();
+    fn word<T: InstructionT>(inst: T) -> u32 {
+        let bytes = inst.encode(EncodeFlags::default()).to_vec();
         assert_eq!(bytes.len(), 4, "every A64 instruction must be 4 bytes");
         u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
     }
