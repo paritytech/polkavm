@@ -30,7 +30,7 @@ if_compiler_is_supported! {
         use crate::sandbox::{Sandbox, SandboxInstance};
         use crate::compiler::{CompiledModule, CompilerCache};
 
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         use crate::sandbox::linux::Sandbox as SandboxLinux;
         #[cfg(feature = "generic-sandbox")]
         use crate::sandbox::generic::Sandbox as SandboxGeneric;
@@ -57,7 +57,7 @@ trait IntoResult<T> {
 }
 
 if_compiler_is_supported! {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     impl<T> IntoResult<T> for Result<T, polkavm_linux_raw::Error> {
         fn into_result(self, message: &str) -> Result<T, Error> {
             self.map_err(|error| Error::from(error).context(message))
@@ -239,7 +239,7 @@ impl Engine {
 if_compiler_is_supported! {
     {
         pub(crate) enum CompiledModuleKind {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             Linux(CompiledModule<SandboxLinux>),
             #[cfg(feature = "generic-sandbox")]
             Generic(CompiledModule<SandboxGeneric>),
@@ -586,7 +586,7 @@ impl Module {
                     if let Some(selected_sandbox) = engine.selected_sandbox {
                         match selected_sandbox {
                             SandboxKind::Linux => {
-                                #[cfg(target_os = "linux")]
+                                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                                 match blob.isa() {
                                     InstructionSetKind::ReviveV1 => compile_module!(SandboxLinux, B64, build_static_dispatch_table_revive_v1, COMPILER_VISITOR_LINUX, Linux),
                                     InstructionSetKind::JamV1 => compile_module!(SandboxLinux, B64, build_static_dispatch_table_jam_v1, COMPILER_VISITOR_LINUX, Linux),
@@ -594,7 +594,7 @@ impl Module {
                                     InstructionSetKind::Latest64 => compile_module!(SandboxLinux, B64, build_static_dispatch_table_latest64, COMPILER_VISITOR_LINUX, Linux),
                                 }
 
-                                #[cfg(not(target_os = "linux"))]
+                                #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
                                 {
                                     log::debug!("Selecetd sandbox unavailable: 'linux'");
                                     None
@@ -745,7 +745,7 @@ impl Module {
         let backend = if_compiler_is_supported! {
             {{
                 match compiled_module {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     CompiledModuleKind::Linux(..) => {
                         let outer_instance = match outer_instance {
                             Some(outer_instance) => {
@@ -858,7 +858,7 @@ impl Module {
         if_compiler_is_supported! {
             {
                 match self.state().compiled_module {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     CompiledModuleKind::Linux(ref module) => Some(module.machine_code()),
                     #[cfg(feature = "generic-sandbox")]
                     CompiledModuleKind::Generic(ref module) => Some(module.machine_code()),
@@ -878,7 +878,7 @@ impl Module {
         if_compiler_is_supported! {
             {
                 match self.state().compiled_module {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     CompiledModuleKind::Linux(..) => Some(polkavm_common::zygote::VM_ADDR_NATIVE_CODE),
                     #[cfg(feature = "generic-sandbox")]
                     CompiledModuleKind::Generic(..) => None,
@@ -907,7 +907,7 @@ impl Module {
         if_compiler_is_supported! {
             {
                 match self.state().compiled_module {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     CompiledModuleKind::Linux(ref module) => Some(module.program_counter_to_machine_code_offset()),
                     #[cfg(feature = "generic-sandbox")]
                     CompiledModuleKind::Generic(ref module) => Some(module.program_counter_to_machine_code_offset()),
@@ -1028,7 +1028,7 @@ impl Module {
 if_compiler_is_supported! {
     {
         enum InstanceBackend {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             CompiledLinux(SandboxInstance<SandboxLinux>),
             #[cfg(feature = "generic-sandbox")]
             CompiledGeneric(SandboxInstance<SandboxGeneric>),
@@ -1126,7 +1126,7 @@ if_compiler_is_supported! {
         macro_rules! access_backend {
             ($itself:expr, |$backend:ident| $e:expr) => {
                 match $itself {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     InstanceBackend::CompiledLinux(ref $backend) => {
                         let $backend = $backend.sandbox();
                         $e
@@ -1142,7 +1142,7 @@ if_compiler_is_supported! {
 
             ($itself:expr, |mut $backend:ident| $e:expr) => {
                 match $itself {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     InstanceBackend::CompiledLinux(ref mut $backend) => {
                         let $backend = $backend.sandbox_mut();
                         $e

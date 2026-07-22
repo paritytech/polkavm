@@ -59,8 +59,9 @@ fn to_usize<T>(value: T) -> Cast<T, usize> {
     Cast(value, core::marker::PhantomData)
 }
 
-// On Linux don't depend on the `libc` crate to lower the number of dependencies.
-#[cfg(target_os = "linux")]
+// On x86_64 Linux don't depend on the `libc` crate to lower the number of dependencies.
+// (polkavm-linux-raw is x86_64-only, so aarch64 Linux uses libc — see the `use libc as sys` below.)
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[allow(non_camel_case_types)]
 mod sys {
     pub use polkavm_linux_raw::{c_int, c_void, siginfo_t, size_t, ucontext as ucontext_t, SIG_DFL, SIG_IGN};
@@ -111,7 +112,7 @@ mod sys {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 use libc as sys;
 
 // Apple Silicon W^X: MAP_JIT regions toggle writability per-thread via pthread_jit_write_protect_np,
@@ -180,6 +181,8 @@ pub struct Mmap {
     pointer: *mut c_void,
     length: usize,
     // MAP_JIT region (Apple Silicon): uses per-thread write-protect toggling instead of mprotect.
+    // Only read on macOS-aarch64; kept as a field on all targets for a uniform constructor.
+    #[allow(dead_code)]
     is_jit: bool,
 }
 
@@ -332,6 +335,13 @@ impl Mmap {
         if protection != PROT_READ | PROT_WRITE {
             self.mprotect(offset, length, protection)?;
         }
+        // AArch64 has separate I/D caches: after writing code we must flush the I-cache so the CPU
+        // doesn't execute stale instructions. (macOS handles this in the MAP_JIT path above.)
+        #[cfg(all(target_arch = "aarch64", not(target_os = "macos")))]
+        unsafe {
+            let start = self.pointer.cast::<u8>().add(offset).cast::<core::ffi::c_char>();
+            clear_instruction_cache(start, start.add(length));
+        }
         Ok(())
     }
 
@@ -384,17 +394,29 @@ impl Drop for Mmap {
     }
 }
 
+// AArch64 I-cache maintenance for freshly written code (non-macOS; macOS uses sys_icache_invalidate).
+#[cfg(all(target_arch = "aarch64", not(target_os = "macos")))]
+#[inline]
+unsafe fn clear_instruction_cache(start: *mut core::ffi::c_char, end: *mut core::ffi::c_char) {
+    extern "C" {
+        // Provided by the compiler runtime (compiler-builtins / libgcc); performs the
+        // architecture-appropriate I-cache maintenance over the given range.
+        fn __clear_cache(start: *mut core::ffi::c_char, end: *mut core::ffi::c_char);
+    }
+    __clear_cache(start, end);
+}
+
 static mut OLD_SIGSEGV: sys::sigaction = unsafe { core::mem::zeroed() };
 static mut OLD_SIGILL: sys::sigaction = unsafe { core::mem::zeroed() };
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
+#[cfg(any(target_os = "macos", target_os = "freebsd", all(target_os = "linux", target_arch = "aarch64")))]
 static mut OLD_SIGBUS: sys::sigaction = unsafe { core::mem::zeroed() };
 
 unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, context: &sys::ucontext_t) {
     let old = match signal {
         sys::SIGSEGV => core::ptr::addr_of!(OLD_SIGSEGV),
         sys::SIGILL => core::ptr::addr_of!(OLD_SIGILL),
-        #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+        #[cfg(any(target_os = "macos", target_os = "freebsd", all(target_os = "linux", target_arch = "aarch64")))]
         sys::SIGBUS => core::ptr::addr_of!(OLD_SIGBUS),
         _ => unreachable!("received unknown signal"),
     };
@@ -404,25 +426,43 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
         #[cfg(target_arch = "aarch64")]
         {
             // SAFETY: On a fault inside guest code the kernel hands us a valid thread state.
-            let ss = &(*context.uc_mcontext).__ss;
-            let pc = ss.__pc;
+            // macOS and Linux expose the AArch64 register file differently in the ucontext:
+            // macOS via `uc_mcontext->__ss` (a pointer), Linux via an inline `uc_mcontext`.
+            #[cfg(target_os = "macos")]
+            let (pc, regs) = {
+                let ss = &(*context.uc_mcontext).__ss;
+                (ss.__pc, ss.__x)
+            };
+            #[cfg(target_os = "linux")]
+            let (pc, regs) = {
+                let mc = &context.uc_mcontext;
+                (mc.pc, mc.regs)
+            };
             let vmctx = &mut *vmctx;
 
             use polkavm_common::regmap::{to_native_reg, NativeReg, TMP_REG};
-            // Guest registers and TMP_REG live in x0..x13, so we can index `__x` directly.
+            // Guest registers and TMP_REG live in x0..x13, so we can index the register file directly.
             for reg in polkavm_common::program::Reg::ALL {
                 let idx = to_native_reg(reg).idx() as usize;
-                vmctx.regs[reg as usize] = ss.__x[idx];
+                vmctx.regs[reg as usize] = regs[idx];
             }
             polkavm_common::static_assert!(TMP_REG.equals(NativeReg::X13));
-            vmctx.tmp_reg.store(ss.__x[TMP_REG.idx() as usize], Ordering::Relaxed);
+            vmctx.tmp_reg.store(regs[TMP_REG.idx() as usize], Ordering::Relaxed);
 
             if vmctx.program_range.contains(&pc) {
                 vmctx.next_native_program_counter.store(pc, Ordering::Relaxed);
                 // No `trapno` on AArch64: treat in-range SIGSEGV/SIGBUS as a page fault (gas UDF is SIGILL).
                 let is_page_fault = signal == sys::SIGSEGV || signal == sys::SIGBUS;
                 if is_page_fault {
+                    // macOS reads the fault address from siginfo; Linux AArch64 carries it in the
+                    // sigcontext (si_addr is a method, not a field, in libc there).
+                    #[cfg(target_os = "macos")]
                     let fault_address = info.si_addr as u64;
+                    #[cfg(target_os = "linux")]
+                    let fault_address = {
+                        let _ = info;
+                        context.uc_mcontext.fault_address
+                    };
                     log::trace!("Page fault at 0x{fault_address:x} (pc: 0x{pc:x})");
                     trigger_exit(vmctx, ExitReason::Segfault(fault_address));
                 } else {
@@ -640,7 +680,7 @@ unsafe fn register_signal_handler_for_signal(signal: c_int, old_sa: *mut sys::si
 unsafe fn register_signal_handlers() -> Result<(), Error> {
     register_signal_handler_for_signal(sys::SIGSEGV, core::ptr::addr_of_mut!(OLD_SIGSEGV))?;
     register_signal_handler_for_signal(sys::SIGILL, core::ptr::addr_of_mut!(OLD_SIGILL))?;
-    #[cfg(any(target_os = "macos", target_os = "freebsd"))]
+    #[cfg(any(target_os = "macos", target_os = "freebsd", all(target_os = "linux", target_arch = "aarch64")))]
     register_signal_handler_for_signal(sys::SIGBUS, core::ptr::addr_of_mut!(OLD_SIGBUS))?;
     Ok(())
 }

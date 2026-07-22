@@ -25,7 +25,7 @@ macro_rules! get_field_offset {
 #[cfg(feature = "generic-sandbox")]
 pub mod generic;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod linux;
 
 // This is literally the only thing we need from `libc` on Linux, so instead of including
@@ -221,7 +221,7 @@ where
 }
 
 pub(crate) enum GlobalStateKind {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     Linux(crate::sandbox::linux::GlobalState),
     #[cfg(feature = "generic-sandbox")]
     Generic(crate::sandbox::generic::GlobalState),
@@ -231,7 +231,7 @@ impl GlobalStateKind {
     pub(crate) fn new(kind: SandboxKind, config: &Config) -> Result<Self, Error> {
         match kind {
             SandboxKind::Linux => {
-                #[cfg(target_os = "linux")]
+                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                 {
                     Ok(Self::Linux(
                         crate::sandbox::linux::GlobalState::new(config)
@@ -239,7 +239,7 @@ impl GlobalStateKind {
                     ))
                 }
 
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
                 {
                     unreachable!()
                 }
@@ -264,7 +264,7 @@ impl GlobalStateKind {
     pub(crate) fn idle_worker_pids(&self) -> Vec<u32> {
         #[allow(unreachable_patterns)]
         match self {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             GlobalStateKind::Linux(state) => crate::sandbox::linux::Sandbox::idle_worker_pids(state),
             _ => Vec::new(),
         }
