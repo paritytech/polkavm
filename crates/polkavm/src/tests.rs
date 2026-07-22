@@ -1267,9 +1267,7 @@ fn out_of_range_execution(engine_config: Config) {
     assert_eq!(instance.program_counter(), Some(offsets[2]));
 }
 
-/// Known divergence at `pc == code_len` for non-terminating last blocks: the
-/// recompiler's implicit fall-off-end trampoline charges the block cost; the
-/// interpreter has none and charges nothing. Both still trap.
+/// Known gas divergence at `pc == code_len` for non-terminating last blocks.
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "known interpreter/recompiler gas divergence at implicit fall-off-end PC"]
