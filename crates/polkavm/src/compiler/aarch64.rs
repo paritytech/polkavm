@@ -42,10 +42,7 @@ where
     pub const PADDING_BYTE: u8 = 0x00;
 
     #[inline(always)]
-    fn push<T>(&mut self, inst: polkavm_assembler::Instruction<T>)
-    where
-        T: core::fmt::Display,
-    {
+    fn push(&mut self, inst: impl polkavm_assembler::InstructionT) {
         self.0.asm.push(inst);
     }
 
