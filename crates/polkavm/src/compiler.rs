@@ -23,6 +23,9 @@ mod amd64;
 #[cfg(target_arch = "x86_64")]
 pub use crate::compiler::amd64::{extract_gas_cost, on_page_fault, on_signal_trap, step_prelude_length};
 
+#[cfg(all(target_arch = "x86_64", feature = "generic-sandbox"))]
+pub(crate) use crate::compiler::amd64::{are_we_executing_memset, MemsetKind};
+
 /// The address to which to jump to for invalid dynamic jumps.
 ///
 /// This needs to be at least 0x800000000000 on modern CPUs, but ideally should have
