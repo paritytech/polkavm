@@ -2459,7 +2459,7 @@ fn test_opcode_from_u8() {
     assert_eq!(ISA_ReviveV1.opcode_from_u8(3), None);
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum InstructionSetKind {
     ReviveV1,
     JamV1,
@@ -2494,6 +2494,14 @@ impl InstructionSetKind {
             2 => Some(Self::Latest64),
             3 => Some(Self::JamV1),
             _ => None,
+        }
+    }
+
+    /// Returns whether the ISA is 64-bit.
+    pub fn is_64_bit(&self) -> bool {
+        match self {
+            InstructionSetKind::Latest32 => false,
+            InstructionSetKind::ReviveV1 | InstructionSetKind::JamV1 | InstructionSetKind::Latest64 => true,
         }
     }
 }
@@ -5386,10 +5394,7 @@ impl ProgramBlob {
 
     /// Returns whether the blob contains a 64-bit program.
     pub fn is_64_bit(&self) -> bool {
-        match self.isa {
-            InstructionSetKind::Latest32 => false,
-            InstructionSetKind::ReviveV1 | InstructionSetKind::JamV1 | InstructionSetKind::Latest64 => true,
-        }
+        self.isa.is_64_bit()
     }
 
     /// Returns the metadata hash embedded in the blob, or an empty slice if none is present.
