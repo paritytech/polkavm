@@ -55,6 +55,7 @@ impl BackendKind {
 pub enum SandboxKind {
     Linux,
     Generic,
+    Hypervisor,
 }
 
 impl core::fmt::Display for SandboxKind {
@@ -62,6 +63,7 @@ impl core::fmt::Display for SandboxKind {
         let name = match self {
             SandboxKind::Linux => "linux",
             SandboxKind::Generic => "generic",
+            SandboxKind::Hypervisor => "hypervisor",
         };
 
         fmt.write_str(name)
@@ -77,9 +79,11 @@ impl SandboxKind {
             Ok(Some(SandboxKind::Linux))
         } else if s == "generic" {
             Ok(Some(SandboxKind::Generic))
+        } else if s == "hypervisor" {
+            Ok(Some(SandboxKind::Hypervisor))
         } else {
             Err(Error::from_static_str(
-                "invalid value of POLKAVM_SANDBOX; supported values are: 'linux', 'generic'",
+                "invalid value of POLKAVM_SANDBOX; supported values are: 'linux', 'generic', 'hypervisor'",
             ))
         }
     }
@@ -92,6 +96,7 @@ impl SandboxKind {
                 match self {
                     SandboxKind::Linux => cfg!(all(target_os = "linux", target_arch = "x86_64")),
                     SandboxKind::Generic => cfg!(feature = "generic-sandbox"),
+                    SandboxKind::Hypervisor => cfg!(all(feature = "hypervisor-sandbox", target_arch = "aarch64")),
                 }
             } else {
                 false

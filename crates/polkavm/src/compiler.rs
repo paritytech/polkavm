@@ -432,7 +432,7 @@ where
 
         match S::KIND {
             SandboxKind::Linux => {}
-            SandboxKind::Generic => {
+            SandboxKind::Generic | SandboxKind::Hypervisor => {
                 let native_page_size = crate::sandbox::get_native_page_size();
                 let padded_length = polkavm_common::utils::align_to_next_page_usize(native_page_size, self.asm.len()).unwrap();
                 self.asm.resize(padded_length, ArchVisitor::<S, B, G>::PADDING_BYTE);

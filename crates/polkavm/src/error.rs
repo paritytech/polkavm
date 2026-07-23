@@ -60,6 +60,14 @@ if_compiler_is_supported! {
             Self(ErrorKind::Owned(error.to_string()))
         }
     }
+
+    #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+    impl From<crate::sandbox::hypervisor::Error> for Error {
+        #[cold]
+        fn from(error: crate::sandbox::hypervisor::Error) -> Self {
+            Self(ErrorKind::Owned(error.to_string()))
+        }
+    }
 }
 
 impl Error {

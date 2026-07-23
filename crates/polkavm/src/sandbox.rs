@@ -25,6 +25,9 @@ macro_rules! get_field_offset {
 #[cfg(feature = "generic-sandbox")]
 pub mod generic;
 
+#[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+pub mod hypervisor;
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod linux;
 
@@ -226,6 +229,8 @@ pub(crate) enum GlobalStateKind {
     Linux(crate::sandbox::linux::GlobalState),
     #[cfg(feature = "generic-sandbox")]
     Generic(crate::sandbox::generic::GlobalState),
+    #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+    Hypervisor(crate::sandbox::hypervisor::GlobalState),
 }
 
 impl GlobalStateKind {
@@ -255,6 +260,20 @@ impl GlobalStateKind {
                 }
 
                 #[cfg(not(feature = "generic-sandbox"))]
+                {
+                    unreachable!()
+                }
+            }
+            SandboxKind::Hypervisor => {
+                #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+                {
+                    Ok(Self::Hypervisor(
+                        crate::sandbox::hypervisor::GlobalState::new(config)
+                            .map_err(|error| format!("failed to initialize hypervisor sandbox: {error}"))?,
+                    ))
+                }
+
+                #[cfg(not(all(feature = "hypervisor-sandbox", target_arch = "aarch64")))]
                 {
                     unreachable!()
                 }
