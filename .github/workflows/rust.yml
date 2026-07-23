@@ -12,6 +12,10 @@ env:
 jobs:
   build-and-test-linux:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [dev, release]
     steps:
     - uses: actions/checkout@v4
     - name: uname -a
@@ -22,22 +26,44 @@ jobs:
       run: echo "0" | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
     - name: Install LLD
       run: sudo apt-get install -y lld
+    - name: Build and test (generic)
+      run: ./ci/jobs/build-and-test-${{ matrix.profile }}.sh
+  build-and-test-linux-only:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+    - name: Enable unprivileged userfaultfd
+      run: echo "1" | sudo tee /proc/sys/vm/unprivileged_userfaultfd
+    - name: Enable unprivileged user namespaces
+      run: echo "0" | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+    - name: Install LLD
+      run: sudo apt-get install -y lld
     - name: Install target -- i686-unknown-linux-musl
       run: rustup target add i686-unknown-linux-musl
-    - name: Install target -- x86_64-unknown-freebsd
-      run: rustup target add x86_64-unknown-freebsd
-    - name: Build and test (generic)
-      run: ./ci/jobs/build-and-test.sh
     - name: Build and test (Linux-only)
       run: ./ci/jobs/build-and-test-linux.sh
+  check-freebsd:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install target -- x86_64-unknown-freebsd
+      run: rustup target add x86_64-unknown-freebsd
     - name: Check (FreeBSD)
       run: ./ci/jobs/check-freebsd.sh
   build-and-test-macos:
     runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [dev, release]
     steps:
     - uses: actions/checkout@v4
     - name: Build and test
-      run: ./ci/jobs/build-and-test.sh
+      run: ./ci/jobs/build-and-test-${{ matrix.profile }}.sh
+  build-and-test-macos-only:
+    runs-on: macos-14
+    steps:
+    - uses: actions/checkout@v4
     - name: Build and test (macOS-only)
       run: ./ci/jobs/build-and-test-macos.sh
   clippy-macos:
@@ -54,11 +80,15 @@ jobs:
       run: ./ci/jobs/clippy.sh
   build-and-test-windows:
     runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [dev, release]
     steps:
     - uses: actions/checkout@v4
     - name: Build and test
       shell: bash
-      run: ./ci/jobs/build-and-test.sh
+      run: ./ci/jobs/build-and-test-${{ matrix.profile }}.sh
   build-guests:
     runs-on: ubuntu-22.04
     steps:
@@ -152,3 +182,25 @@ jobs:
       run: rustup toolchain install nightly --profile minimal
     - name: Build and test with interpreter-musttail-dispatch
       run: ./ci/jobs/build-and-test-nightly-musttail.sh
+  required-checks:
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - build-and-test-linux
+      - build-and-test-linux-only
+      - build-and-test-macos
+      - build-and-test-macos-only
+      - build-and-test-windows
+      - build-guests
+      - check-freebsd
+      - kani
+      - clippy
+      - clippy-macos
+      - rustfmt
+      - pallet-revive-tests
+      - link-westend-runtime-blob
+      - fuzz
+    steps:
+    - name: Fail if any dependency failed or was cancelled
+      if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+      run: exit 1
