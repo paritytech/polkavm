@@ -243,12 +243,15 @@ const GAS_COST_GENERIC_SANDBOX_OFFSET: usize = 7;
 const REP_STOSB_MACHINE_CODE: &[u8] = &[0xf3, 0xaa];
 
 #[derive(Copy, Clone)]
-enum MemsetKind {
+pub(crate) enum MemsetKind {
     Inline,
     Trampoline,
 }
 
-fn are_we_executing_memset<S>(compiled_module: &crate::compiler::CompiledModule<S>, machine_code_offset: u64) -> Option<MemsetKind>
+pub(crate) fn are_we_executing_memset<S>(
+    compiled_module: &crate::compiler::CompiledModule<S>,
+    machine_code_offset: u64,
+) -> Option<MemsetKind>
 where
     S: Sandbox,
 {
@@ -713,6 +716,18 @@ where
         self.push(ret());
     }
 
+    fn emit_rep_stosb(&mut self) {
+        if matches!(S::KIND, SandboxKind::Generic) {
+            self.push(add((RegSize::R64, rdi, GENERIC_SANDBOX_MEMORY_REG)));
+        }
+
+        self.asm.push_raw(REP_STOSB_MACHINE_CODE);
+
+        if matches!(S::KIND, SandboxKind::Generic) {
+            self.push(sub((RegSize::R64, rdi, GENERIC_SANDBOX_MEMORY_REG)));
+        }
+    }
+
     // This is a slower memset implementation when we're running with gas metering enabled
     // and we don't have enough gas to finish running the whole memset.
     pub(crate) fn emit_memset_trampoline(&mut self) {
@@ -737,7 +752,7 @@ where
         self.push(store(RegSize::R64, Self::vmctx_field(S::offset_table().arg), rcx));
 
         // Execute the memset.
-        self.asm.push_raw(REP_STOSB_MACHINE_CODE);
+        self.emit_rep_stosb();
 
         // We've successfully finished memset without page faulting, so we can run out of gas.
         self.save_registers_to_vmctx();
@@ -1303,12 +1318,19 @@ where
         let label_repeat = self.asm.create_label();
         self.asm.push(lea_rip_label(rcx, label_repeat));
 
-        // Store the address to restart the memset in case we trigger a page fault.
+        // Store the address to restart the memset from if it's interrupted.
         self.push(store(
             RegSize::R64,
             Self::vmctx_field(S::offset_table().next_native_program_counter),
             rcx,
         ));
+
+        // The generic sandbox clobbers `next_native_program_counter` with the fault address in its
+        // signal handler, so on top of the above it keeps the restart address in a dedicated field
+        // which survives a fault.
+        if matches!(S::KIND, SandboxKind::Generic) {
+            self.push(store(RegSize::R64, Self::vmctx_field(S::offset_table().memset_continuation), rcx));
+        }
 
         let count = conv_reg(Reg::A2.into());
 
@@ -1316,7 +1338,7 @@ where
             None => {
                 self.asm.push(mov(reg_size, rcx, count));
                 // rep stosb, rdi is destination pointer, rcx is count, rax is the value
-                self.asm.push_raw(REP_STOSB_MACHINE_CODE);
+                self.emit_rep_stosb();
                 self.asm.push(mov(reg_size, count, rcx));
             }
             Some(GasMeteringKind::Sync) => {
@@ -1329,13 +1351,13 @@ where
                 branch_to_label(self.asm.reserve::<U1>(), Condition::Less, label_slow);
                 // If yes - do it the fast way.
                 self.asm.push(mov(reg_size, rcx, count));
-                self.asm.push_raw(REP_STOSB_MACHINE_CODE);
+                self.emit_rep_stosb();
                 self.asm.push(mov(reg_size, count, rcx));
             }
             Some(GasMeteringKind::Async) => {
                 self.asm.push(sub((RegSize::R64, Self::vmctx_field(S::offset_table().gas), count)));
                 self.asm.push(mov(reg_size, rcx, count));
-                self.asm.push_raw(REP_STOSB_MACHINE_CODE);
+                self.emit_rep_stosb();
                 self.asm.push(mov(reg_size, count, rcx));
             }
         }
