@@ -48,6 +48,10 @@ module-cache = ["dep:schnellru", "polkavm-common/blake3"]
 # This sandbox is EXPERIMENTAL and is not meant for production use.
 generic-sandbox = []
 
+# Hardware-virtualization sandbox (aarch64-only): runs the guest in a vCPU with its
+# own stage-1 MMU, giving 4K guest pages on any host. EXPERIMENTAL; currently a scaffold.
+hypervisor-sandbox = []
+
 # Internal feature for testing. DO NOT USE.
 export-internals-for-testing = []
 
