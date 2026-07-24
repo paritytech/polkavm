@@ -137,6 +137,7 @@ build_benchmark "bench-minimal"
 build_benchmark "bench-pinky"
 build_benchmark "bench-prime-sieve"
 build_benchmark "bench-ed25519"
+build_benchmark "bench-hash"
 
 if [ "${SOLANA_PLATFORM_TOOLS_DIR:-}" != "" ]; then
     unset SOLANA_PLATFORM_TOOLS_DIR

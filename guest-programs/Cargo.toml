@@ -19,6 +19,7 @@ members = [
     "bench-minimal",
     "bench-memset",
     "bench-ed25519",
+    "bench-hash",
     "bench-pinky",
     "bench-prime-sieve",
 

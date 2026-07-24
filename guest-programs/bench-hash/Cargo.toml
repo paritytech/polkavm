@@ -1,0 +1,37 @@
+[package]
+name = "bench-hash"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "bench_hash"
+path = "src/main.rs"
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "bench-hash"
+path = "src/main.rs"
+
+[dependencies]
+blake2b_simd = { version = "1", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+sha3 = { version = "0.10", default-features = false }
+picoalloc = { workspace = true }
+
+[target.'cfg(target_env = "polkavm")'.dependencies]
+polkavm-derive = { path = "../../crates/polkavm-derive" }
+
+# To build a SIMD-accelerated native library for comparison, enable the CPU
+# features at compile time (runtime dispatch would require std, which
+# conflicts with this crate being no_std):
+#
+#   RUSTFLAGS="-C target-cpu=native" cargo build \
+#       --target=x86_64-unknown-linux-gnu --release --lib -p bench-hash
+#
+# and copy the resulting libbench_hash.so aside (e.g. as libbench_hash_simd.so
+# next to benchtool, where it is auto-discovered as "hash-simd") before it is
+# overwritten by a regular build.
+
+[lints]
+workspace = true
