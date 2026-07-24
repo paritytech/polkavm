@@ -33,6 +33,7 @@ dependencies = [
  "polkavm-derive",
  "sha2",
  "sha3",
+ "twox-hash",
 ]
 
 [[package]]
@@ -418,6 +419,12 @@ dependencies = [
  "polkavm-derive",
  "simplealloc",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8464ec13c3691491391d9fce00f6416c9a48e46972f72d7865688be2080192c9"
 
 [[package]]
 name = "typenum"

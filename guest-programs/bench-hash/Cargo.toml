@@ -17,6 +17,7 @@ path = "src/main.rs"
 blake2b_simd = { version = "1", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 sha3 = { version = "0.10", default-features = false }
+twox-hash = { version = "2", default-features = false, features = ["xxhash64"] }
 picoalloc = { workspace = true }
 
 [target.'cfg(target_env = "polkavm")'.dependencies]
