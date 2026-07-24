@@ -467,6 +467,33 @@ enum Args {
     /// Benchmarks PolkaVM's memset.
     BenchMemset,
 
+    /// Benchmarks hash functions.
+    ///
+    /// Discovers the bench-hash artifacts (PVM blob and native libraries,
+    /// including variants like libbench_hash_simd.so) and measures their
+    /// `benchmark_<algo>(len, times) -> u64` exports over a grid of input
+    /// sizes, printing raw per-iteration times. Comparing artifacts (e.g.
+    /// PVM vs native) is up to the caller.
+    BenchHash {
+        /// Comma-separated input sizes, in bytes.
+        #[clap(long, default_value = "32,128,512,4096,65536,1048576")]
+        sizes: String,
+
+        /// Target total bytes hashed per row; iteration count is derived as
+        /// max(1, total_bytes / size).
+        #[clap(long, default_value_t = 32 * 1024 * 1024)]
+        total_bytes: u64,
+
+        /// Output CSV (artifact,algo,size,ns_per_iter,times,checksum) instead of
+        /// human-readable rows.
+        #[clap(long)]
+        csv: bool,
+
+        /// Hash algorithm names; each is resolved as a `benchmark_<name>` export.
+        #[clap(required = true)]
+        algos: Vec<String>,
+    },
+
     /// Benchmarks ecalli overhead.
     BenchEcalli {
         #[clap(long)]
@@ -823,6 +850,160 @@ fn main() {
                             format_time_with_div(timestamp.elapsed(), times)
                         );
                     }
+                }
+            }
+        }
+        Args::BenchHash { sizes, total_bytes, csv, algos } => {
+            let sizes: Vec<u64> = sizes
+                .split(',')
+                .map(|s| s.trim().parse().expect("invalid --sizes entry"))
+                .collect();
+
+            struct Row<'a> {
+                algo: &'a str,
+                size: u64,
+                times: u64,
+                elapsed: Duration,
+                checksum: u64,
+            }
+
+            fn print_row(csv: bool, artifact: &str, row: Row) {
+                if csv {
+                    println!(
+                        "{artifact},{algo},{size},{ns_per_iter:.2},{times},{checksum:016x}",
+                        algo = row.algo,
+                        size = row.size,
+                        ns_per_iter = row.elapsed.as_nanos() as f64 / row.times as f64,
+                        times = row.times,
+                        checksum = row.checksum,
+                    );
+                } else {
+                    println!(
+                        "{artifact} {algo:<12} {size:>8}: {time_per_iter}/iter (x{times}) checksum={checksum:016x}",
+                        algo = row.algo,
+                        size = row.size,
+                        time_per_iter = format_time_with_div(row.elapsed, row.times as u32),
+                        times = row.times,
+                        checksum = row.checksum,
+                    );
+                }
+            }
+
+            if csv {
+                println!("artifact,algo,size,ns_per_iter,times,checksum");
+            }
+
+            enum Artifact {
+                Pvm(PathBuf),
+                Native(PathBuf),
+            }
+
+            // Discover artifacts like `benchmark` does. This picks up the standard
+            // bench-hash artifacts from guest-programs/target as well as any variant
+            // there or in the current directory (e.g. a `libbench_hash_simd.so` is
+            // discovered as "hash-simd").
+            let mut artifacts = Vec::new();
+            for benchmark in find_benchmarks().unwrap() {
+                if benchmark.name != "hash" && !benchmark.name.starts_with("hash-") {
+                    continue;
+                }
+                match benchmark.kind {
+                    BenchmarkKind::PolkaVM64 => artifacts.push(Artifact::Pvm(benchmark.path)),
+                    BenchmarkKind::Native => artifacts.push(Artifact::Native(benchmark.path)),
+                    _ => {}
+                }
+            }
+            if artifacts.is_empty() {
+                eprintln!(
+                    "no bench-hash artifacts found; build them with \
+                     guest-programs/build-benchmarks.sh and guest-programs/build-hash-native.sh"
+                );
+                std::process::exit(1);
+            }
+
+            for artifact in artifacts {
+                match artifact {
+                Artifact::Pvm(path) => {
+                    let config = polkavm::Config::from_env().unwrap();
+                    let engine = polkavm::Engine::new(&config).unwrap();
+                    let raw_blob = std::fs::read(&path).unwrap();
+                    let blob = polkavm::ProgramBlob::parse(raw_blob.into()).unwrap();
+                    let mut module_config = polkavm::ModuleConfig::default();
+                    module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
+                    let module = polkavm::Module::from_blob(&engine, &module_config, blob).unwrap();
+                    let linker = polkavm::Linker::<()>::new();
+                    let instance_pre = linker.instantiate_pre(&module).unwrap();
+                    let mut instance = instance_pre.instantiate().unwrap();
+                    let artifact = path.file_stem().unwrap().to_string_lossy().into_owned();
+
+                    instance.set_gas(polkavm::Gas::MAX);
+                    instance.call_typed(&mut (), "initialize", ()).unwrap();
+
+                    for algo in &algos {
+                        let export = format!("benchmark_{algo}");
+                        for &size in &sizes {
+                            let times = (total_bytes / size).max(1);
+                            let mut measure = || -> (Duration, u64) {
+                                // Reset the input buffer so every measurement is
+                                // self-contained and checksums are comparable
+                                // across runs regardless of row order.
+                                instance.set_gas(polkavm::Gas::MAX);
+                                instance.call_typed(&mut (), "initialize", ()).unwrap();
+                                instance.set_gas(polkavm::Gas::MAX);
+                                let timestamp = std::time::Instant::now();
+                                let checksum: u64 = instance
+                                    .call_typed_and_get_result(&mut (), &*export, (size, times))
+                                    .unwrap();
+                                (timestamp.elapsed(), checksum)
+                            };
+                            measure(); // Warmup.
+                            let (elapsed, checksum) = measure();
+                            print_row(csv, &artifact, Row { algo, size, times, elapsed, checksum });
+                        }
+                    }
+                }
+                Artifact::Native(path) => {
+                    #[cfg(feature = "native")]
+                    {
+                        // A bare filename would be looked up in the system library
+                        // search path by dlopen, not in the current directory.
+                        let path = path.canonicalize().unwrap_or_else(|error| {
+                            eprintln!("failed to resolve {path:?}: {error}");
+                            std::process::exit(1);
+                        });
+                        let library = unsafe { libloading::Library::new(&path) }.unwrap();
+                        let artifact = path.file_stem().unwrap().to_string_lossy().into_owned();
+
+                        let initialize = unsafe {
+                            library.get::<unsafe extern "C" fn()>(b"initialize").unwrap()
+                        };
+
+                        for algo in &algos {
+                            let export = format!("benchmark_{algo}");
+                            let func: libloading::Symbol<unsafe extern "C" fn(u64, u64) -> u64> =
+                                unsafe { library.get(export.as_bytes()) }.unwrap();
+                            for &size in &sizes {
+                                let times = (total_bytes / size).max(1);
+                                let mut measure = || -> (Duration, u64) {
+                                    // See the PVM path: reset state for comparable checksums.
+                                    unsafe { initialize() };
+                                    let timestamp = std::time::Instant::now();
+                                    let checksum = unsafe { func(size, times) };
+                                    (timestamp.elapsed(), checksum)
+                                };
+                                measure(); // Warmup.
+                                let (elapsed, checksum) = measure();
+                                print_row(csv, &artifact, Row { algo, size, times, elapsed, checksum });
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "native"))]
+                    {
+                        let _ = path;
+                        eprintln!("native libraries require benchtool to be built with the 'native' feature");
+                        std::process::exit(1);
+                    }
+                }
                 }
             }
         }
