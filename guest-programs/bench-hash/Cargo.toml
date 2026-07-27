@@ -34,5 +34,9 @@ polkavm-derive = { path = "../../crates/polkavm-derive" }
 # next to benchtool, where it is auto-discovered as "hash-simd") before it is
 # overwritten by a regular build.
 
+[features]
+default = ["builtins-mem"]
+builtins-mem = []
+
 [lints]
 workspace = true
