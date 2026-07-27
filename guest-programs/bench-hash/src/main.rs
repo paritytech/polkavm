@@ -85,8 +85,8 @@ fn twox_once<const WORDS: usize>(input: &[u8], out: &mut Output) -> usize {
 
 /// Hashes `memory[..len]` `times` times, feeding each round's output back
 /// into the start of the buffer so every iteration depends on the previous
-/// one (no loop-invariant hoisting), and returns a fold of the final output
-/// so the whole chain is observable (no dead-code elimination).
+/// one (no loop-invariant hoisting), and returns the first 8 bytes of the
+/// final digest so the whole chain is observable (no dead-code elimination).
 fn chained(
     memory: &mut [u8],
     len: u64,
@@ -95,13 +95,11 @@ fn chained(
 ) -> u64 {
     let len = (len as usize).min(memory.len()).max(1);
     let mut out = [0u8; 64];
-    let mut out_len = 8;
     for _ in 0..times {
-        out_len = hash_once(&memory[..len], &mut out);
+        let out_len = hash_once(&memory[..len], &mut out);
         let feedback = len.min(out_len);
         memory[..feedback].copy_from_slice(&out[..feedback]);
     }
-    let _ = out_len;
     u64::from_le_bytes(out[..8].try_into().unwrap())
 }
 

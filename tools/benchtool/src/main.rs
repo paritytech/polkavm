@@ -854,9 +854,20 @@ fn main() {
             }
         }
         Args::BenchHash { sizes, total_bytes, csv, algos } => {
+            disable_aslr();
+
+            // bench-hash's input buffer size; larger sizes would silently clamp
+            // in the guest and mislabel the row.
+            const MAX_LEN: u64 = 1024 * 1024;
             let sizes: Vec<u64> = sizes
                 .split(',')
                 .map(|s| s.trim().parse().expect("invalid --sizes entry"))
+                .inspect(|&size| {
+                    assert!(
+                        (1..=MAX_LEN).contains(&size),
+                        "--sizes entries must be in 1..={MAX_LEN} (got {size})"
+                    );
+                })
                 .collect();
 
             struct Row<'a> {
