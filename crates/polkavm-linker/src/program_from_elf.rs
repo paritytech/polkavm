@@ -10007,6 +10007,7 @@ pub struct Config {
     min_stack_size: u32,
     gas_cost_model_aware_optimizations: bool,
     metadata_hash: Option<Vec<u8>>,
+    allow_unsupported_instructions: bool,
 }
 
 impl Default for Config {
@@ -10020,6 +10021,7 @@ impl Default for Config {
             min_stack_size: VM_MIN_PAGE_SIZE * 2,
             gas_cost_model_aware_optimizations: true,
             metadata_hash: None,
+            allow_unsupported_instructions: false,
         }
     }
 }
@@ -10027,6 +10029,12 @@ impl Default for Config {
 impl Config {
     pub fn set_strip(&mut self, value: bool) -> &mut Self {
         self.strip = value;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn set_allow_unsupported_instructions(&mut self, value: bool) -> &mut Self {
+        self.allow_unsupported_instructions = value;
         self
     }
 
@@ -10071,12 +10079,22 @@ impl Config {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[non_exhaustive]
 pub enum TargetInstructionSet {
     ReviveV1,
     JamV1,
     Latest,
+}
+
+impl From<InstructionSetKind> for TargetInstructionSet {
+    fn from(kind: InstructionSetKind) -> Self {
+        match kind {
+            InstructionSetKind::ReviveV1 => TargetInstructionSet::ReviveV1,
+            InstructionSetKind::JamV1 => TargetInstructionSet::JamV1,
+            InstructionSetKind::Latest32 | InstructionSetKind::Latest64 => TargetInstructionSet::Latest,
+        }
+    }
 }
 
 pub fn program_from_elf(config: Config, isa: TargetInstructionSet, data: &[u8]) -> Result<Vec<u8>, ProgramFromElfError> {
@@ -10941,6 +10959,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
     log::trace!("Instruction count: {}", code.len());
 
     let mut builder = ProgramBlobBuilder::new(isa);
+    builder.set_ignore_instruction_set_incompatibility(config.allow_unsupported_instructions);
     builder.set_ro_data_size(memory_config.ro_data_size);
     builder.set_rw_data_size(memory_config.rw_data_size);
     builder.set_stack_size(memory_config.min_stack_size);
