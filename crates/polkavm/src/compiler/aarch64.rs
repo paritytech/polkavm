@@ -116,9 +116,10 @@ where
         }
     }
 
-    /// Address of a VM-context field into `dst` (generic sandbox only; vmctx sits below the memory base).
+    /// Address of a VM-context field into `dst`. Both the generic and hypervisor sandboxes
+    /// place the vmctx one page below the guest memory base, so they share this codegen.
     fn vmctx_addr(&mut self, dst: NativeReg, field_offset: usize) {
-        debug_assert!(matches!(S::KIND, SandboxKind::Generic));
+        debug_assert!(matches!(S::KIND, SandboxKind::Generic | SandboxKind::Hypervisor));
         #[cfg(feature = "generic-sandbox")]
         let off = (crate::sandbox::generic::GUEST_MEMORY_TO_VMCTX_OFFSET as i64 + field_offset as i64) as u64;
         #[cfg(not(feature = "generic-sandbox"))]
