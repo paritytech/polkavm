@@ -96,7 +96,7 @@ impl SandboxKind {
                 match self {
                     SandboxKind::Linux => cfg!(all(target_os = "linux", target_arch = "x86_64")),
                     SandboxKind::Generic => cfg!(feature = "generic-sandbox"),
-                    SandboxKind::Hypervisor => cfg!(all(feature = "hypervisor-sandbox", target_arch = "aarch64")),
+                    SandboxKind::Hypervisor => cfg!(all(feature = "hypervisor-sandbox", target_os = "macos", target_arch = "aarch64")),
                 }
             } else {
                 false
