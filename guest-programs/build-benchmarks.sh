@@ -137,6 +137,12 @@ build_benchmark "bench-minimal"
 build_benchmark "bench-pinky"
 build_benchmark "bench-prime-sieve"
 build_benchmark "bench-ed25519"
+build_benchmark "bench-ed25519-zebra"
+build_benchmark "bench-sr25519"
+build_benchmark "bench-ecdsa-k256"
+build_benchmark "bench-ecdsa-libsecp"
+build_benchmark "bench-recover-k256"
+build_benchmark "bench-recover-libsecp"
 build_benchmark "bench-hash"
 
 if [ "${SOLANA_PLATFORM_TOOLS_DIR:-}" != "" ]; then
