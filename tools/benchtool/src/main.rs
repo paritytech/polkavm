@@ -470,7 +470,7 @@ enum Args {
     /// Benchmarks hash functions.
     ///
     /// Discovers the bench-hash artifacts (PVM blob and native libraries,
-    /// including variants like libbench_hash_simd.so) and measures their
+    /// including variants like libbench_hash_native.so) and measures their
     /// `benchmark_<algo>(len, times) -> u64` exports over a grid of input
     /// sizes, printing raw per-iteration times. Comparing artifacts (e.g.
     /// PVM vs native) is up to the caller.
@@ -911,8 +911,8 @@ fn main() {
 
             // Discover artifacts like `benchmark` does. This picks up the standard
             // bench-hash artifacts from guest-programs/target as well as any variant
-            // there or in the current directory (e.g. a `libbench_hash_simd.so` is
-            // discovered as "hash-simd").
+            // there or in the current directory (e.g. a `libbench_hash_native.so` is
+            // discovered as "hash-native").
             let mut artifacts = Vec::new();
             for benchmark in find_benchmarks().unwrap() {
                 if benchmark.name != "hash" && !benchmark.name.starts_with("hash-") {

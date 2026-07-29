@@ -7,9 +7,10 @@
 #   ./process-results.sh results.csv > result-table.md
 #
 # Artifact roles:
-#   bench-hash          -> pvm       (the PVM blob)
-#   libbench_hash_simd  -> native    (built with -C target-cpu=native)
-#   libbench_hash       -> portable  (plain native build)
+#   bench-hash            -> pvm       (the PVM blob)
+#   libbench_hash_native  -> native    (host native: -C target-cpu=native;
+#                                       "_simd" accepted for old CSVs)
+#   libbench_hash         -> portable  (host portable build)
 # The PVM column gets ratios against both native and portable; a
 # native/portable ratio shows what -C target-cpu=native buys (or costs) on
 # the host. Any other artifact gets its own column with a ratio vs native.
@@ -26,7 +27,7 @@ NF < 6 { next }
     if (!(artifact in artifact_seen)) {
         artifact_seen[artifact] = ++artifact_count
         artifacts[artifact_count] = artifact
-        if (artifact ~ /_simd$/)            { native = artifact }
+        if (artifact ~ /_(native|simd)$/)   { native = artifact }
         else if (artifact ~ /^libbench/)    { portable = artifact }
         else if (pvm == "")                 { pvm = artifact }
     }
@@ -74,6 +75,12 @@ END {
             others[++other_count] = artifacts[i]
         }
     }
+
+    print "*pvm* = PVM guest blob (recompiler, sync gas) · *native* = host native"
+    print "build (`-C target-cpu=native`, build machine only) · *portable* = host"
+    print "portable build (runs on any x86-64; crates may runtime-dispatch, e.g."
+    print "sha2 uses SHA-NI where available)"
+    print ""
 
     for (a = 1; a <= algo_count; a++) {
         algo = algos[a]

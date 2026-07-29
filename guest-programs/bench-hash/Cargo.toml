@@ -30,9 +30,9 @@ polkavm-derive = { path = "../../crates/polkavm-derive" }
 #   RUSTFLAGS="-C target-cpu=native" cargo build \
 #       --target=x86_64-unknown-linux-gnu --release --lib -p bench-hash
 #
-# and copy the resulting libbench_hash.so aside (e.g. as libbench_hash_simd.so
-# next to benchtool, where it is auto-discovered as "hash-simd") before it is
-# overwritten by a regular build.
+# and copy the resulting libbench_hash.so aside as libbench_hash_native.so
+# (auto-discovered as "hash-native") before it is overwritten by a regular
+# build — see build-hash-native.sh, which does exactly this.
 
 [features]
 default = ["builtins-mem"]
