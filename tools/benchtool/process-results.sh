@@ -3,11 +3,16 @@
 # Turns `benchtool bench-hash --csv` output into per-algorithm markdown tables.
 #
 # Usage:
-#   benchtool bench-hash --csv blake2b sha256 keccak256 > results.csv
+#   benchtool bench-hash --csv blake2_256 sha2_256 ... > results.csv
 #   ./process-results.sh results.csv > result-table.md
 #
-# The artifact whose name ends in `_simd` is used as the baseline for ratios;
-# if none is present, the first artifact (in input order) is the baseline.
+# Artifact roles:
+#   bench-hash          -> pvm       (the PVM blob)
+#   libbench_hash_simd  -> native    (built with -C target-cpu=native)
+#   libbench_hash       -> portable  (plain native build)
+# The PVM column gets ratios against both native and portable; a
+# native/portable ratio shows what -C target-cpu=native buys (or costs) on
+# the host. Any other artifact gets its own column with a ratio vs native.
 # Checksums are cross-checked: rows of the same (algo, size) must agree.
 
 set -eu
@@ -21,7 +26,9 @@ NF < 6 { next }
     if (!(artifact in artifact_seen)) {
         artifact_seen[artifact] = ++artifact_count
         artifacts[artifact_count] = artifact
-        if (artifact ~ /_simd$/) baseline = artifact
+        if (artifact ~ /_simd$/)            { native = artifact }
+        else if (artifact ~ /^libbench/)    { portable = artifact }
+        else if (pvm == "")                 { pvm = artifact }
     }
     if (!((algo, size) in row_seen)) {
         row_seen[algo, size] = 1
@@ -42,9 +49,15 @@ NF < 6 { next }
 }
 
 function fmt(ns) {
+    if (ns == "") return "-"
     if (ns < 1000) return sprintf("%.0f ns", ns)
     if (ns < 1000000) return sprintf("%.2f µs", ns / 1000)
     return sprintf("%.2f ms", ns / 1000000)
+}
+
+function ratio(a, b) {
+    if (a == "" || b == "" || b == 0) return "-"
+    return sprintf("%.2fx", a / b)
 }
 
 function fmt_size(bytes) {
@@ -54,45 +67,49 @@ function fmt_size(bytes) {
 }
 
 END {
-    if (baseline == "") baseline = artifacts[1]
-
-    # Reorder so the baseline column comes first.
-    ordered_count = 0
-    ordered[++ordered_count] = baseline
+    # Other artifacts = everything that is not one of the three roles.
+    other_count = 0
     for (i = 1; i <= artifact_count; i++) {
-        if (artifacts[i] != baseline) ordered[++ordered_count] = artifacts[i]
+        if (artifacts[i] != pvm && artifacts[i] != native && artifacts[i] != portable) {
+            others[++other_count] = artifacts[i]
+        }
     }
-    for (i = 1; i <= artifact_count; i++) artifacts[i] = ordered[i]
 
     for (a = 1; a <= algo_count; a++) {
         algo = algos[a]
         printf "## %s\n\n", algo
 
         printf "| size |"
-        for (i = 1; i <= artifact_count; i++) {
-            printf " %s |", artifacts[i]
-            if (artifacts[i] != baseline) printf " vs %s |", baseline
-        }
+        if (pvm != "")      printf " pvm |"
+        if (native != "")   printf " native |"
+        if (portable != "") printf " portable |"
+        if (pvm != "" && native != "")      printf " pvm/native |"
+        if (pvm != "" && portable != "")    printf " pvm/portable |"
+        if (native != "" && portable != "") printf " native/portable |"
+        for (i = 1; i <= other_count; i++) printf " %s | %s/native |", others[i], others[i]
         printf "\n|---:|"
-        for (i = 1; i <= artifact_count; i++) {
-            printf "---:|"
-            if (artifacts[i] != baseline) printf "---:|"
-        }
+        cols = (pvm != "") + (native != "") + (portable != "") \
+             + (pvm != "" && native != "") + (pvm != "" && portable != "") \
+             + (native != "" && portable != "") + 2 * other_count
+        for (i = 0; i < cols; i++) printf "---:|"
         printf "\n"
 
         n = split(sizes_for[algo], size_list, " ")
         for (s = 1; s <= n; s++) {
             size = size_list[s]
+            t_pvm = time[pvm, algo, size]
+            t_nat = time[native, algo, size]
+            t_por = time[portable, algo, size]
             printf "| %s |", fmt_size(size)
-            base_ns = time[baseline, algo, size]
-            for (i = 1; i <= artifact_count; i++) {
-                ns = time[artifacts[i], algo, size]
-                if (ns == "") { printf " - |"; if (artifacts[i] != baseline) printf " - |"; continue }
-                printf " %s |", fmt(ns)
-                if (artifacts[i] != baseline) {
-                    if (base_ns > 0) printf " %.2fx |", ns / base_ns
-                    else printf " - |"
-                }
+            if (pvm != "")      printf " %s |", fmt(t_pvm)
+            if (native != "")   printf " %s |", fmt(t_nat)
+            if (portable != "") printf " %s |", fmt(t_por)
+            if (pvm != "" && native != "")      printf " %s |", ratio(t_pvm, t_nat)
+            if (pvm != "" && portable != "")    printf " %s |", ratio(t_pvm, t_por)
+            if (native != "" && portable != "") printf " %s |", ratio(t_nat, t_por)
+            for (i = 1; i <= other_count; i++) {
+                t_o = time[others[i], algo, size]
+                printf " %s | %s |", fmt(t_o), ratio(t_o, t_nat)
             }
             printf "\n"
         }
