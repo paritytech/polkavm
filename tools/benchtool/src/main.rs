@@ -489,6 +489,10 @@ enum Args {
         #[clap(long)]
         csv: bool,
 
+        /// Run with ASLR enabled.
+        #[clap(long)]
+        aslr: bool,
+
         /// Hash algorithm names; each is resolved as a `benchmark_<name>` export.
         #[clap(required = true)]
         algos: Vec<String>,
@@ -853,8 +857,10 @@ fn main() {
                 }
             }
         }
-        Args::BenchHash { sizes, total_bytes, csv, algos } => {
-            disable_aslr();
+        Args::BenchHash { sizes, total_bytes, csv, aslr, algos } => {
+            if !aslr {
+                disable_aslr();
+            }
 
             // bench-hash's input buffer size; larger sizes would silently clamp
             // in the guest and mislabel the row.

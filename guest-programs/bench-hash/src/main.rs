@@ -48,6 +48,25 @@ fn blake2_256_once(input: &[u8], out: &mut Output) -> usize {
     blake2b_once(input, out, 32)
 }
 
+mod compact_blake2b;
+
+// Same function as `blake2_256`, but computed by the code-size-compact
+// rounds-loop implementation; its checksums must match `blake2_256`'s.
+fn blake2_256_compact_once(input: &[u8], out: &mut Output) -> usize {
+    out[..32].copy_from_slice(&compact_blake2b::blake2b_256(input));
+    32
+}
+
+mod asm_blake2b;
+
+// Same function as `blake2_256`, but with a hand-scheduled RISC-V assembly
+// compression function; its checksums must match `blake2_256`'s. On non-PVM
+// targets it falls back to the compact implementation.
+fn blake2_256_asm_once(input: &[u8], out: &mut Output) -> usize {
+    out[..32].copy_from_slice(&asm_blake2b::blake2b_256(input));
+    32
+}
+
 fn keccak_256_once(input: &[u8], out: &mut Output) -> usize {
     use sha3::Digest;
     let mut hasher = sha3::Keccak256::new();
@@ -117,6 +136,8 @@ macro_rules! export_hash_benchmark {
 // Named after the `sp_io::hashing` host functions they mirror.
 export_hash_benchmark!(benchmark_blake2_128, blake2_128_once);
 export_hash_benchmark!(benchmark_blake2_256, blake2_256_once);
+export_hash_benchmark!(benchmark_blake2_256_compact, blake2_256_compact_once);
+export_hash_benchmark!(benchmark_blake2_256_asm, blake2_256_asm_once);
 export_hash_benchmark!(benchmark_keccak_256, keccak_256_once);
 export_hash_benchmark!(benchmark_keccak_512, keccak_512_once);
 export_hash_benchmark!(benchmark_sha2_256, sha2_256_once);
