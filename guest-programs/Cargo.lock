@@ -33,6 +33,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bench-blake2-128"
+version = "0.1.0"
+dependencies = [
+ "blake2b_simd",
+ "picoalloc",
+ "polkavm-derive",
+]
+
+[[package]]
+name = "bench-blake2-256"
+version = "0.1.0"
+dependencies = [
+ "blake2b_simd",
+ "picoalloc",
+ "polkavm-derive",
+]
+
+[[package]]
+name = "bench-blake2-256-asm"
+version = "0.1.0"
+dependencies = [
+ "picoalloc",
+ "polkavm-derive",
+]
+
+[[package]]
 name = "bench-ecdsa-k256"
 version = "0.1.0"
 dependencies = [
@@ -81,6 +107,24 @@ dependencies = [
  "sha2",
  "sha3",
  "twox-hash",
+]
+
+[[package]]
+name = "bench-keccak-256"
+version = "0.1.0"
+dependencies = [
+ "picoalloc",
+ "polkavm-derive",
+ "sha3",
+]
+
+[[package]]
+name = "bench-keccak-512"
+version = "0.1.0"
+dependencies = [
+ "picoalloc",
+ "polkavm-derive",
+ "sha3",
 ]
 
 [[package]]
@@ -141,12 +185,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "bench-sha2-256"
+version = "0.1.0"
+dependencies = [
+ "picoalloc",
+ "polkavm-derive",
+ "sha2",
+]
+
+[[package]]
 name = "bench-sr25519"
 version = "0.1.0"
 dependencies = [
  "picoalloc",
  "polkavm-derive",
  "schnorrkel",
+]
+
+[[package]]
+name = "bench-twox-128"
+version = "0.1.0"
+dependencies = [
+ "picoalloc",
+ "polkavm-derive",
+ "twox-hash",
+]
+
+[[package]]
+name = "bench-twox-256"
+version = "0.1.0"
+dependencies = [
+ "picoalloc",
+ "polkavm-derive",
+ "twox-hash",
+]
+
+[[package]]
+name = "bench-twox-64"
+version = "0.1.0"
+dependencies = [
+ "picoalloc",
+ "polkavm-derive",
+ "twox-hash",
 ]
 
 [[package]]
@@ -266,7 +346,7 @@ checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.38",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -595,7 +675,7 @@ dependencies = [
  "polkavm-common",
  "proc-macro2",
  "quote",
- "syn 2.0.38",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -603,23 +683,23 @@ name = "polkavm-derive-impl-macro"
 version = "0.37.0"
 dependencies = [
  "polkavm-derive-impl",
- "syn 2.0.38",
+ "syn 2.0.119",
 ]
 
 [[package]]
 name = "proc-macro2"
-version = "1.0.69"
+version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "134c189feb4956b20f6f547d2cf727d4c0fe06722b20a0eec87ed445a97f92da"
+checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
 ]
 
 [[package]]
 name = "quote"
-version = "1.0.33"
+version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5267fca4496028628a95160fc423a33e8b2e6af8a5302579e322e4b520293cae"
+checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
 ]
@@ -712,7 +792,7 @@ checksum = "43576ca501357b9b071ac53cdc7da8ef0cbd9493d8df094cd821777ea6e894d3"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.38",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -785,13 +865,20 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "2.0.38"
+version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e96b79aaa137db8f61e26363a0c9b47d8b4ec75da28b7d1d614c2303e232408b"
+checksum = "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
 dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "test-blake2-asm"
+version = "0.1.0"
+dependencies = [
+ "polkavm-derive",
 ]
 
 [[package]]
@@ -858,5 +945,5 @@ checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.38",
+ "syn 2.0.119",
 ]
