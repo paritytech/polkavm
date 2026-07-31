@@ -105,14 +105,24 @@ function build_benchmark() {
         RUSTFLAGS="-C target-cpu=mvp -C target-feature=-sign-ext $extra_flags" cargo build -q --target=wasm32-unknown-unknown --release --bin $1 -p $1
     fi
 
+    # Native libraries are deliberately built with the stable toolchain (the
+    # directory's nightly pin exists only for -Zbuild-std guest builds; the
+    # pinned nightly's x86-64 codegen is measurably worse, e.g. ~3x slower
+    # SHA-NI sha256). Exception: bench-memset's compiler_builtins dependency
+    # requires nightly.
+    native_toolchain="+1.86.0"
+    if [ "$1" == "bench-memset" ]; then
+        native_toolchain=""
+    fi
+
     if [ "${BUILD_NATIVE_X86_64}" == "1" ]; then
         echo "> Building: '$1' (native, x86_64)"
-        RUSTFLAGS="$extra_flags" cargo build -q --target=x86_64-unknown-linux-gnu --release --lib -p $1
+        RUSTFLAGS="$extra_flags" cargo $native_toolchain build -q --target=x86_64-unknown-linux-gnu --release --lib -p $1
     fi
 
     if [ "${BUILD_NATIVE_X86}" == "1" ]; then
         echo "> Building: '$1' (native, i686)"
-        RUSTFLAGS="$extra_flags" cargo build -q --target=i686-unknown-linux-gnu --release --lib -p $1
+        RUSTFLAGS="$extra_flags" cargo $native_toolchain build -q --target=i686-unknown-linux-gnu --release --lib -p $1
     fi
 
     if [ "${BUILD_CKBVM}" == "1" ]; then
@@ -143,7 +153,15 @@ build_benchmark "bench-ecdsa-k256"
 build_benchmark "bench-ecdsa-libsecp"
 build_benchmark "bench-recover-k256"
 build_benchmark "bench-recover-libsecp"
-build_benchmark "bench-hash"
+build_benchmark "bench-blake2-128"
+build_benchmark "bench-blake2-256"
+build_benchmark "bench-blake2-256-asm"
+build_benchmark "bench-keccak-256"
+build_benchmark "bench-keccak-512"
+build_benchmark "bench-sha2-256"
+build_benchmark "bench-twox-64"
+build_benchmark "bench-twox-128"
+build_benchmark "bench-twox-256"
 
 if [ "${SOLANA_PLATFORM_TOOLS_DIR:-}" != "" ]; then
     unset SOLANA_PLATFORM_TOOLS_DIR
