@@ -105,12 +105,15 @@ function build_benchmark() {
         RUSTFLAGS="-C target-cpu=mvp -C target-feature=-sign-ext $extra_flags" cargo build -q --target=wasm32-unknown-unknown --release --bin $1 -p $1
     fi
 
-    # Native libraries are deliberately built with the stable toolchain (the
-    # directory's nightly pin exists only for -Zbuild-std guest builds; the
-    # pinned nightly's x86-64 codegen is measurably worse, e.g. ~3x slower
-    # SHA-NI sha256). Exception: bench-memset's compiler_builtins dependency
-    # requires nightly.
-    native_toolchain="+1.86.0"
+    # Toolchain for the host library builds (the directory's nightly pin
+    # applies only to -Zbuild-std guest builds). Host baselines are
+    # toolchain-sensitive - nightly degrades sha2 (SHA-NI spills) and
+    # keccak-native on Zen 4 (AVX-512), but is the ONLY way to get
+    # curve25519-dalek's SIMD/IFMA backends - so set this deliberately and
+    # label results with it. Override: NATIVE_TOOLCHAIN="+1.86.0" ./build-...
+    # Exception: bench-memset's compiler_builtins dependency requires
+    # nightly (empty = the directory's pinned nightly).
+    native_toolchain="${NATIVE_TOOLCHAIN:-+nightly-2026-08-01}"
     if [ "$1" == "bench-memset" ]; then
         native_toolchain=""
     fi
