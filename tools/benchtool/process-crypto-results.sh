@@ -3,9 +3,12 @@
 # Turns the generic-harness output of run-crypto-benches into a markdown
 # summary table: per benchmark, host vs PVM (64-bit, compiler, sync gas).
 #
-# The "host" column is whichever build the benchmark libraries were compiled
-# with (host portable by default; host native if built with
-# -C target-cpu=native) - label the resulting table accordingly.
+# Roles (same naming as the report / process-hash-results.sh):
+#   host portable = <bench>        with the native backend (plain build)
+#   host native   = <bench>-native with the native backend
+#                   (-C target-cpu=native, built by build-crypto-native.sh;
+#                   column shows "-" when those libraries are absent)
+#   pvm           = <bench>        with the polkavm64_compiler_sync_gas backend
 #
 # Usage:
 #   ./run-crypto-benches > crypto.txt
@@ -29,8 +32,14 @@ $1 ~ /^runtime\// {
     else if (time ~ /s$/)  { sub(/s$/,  "", ns); ns *= 1000000000 }
     else next
 
+    if (bench ~ /-native$/) {
+        base = bench; sub(/-native$/, "", base)
+        if (backend == "native") hostnative[base] = ns
+        next
+    }
+
     if (!(bench in seen)) { seen[bench] = ++count; benches[count] = bench }
-    if (backend == "native")                       native[bench] = ns
+    if (backend == "native")                       portable[bench] = ns
     if (backend == "polkavm64_compiler_sync_gas")  pvm[bench] = ns
 }
 
@@ -41,13 +50,16 @@ function fmt(ns) {
     return sprintf("%.2f ms", ns / 1000000)
 }
 
+function ratio(a, b) {
+    return (a != "" && b != "") ? sprintf("%.2fx", a / b) : "-"
+}
+
 END {
-    print "| benchmark | host | PVM (64-bit, sync gas) | ratio |"
-    print "|---|---:|---:|---:|"
+    print "| benchmark | host portable | host native | PVM (64-bit, sync gas) | pvm/portable | pvm/native |"
+    print "|---|---:|---:|---:|---:|---:|"
     for (i = 1; i <= count; i++) {
         b = benches[i]
-        ratio = (native[b] != "" && pvm[b] != "") ? sprintf("%.2fx", pvm[b] / native[b]) : "-"
-        printf "| %s | %s | %s | %s |\n", b, fmt(native[b]), fmt(pvm[b]), ratio
+        printf "| %s | %s | %s | %s | %s | %s |\n", b, fmt(portable[b]), fmt(hostnative[b]), fmt(pvm[b]), ratio(pvm[b], portable[b]), ratio(pvm[b], hostnative[b])
     }
 }
 ' "$@"
