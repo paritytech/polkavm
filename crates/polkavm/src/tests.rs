@@ -5051,7 +5051,7 @@ fn jam_validate_ok(config: Config, isa: InstructionSetKind) {
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_imm(Reg::A0, 0x12345678), asm::ret()], &[]);
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-    assert!(blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1).is_ok());
+    assert!(blob.validate_code_with_isa(isa).is_ok());
     Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
 }
 
@@ -5066,7 +5066,7 @@ fn jam_validate_invalid_opcode(config: Config, isa: InstructionSetKind) {
     let mut raw_code = blob.code().to_vec();
     raw_code[0] = 255;
     blob.set_code(raw_code.into());
-    assert!(blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1).is_err());
+    assert!(blob.validate_code_with_isa(isa).is_err());
     assert!(matches!(
         Module::from_blob(&engine, &ModuleConfig::new(), blob),
         Err(CompileError::ValidationFailed(..))
@@ -5081,7 +5081,7 @@ fn jam_validate_invalid_fallthrough(config: Config, isa: InstructionSetKind) {
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_imm(Reg::A0, 0x12345678), asm::fallthrough()], &[]);
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-    assert!(blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1).is_err());
+    assert!(blob.validate_code_with_isa(isa).is_err());
     assert!(matches!(
         Module::from_blob(&engine, &ModuleConfig::new(), blob),
         Err(CompileError::ValidationFailed(..))
@@ -5116,7 +5116,7 @@ fn jam_validate_invalid_branch(config: Config, isa: InstructionSetKind) {
     let mut raw_code = blob.code().to_vec();
     raw_code[instructions[0].next_offset.0 as usize - 1] -= 1;
     blob.set_code(raw_code.into());
-    assert!(blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1).is_ok());
+    assert!(blob.validate_code_with_isa(isa).is_ok());
     Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
 }
 
@@ -5153,7 +5153,7 @@ fn jam_validate_invalid_skip(config: Config, isa: InstructionSetKind) {
     raw_bitmask[0..4].fill(0);
     raw_bitmask[0] = 1;
     blob.set_bitmask(raw_bitmask.into());
-    assert!(blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1).is_err());
+    assert!(blob.validate_code_with_isa(isa).is_err());
     assert!(matches!(
         Module::from_blob(&engine, &ModuleConfig::new(), blob),
         Err(CompileError::ValidationFailed(..))
@@ -5208,7 +5208,7 @@ fn jam_reg_nibble_clamped_to_a5(config: Config, isa: InstructionSetKind) {
         assert_eq!(raw_code[1], 12);
         raw_code[1] = nibble;
         blob.set_code(raw_code.into());
-        assert!(blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1).is_ok());
+        assert!(blob.validate_code_with_isa(isa).is_ok());
 
         let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
         let mut instance = module.instantiate().unwrap();
