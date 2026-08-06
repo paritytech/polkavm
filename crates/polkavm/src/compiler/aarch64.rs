@@ -17,6 +17,29 @@ fn conv_reg(reg: RawReg) -> NativeReg {
     to_native_reg(reg.get())
 }
 
+/// How a guest memory access is addressed; see `guest_access`.
+enum GuestAccess {
+    /// `[x14, #imm]`, where `imm` is already scaled by the access size.
+    Offset(u32),
+    /// `[reg]`, with the full address materialized in `reg`.
+    Rebased(NativeReg),
+    /// `[x14, wreg, uxtw]`.
+    Index(NativeReg),
+}
+
+/// Splits a signed constant into the add/sub-immediate encoding: `(imm12, lsl #12, is_sub)`.
+fn add_sub_imm(value: i64) -> Option<(u32, bool, bool)> {
+    let sub = value < 0;
+    let mag = value.unsigned_abs();
+    if mag < 0x1000 {
+        Some((mag as u32, false, sub))
+    } else if mag & 0xfff == 0 && (mag >> 12) < 0x1000 {
+        Some(((mag >> 12) as u32, true, sub))
+    } else {
+        None
+    }
+}
+
 /// Guest linear-memory base (generic sandbox); the vmctx is at a fixed negative offset from it.
 const MEMORY_BASE_REG: NativeReg = AUX_TMP_REG; // x14
 
@@ -30,7 +53,7 @@ const SP: NativeReg = NativeReg::XZR;
 
 // Byte offsets within the gas-metering stub (see emit_gas_metering_stub).
 const GAS_COST_OFFSET: usize = 8; // the embedded 32-bit cost literal
-const GAS_METERING_TRAP_OFFSET: u64 = 36; // the `udf` that fires on gas underflow
+pub(crate) const GAS_METERING_TRAP_OFFSET: u64 = 36; // the `udf` that fires on gas underflow
 
 impl<'r, 'a, S, B, G> ArchVisitor<'r, 'a, S, B, G>
 where
@@ -94,21 +117,11 @@ where
             return;
         }
 
-        let sub = signed < 0;
-        let mag = signed.unsigned_abs();
-        if mag < 0x1000 {
-            let m = mag as u32;
+        if let Some((imm, shift12, sub)) = add_sub_imm(signed) {
             if sub {
-                self.push(a64::sub_imm(X, rd, rn, m, false));
+                self.push(a64::sub_imm(X, rd, rn, imm, shift12));
             } else {
-                self.push(a64::add_imm(X, rd, rn, m, false));
-            }
-        } else if mag & 0xfff == 0 && (mag >> 12) < 0x1000 {
-            let m = (mag >> 12) as u32;
-            if sub {
-                self.push(a64::sub_imm(X, rd, rn, m, true));
-            } else {
-                self.push(a64::add_imm(X, rd, rn, m, true));
+                self.push(a64::add_imm(X, rd, rn, imm, shift12));
             }
         } else {
             self.mov_imm(SCRATCH1, value);
@@ -116,14 +129,61 @@ where
         }
     }
 
+    /// `rd = rn + value` at `size`, preferring the add/sub-immediate form. Adding a negative value
+    /// is subtracting its magnitude, which is the same modulo the register width.
+    fn add_const_sized(&mut self, size: a64::RegSize, rd: NativeReg, rn: NativeReg, value: i64) {
+        if value == 0 {
+            if !rd.equals(rn) {
+                self.push(a64::mov_reg(size, rd, rn));
+            }
+            return;
+        }
+        if let Some((imm, shift12, sub)) = add_sub_imm(value) {
+            if sub {
+                self.push(a64::sub_imm(size, rd, rn, imm, shift12));
+            } else {
+                self.push(a64::add_imm(size, rd, rn, imm, shift12));
+            }
+        } else {
+            self.mov_imm(SCRATCH0, value as u64);
+            self.push(a64::add_reg(size, rd, rn, SCRATCH0));
+        }
+    }
+
+    /// `cmp rn, #value` when the immediate is encodable, else via a scratch register.
+    fn cmp_const(&mut self, size: a64::RegSize, rn: NativeReg, value: i64) {
+        // Only the non-negative form is encodable as `subs`; a negative would need `cmn`.
+        match add_sub_imm(value) {
+            Some((imm, shift12, false)) => self.push(a64::cmp_imm(size, rn, imm, shift12)),
+            _ => {
+                self.mov_imm(SCRATCH0, value as u64);
+                self.push(a64::cmp_reg(size, rn, SCRATCH0));
+            }
+        }
+    }
+
+    /// An immediate operand as a signed 64-bit value; RISC-V immediates are sign-extended, and in
+    /// 32-bit mode the consumers only look at the low half either way.
+    #[allow(clippy::unused_self)]
+    fn imm_operand(&self, value: u32) -> i64 {
+        i64::from(value as i32)
+    }
+
+    /// Bitmask-immediate encoding of an immediate operand as the guest sees it (sign-extended in
+    /// 64-bit mode, zero-extended in 32-bit mode), if the value has one.
+    fn logical_imm(&self, value: u32) -> Option<a64::LogicalImm> {
+        let value = match B::BITNESS {
+            Bitness::B32 => u64::from(value),
+            Bitness::B64 => i64::from(value as i32) as u64,
+        };
+        a64::logical_imm(value, self.reg_size())
+    }
+
     /// Address of a VM-context field into `dst`. Both the generic and hypervisor sandboxes
     /// place the vmctx one page below the guest memory base, so they share this codegen.
     fn vmctx_addr(&mut self, dst: NativeReg, field_offset: usize) {
         debug_assert!(matches!(S::KIND, SandboxKind::Generic | SandboxKind::Hypervisor));
-        #[cfg(feature = "generic-sandbox")]
-        let off = (crate::sandbox::generic::GUEST_MEMORY_TO_VMCTX_OFFSET as i64 + field_offset as i64) as u64;
-        #[cfg(not(feature = "generic-sandbox"))]
-        let off = field_offset as u64;
+        let off = (crate::sandbox::GUEST_MEMORY_TO_VMCTX_OFFSET as i64 + field_offset as i64) as u64;
         self.add_const(dst, MEMORY_BASE_REG, off);
     }
 
@@ -192,57 +252,101 @@ where
         SCRATCH0
     }
 
-    /// `dst = MEMORY_BASE + ((base + offset) as u32)`; the 32-bit wrap bounds accesses to the guarded 4 GiB region.
-    fn guest_addr(&mut self, dst: NativeReg, base: Option<RawReg>, offset: u32) {
-        use a64::RegSize::{W, X};
-        match base {
-            Some(b) => {
-                let b = conv_reg(b);
-                if offset == 0 {
-                    self.push(a64::mov_reg(W, dst, b));
-                } else if offset < 0x1000 {
-                    self.push(a64::add_imm(W, dst, b, offset, false));
-                } else if offset & 0xfff == 0 && (offset >> 12) < 0x1000 {
-                    self.push(a64::add_imm(W, dst, b, offset >> 12, true));
-                } else {
-                    self.mov_imm(dst, u64::from(offset));
-                    self.push(a64::add_reg(W, dst, b, dst));
-                }
-                self.push(a64::add_reg(X, dst, MEMORY_BASE_REG, dst));
+    /// Addressing for a guest access at `(base + offset) as u32`: a scaled immediate off the memory
+    /// base, or a `uxtw` index — whose 32-bit extension *is* the address wrap, so no truncation.
+    fn guest_access(&mut self, base: Option<RawReg>, offset: u32, size: a64::Size) -> GuestAccess {
+        use a64::RegSize::W;
+
+        let Some(base) = base else {
+            // Constant address: `[x14, #offset]` when the offset fits the scaled 12-bit field.
+            let scale = 1u32 << size.raw();
+            if offset % scale == 0 && offset / scale < 0x1000 {
+                return GuestAccess::Offset(offset / scale);
             }
-            None => self.add_const(dst, MEMORY_BASE_REG, u64::from(offset)),
+            self.add_const(SCRATCH0, MEMORY_BASE_REG, u64::from(offset));
+            return GuestAccess::Rebased(SCRATCH0);
+        };
+
+        let base = conv_reg(base);
+        if offset == 0 {
+            // Only the low 32 bits of the index are used, so a dirty upper half is harmless.
+            return GuestAccess::Index(base);
         }
+        if let Some((imm, shift12, sub)) = add_sub_imm(i64::from(offset as i32)) {
+            if sub {
+                self.push(a64::sub_imm(W, SCRATCH0, base, imm, shift12));
+            } else {
+                self.push(a64::add_imm(W, SCRATCH0, base, imm, shift12));
+            }
+        } else {
+            self.mov_imm(SCRATCH0, u64::from(offset));
+            self.push(a64::add_reg(W, SCRATCH0, base, SCRATCH0));
+        }
+        GuestAccess::Index(SCRATCH0)
     }
 
     fn emit_guest_load(&mut self, dst: RawReg, base: Option<RawReg>, offset: u32, size: a64::Size, signed: bool) {
-        self.guest_addr(SCRATCH0, base, offset);
+        let access = self.guest_access(base, offset, size);
         let d = conv_reg(dst);
         // A signed word load only widens to 64 bits; in 32-bit mode a word load already fills the reg.
         let plain = !signed || (matches!(size, a64::Size::U32) && matches!(B::BITNESS, Bitness::B32));
-        if plain {
-            self.push(a64::ldr_imm(size, d, SCRATCH0, 0));
-        } else {
-            match B::BITNESS {
-                Bitness::B32 => self.push(a64::ldrs32_imm(size, d, SCRATCH0, 0)),
-                Bitness::B64 => self.push(a64::ldrs64_imm(size, d, SCRATCH0, 0)),
+        match access {
+            GuestAccess::Offset(imm) => {
+                let rn = MEMORY_BASE_REG;
+                if plain {
+                    self.push(a64::ldr_imm(size, d, rn, imm));
+                } else {
+                    match B::BITNESS {
+                        Bitness::B32 => self.push(a64::ldrs32_imm(size, d, rn, imm)),
+                        Bitness::B64 => self.push(a64::ldrs64_imm(size, d, rn, imm)),
+                    }
+                }
             }
+            GuestAccess::Rebased(rn) => {
+                if plain {
+                    self.push(a64::ldr_imm(size, d, rn, 0));
+                } else {
+                    match B::BITNESS {
+                        Bitness::B32 => self.push(a64::ldrs32_imm(size, d, rn, 0)),
+                        Bitness::B64 => self.push(a64::ldrs64_imm(size, d, rn, 0)),
+                    }
+                }
+            }
+            GuestAccess::Index(index) => {
+                let (rn, rm) = (MEMORY_BASE_REG, index);
+                if plain {
+                    self.push(a64::ldr_reg(size, d, rn, rm, a64::Index::Uxtw));
+                } else {
+                    match B::BITNESS {
+                        Bitness::B32 => self.push(a64::ldrs32_reg(size, d, rn, rm, a64::Index::Uxtw)),
+                        Bitness::B64 => self.push(a64::ldrs64_reg(size, d, rn, rm, a64::Index::Uxtw)),
+                    }
+                }
+            }
+        }
+    }
+
+    fn emit_guest_store(&mut self, src: NativeReg, base: Option<RawReg>, offset: u32, size: a64::Size) {
+        match self.guest_access(base, offset, size) {
+            GuestAccess::Offset(imm) => self.push(a64::str_imm(size, src, MEMORY_BASE_REG, imm)),
+            GuestAccess::Rebased(rn) => self.push(a64::str_imm(size, src, rn, 0)),
+            GuestAccess::Index(index) => self.push(a64::str_reg(size, src, MEMORY_BASE_REG, index, a64::Index::Uxtw)),
         }
     }
 
     fn emit_guest_store_reg(&mut self, src: RawReg, base: Option<RawReg>, offset: u32, size: a64::Size) {
-        self.guest_addr(SCRATCH0, base, offset);
-        self.push(a64::str_imm(size, conv_reg(src), SCRATCH0, 0));
+        self.emit_guest_store(conv_reg(src), base, offset, size);
     }
 
     fn emit_guest_store_imm(&mut self, value: u64, base: Option<RawReg>, offset: u32, size: a64::Size) {
-        if value == 0 {
-            self.guest_addr(SCRATCH0, base, offset);
-            self.push(a64::str_imm(size, NativeReg::XZR, SCRATCH0, 0));
+        // SCRATCH2 holds the value across the address computation (which only uses SCRATCH0/1).
+        let src = if value == 0 {
+            NativeReg::XZR
         } else {
             self.mov_imm(SCRATCH2, value);
-            self.guest_addr(SCRATCH0, base, offset);
-            self.push(a64::str_imm(size, SCRATCH2, SCRATCH0, 0));
-        }
+            SCRATCH2
+        };
+        self.emit_guest_store(src, base, offset, size);
     }
 
     /// `rd = rn << n` (logical shift left by a constant), via the UBFM alias.
@@ -274,8 +378,11 @@ where
         }
         self.shl_imm(X, SCRATCH2, SCRATCH2, 3); // index * 8
 
+        // `adrp` (±4 GiB), not `adr` (±1 MiB): the table sits past the end of the code, which can be
+        // far away. It is native-page-aligned (see `finish_compilation`), so the page base it yields
+        // *is* the table address and no low-12-bit add is needed.
         let jump_table_label = self.jump_table_label;
-        self.push(a64::adr(SCRATCH1, jump_table_label));
+        self.push(a64::adrp(SCRATCH1, jump_table_label));
         self.push(a64::add_reg(X, SCRATCH1, SCRATCH1, SCRATCH2));
         self.push(a64::ldr_imm(a64::Size::U64, SCRATCH1, SCRATCH1, 0));
         if let Some((ra, value)) = load_imm {
@@ -330,8 +437,7 @@ where
             return;
         }
         let sz = self.reg_size();
-        let r = self.imm_reg(imm);
-        self.push(a64::cmp_reg(sz, conv_reg(s1), r));
+        self.cmp_const(sz, conv_reg(s1), self.imm_operand(imm));
         let label = self.get_or_forward_declare_label(target).unwrap_or(self.trap_label);
         self.branch_to_label(cond, label);
     }
@@ -344,16 +450,12 @@ where
         self.push(a64::add_reg(a64::RegSize::X, conv_reg(d), conv_reg(s1), conv_reg(s2)));
     }
     pub fn add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) {
-        let s2 = s2 as u32;
-        let r = self.imm_reg(s2);
-        self.push(a64::add_reg(a64::RegSize::W, conv_reg(d), conv_reg(s1), r));
+        self.add_const_sized(a64::RegSize::W, conv_reg(d), conv_reg(s1), i64::from(s2));
         self.finish32(d);
     }
     pub fn add_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) {
-        let s2 = s2 as u32;
-        // Sign-extend the 32-bit immediate to 64 bits (matches the x86 backend's `imm64(sign_extend)`).
-        self.mov_imm(SCRATCH0, i64::from(s2 as i32) as u64);
-        self.push(a64::add_reg(a64::RegSize::X, conv_reg(d), conv_reg(s1), SCRATCH0));
+        // The immediate is sign-extended to 64 bits (as in the x86 backend's `imm64(sign_extend)`).
+        self.add_const_sized(a64::RegSize::X, conv_reg(d), conv_reg(s1), i64::from(s2));
     }
     pub fn and(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         let sz = self.reg_size();
@@ -362,8 +464,12 @@ where
     pub fn and_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         let s2 = s2 as u32;
         let sz = self.reg_size();
-        let r = self.imm_reg(s2);
-        self.push(a64::and_reg(sz, conv_reg(d), conv_reg(s1), r));
+        if let Some(imm) = self.logical_imm(s2) {
+            self.push(a64::and_imm(sz, conv_reg(d), conv_reg(s1), imm));
+        } else {
+            let r = self.imm_reg(s2);
+            self.push(a64::and_reg(sz, conv_reg(d), conv_reg(s1), r));
+        }
     }
     pub fn and_inverted(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         // d = s1 & ~s2
@@ -575,10 +681,7 @@ where
         assert_eq!(S::offset_table().gas, 0x60);
 
         // Gas counter sits a fixed displacement below the memory base: one `sub` immediate finds it.
-        #[cfg(feature = "generic-sandbox")]
-        let disp = -(crate::sandbox::generic::GUEST_MEMORY_TO_VMCTX_OFFSET as i64 + S::offset_table().gas as i64);
-        #[cfg(not(feature = "generic-sandbox"))]
-        let disp = 0i64;
+        let disp = -(crate::sandbox::GUEST_MEMORY_TO_VMCTX_OFFSET as i64 + S::offset_table().gas as i64);
         debug_assert!(disp > 0 && disp < 0x1000, "gas displacement does not fit a sub-immediate");
 
         // Fixed layout (offsets fixed by GAS_COST_OFFSET / GAS_METERING_TRAP_OFFSET).
@@ -906,8 +1009,12 @@ where
     pub fn or_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         let s2 = s2 as u32;
         let sz = self.reg_size();
-        let r = self.imm_reg(s2);
-        self.push(a64::orr_reg(sz, conv_reg(d), conv_reg(s1), r));
+        if let Some(imm) = self.logical_imm(s2) {
+            self.push(a64::orr_imm(sz, conv_reg(d), conv_reg(s1), imm));
+        } else {
+            let r = self.imm_reg(s2);
+            self.push(a64::orr_reg(sz, conv_reg(d), conv_reg(s1), r));
+        }
     }
     pub fn or_inverted(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         // d = s1 | ~s2
@@ -952,15 +1059,16 @@ where
         self.push(a64::rorv(a64::RegSize::X, conv_reg(d), conv_reg(s1), conv_reg(s2)));
     }
     pub fn rotate_right_imm_32(&mut self, d: RawReg, s: RawReg, c: i32) {
-        let c = c as u32;
-        let r = self.imm_reg(c);
-        self.push(a64::rorv(a64::RegSize::W, conv_reg(d), conv_reg(s), r));
+        // `ror rd, rn, #n` is `extr rd, rn, rn, #n`.
+        let n = c as u32 & 31;
+        let s = conv_reg(s);
+        self.push(a64::extr(a64::RegSize::W, conv_reg(d), s, s, n));
         self.finish32(d);
     }
     pub fn rotate_right_imm_64(&mut self, d: RawReg, s: RawReg, c: i32) {
-        let c = c as u32;
-        let r = self.imm_reg(c);
-        self.push(a64::rorv(a64::RegSize::X, conv_reg(d), conv_reg(s), r));
+        let n = c as u32 & 63;
+        let s = conv_reg(s);
+        self.push(a64::extr(a64::RegSize::X, conv_reg(d), s, s, n));
     }
     pub fn rotate_right_imm_alt_32(&mut self, d: RawReg, s: RawReg, c: i32) {
         let c = c as u32;
@@ -1021,31 +1129,23 @@ where
         self.set_cond(d, a64::Cond::Lt);
     }
     pub fn set_less_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) {
-        let s2 = s2 as u32;
         let sz = self.reg_size();
-        let r = self.imm_reg(s2);
-        self.push(a64::cmp_reg(sz, conv_reg(s1), r));
+        self.cmp_const(sz, conv_reg(s1), self.imm_operand(s2 as u32));
         self.set_cond(d, a64::Cond::Cc);
     }
     pub fn set_less_than_signed_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) {
-        let s2 = s2 as u32;
         let sz = self.reg_size();
-        let r = self.imm_reg(s2);
-        self.push(a64::cmp_reg(sz, conv_reg(s1), r));
+        self.cmp_const(sz, conv_reg(s1), self.imm_operand(s2 as u32));
         self.set_cond(d, a64::Cond::Lt);
     }
     pub fn set_greater_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) {
-        let s2 = s2 as u32;
         let sz = self.reg_size();
-        let r = self.imm_reg(s2);
-        self.push(a64::cmp_reg(sz, conv_reg(s1), r));
+        self.cmp_const(sz, conv_reg(s1), self.imm_operand(s2 as u32));
         self.set_cond(d, a64::Cond::Hi);
     }
     pub fn set_greater_than_signed_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) {
-        let s2 = s2 as u32;
         let sz = self.reg_size();
-        let r = self.imm_reg(s2);
-        self.push(a64::cmp_reg(sz, conv_reg(s1), r));
+        self.cmp_const(sz, conv_reg(s1), self.imm_operand(s2 as u32));
         self.set_cond(d, a64::Cond::Gt);
     }
     pub fn shift_arithmetic_right_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
@@ -1056,15 +1156,13 @@ where
         self.push(a64::asrv(a64::RegSize::X, conv_reg(d), conv_reg(s1), conv_reg(s2)));
     }
     pub fn shift_arithmetic_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) {
-        let s2 = s2 as u32;
-        let r = self.imm_reg(s2);
-        self.push(a64::asrv(a64::RegSize::W, conv_reg(d), conv_reg(s1), r));
+        let n = s2 as u32 & 31;
+        self.push(a64::sbfm(a64::RegSize::W, conv_reg(d), conv_reg(s1), n, 31));
         self.finish32(d);
     }
     pub fn shift_arithmetic_right_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) {
-        let s2 = s2 as u32;
-        let r = self.imm_reg(s2);
-        self.push(a64::asrv(a64::RegSize::X, conv_reg(d), conv_reg(s1), r));
+        let n = s2 as u32 & 63;
+        self.push(a64::sbfm(a64::RegSize::X, conv_reg(d), conv_reg(s1), n, 63));
     }
     pub fn shift_arithmetic_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: i32) {
         let s1 = s1 as u32;
@@ -1085,15 +1183,13 @@ where
         self.push(a64::lslv(a64::RegSize::X, conv_reg(d), conv_reg(s1), conv_reg(s2)));
     }
     pub fn shift_logical_left_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) {
-        let s2 = s2 as u32;
-        let r = self.imm_reg(s2);
-        self.push(a64::lslv(a64::RegSize::W, conv_reg(d), conv_reg(s1), r));
+        let n = s2 as u32 & 31;
+        self.shl_imm(a64::RegSize::W, conv_reg(d), conv_reg(s1), n);
         self.finish32(d);
     }
     pub fn shift_logical_left_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) {
-        let s2 = s2 as u32;
-        let r = self.imm_reg(s2);
-        self.push(a64::lslv(a64::RegSize::X, conv_reg(d), conv_reg(s1), r));
+        let n = s2 as u32 & 63;
+        self.shl_imm(a64::RegSize::X, conv_reg(d), conv_reg(s1), n);
     }
     pub fn shift_logical_left_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: i32) {
         let s1 = s1 as u32;
@@ -1114,15 +1210,13 @@ where
         self.push(a64::lsrv(a64::RegSize::X, conv_reg(d), conv_reg(s1), conv_reg(s2)));
     }
     pub fn shift_logical_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) {
-        let s2 = s2 as u32;
-        let r = self.imm_reg(s2);
-        self.push(a64::lsrv(a64::RegSize::W, conv_reg(d), conv_reg(s1), r));
+        let n = s2 as u32 & 31;
+        self.push(a64::ubfm(a64::RegSize::W, conv_reg(d), conv_reg(s1), n, 31));
         self.finish32(d);
     }
     pub fn shift_logical_right_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) {
-        let s2 = s2 as u32;
-        let r = self.imm_reg(s2);
-        self.push(a64::lsrv(a64::RegSize::X, conv_reg(d), conv_reg(s1), r));
+        let n = s2 as u32 & 63;
+        self.push(a64::ubfm(a64::RegSize::X, conv_reg(d), conv_reg(s1), n, 63));
     }
     pub fn shift_logical_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: i32) {
         let s1 = s1 as u32;
@@ -1251,8 +1345,12 @@ where
     pub fn xor_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         let s2 = s2 as u32;
         let sz = self.reg_size();
-        let r = self.imm_reg(s2);
-        self.push(a64::eor_reg(sz, conv_reg(d), conv_reg(s1), r));
+        if let Some(imm) = self.logical_imm(s2) {
+            self.push(a64::eor_imm(sz, conv_reg(d), conv_reg(s1), imm));
+        } else {
+            let r = self.imm_reg(s2);
+            self.push(a64::eor_reg(sz, conv_reg(d), conv_reg(s1), r));
+        }
     }
     pub fn zero_extend_16(&mut self, d: RawReg, s: RawReg) {
         let sz = self.reg_size();
@@ -1262,6 +1360,25 @@ where
 
 // ---- Free functions used by the sandbox (parallel to amd64.rs) ----
 // `on_signal_trap`/`on_page_fault` are zygote-only; the generic sandbox recovers from signals inline in generic.rs.
+
+/// Only here to match the x86 signature; never constructed.
+#[cfg(feature = "generic-sandbox")]
+#[allow(dead_code)]
+#[derive(Copy, Clone)]
+pub(crate) enum MemsetKind {
+    Inline,
+    Trampoline,
+}
+
+/// Always `None`: the AArch64 `memset` loop keeps its progress in A0/A2 and charges gas per byte,
+/// so re-entering the instruction resumes the fill — no fixup or continuation needed.
+#[cfg(feature = "generic-sandbox")]
+pub(crate) fn are_we_executing_memset<S>(_compiled_module: &crate::compiler::CompiledModule<S>, _offset: u64) -> Option<MemsetKind>
+where
+    S: Sandbox,
+{
+    None
+}
 
 /// Reads the 32-bit gas cost embedded in a block's metering stub.
 pub fn extract_gas_cost<S>(machine_code: &[u8], basic_block_machine_code_offset: usize) -> u32

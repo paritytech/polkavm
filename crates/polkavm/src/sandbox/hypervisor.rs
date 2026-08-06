@@ -115,8 +115,14 @@ const HVC_SBRK: u16 = 5;
 const HVC_NOT_ENOUGH_GAS: u16 = 6;
 /// Emitted by the guest EL1 exception vector on an abort, to report it to the host.
 const HVC_FAULT: u16 = 7;
+/// Emitted by the TLB-maintenance stub once the invalidation has completed.
+const HVC_TLBI: u16 = 8;
 /// Stride between consecutive stubs (2 x 4-byte instructions).
 const STUB_STRIDE: u64 = 8;
+/// Number of `br`/`blr`-target stubs laid out at `STUBS_IPA` with `STUB_STRIDE` spacing.
+const NUM_BR_STUBS: u64 = 6;
+/// The TLB-maintenance stub, placed after them (4 instructions, so it needs its own slot).
+const TLBI_STUB_IPA: u64 = STUBS_IPA + NUM_BR_STUBS * STUB_STRIDE;
 
 /// Per-page protection state tracked host-side (mirrors the L3 descriptor AP bits).
 const PROT_NONE: u8 = 0;
@@ -175,6 +181,7 @@ struct VmCtx {
     program_counter: AtomicU32,
     next_program_counter: AtomicU32,
     next_native_program_counter: AtomicU64,
+    memset_continuation: AtomicU64,
 }
 
 impl VmCtx {
@@ -202,6 +209,7 @@ impl VmCtx {
             program_counter: AtomicU32::new(0),
             next_program_counter: AtomicU32::new(0),
             next_native_program_counter: AtomicU64::new(0),
+            memset_continuation: AtomicU64::new(0),
         }
     }
 }
@@ -377,6 +385,9 @@ pub struct Vm {
     has_vcpu: bool,
     #[cfg(target_os = "macos")]
     exit: *const hv::hv_vcpu_exit_t,
+    /// Set when the host edits the stage-1 tables; cleared by `flush_tlb` before the next entry.
+    #[cfg(target_os = "macos")]
+    tlb_dirty: bool,
     /// Held for the VM's whole lifetime: only one HV VM may exist per process, so
     /// concurrent sandboxes serialize here instead of failing. Released on drop.
     #[cfg(target_os = "macos")]
@@ -466,6 +477,7 @@ impl Vm {
             vcpu: 0,
             has_vcpu: false,
             exit: core::ptr::null(),
+            tlb_dirty: false,
             _guard: guard,
         };
 
@@ -562,6 +574,7 @@ impl Vm {
     #[cfg(target_os = "macos")]
     #[allow(clippy::cast_ptr_alignment)]
     fn clear_window(&mut self) {
+        self.tlb_dirty = true;
         let start = GUEST_MEM_OFFSET / GUEST_PAGE_SIZE; // covered-page index of PolkaVM address 0
         let end = start + NUM_PAGES;
         for p in start..end {
@@ -597,6 +610,7 @@ impl Vm {
     #[cfg(target_os = "macos")]
     #[allow(clippy::cast_ptr_alignment)]
     fn map_return_slot(&mut self, slot_va: u64, value: u64) -> Result<(), Error> {
+        self.tlb_dirty = true;
         // Back the containing host page and map it read-only into the guest IPA space.
         let page_base = slot_va & !(HOST_PAGE as u64 - 1);
         if self.slot.is_null() {
@@ -744,6 +758,7 @@ impl Vm {
             (HVC_NOT_ENOUGH_GAS, false),
         ];
         let stubs_off = (STUBS_IPA - STUB_IPA) as usize;
+        debug_assert_eq!(stubs.len() as u64, NUM_BR_STUBS);
         for (nth, (imm, needs_ret)) in stubs.iter().enumerate() {
             let off = stubs_off + nth * STUB_STRIDE as usize;
             // SAFETY: the stubs occupy STUBS_IPA.. within the reserved stub page.
@@ -751,6 +766,18 @@ impl Vm {
                 self.code.add(off).cast::<u32>().write_unaligned(hvc(*imm));
                 let second = if *needs_ret { ret } else { 0x0000_0000u32 }; // udf #0 filler
                 self.code.add(off + 4).cast::<u32>().write_unaligned(second);
+            }
+        }
+
+        // TLB maintenance; the host enters here after editing the page tables (see `flush_tlb`).
+        const TLBI_VMALLE1: u32 = 0xD508_871F;
+        const DSB_ISH: u32 = 0xD503_3B9F;
+        const ISB: u32 = 0xD503_3FDF;
+        let tlbi_off = (TLBI_STUB_IPA - STUB_IPA) as usize;
+        // SAFETY: 4 instructions at TLBI_STUB_IPA, still within the reserved stub page.
+        unsafe {
+            for (nth, word) in [TLBI_VMALLE1, DSB_ISH, ISB, hvc(HVC_TLBI)].into_iter().enumerate() {
+                self.code.add(tlbi_off + nth * 4).cast::<u32>().write_unaligned(word);
             }
         }
     }
@@ -777,6 +804,7 @@ impl Vm {
         if len == 0 {
             return;
         }
+        self.tlb_dirty = true;
         let first = u64::from(va) & !(GUEST_PAGE_SIZE as u64 - 1);
         let last = (u64::from(va) + u64::from(len) - 1) & !(GUEST_PAGE_SIZE as u64 - 1);
         let mut page_va = first;
@@ -799,6 +827,7 @@ impl Vm {
         if len == 0 {
             return;
         }
+        self.tlb_dirty = true;
         let first = u64::from(va) & !(GUEST_PAGE_SIZE as u64 - 1);
         let last = (u64::from(va) + u64::from(len) - 1) & !(GUEST_PAGE_SIZE as u64 - 1);
         let mut page_va = first;
@@ -812,8 +841,23 @@ impl Vm {
             unsafe { entry_ptr.write(entry & !DESC_VALID) };
             page_va += GUEST_PAGE_SIZE as u64;
         }
-        // NOTE: when the guest is actually running this needs a guest TLBI; the host
-        // only mutates the tables while the vCPU is stopped in the current design.
+    }
+
+    /// Invalidate the guest's stage-1 TLB if the host edited the page tables. Only the guest can do
+    /// it, so enter briefly at the TLBI stub: it touches no GPRs and the caller resets PC anyway.
+    #[cfg(target_os = "macos")]
+    fn flush_tlb(&mut self) -> Result<(), Error> {
+        if !self.tlb_dirty {
+            return Ok(());
+        }
+        self.set_reg(hv::HV_REG_PC, TLBI_STUB_IPA)?;
+        match self.run_raw()? {
+            VmExit::HostCall { imm: HVC_TLBI } => {
+                self.tlb_dirty = false;
+                Ok(())
+            }
+            other => Err(alloc::format!("unexpected exit while invalidating the guest TLB: {other:?}").into()),
+        }
     }
 
     /// Host pointer to the guest VmCtx (one 4K page below the guest memory base).
@@ -841,12 +885,14 @@ impl Vm {
                     let esr = exit.exception.syndrome;
                     let ec = (esr >> 26) & 0x3f;
                     match ec {
-                        0x16 => VmExit::HostCall { imm: (esr & 0xffff) as u16 }, // HVC
+                        0x16 => VmExit::HostCall {
+                            imm: (esr & 0xffff) as u16,
+                        }, // HVC
                         0x24 | 0x20 => VmExit::MemoryFault {
                             address: exit.exception.virtual_address,
                             esr,
                         }, // Data / Instruction Abort
-                        0x00 => VmExit::Trap { esr },                            // Undefined instruction
+                        0x00 => VmExit::Trap { esr }, // Undefined instruction
                         _ => VmExit::Exception { ec, esr },
                     }
                 }
@@ -896,7 +942,8 @@ impl Vm {
         {
             let mut value = 0u64;
             // SAFETY: FFI call; `value` is a valid out-pointer.
-            check(unsafe { hv::hv_vcpu_get_sys_reg(self.vcpu, reg, &mut value) }, "hv_vcpu_get_sys_reg")?;
+            let ret = unsafe { hv::hv_vcpu_get_sys_reg(self.vcpu, reg, &mut value) };
+            check(ret, "hv_vcpu_get_sys_reg")?;
             Ok(value)
         }
         #[cfg(not(target_os = "macos"))]
@@ -1108,7 +1155,10 @@ pub struct Sandbox {
     next_program_counter: Option<ProgramCounter>,
     next_program_counter_changed: bool,
     charge_gas_on_entry: bool,
+    /// Aux data the guest may read, as set by `set_accessible_aux_size`.
     accessible_aux_size: u32,
+    aux_data_address: u32,
+    aux_data_full_length: u32,
     heap_base: u32,
     heap_top: u32,
     dynamic_paging: bool,
@@ -1253,6 +1303,8 @@ impl super::Sandbox for Sandbox {
             next_program_counter_changed: false,
             charge_gas_on_entry: true,
             accessible_aux_size: 0,
+            aux_data_address: 0,
+            aux_data_full_length: 0,
             heap_base: 0,
             heap_top: 0,
             dynamic_paging: false,
@@ -1324,6 +1376,9 @@ impl super::Sandbox for Sandbox {
 
             self.heap_base = mmap.heap_base();
             self.heap_top = mmap.heap_base();
+            self.aux_data_address = mmap.aux_data_address();
+            self.aux_data_full_length = mmap.aux_data_size();
+            self.accessible_aux_size = 0;
             self.gas_metering = module.gas_metering();
             self.program = Some(program);
             self.module = Some(module.clone());
@@ -1363,6 +1418,7 @@ impl super::Sandbox for Sandbox {
             next_program_counter: get_field_offset!(VmCtx::new(), |base| base.next_program_counter.as_ptr()),
             program_counter: get_field_offset!(VmCtx::new(), |base| base.program_counter.as_ptr()),
             regs: get_field_offset!(VmCtx::new(), |base| &base.regs),
+            memset_continuation: get_field_offset!(VmCtx::new(), |base| base.memset_continuation.as_ptr()),
             futex: usize::MAX,
         }
     }
@@ -1382,7 +1438,9 @@ impl super::Sandbox for Sandbox {
             let compiled = Self::downcast_module(&module);
 
             if self.next_program_counter_changed {
-                let pc = self.next_program_counter.ok_or_else(|| Error::from("next program counter not set"))?;
+                let pc = self
+                    .next_program_counter
+                    .ok_or_else(|| Error::from("next program counter not set"))?;
                 let Some(address) = compiled.lookup_native_code_address(pc) else {
                     self.program_counter = Some(pc);
                     self.is_program_counter_valid = true;
@@ -1401,7 +1459,9 @@ impl super::Sandbox for Sandbox {
                 unsafe {
                     let vmctx = &mut *self.vm.vmctx_ptr();
                     vmctx.next_program_counter.store(pc.0, core::sync::atomic::Ordering::Relaxed);
-                    vmctx.next_native_program_counter.store(address, core::sync::atomic::Ordering::Relaxed);
+                    vmctx
+                        .next_native_program_counter
+                        .store(address, core::sync::atomic::Ordering::Relaxed);
                 }
                 self.next_program_counter = None;
             }
@@ -1431,6 +1491,19 @@ impl super::Sandbox for Sandbox {
                     *value = vmctx.regs.0[i];
                 }
             }
+
+            // Async metering doesn't trap in-guest; the counter is only checked on the way out.
+            if self.gas_metering == Some(GasMeteringKind::Async) && self.gas < 0 {
+                self.is_program_counter_valid = false;
+                // SAFETY: the VmCtx page is mapped and initialized.
+                unsafe {
+                    (*self.vm.vmctx_ptr())
+                        .next_native_program_counter
+                        .store(0, core::sync::atomic::Ordering::Relaxed);
+                }
+                return Ok(InterruptKind::NotEnoughGas);
+            }
+
             Ok(interrupt)
         }
         #[cfg(not(target_os = "macos"))]
@@ -1486,7 +1559,19 @@ impl super::Sandbox for Sandbox {
     }
 
     fn next_native_program_counter(&self) -> Option<usize> {
-        None
+        #[cfg(target_os = "macos")]
+        {
+            // SAFETY: the VmCtx page is mapped and zeroed before a module is loaded.
+            let vmctx = unsafe { &*self.vm.vmctx_ptr() };
+            match vmctx.next_native_program_counter.load(core::sync::atomic::Ordering::Relaxed) {
+                0 => None,
+                address => Some(address as usize),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
     }
 
     fn set_next_program_counter(&mut self, pc: ProgramCounter) {
@@ -1501,6 +1586,12 @@ impl super::Sandbox for Sandbox {
     }
 
     fn set_accessible_aux_size(&mut self, size: u32) -> Result<(), Self::Error> {
+        if self.aux_data_address == 0 || self.aux_data_full_length == 0 {
+            return Err(Error::from("aux data address or length is zero"));
+        }
+        if size > self.aux_data_full_length {
+            return Err(Error::from("size exceeds the full length of aux data"));
+        }
         self.accessible_aux_size = size;
         Ok(())
     }
@@ -1524,12 +1615,58 @@ impl super::Sandbox for Sandbox {
     fn reset_memory(&mut self) -> Result<(), Self::Error> {
         #[cfg(target_os = "macos")]
         {
-            if let Some(slice) = self.vm.ram_slice_mut(0, RAM_SIZE) {
-                slice.fill(0);
+            if self.module.is_none() {
+                return Err("no module loaded into the sandbox".into());
             }
+            if self.dynamic_paging {
+                return self.free_pages(0x10000, 0xffff_0000);
+            }
+
+            // Static paging: the guest can only have written where the map made it writable, so
+            // restore those regions instead of scrubbing the whole 4 GiB window.
+            let program = self.program.clone().ok_or_else(|| Error::from("no program loaded"))?;
+
+            // Anything `sbrk` grew into lies outside the map; revoke and clear it.
+            // SAFETY: the VmCtx page is mapped and initialized.
+            let (threshold, initial) = unsafe {
+                let vmctx = &*self.vm.vmctx_ptr();
+                (vmctx.heap_info.heap_threshold as u32, vmctx.heap_initial_threshold)
+            };
+            if threshold > initial {
+                let length = threshold - initial;
+                if let Some(slice) = self.vm.ram_slice_mut(initial, length as usize) {
+                    slice.fill(0);
+                }
+                self.vm.invalidate_pages(initial, length);
+                mark_pages(&mut self.page_prot, initial, length, PROT_NONE);
+            }
+
+            for map in &program.0.memory_map {
+                if !map.is_writable || map.length == 0 {
+                    continue;
+                }
+                let Some(slice) = self.vm.ram_slice_mut(map.address, map.length as usize) else {
+                    return Err("memory map region out of range".into());
+                };
+                match &map.data {
+                    Some(data) => slice.copy_from_slice(data),
+                    None => slice.fill(0),
+                }
+            }
+
+            self.heap_top = self.heap_base;
+            // SAFETY: the VmCtx page is mapped and initialized.
+            unsafe {
+                let vmctx = &mut *self.vm.vmctx_ptr();
+                vmctx.heap_info.heap_top = u64::from(self.heap_base);
+                vmctx.heap_info.heap_threshold = u64::from(initial);
+            }
+            return Ok(());
         }
-        self.free_pages(0, 0xffff_f000)?;
-        Ok(())
+        #[cfg(not(target_os = "macos"))]
+        {
+            todo!("hypervisor sandbox: reset_memory needs the KVM backend")
+        }
     }
 
     fn read_memory_into<'slice>(&self, address: u32, slice: &'slice mut [MaybeUninit<u8>]) -> Result<&'slice mut [u8], MemoryAccessError> {
@@ -1573,10 +1710,13 @@ impl super::Sandbox for Sandbox {
         }
         #[cfg(target_os = "macos")]
         {
-            let dst = self.vm.ram_slice_mut(address, data.len()).ok_or(MemoryAccessError::OutOfRangeAccess {
-                address,
-                length: data.len() as u64,
-            })?;
+            let dst = self
+                .vm
+                .ram_slice_mut(address, data.len())
+                .ok_or(MemoryAccessError::OutOfRangeAccess {
+                    address,
+                    length: data.len() as u64,
+                })?;
             dst.copy_from_slice(data);
             Ok(())
         }
@@ -1626,10 +1766,13 @@ impl super::Sandbox for Sandbox {
         }
         #[cfg(target_os = "macos")]
         {
-            let dst = self.vm.ram_slice_mut(address, length as usize).ok_or(MemoryAccessError::OutOfRangeAccess {
-                address,
-                length: u64::from(length),
-            })?;
+            let dst = self
+                .vm
+                .ram_slice_mut(address, length as usize)
+                .ok_or(MemoryAccessError::OutOfRangeAccess {
+                    address,
+                    length: u64::from(length),
+                })?;
             dst.fill(0);
             Ok(())
         }
@@ -1675,8 +1818,27 @@ impl super::Sandbox for Sandbox {
         }
         #[cfg(target_os = "macos")]
         {
-            self.vm.invalidate_pages(address, length);
-            mark_pages(&mut self.page_prot, address, length, PROT_NONE);
+            // Walk the page tables only for pages that are actually present: freeing the whole
+            // window is the common case (`reset_memory`) and is nearly always sparse.
+            let first = address as usize / GUEST_PAGE_SIZE;
+            let last = (address as usize + length as usize - 1) / GUEST_PAGE_SIZE;
+            let mut page = first;
+            while page <= last {
+                if self.page_prot[page] == PROT_NONE {
+                    page += 1;
+                    continue;
+                }
+                let start = page;
+                // Cap a run at 1 GiB so the byte length always fits a `u32`.
+                let limit = core::cmp::min(last, start + (1 << 18) - 1);
+                while page <= limit && self.page_prot[page] != PROT_NONE {
+                    page += 1;
+                }
+                let va = (start * GUEST_PAGE_SIZE) as u32;
+                let len = ((page - start) * GUEST_PAGE_SIZE) as u32;
+                self.vm.invalidate_pages(va, len);
+                self.page_prot[start..page].fill(PROT_NONE);
+            }
             Ok(())
         }
         #[cfg(not(target_os = "macos"))]
@@ -1729,6 +1891,12 @@ impl Sandbox {
     #[cfg(target_os = "macos")]
     fn execute(&mut self, entry: u64) -> Result<InterruptKind, Error> {
         use core::sync::atomic::Ordering;
+
+        self.apply_aux_data_protection();
+
+        // Any page-table edits since the last entry (paging in, protection changes, `free_pages`,
+        // aux data) must be visible to the guest before it runs again.
+        self.vm.flush_tlb()?;
 
         // The guest expects x14 = memory base and x13 = tmp_reg on entry (set by run).
         let tmp_reg = {
@@ -1792,6 +1960,14 @@ impl Sandbox {
         use core::sync::atomic::Ordering;
 
         let ec = (esr >> 26) & 0x3f;
+        // EC 0x00 ("unknown") is an undefined instruction: either the sync gas-metering `udf` or
+        // executing garbage. Only the former has a negative gas counter.
+        if ec == 0x00 {
+            if let Some(interrupt) = self.handle_gas_trap(elr)? {
+                return Ok(interrupt);
+            }
+            return Ok(InterruptKind::Trap);
+        }
         // Data abort (0x24/0x25) or instruction abort (0x20/0x21).
         if !matches!(ec, 0x20 | 0x21 | 0x24 | 0x25) {
             return Ok(InterruptKind::Trap);
@@ -1808,13 +1984,7 @@ impl Sandbox {
         let module = self.module.clone().ok_or_else(|| Error::from("fault: no module"))?;
         let compiled = <Self as super::Sandbox>::downcast_module(&module);
 
-        // Snapshot the live guest registers (in native x0..x12) into the VmCtx so the host can
-        // read/edit them and `sysenter` restores them on resume.
-        for reg in Reg::ALL {
-            let value = self.vm.get_reg(to_native_reg(reg) as u32)?;
-            // SAFETY: the VmCtx page is mapped and initialized.
-            unsafe { (*self.vm.vmctx_ptr()).regs.0[reg as usize] = value };
-        }
+        self.snapshot_regs()?;
 
         // Map the faulting native PC to a guest program counter and the native address to resume
         // at (start of that instruction, so re-running retries the access).
@@ -1841,6 +2011,77 @@ impl Sandbox {
             page_size: GUEST_PAGE_SIZE as u32,
             is_write_protected,
         }))
+    }
+
+    /// Guest may read only the first `accessible_aux_size` bytes of aux data; the rest faults. Like
+    /// generic's `set_aux_data_permission_for_guest`; the host is unaffected (it uses its own map).
+    #[cfg(target_os = "macos")]
+    fn apply_aux_data_protection(&mut self) {
+        if self.aux_data_full_length == 0 || self.dynamic_paging {
+            return;
+        }
+        self.vm.invalidate_pages(self.aux_data_address, self.aux_data_full_length);
+        if self.accessible_aux_size > 0 {
+            self.vm
+                .set_page_protection(self.aux_data_address, self.accessible_aux_size, PTE_AP_RO_EL1);
+        }
+    }
+
+    /// Copy the live guest registers into the VmCtx so the host can read/edit them and `sysenter`
+    /// restores them. The `hvc` trampolines do this themselves; the EL1 vector does not.
+    #[cfg(target_os = "macos")]
+    fn snapshot_regs(&mut self) -> Result<(), Error> {
+        for reg in Reg::ALL {
+            let value = self.vm.get_reg(to_native_reg(reg) as u32)?;
+            // SAFETY: the VmCtx page is mapped and initialized.
+            unsafe { (*self.vm.vmctx_ptr()).regs.0[reg as usize] = value };
+        }
+        Ok(())
+    }
+
+    /// The sync metering stub's `udf` fired: refund the charged gas, snapshot registers and re-enter
+    /// at the stub, as generic's `handle_guest_signal` does. `None` if it wasn't a gas trap.
+    #[cfg(target_os = "macos")]
+    fn handle_gas_trap(&mut self, elr: u64) -> Result<Option<InterruptKind>, Error> {
+        use core::sync::atomic::Ordering;
+
+        // SAFETY: the VmCtx page is mapped and initialized.
+        let gas = unsafe { (*self.vm.vmctx_ptr()).gas.load(Ordering::Relaxed) };
+        if self.gas_metering.is_none() || gas >= 0 {
+            return Ok(None);
+        }
+
+        let module = self.module.clone().ok_or_else(|| Error::from("gas trap: no module"))?;
+        let compiled = <Self as super::Sandbox>::downcast_module(&module);
+        // The `udf` sits a fixed distance into the stub; back up to its first instruction so
+        // re-entering recharges the refunded gas.
+        let machine_code_offset = elr.wrapping_sub(compiled.native_code_origin);
+        let Some(offset) = machine_code_offset.checked_sub(crate::compiler::GAS_METERING_TRAP_OFFSET) else {
+            return Ok(None);
+        };
+        let Some(pc) = compiled.program_counter_by_native_code_offset(offset, false) else {
+            return Ok(None);
+        };
+
+        let cost = crate::compiler::extract_gas_cost::<Self>(compiled.machine_code(), offset as usize);
+        self.snapshot_regs()?;
+        // SAFETY: the VmCtx page is mapped and initialized.
+        unsafe {
+            let vmctx = &mut *self.vm.vmctx_ptr();
+            vmctx.gas.fetch_add(i64::from(cost), Ordering::Relaxed);
+            vmctx.program_counter.store(pc.0, Ordering::Relaxed);
+            vmctx.next_program_counter.store(pc.0, Ordering::Relaxed);
+            vmctx
+                .next_native_program_counter
+                .store(compiled.native_code_origin + offset, Ordering::Relaxed);
+        }
+        self.program_counter = Some(pc);
+        self.is_program_counter_valid = true;
+        self.next_program_counter = Some(pc);
+        self.next_program_counter_changed = false;
+        self.charge_gas_on_entry = false;
+
+        Ok(Some(InterruptKind::NotEnoughGas))
     }
 
     /// Heap-growth helper shared by the `sbrk` hvc path: returns the new heap top or 0.
