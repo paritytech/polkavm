@@ -94,6 +94,95 @@ impl Size {
     }
 }
 
+/// Index extension for register-offset loads and stores (the A64 `option` field).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Index {
+    /// 64-bit index, no extension.
+    Lsl = 0b011,
+    /// 32-bit index, zero-extended — what a wrapped guest address needs.
+    Uxtw = 0b010,
+}
+
+impl Index {
+    #[inline]
+    pub const fn raw(self) -> u32 {
+        self as u32
+    }
+}
+
+/// An immediate encodable by the logical (bitmask) instructions, as the `N:immr:imms` fields.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct LogicalImm(u32);
+
+impl LogicalImm {
+    /// Position of the fields within the instruction word: N at 22, immr at 21:16, imms at 15:10.
+    #[inline]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+}
+
+const fn is_mask(value: u64) -> bool {
+    value != 0 && value.wrapping_add(1) & value == 0
+}
+
+const fn is_shifted_mask(value: u64) -> bool {
+    value != 0 && is_mask(value.wrapping_sub(1) | value)
+}
+
+/// Try to encode `value` as a logical (bitmask) immediate: a rotated run of ones, replicated across
+/// the register. Ported from LLVM's `processLogicalImmediate`; `None` when no encoding exists.
+pub const fn logical_imm(value: u64, size: RegSize) -> Option<LogicalImm> {
+    let width = match size {
+        RegSize::W => 32,
+        RegSize::X => 64,
+    };
+    if value == 0 || value == u64::MAX {
+        return None;
+    }
+    if width != 64 && (value >> width != 0 || value == u64::MAX >> (64 - width)) {
+        return None;
+    }
+
+    // Narrow down to the smallest element that repeats to fill the register.
+    let mut element = width;
+    loop {
+        element /= 2;
+        let mask = (1u64 << element) - 1;
+        if value & mask != (value >> element) & mask {
+            element *= 2;
+            break;
+        }
+        if element <= 2 {
+            break;
+        }
+    }
+
+    // Rotate that element so it reads 0^m 1^n, and record how far we had to go.
+    let mask = u64::MAX >> (64 - element);
+    let mut value = value & mask;
+    let rotation;
+    let ones;
+    if is_shifted_mask(value) {
+        rotation = value.trailing_zeros();
+        ones = (value >> rotation).trailing_ones();
+    } else {
+        value |= !mask;
+        if !is_shifted_mask(!value) {
+            return None;
+        }
+        let leading_ones = value.leading_ones();
+        rotation = 64 - leading_ones;
+        ones = leading_ones + value.trailing_ones() - (64 - element);
+    }
+
+    let immr = (element - rotation) & (element - 1);
+    // Zeroes below the element's top bit, ones above it, then the run length in the low bits.
+    let imms = (!(element - 1) << 1) | (ones - 1);
+    let n = ((imms >> 6) & 1) ^ 1;
+    Some(LogicalImm((n << 22) | ((immr & 0x3f) << 16) | ((imms & 0x3f) << 10)))
+}
+
 /// Condition codes for `B.cond` and conditional selects.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Cond {
@@ -306,6 +395,9 @@ a64_inst! {
     // ---- PC-relative address ----
     // 0 immlo(2) 10000 immhi(19) Rd ; 21-bit signed byte offset relative to this instruction.
     adr(rd: Reg, label: Label) => 0x1000_0000 | rd.idx(), fixup = Some((label, FixupKind::aarch64_adr()));
+    // 1 immlo(2) 10000 immhi(19) Rd ; 21-bit signed 4 KiB-page offset (±4 GiB). Yields the base of
+    // the target's page, so the caller must add the low 12 bits (or know the target is 4K-aligned).
+    adrp(rd: Reg, label: Label) => 0x9000_0000 | rd.idx(), fixup = Some((label, FixupKind::aarch64_adrp()));
 
     // ---- Unconditional branch (register) ----
     br(rn: Reg) => 0xD61F0000 | (rn.idx() << 5);
@@ -368,6 +460,20 @@ a64_inst! {
     ubfm(size: RegSize, rd: Reg, rn: Reg, immr: u32, imms: u32) =>
         (size.sf() << 31) | (0b10 << 29) | (0b100110 << 23) | (size.sf() << 22) | ((immr & 0x3f) << 16) | ((imms & 0x3f) << 10) | (rn.idx() << 5) | rd.idx();
 
+    // ---- Extract register (EXTR); `extr rd, rn, rn, #n` is `ror rd, rn, #n` ----
+    // sf 00 100111 N 0 Rm imms(6) Rn Rd
+    extr(size: RegSize, rd: Reg, rn: Reg, rm: Reg, lsb: u32) =>
+        (size.sf() << 31) | (0b100111 << 23) | (size.sf() << 22) | (rm.idx() << 16) | ((lsb & 0x3f) << 10) | (rn.idx() << 5) | rd.idx();
+
+    // ---- Logical (immediate) ----
+    // sf opc(2) 100100 N immr(6) imms(6) Rn Rd ; the immediate is a bitmask pattern, see `logical_imm`.
+    and_imm(size: RegSize, rd: Reg, rn: Reg, imm: LogicalImm) =>
+        (size.sf() << 31) | (0b100100 << 23) | imm.bits() | (rn.idx() << 5) | rd.idx();
+    orr_imm(size: RegSize, rd: Reg, rn: Reg, imm: LogicalImm) =>
+        (size.sf() << 31) | (0b01 << 29) | (0b100100 << 23) | imm.bits() | (rn.idx() << 5) | rd.idx();
+    eor_imm(size: RegSize, rd: Reg, rn: Reg, imm: LogicalImm) =>
+        (size.sf() << 31) | (0b10 << 29) | (0b100100 << 23) | imm.bits() | (rn.idx() << 5) | rd.idx();
+
     // ---- Conditional select ----
     // sf 0 0 11010100 Rm cond op2(2) Rn Rd
     csel(size: RegSize, rd: Reg, rn: Reg, rm: Reg, cond: Cond) =>
@@ -378,18 +484,21 @@ a64_inst! {
     csinv(size: RegSize, rd: Reg, rn: Reg, rm: Reg, cond: Cond) =>
         0x5A80_0000 | (size.sf() << 31) | (rm.idx() << 16) | (cond.raw() << 12) | (rn.idx() << 5) | rd.idx();
 
-    // ---- Load/Store register (register offset), option = LSL/UXTX (#0) ----
-    // size 111 0 00 opc 1 Rm option(3)=011 S=0 10 Rn Rt
-    str_reg(size: Size, rt: Reg, rn: Reg, rm: Reg) =>
-        (size.raw() << 30) | (0b111 << 27) | (1 << 21) | (rm.idx() << 16) | (0b011 << 13) | (0b10 << 10) | (rn.idx() << 5) | rt.idx();
-    ldr_reg(size: Size, rt: Reg, rn: Reg, rm: Reg) =>
-        (size.raw() << 30) | (0b111 << 27) | (0b01 << 22) | (1 << 21) | (rm.idx() << 16) | (0b011 << 13) | (0b10 << 10) | (rn.idx() << 5) | rt.idx();
+    // ---- Load/Store register (register offset), scale S = 0 ----
+    // size 111 0 00 opc 1 Rm option(3) S=0 10 Rn Rt
+    str_reg(size: Size, rt: Reg, rn: Reg, rm: Reg, index: Index) =>
+        (size.raw() << 30) | (0b111 << 27) | (1 << 21) | (rm.idx() << 16) | (index.raw() << 13) | (0b10 << 10) | (rn.idx() << 5) | rt.idx();
+    ldr_reg(size: Size, rt: Reg, rn: Reg, rm: Reg, index: Index) =>
+        (size.raw() << 30) | (0b111 << 27) | (0b01 << 22) | (1 << 21) | (rm.idx() << 16) | (index.raw() << 13) | (0b10 << 10) | (rn.idx() << 5) | rt.idx();
     // Sign-extending load (unsigned immediate offset) to a 32-bit register (opc = 11).
     ldrs32_imm(size: Size, rt: Reg, rn: Reg, imm12_scaled: u32) =>
         (size.raw() << 30) | (0b111 << 27) | (0b01 << 24) | (0b11 << 22) | ((imm12_scaled & 0xfff) << 10) | (rn.idx() << 5) | rt.idx();
+    // Sign-extending load (register offset) into a 32-bit register (opc = 11).
+    ldrs32_reg(size: Size, rt: Reg, rn: Reg, rm: Reg, index: Index) =>
+        (size.raw() << 30) | (0b111 << 27) | (0b11 << 22) | (1 << 21) | (rm.idx() << 16) | (index.raw() << 13) | (0b10 << 10) | (rn.idx() << 5) | rt.idx();
     // Sign-extending load (register offset) into a 64-bit register (opc = 10).
-    ldrs64_reg(size: Size, rt: Reg, rn: Reg, rm: Reg) =>
-        (size.raw() << 30) | (0b111 << 27) | (0b10 << 22) | (1 << 21) | (rm.idx() << 16) | (0b011 << 13) | (0b10 << 10) | (rn.idx() << 5) | rt.idx();
+    ldrs64_reg(size: Size, rt: Reg, rn: Reg, rm: Reg, index: Index) =>
+        (size.raw() << 30) | (0b111 << 27) | (0b10 << 22) | (1 << 21) | (rm.idx() << 16) | (index.raw() << 13) | (0b10 << 10) | (rn.idx() << 5) | rt.idx();
 
     // ---- NEON: used for popcount (cnt). SIMD registers are passed as raw indices 0..31. ----
     fmov_gpr_to_s(sd: u32, wn: Reg) => 0x1E27_0000 | (wn.idx() << 5) | sd; // 32-bit GPR -> SIMD
@@ -478,8 +587,48 @@ mod tests {
         assert_eq!(word(bic_reg(RegSize::X, Reg::X0, Reg::X1, Reg::X2)), 0x8A22_0020);
         assert_eq!(word(orn_reg(RegSize::X, Reg::X0, Reg::X1, Reg::X2)), 0xAA22_0020);
         assert_eq!(word(ands_reg(RegSize::X, Reg::X0, Reg::X1, Reg::X2)), 0xEA02_0020);
-        assert_eq!(word(ldr_reg(Size::U64, Reg::X0, Reg::X1, Reg::X2)), 0xF862_6820);
-        assert_eq!(word(str_reg(Size::U64, Reg::X0, Reg::X1, Reg::X2)), 0xF822_6820);
+        assert_eq!(word(ldr_reg(Size::U64, Reg::X0, Reg::X1, Reg::X2, Index::Lsl)), 0xF862_6820);
+        assert_eq!(word(str_reg(Size::U64, Reg::X0, Reg::X1, Reg::X2, Index::Lsl)), 0xF822_6820);
+        // Cross-checked against `clang -x assembler` on this host.
+        assert_eq!(word(ldr_reg(Size::U64, Reg::X0, Reg::X14, Reg::X1, Index::Uxtw)), 0xF861_49C0);
+        assert_eq!(word(str_reg(Size::U64, Reg::X0, Reg::X14, Reg::X1, Index::Uxtw)), 0xF821_49C0);
+        assert_eq!(word(ldr_reg(Size::U8, Reg::X0, Reg::X14, Reg::X1, Index::Uxtw)), 0x3861_49C0);
+        assert_eq!(word(ldrs64_reg(Size::U32, Reg::X0, Reg::X14, Reg::X1, Index::Uxtw)), 0xB8A1_49C0);
+        assert_eq!(word(ldrs64_reg(Size::U8, Reg::X0, Reg::X14, Reg::X1, Index::Uxtw)), 0x38A1_49C0);
+        assert_eq!(word(ldrs32_reg(Size::U8, Reg::X0, Reg::X14, Reg::X1, Index::Uxtw)), 0x38E1_49C0);
+        assert_eq!(word(ldrs32_reg(Size::U16, Reg::X0, Reg::X14, Reg::X1, Index::Uxtw)), 0x78E1_49C0);
+        assert_eq!(word(ldr_imm(Size::U64, Reg::X0, Reg::X14, 1)), 0xF940_05C0); // ldr x0,[x14,#8]
+        assert_eq!(word(ldr_imm(Size::U8, Reg::X0, Reg::X14, 4095)), 0x397F_FDC0);
+        assert_eq!(word(extr(RegSize::X, Reg::X0, Reg::X1, Reg::X1, 3)), 0x93C1_0C20); // ror x0,x1,#3
+        assert_eq!(word(ubfm(RegSize::X, Reg::X0, Reg::X1, 61, 60)), 0xD37D_F020); // lsl x0,x1,#3
+        assert_eq!(word(ubfm(RegSize::X, Reg::X0, Reg::X1, 3, 63)), 0xD343_FC20); // lsr x0,x1,#3
+        assert_eq!(word(sbfm(RegSize::X, Reg::X0, Reg::X1, 3, 63)), 0x9343_FC20); // asr x0,x1,#3
+        assert_eq!(word(ubfm(RegSize::W, Reg::X0, Reg::X1, 29, 28)), 0x531D_7020);
+        // lsl w0,w1,#3
+    }
+
+    #[test]
+    fn logical_immediates_match_known_good() {
+        // Cross-checked against `clang -x assembler` on this host.
+        let x = |value| logical_imm(value, RegSize::X).unwrap();
+        assert_eq!(word(and_imm(RegSize::X, Reg::X0, Reg::X1, x(0xff))), 0x9240_1C20);
+        assert_eq!(word(orr_imm(RegSize::X, Reg::X0, Reg::X1, x(0xff))), 0xB240_1C20);
+        assert_eq!(word(eor_imm(RegSize::X, Reg::X0, Reg::X1, x(0xff))), 0xD240_1C20);
+        assert_eq!(word(and_imm(RegSize::X, Reg::X2, Reg::X3, x(0xffff_ffff_ffff_f000))), 0x9274_CC62);
+        assert_eq!(word(orr_imm(RegSize::X, Reg::X0, Reg::X1, x(0x5555_5555_5555_5555))), 0xB200_F020);
+        let w = logical_imm(0xff, RegSize::W).unwrap();
+        assert_eq!(word(and_imm(RegSize::W, Reg::X0, Reg::X1, w)), 0x1200_1C20);
+    }
+
+    #[test]
+    fn logical_immediates_reject_unencodable() {
+        assert!(logical_imm(0, RegSize::X).is_none());
+        assert!(logical_imm(u64::MAX, RegSize::X).is_none());
+        assert!(logical_imm(0xff, RegSize::W).is_some());
+        assert!(logical_imm(0x1_0000_0000, RegSize::W).is_none()); // doesn't fit 32 bits
+        assert!(logical_imm(0xffff_ffff, RegSize::W).is_none()); // all-ones in W
+        assert!(logical_imm(0x1234_5678, RegSize::X).is_none()); // not a rotated run of ones
+        assert!(logical_imm(0x8000_0000_0000_0001, RegSize::X).is_some()); // wraps around
         assert_eq!(word(fmov_gpr_to_s(0, Reg::X1)), 0x1E27_0020);
         assert_eq!(word(fmov_gpr_to_d(0, Reg::X1)), 0x9E67_0020);
         assert_eq!(word(fmov_s_to_gpr(Reg::X0, 1)), 0x1E26_0020);
@@ -521,6 +670,65 @@ mod tests {
         assert_eq!(immlo, 0);
         assert_eq!(immhi, 3);
         assert_eq!(w & 0x1f, 0); // Rd = x0
+    }
+
+    #[test]
+    fn adrp_fixup_is_page_relative() {
+        let mut asm = crate::Assembler::new();
+        asm.set_origin(0x1000); // pc page = 1
+        let target = asm.forward_declare_label();
+        asm.push(adrp(Reg::X0, target));
+        asm.resize(0x3000, 0); // target lands at 0x1000 + 0x3000 = 0x4000, page 4
+        asm.define_label(target);
+        let code = asm.finalize();
+        let w = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
+        let immlo = (w >> 29) & 0b11;
+        let immhi = (w >> 5) & 0x7_ffff;
+        assert_eq!((immhi << 2) | immlo, 3); // +3 pages
+        assert_eq!(w & 0x9f00_0000, 0x9000_0000); // ADRP
+        assert_eq!(w & 0x1f, 0); // Rd = x0
+    }
+
+    #[test]
+    fn adrp_reaches_far_beyond_adr_range() {
+        // The same distance would blow ADR's ±1 MiB range; ADRP encodes it as pages.
+        let mut asm = crate::Assembler::new();
+        let target = asm.forward_declare_label();
+        asm.push(adrp(Reg::X0, target));
+        asm.resize(64 * 1024 * 1024, 0);
+        asm.define_label(target);
+        let code = asm.finalize();
+        let w = u32::from_le_bytes([code[0], code[1], code[2], code[3]]);
+        let immlo = (w >> 29) & 0b11;
+        let immhi = (w >> 5) & 0x7_ffff;
+        assert_eq!((immhi << 2) | immlo, (64 * 1024 * 1024) >> 12);
+    }
+
+    #[test]
+    fn out_of_range_fixups_are_reported_not_panicked() {
+        // `b` reaches ±128 MiB and `adrp` ±4 GiB; past that `try_finalize` must return an error so
+        // the caller can turn it into a compilation failure.
+        let mut asm = crate::Assembler::new();
+        let target = asm.forward_declare_label();
+        asm.push(b(target));
+        asm.resize(256 * 1024 * 1024, 0);
+        asm.define_label(target);
+        assert_eq!(asm.try_finalize().err(), Some(crate::OutOfRange("jump")));
+
+        let mut asm = crate::Assembler::new();
+        let target = asm.forward_declare_label();
+        asm.push(adr(Reg::X0, target));
+        asm.resize(2 * 1024 * 1024, 0);
+        asm.define_label(target);
+        assert_eq!(asm.try_finalize().err(), Some(crate::OutOfRange("ADR")));
+
+        // Within range: still fine.
+        let mut asm = crate::Assembler::new();
+        let target = asm.forward_declare_label();
+        asm.push(b(target));
+        asm.resize(1024, 0);
+        asm.define_label(target);
+        assert!(asm.try_finalize().is_ok());
     }
 
     #[test]

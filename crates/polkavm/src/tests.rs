@@ -117,7 +117,11 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
 
 fn get_native_page_size() -> usize {
     if_compiler_is_supported! {
-        { crate::sandbox::get_native_page_size() } else { 4096 }
+        {
+            // Normally primed by `Engine::new`; tests may ask before building an engine.
+            crate::sandbox::init_native_page_size();
+            crate::sandbox::get_native_page_size()
+        } else { 4096 }
     }
 }
 
@@ -398,9 +402,6 @@ mod aarch64_backend {
                 return (crate::SandboxKind::Hypervisor, 4096);
             }
         }
-        // `get_native_page_size` is normally primed by `Engine::new`, which runs after this;
-        // prime it here so querying the page size before the engine exists is safe.
-        crate::sandbox::init_native_page_size();
         (crate::SandboxKind::Generic, get_native_page_size().try_into().unwrap())
     }
 
@@ -440,6 +441,42 @@ mod aarch64_backend {
         let (interrupt, instance) = run(InstructionSetKind::Latest32, 0, code, inputs);
         assert!(matches!(interrupt, InterruptKind::Trap), "unexpected interrupt: {interrupt:?}");
         instance
+    }
+
+    #[test]
+    fn far_jump_table_is_reachable() {
+        // The jump table sits past the end of the code, so with >1 MiB of code the indirect-jump
+        // `adrp` needs a multi-page offset; `adr` (±1 MiB) used to panic here. Block 0 is a `ret`,
+        // which goes through the table, so this also checks the computed base is right.
+        let _ = env_logger::try_init();
+        let mut code = vec![asm::ret()];
+        for _ in 0..200_000 {
+            code.push(asm::add_imm_32(A0, A0, 1));
+        }
+        code.push(asm::trap());
+
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&code, &[]);
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+        let (sandbox, page_size) = select_sandbox();
+        let mut config = Config::default();
+        config.set_allow_experimental(true);
+        config.set_backend(Some(BackendKind::Compiler));
+        config.set_sandbox(Some(sandbox));
+        let engine = Engine::new(&config).unwrap();
+        let mut module_config = ModuleConfig::default();
+        module_config.set_page_size(page_size);
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let native_len = module.machine_code().map_or(0, |code| code.len());
+        assert!(native_len > 0x100000, "test is pointless below 1 MiB of code: {native_len}");
+
+        let entry = module.exports().find(|e| e == "main").unwrap().program_counter();
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(entry);
+        assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
     }
 
     #[test]
@@ -2025,7 +2062,7 @@ fn dynamic_paging_read_at_top_of_address_space(mut engine_config: Config, isa: I
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(offsets[0]);
     let segfault = expect_segfault(instance.run().unwrap());
-    assert_eq!(segfault.page_address, 0xffffffff & !(page_size - 1)); // 0xfffff000 at 4K
+    assert_eq!(segfault.page_address, !(page_size - 1)); // 0xfffff000 at 4K
 }
 
 fn dynamic_paging_read_with_upper_bits_set(mut engine_config: Config, isa: InstructionSetKind) {
@@ -2970,8 +3007,11 @@ fn pinky_standard(config: Config, isa: InstructionSetKind) {
     pinky_impl(config, isa)
 }
 
-// macOS has 16K native pages; recompiler tests using the default 4K guest page can't run faithfully
-// there. Such tests skip on macOS (they pass on 4K-page hosts, including the production target).
+// The generic sandbox enforces guest page protections with `mprotect`, so its granularity is the
+// *host* page size. On macOS (16K) a 4K-page module is under-protected by up to 12K: accesses past a
+// guest page boundary don't fault until the next 16K boundary, so tests asserting an out-of-bounds
+// trap fail. They pass on 4K-page hosts (including the production target); running them faithfully
+// on macOS needs the hypervisor sandbox, whose stage-1 MMU protects at a real 4K granule.
 fn skip_on_16k_native_page(config: &Config) -> bool {
     // `get_native_page_size()` returns 4096 when the compiler/sandbox isn't built, so this is false there.
     if_compiler_is_supported! {
@@ -6204,11 +6244,23 @@ assert_send_sync! {
 // Smoke test for the Hypervisor sandbox execution path. Requires the test process to be
 // codesigned with com.apple.security.hypervisor (see ci/hypervisor/sign-and-run.sh); without
 // it `hv_vm_create` returns HV_DENIED and instantiation fails.
-#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "hypervisor-sandbox", feature = "generic-sandbox"))]
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "hypervisor-sandbox"))]
 mod aarch64_hypervisor {
     use super::*;
     use crate::{RawInstance, RegValue};
     use polkavm_common::program::Instruction;
+
+    /// `hv_vm_create` needs the `com.apple.security.hypervisor` entitlement, which a plain
+    /// `cargo test` binary doesn't have. Without it there is nothing to exercise, so skip instead of
+    /// failing; `ci/jobs/build-and-test-macos-hypervisor.sh` runs these against a signed binary.
+    fn hypervisor_unavailable() -> bool {
+        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let available = *AVAILABLE.get_or_init(|| crate::sandbox::hypervisor::Vm::new().is_ok());
+        if !available {
+            eprintln!("skipping: the test binary lacks the hypervisor entitlement");
+        }
+        !available
+    }
 
     fn run_hv(code: &[Instruction], inputs: &[(Reg, RegValue)]) -> (InterruptKind, RawInstance) {
         let _ = env_logger::try_init();
@@ -6236,8 +6288,214 @@ mod aarch64_hypervisor {
         (instance.run().unwrap(), instance)
     }
 
+    /// `reset_memory` must restore the initial contents *and* leave the instance runnable: the
+    /// static map protections have to survive the reset.
+    #[test]
+    fn hv_reset_memory_keeps_instance_usable() {
+        if hypervisor_unavailable() {
+            return;
+        }
+        let _ = env_logger::try_init();
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_rw_data_size(4096);
+        builder.set_code(&[asm::store_imm_indirect_u32(A0, 0, 0x1234_5678), asm::ret()], &[]);
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+        let mut config = Config::default();
+        config.set_allow_experimental(true);
+        config.set_backend(Some(BackendKind::Compiler));
+        config.set_sandbox(Some(crate::SandboxKind::Hypervisor));
+        let engine = Engine::new(&config).unwrap();
+        let mut module_config = ModuleConfig::default();
+        module_config.set_page_size(4096);
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let entry = module.exports().find(|e| e == "main").unwrap().program_counter();
+        let rw = module.memory_map().rw_data_address();
+
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(A0, u64::from(rw));
+        instance.set_next_program_counter(entry);
+        assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+        assert_eq!(instance.read_memory(rw, 4).unwrap(), 0x1234_5678u32.to_le_bytes());
+
+        instance.reset_memory().unwrap();
+        assert_eq!(instance.read_memory(rw, 4).unwrap(), [0, 0, 0, 0]);
+
+        // The guest must still be able to write there afterwards.
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(A0, u64::from(rw));
+        instance.set_next_program_counter(entry);
+        let interrupt = instance.run().unwrap();
+        assert!(matches!(interrupt, InterruptKind::Finished), "after reset: {interrupt:?}");
+        assert_eq!(instance.read_memory(rw, 4).unwrap(), 0x1234_5678u32.to_le_bytes());
+    }
+
+    /// `set_accessible_aux_size` must actually bind the guest: reads inside the accessible prefix
+    /// work, reads past it trap, and writes are refused even inside it (aux data is read-only).
+    #[test]
+    fn hv_aux_data_is_bounded() {
+        if hypervisor_unavailable() {
+            return;
+        }
+        let _ = env_logger::try_init();
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::load_indirect_u8(S0, A0, 0), asm::ret()], &[]);
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+        let mut config = Config::default();
+        config.set_allow_experimental(true);
+        config.set_backend(Some(BackendKind::Compiler));
+        config.set_sandbox(Some(crate::SandboxKind::Hypervisor));
+        let engine = Engine::new(&config).unwrap();
+        let mut module_config = ModuleConfig::default();
+        module_config.set_page_size(4096);
+        module_config.set_aux_data_size(4096 * 2);
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let entry = module.exports().find(|e| e == "main").unwrap().program_counter();
+        let aux = module.memory_map().aux_data_address();
+
+        let mut instance = module.instantiate().unwrap();
+        // Only the first page is accessible to the guest.
+        instance.set_accessible_aux_size(4096).unwrap();
+        instance.write_memory(aux, &[0x5a]).unwrap(); // host can always write it
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+
+        // Inside the accessible prefix: the load succeeds.
+        instance.set_reg(A0, u64::from(aux));
+        instance.set_next_program_counter(entry);
+        let interrupt = instance.run().unwrap();
+        assert!(matches!(interrupt, InterruptKind::Finished), "in-bounds aux read: {interrupt:?}");
+        assert_eq!(instance.reg(S0), 0x5a);
+
+        // Past it: the load traps.
+        instance.set_reg(A0, u64::from(aux + 4096));
+        instance.set_next_program_counter(entry);
+        let interrupt = instance.run().unwrap();
+        assert!(matches!(interrupt, InterruptKind::Trap), "out-of-bounds aux read: {interrupt:?}");
+
+        // Shrinking to zero closes the prefix too.
+        instance.set_accessible_aux_size(0).unwrap();
+        instance.set_reg(A0, u64::from(aux));
+        instance.set_next_program_counter(entry);
+        let interrupt = instance.run().unwrap();
+        assert!(
+            matches!(interrupt, InterruptKind::Trap),
+            "aux read after shrinking to 0: {interrupt:?}"
+        );
+
+        assert!(instance.set_accessible_aux_size(4096 * 3).is_err()); // beyond the region
+    }
+
+    /// Revoking a page the guest has already touched must actually stop it: the stage-1 TLB holds
+    /// the old entry, so the host has to invalidate it before re-entering. Without the TLBI the
+    /// second store silently succeeds.
+    #[test]
+    fn hv_revoked_page_faults_again() {
+        if hypervisor_unavailable() {
+            return;
+        }
+        let _ = env_logger::try_init();
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.add_import(b"hostfn");
+        // store; hand control back to the host; store again.
+        builder.set_code(
+            &[
+                asm::store_imm_indirect_u32(A0, 0, 0x1111_1111),
+                asm::ecalli(0),
+                asm::store_imm_indirect_u32(A0, 0, 0x2222_2222),
+                asm::ret(),
+            ],
+            &[],
+        );
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+        let mut config = Config::default();
+        config.set_allow_experimental(true);
+        config.set_backend(Some(BackendKind::Compiler));
+        config.set_sandbox(Some(crate::SandboxKind::Hypervisor));
+        config.set_allow_dynamic_paging(true);
+        let engine = Engine::new(&config).unwrap();
+        let mut module_config = ModuleConfig::default();
+        module_config.set_page_size(4096);
+        module_config.set_dynamic_paging(true);
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let entry = module.exports().find(|e| e == "main").unwrap().program_counter();
+
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(A0, 0x20000);
+        instance.set_next_program_counter(entry);
+
+        // Page in on the first fault, then let the store land -- this is what populates the TLB.
+        assert!(matches!(instance.run().unwrap(), InterruptKind::Segfault(_)));
+        instance
+            .zero_memory_with_memory_protection(0x20000, 4096, MemoryProtection::ReadWrite)
+            .unwrap();
+        assert!(matches!(instance.run().unwrap(), InterruptKind::Ecalli(0)));
+        assert_eq!(instance.read_memory(0x20000, 4).unwrap(), 0x1111_1111u32.to_le_bytes());
+
+        // Revoke the page; the second store must fault instead of overwriting it.
+        instance.free_pages(0x20000, 4096).unwrap();
+        instance.set_next_program_counter(instance.next_program_counter().unwrap());
+        let interrupt = instance.run().unwrap();
+        assert!(
+            matches!(interrupt, InterruptKind::Segfault(ref s) if s.page_address == 0x20000),
+            "revoked page did not fault: {interrupt:?}"
+        );
+        assert!(instance.read_memory(0x20000, 4).is_err()); // unmapped again
+    }
+
+    /// Sync metering runs out mid-guest: the `udf` in the metering stub must come back as
+    /// `NotEnoughGas` with the gas refunded and register state intact, exactly like the generic
+    /// sandbox (which the same program is checked against).
+    #[cfg(feature = "generic-sandbox")] // compares against the generic sandbox
+    #[test]
+    fn hv_gas_exhaustion_matches_generic() {
+        if hypervisor_unavailable() {
+            return;
+        }
+        let _ = env_logger::try_init();
+        let code = [asm::add_imm_32(A0, A0, 1), asm::jump(0)]; // loops until the gas runs out
+        let mut results = Vec::new();
+        for sandbox in [crate::SandboxKind::Generic, crate::SandboxKind::Hypervisor] {
+            let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+            builder.add_export_by_basic_block(0, b"main");
+            builder.set_code(&code, &[]);
+            let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+            let mut config = Config::default();
+            config.set_allow_experimental(true);
+            config.set_backend(Some(BackendKind::Compiler));
+            config.set_sandbox(Some(sandbox));
+            let engine = Engine::new(&config).unwrap();
+            let mut module_config = ModuleConfig::default();
+            module_config.set_page_size(4096);
+            module_config.set_gas_metering(Some(crate::GasMeteringKind::Sync));
+            let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+            let entry = module.exports().find(|e| e == "main").unwrap().program_counter();
+
+            let mut instance = module.instantiate().unwrap();
+            instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+            instance.set_gas(100);
+            instance.set_next_program_counter(entry);
+            let interrupt = instance.run().unwrap();
+            assert!(matches!(interrupt, InterruptKind::NotEnoughGas), "{sandbox:?}: {interrupt:?}");
+            assert!(instance.gas() >= 0, "{sandbox:?}: gas left negative: {}", instance.gas());
+            results.push((instance.gas(), instance.reg(A0), instance.program_counter()));
+            drop(instance); // one hypervisor VM per process
+        }
+        assert_eq!(results[0], results[1], "generic vs hypervisor: (gas, A0, pc) diverged");
+    }
+
     #[test]
     fn hv_add_trap() {
+        if hypervisor_unavailable() {
+            return;
+        }
         // Smallest end-to-end path: entry stub -> add handler -> trap trampoline (hvc).
         let (interrupt, i) = run_hv(&[asm::add_32(A0, A0, A1), asm::trap()], &[(A0, 1), (A1, 10)]);
         assert!(matches!(interrupt, InterruptKind::Trap), "unexpected interrupt: {interrupt:?}");
@@ -6246,6 +6504,9 @@ mod aarch64_hypervisor {
 
     #[test]
     fn hv_ret() {
+        if hypervisor_unavailable() {
+            return;
+        }
         // Return-to-host: add handler -> ret (jump table[RETURN_TO_HOST]) -> sysreturn hvc.
         let (interrupt, i) = run_hv(&[asm::add_32(A0, A0, A1), asm::ret()], &[(A0, 1), (A1, 10)]);
         assert!(matches!(interrupt, InterruptKind::Finished), "unexpected interrupt: {interrupt:?}");
@@ -6254,6 +6515,9 @@ mod aarch64_hypervisor {
 
     #[test]
     fn hv_ecall() {
+        if hypervisor_unavailable() {
+            return;
+        }
         // Hostcall then resume: ecalli(0) -> Ecalli(0); resume -> add -> ret -> Finished.
         let _ = env_logger::try_init();
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
@@ -6287,6 +6551,9 @@ mod aarch64_hypervisor {
 
     #[test]
     fn hv_sbrk() {
+        if hypervisor_unavailable() {
+            return;
+        }
         // Guest sbrk crossing the heap threshold -> hvc #SBRK trampoline -> resume.
         let _ = env_logger::try_init();
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
@@ -6322,6 +6589,9 @@ mod aarch64_hypervisor {
 
     #[test]
     fn hv_segfault() {
+        if hypervisor_unavailable() {
+            return;
+        }
         // Dynamic paging: load from an unmapped address -> guest EL1 abort -> hvc -> Segfault.
         let _ = env_logger::try_init();
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
@@ -6359,15 +6629,15 @@ mod aarch64_hypervisor {
 
     #[test]
     fn hv_dynamic_paging() {
+        if hypervisor_unavailable() {
+            return;
+        }
         // Full round-trip: store to an unmapped page -> Segfault -> host maps + zeroes the
         // page -> resume re-executes the store -> Finished -> value is readable.
         let _ = env_logger::try_init();
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
         builder.add_export_by_basic_block(0, b"main");
-        builder.set_code(
-            &[asm::store_imm_indirect_u32(A0, 0, 0xAABB_CCDDu32 as i32), asm::ret()],
-            &[],
-        );
+        builder.set_code(&[asm::store_imm_indirect_u32(A0, 0, 0xAABB_CCDDu32 as i32), asm::ret()], &[]);
         let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
 
         let mut config = Config::default();
@@ -6416,17 +6686,20 @@ mod aarch64_hypervisor {
 
     #[test]
     fn hv_static_oob() {
+        if hypervisor_unavailable() {
+            return;
+        }
         // Static paging: a store to an unmapped address faults -> Trap (matches generic;
         // Segfault is only produced with dynamic paging).
-        let (interrupt, _i) = run_hv(
-            &[asm::store_imm_indirect_u32(A0, 0, 0x1234), asm::trap()],
-            &[(A0, 0x0100_0000)],
-        );
+        let (interrupt, _i) = run_hv(&[asm::store_imm_indirect_u32(A0, 0, 0x1234), asm::trap()], &[(A0, 0x0100_0000)]);
         assert!(matches!(interrupt, InterruptKind::Trap), "unexpected interrupt: {interrupt:?}");
     }
 
     #[test]
     fn hv_host_calls() {
+        if hypervisor_unavailable() {
+            return;
+        }
         // A small "real" program: two host calls with register round-trips and arithmetic
         // across the resulting basic blocks, then a return to the host.
         //   ecalli(0); A0 += 1; ecalli(0); A0 += 1; ret

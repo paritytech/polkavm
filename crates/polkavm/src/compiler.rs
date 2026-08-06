@@ -32,6 +32,12 @@ mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use crate::compiler::aarch64::{extract_gas_cost, step_prelude_length};
 
+#[cfg(all(target_arch = "aarch64", feature = "generic-sandbox"))]
+pub(crate) use crate::compiler::aarch64::{are_we_executing_memset, MemsetKind};
+
+#[cfg(all(target_arch = "aarch64", feature = "hypervisor-sandbox"))]
+pub(crate) use crate::compiler::aarch64::GAS_METERING_TRAP_OFFSET;
+
 /// The address to which to jump to for invalid dynamic jumps.
 ///
 /// This needs to be at least 0x800000000000 on modern CPUs, but ideally should have
@@ -436,14 +442,24 @@ where
                 let native_page_size = crate::sandbox::get_native_page_size();
                 let padded_length = polkavm_common::utils::align_to_next_page_usize(native_page_size, self.asm.len()).unwrap();
                 self.asm.resize(padded_length, ArchVisitor::<S, B, G>::PADDING_BYTE);
+                // The AArch64 codegen reaches the table with a bare `adrp`, which is 4K-page granular.
+                debug_assert_eq!(padded_length % 4096, 0);
+                debug_assert_eq!(native_code_origin % 4096, 0);
                 self.asm.define_label(self.jump_table_label);
             }
         }
 
         let module = {
+            // An out-of-range fixup means the program was too big for the backend's branch
+            // encodings: a property of the input, not a bug, so report it as a failed compilation.
+            let code = self
+                .asm
+                .try_finalize()
+                .map_err(|error| Error::from(alloc::format!("failed to compile the program: {error}")))?;
+
             let init = SandboxInit {
                 guest_init: self.init,
-                code: &self.asm.finalize(),
+                code: &code,
                 jump_table: native_jump_table,
                 sysenter_address,
                 sysreturn_address,
@@ -1816,7 +1832,7 @@ where
 
     /// Native address to resume at after a page-fault. AArch64 skips the block prologue so gas
     /// isn't re-charged; on x86 the faulting instruction is self-contained.
-    #[cfg(feature = "generic-sandbox")]
+    #[cfg(any(feature = "generic-sandbox", feature = "hypervisor-sandbox"))]
     #[allow(unused_variables, clippy::unused_self)]
     pub(crate) fn resume_native_address_for_pagefault(
         &self,

@@ -140,7 +140,7 @@ mod jit_mem {
 use core::ffi::c_void;
 use sys::{c_int, size_t, MADV_DONTNEED, MADV_FREE, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
 
-pub(crate) const GUEST_MEMORY_TO_VMCTX_OFFSET: isize = -4096;
+use crate::sandbox::GUEST_MEMORY_TO_VMCTX_OFFSET;
 
 // These must match the gas-metering stub layout emitted by the compiler backend for this target.
 #[cfg(target_arch = "x86_64")]
@@ -1340,6 +1340,14 @@ impl Sandbox {
             ));
         };
 
+        // Re-entry point: mid-`memset` the recorded continuation, else the faulting instruction's
+        // start (recomputed on AArch64). Resolved here while `compiled_module` is still borrowed.
+        let restart_address = if memset.is_some() {
+            memset_continuation
+        } else {
+            compiled_module.resume_native_address_for_pagefault(program_counter, machine_code_address, self.gas_metering)
+        };
+
         self.vmctx().program_counter.store(program_counter.0, Ordering::Relaxed);
         self.vmctx().next_program_counter.store(program_counter.0, Ordering::Relaxed);
         self.is_program_counter_valid = true;
@@ -1361,13 +1369,6 @@ impl Sandbox {
         }
 
         if let Some(is_write_protected) = segfault_kind {
-            // Where to re-enter: mid-`memset` that's the recorded continuation (x86 keeps the fill
-            // state in tmp_reg); otherwise the faulting instruction's start, recomputed on AArch64.
-            let restart_address = if memset.is_some() {
-                memset_continuation
-            } else {
-                compiled_module.resume_native_address_for_pagefault(program_counter, machine_code_address, self.gas_metering)
-            };
             self.vmctx().next_native_program_counter.store(restart_address, Ordering::Relaxed);
 
             Ok(InterruptKind::Segfault(Segfault {
@@ -1674,6 +1675,18 @@ impl super::Sandbox for Sandbox {
     fn load_module(&mut self, _global: &Self::GlobalState, module: &Module) -> Result<(), Self::Error> {
         if self.module.is_some() {
             return Err(Error::from("module already loaded"));
+        }
+
+        // Guest page protections are enforced with `mprotect`, so their granularity is the host page
+        // size. A module with smaller pages is under-protected: an out-of-bounds access only faults
+        // once it crosses the next *host* page boundary. Nothing here can fix that, so say so.
+        if get_native_page_size() > module.memory_map().page_size() as usize {
+            log::warn!(
+                "Module page size ({}) is smaller than the native page size ({}); \
+                 out-of-bounds guest accesses will not be caught until the next native page boundary",
+                module.memory_map().page_size(),
+                get_native_page_size(),
+            );
         }
 
         if module.is_dynamic_paging() && get_native_page_size() != module.memory_map().page_size() as usize {

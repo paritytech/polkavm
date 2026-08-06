@@ -19,7 +19,11 @@
                 all(feature = "generic-sandbox", any(target_os = "macos", target_os = "freebsd"))
             ),
         ),
-        all(target_arch = "aarch64", feature = "generic-sandbox", any(target_os = "macos", target_os = "linux")),
+        all(
+            target_arch = "aarch64",
+            any(feature = "generic-sandbox", feature = "hypervisor-sandbox"),
+            any(target_os = "macos", target_os = "linux")
+        ),
     ),
 ))]
 macro_rules! if_compiler_is_supported {
@@ -47,7 +51,11 @@ macro_rules! if_compiler_is_supported {
                 all(feature = "generic-sandbox", any(target_os = "macos", target_os = "freebsd"))
             ),
         ),
-        all(target_arch = "aarch64", feature = "generic-sandbox", any(target_os = "macos", target_os = "linux")),
+        all(
+            target_arch = "aarch64",
+            any(feature = "generic-sandbox", feature = "hypervisor-sandbox"),
+            any(target_os = "macos", target_os = "linux")
+        ),
     ),
 )))]
 macro_rules! if_compiler_is_supported {
@@ -103,6 +111,8 @@ mod module_cache;
 
 if_compiler_is_supported! {
     mod compiler;
+    // Page tracking for the generic sandbox; the hypervisor tracks its own guest page table.
+    #[cfg_attr(not(feature = "generic-sandbox"), allow(dead_code))]
     mod page_set;
     mod sandbox;
 

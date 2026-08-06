@@ -401,6 +401,8 @@ impl Module {
     }
 
     if_compiler_is_supported! {
+        // Used by the generic sandbox's page-fault path.
+        #[cfg_attr(not(feature = "generic-sandbox"), allow(dead_code))]
         pub(crate) fn address_to_page(&self, address: u32) -> u32 {
             address >> self.state().page_shift
         }

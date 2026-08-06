@@ -26,6 +26,16 @@ impl Default for Assembler {
     }
 }
 
+/// A fixup target that no encoding can reach; the payload names the instruction class.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct OutOfRange(pub &'static str);
+
+impl core::fmt::Display for OutOfRange {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        fmt.write_fmt(core::format_args!("out of range {}", self.0))
+    }
+}
+
 #[repr(transparent)]
 pub struct AssembledCode<'a>(&'a mut Assembler);
 
@@ -315,18 +325,28 @@ impl Assembler {
         self
     }
 
-    pub fn finalize(&mut self) -> AssembledCode {
+    /// Resolves every fixup, or fails when a target is out of the encodable range (which for a
+    /// recompiler means the input program was too big, not that the assembler is broken).
+    pub fn try_finalize(&mut self) -> Result<AssembledCode, OutOfRange> {
         #[cfg(target_arch = "aarch64")]
-        self.finalize_aarch64();
+        self.finalize_aarch64()?;
         #[cfg(not(target_arch = "aarch64"))]
-        self.finalize_x86();
+        self.finalize_x86()?;
 
-        AssembledCode(self)
+        Ok(AssembledCode(self))
+    }
+
+    /// [`Self::try_finalize`], panicking on an out-of-range fixup.
+    pub fn finalize(&mut self) -> AssembledCode {
+        match self.try_finalize() {
+            Ok(code) => code,
+            Err(error) => panic!("{error}"),
+        }
     }
 
     /// Resolves x86 fixups: a 1/4-byte LE displacement after the opcode, relative to the instruction end.
     #[cfg(not(target_arch = "aarch64"))]
-    fn finalize_x86(&mut self) {
+    fn finalize_x86(&mut self) -> Result<(), OutOfRange> {
         for fixup in self.fixups.drain(..) {
             let origin = fixup.instruction_offset + fixup.instruction_length as usize;
             let target_absolute = self.labels[fixup.target_label.raw() as usize];
@@ -353,12 +373,12 @@ impl Assembler {
             let p = fixup.instruction_offset + fixup_offset as usize;
             if fixup_length == 1 {
                 if offset > i8::MAX as isize || offset < i8::MIN as isize {
-                    panic!("out of range jump");
+                    return Err(OutOfRange("jump"));
                 }
                 self.code[p] = offset as i8 as u8;
             } else if fixup_length == 4 {
                 if offset > i32::MAX as isize || offset < i32::MIN as isize {
-                    panic!("out of range jump");
+                    return Err(OutOfRange("jump"));
                 }
                 self.code[p..p + 4].copy_from_slice(&(offset as i32).to_le_bytes());
             } else {
@@ -369,7 +389,7 @@ impl Assembler {
 
     /// Resolves AArch64 fixups: offset bitfield packed inside the 4-byte word, relative to instruction start.
     #[cfg(target_arch = "aarch64")]
-    fn finalize_aarch64(&mut self) {
+    fn finalize_aarch64(&mut self) -> Result<(), OutOfRange> {
         for fixup in self.fixups.drain(..) {
             let target_absolute = self.labels[fixup.target_label.raw() as usize];
             if target_absolute == isize::MAX {
@@ -382,11 +402,26 @@ impl Assembler {
             let p = fixup.instruction_offset;
             let mut word = u32::from_le_bytes([self.code[p], self.code[p + 1], self.code[p + 2], self.code[p + 3]]);
 
-            if fixup.kind.aarch64_is_adr() {
+            if fixup.kind.aarch64_is_adrp() {
+                // Page-relative: ADRP always uses 4 KiB pages, and the offset is between the pages
+                // of the *absolute* addresses, so `origin` matters here (unlike every other fixup).
+                let pc_page = self.origin.wrapping_add(fixup.instruction_offset as u64) >> 12;
+                let target_page = self.origin.wrapping_add(target_absolute as u64) >> 12;
+                let pages = (target_page as i64).wrapping_sub(pc_page as i64);
+                let limit = 1i64 << 20;
+                if pages >= limit || pages < -limit {
+                    return Err(OutOfRange("ADRP"));
+                }
+                let imm = (pages as u32) & 0x001f_ffff;
+                let immlo = imm & 0b11;
+                let immhi = (imm >> 2) & 0x7_ffff;
+                word &= !((0b11 << 29) | (0x7_ffff << 5));
+                word |= (immlo << 29) | (immhi << 5);
+            } else if fixup.kind.aarch64_is_adr() {
                 // 21-bit signed *byte* offset, split into immlo (bits 30:29) and immhi (bits 23:5).
                 let limit = 1isize << 20;
                 if offset >= limit || offset < -limit {
-                    panic!("out of range ADR");
+                    return Err(OutOfRange("ADR"));
                 }
                 let imm = (offset as u32) & 0x001f_ffff;
                 let immlo = imm & 0b11;
@@ -403,7 +438,7 @@ impl Assembler {
                 // Range-check against the signed field width.
                 let limit = 1isize << (width - 1);
                 if imm >= limit || imm < -limit {
-                    panic!("out of range jump");
+                    return Err(OutOfRange("jump"));
                 }
 
                 let mask = ((1u32 << width) - 1) << lsb;
@@ -412,6 +447,8 @@ impl Assembler {
 
             self.code[p..p + 4].copy_from_slice(&word.to_le_bytes());
         }
+
+        Ok(())
     }
 
     pub fn is_empty(&self) -> bool {

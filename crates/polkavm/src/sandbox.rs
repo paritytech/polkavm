@@ -77,11 +77,18 @@ pub trait SandboxProgram: Clone {
     fn machine_code(&self) -> &[u8];
 }
 
+/// Where the VM context sits relative to the guest memory base. Both the generic and the hypervisor
+/// sandbox place it one page below, which is what lets them share the AArch64 codegen.
+#[cfg(any(target_os = "linux", feature = "generic-sandbox", feature = "hypervisor-sandbox"))]
+pub(crate) const GUEST_MEMORY_TO_VMCTX_OFFSET: isize = -4096;
+
 pub struct OffsetTable {
     pub arg: usize,
     pub gas: usize,
     pub heap_info: usize,
     pub next_native_program_counter: usize,
+    // Only read by the x86 `memset` codegen; AArch64's loop tracks progress in A0/A2 instead.
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     pub memset_continuation: usize,
     pub next_program_counter: usize,
     pub program_counter: usize,
@@ -296,7 +303,7 @@ fn is_sandbox_logging_enabled() -> bool {
 }
 
 // This is the same for both sandboxes.
-#[cfg(any(target_os = "linux", feature = "generic-sandbox"))]
+#[cfg(any(target_os = "linux", any(feature = "generic-sandbox", feature = "hypervisor-sandbox")))]
 pub(crate) fn charge_gas_on_entry<S>(
     module: &Module,
     pc: ProgramCounter,

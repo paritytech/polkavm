@@ -28,6 +28,18 @@ jobs:
       run: sudo apt-get install -y lld
     - name: Build and test (generic)
       run: ./ci/jobs/build-and-test-${{ matrix.profile }}.sh
+  build-and-test-linux-aarch64:
+    # The AArch64 recompiler runs through the generic sandbox here, at a native 4K page size --
+    # which macOS (16K) cannot exercise. The Linux zygote sandbox is x86_64-only, hence generic.
+    runs-on: ubuntu-24.04-arm
+    steps:
+    - uses: actions/checkout@v4
+    - name: uname -a
+      run: uname -a
+    - name: Install LLD
+      run: sudo apt-get install -y lld
+    - name: Build and test (generic sandbox, AArch64)
+      run: ./ci/jobs/build-and-test-linux-aarch64.sh
   build-and-test-linux-only:
     runs-on: ubuntu-24.04
     steps:

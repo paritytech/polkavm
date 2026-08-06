@@ -119,11 +119,26 @@ impl FixupKind {
         FixupKind(1 << 16)
     }
 
+    /// `ADRP` fixup: same immediate fields as `ADR`, but a signed 21-bit *4 KiB page* offset
+    /// (±4 GiB) computed from absolute addresses; tagged by bit 17.
+    #[cfg(target_arch = "aarch64")]
+    #[inline]
+    pub const fn aarch64_adrp() -> Self {
+        FixupKind(1 << 17)
+    }
+
     #[cfg(target_arch = "aarch64")]
     #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
     #[inline]
     pub const fn aarch64_is_adr(self) -> bool {
         (self.0 >> 16) & 1 == 1
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[cfg_attr(not(feature = "alloc"), allow(dead_code))]
+    #[inline]
+    pub const fn aarch64_is_adrp(self) -> bool {
+        (self.0 >> 17) & 1 == 1
     }
 
     #[cfg(target_arch = "aarch64")]

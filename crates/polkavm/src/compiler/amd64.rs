@@ -551,7 +551,7 @@ where
             SandboxKind::Generic => {
                 #[cfg(feature = "generic-sandbox")]
                 {
-                    let offset = crate::sandbox::generic::GUEST_MEMORY_TO_VMCTX_OFFSET as i32 + offset as i32;
+                    let offset = crate::sandbox::GUEST_MEMORY_TO_VMCTX_OFFSET as i32 + offset as i32;
                     reg_indirect(RegSize::R64, GENERIC_SANDBOX_MEMORY_REG + offset)
                 }
 
