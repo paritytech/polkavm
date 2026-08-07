@@ -279,9 +279,8 @@ where
 /// offset attributable to the guest instruction whose site stub entered the
 /// trampoline; otherwise returns the offset unchanged.
 ///
-/// The continuation points at the first byte after the site's jump, which is
-/// the boundary with the next instruction, so back up one byte to land within
-/// the originating instruction's native code range.
+/// The continuation points at the site's call instruction, which lies within
+/// the originating guest instruction's native code range.
 pub(crate) fn wide_arith_effective_offset<S>(
     compiled_module: &crate::compiler::CompiledModule<S>,
     machine_code_offset: u64,
@@ -291,9 +290,7 @@ where
     S: Sandbox,
 {
     if are_we_executing_wide_arith(compiled_module, machine_code_offset) {
-        wide_arith_continuation
-            .wrapping_sub(compiled_module.native_code_origin)
-            .wrapping_sub(1)
+        wide_arith_continuation.wrapping_sub(compiled_module.native_code_origin)
     } else {
         machine_code_offset
     }
@@ -1973,15 +1970,22 @@ where
             label
         };
 
-        let continue_label = self.asm.forward_declare_label();
-        self.push(lea_rip_label(TMP_REG, continue_label));
+        // Record this site's *call* address: the fault handlers use it to
+        // attribute a fault inside the shared trampoline to this instruction,
+        // and a resumable fault restarts at the call itself (the trampoline's
+        // probe phase is idempotent, so re-executing it is always safe).
+        // Dispatching with call/ret (rather than a jump plus an indirect jump
+        // back) keeps the return predicted by the return stack buffer even
+        // when many sites share one trampoline.
+        let call_site = self.asm.forward_declare_label();
+        self.push(lea_rip_label(TMP_REG, call_site));
         self.push(store(
             RegSize::R64,
             Self::vmctx_field(S::offset_table().wide_arith_continuation),
             TMP_REG,
         ));
-        self.push(jmp_label32(label));
-        self.asm.define_label(continue_label);
+        self.asm.define_label(call_site);
+        self.push(call_label32(label));
     }
 
     /// Emits the trampolines for every wide-arithmetic (opcode, registers)
@@ -2000,13 +2004,9 @@ where
                 WideArithOp::Mul256ByU64 => self.wide_arith_body_mul256_by_u64(regs[0], regs[1], regs[2], regs[3]),
             }
 
-            // Jump back to the site that entered the trampoline.
-            self.push(load(
-                LoadKind::U64,
-                TMP_REG,
-                Self::vmctx_field(S::offset_table().wide_arith_continuation),
-            ));
-            self.push(jmp(RegMem::Reg(TMP_REG.into())));
+            // Return to the site that called the trampoline; paired with the
+            // site's `call`, this is predicted by the return stack buffer.
+            self.push(ret());
         }
     }
 

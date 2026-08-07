@@ -1079,13 +1079,12 @@ impl Sandbox {
                 .wrapping_sub(native_code_origin)
         } else if crate::compiler::are_we_executing_wide_arith(compiled_module, machine_code_offset) {
             // Attribute the fault to the guest instruction whose site stub
-            // entered the trampoline; the continuation points just past the
-            // site's jump (the boundary with the next instruction), hence -1.
+            // called the trampoline; the continuation points at the site's
+            // call instruction, inside that instruction's native code range.
             self.vmctx()
                 .wide_arith_continuation
                 .load(Ordering::Relaxed)
                 .wrapping_sub(native_code_origin)
-                .wrapping_sub(1)
         } else {
             machine_code_offset
         };
@@ -1169,14 +1168,10 @@ impl Sandbox {
             memset_continuation.wrapping_sub(native_code_origin)
         } else if crate::compiler::are_we_executing_wide_arith(compiled_module, machine_code_offset) {
             // See handle_guest_signal: attribute to the originating site.
-            // The restart address for a resumable fault remains the faulting
-            // instruction itself (all trampoline faults happen in the probe
-            // phase, before any state is modified, so resuming there is safe).
             self.vmctx()
                 .wide_arith_continuation
                 .load(Ordering::Relaxed)
                 .wrapping_sub(native_code_origin)
-                .wrapping_sub(1)
         } else {
             machine_code_offset
         };
@@ -1203,6 +1198,17 @@ impl Sandbox {
             None
         };
 
+        // The trampoline was entered via `call`; re-entry gets a fresh stack,
+        // so resuming at the faulting instruction inside the trampoline would
+        // leave no return address to `ret` to. Restart at the site's call
+        // instead - all trampoline faults happen in the side-effect-free
+        // probe phase, so re-executing the call and the probes is safe.
+        let wide_arith_restart = if crate::compiler::are_we_executing_wide_arith(compiled_module, machine_code_offset) {
+            Some(self.vmctx().wide_arith_continuation.load(Ordering::Relaxed))
+        } else {
+            None
+        };
+
         if let Some(kind) = memset {
             self.fixup_memset_registers(kind);
         }
@@ -1210,6 +1216,8 @@ impl Sandbox {
         if let Some(is_write_protected) = segfault_kind {
             let restart_address = if memset.is_some() {
                 memset_continuation
+            } else if let Some(restart) = wide_arith_restart {
+                restart
             } else {
                 machine_code_address
             };

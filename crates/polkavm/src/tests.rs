@@ -5589,6 +5589,65 @@ fn wide_arith_oob(config: Config, _isa: InstructionSetKind) {
     );
 }
 
+fn wide_arith_dynamic_paging(mut engine_config: Config, _isa: InstructionSetKind) {
+    use polkavm_common::operation::wide_mul256;
+
+    engine_config.set_allow_dynamic_paging(true);
+    let _ = env_logger::try_init();
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let page_size = get_native_page_size() as u32;
+
+    // Sources on one unfaulted page, the destination on another: the
+    // instruction must segfault on the source page first, resume, segfault
+    // on the destination page, resume again, and then produce the correct
+    // result - exercising restart-during-the-probe-phase on the compiled
+    // backends (the trampoline is re-entered from scratch via its call site).
+    let src_page = 0x20000u32;
+    let dst_page = src_page + page_size;
+    let (a_at, b_at, d_at) = (src_page, src_page + 0x100, dst_page);
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.set_rw_data_size(0x4000);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::mul256(A0, A1, A2), asm::ret()], &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_dynamic_paging(true);
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let mut instance = module.instantiate().unwrap();
+
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_reg(A0, u64::from(d_at));
+    instance.set_reg(A1, u64::from(a_at));
+    instance.set_reg(A2, u64::from(b_at));
+    instance.set_next_program_counter(ProgramCounter(0));
+
+    let a = [0xdeadbeef12345678u64, 0x9e3779b97f4a7c15, 0xfedcba9876543210, 0x0123456789abcdef];
+    let b = [u64::MAX, 0, 0x8000000000000000, 1];
+
+    // First fault: the source page.
+    let segfault = expect_segfault(instance.run().unwrap());
+    assert_eq!(segfault.page_address, src_page);
+    instance
+        .zero_memory_with_memory_protection(src_page, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
+    instance.write_memory(a_at, &limbs_to_bytes(&a)).unwrap();
+    instance.write_memory(b_at, &limbs_to_bytes(&b)).unwrap();
+
+    // Second fault: the destination page.
+    let segfault = expect_segfault(instance.run().unwrap());
+    assert_eq!(segfault.page_address, dst_page);
+    instance
+        .zero_memory_with_memory_protection(dst_page, page_size, MemoryProtection::ReadWrite)
+        .unwrap();
+
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(read_limbs::<8>(&mut instance, d_at), wide_mul256(&a, &b));
+}
+
 fn wide_arith_unsupported(_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
 
@@ -6236,6 +6295,7 @@ run_tests_on_isa! { latest64, InstructionSetKind::Latest64,
     wide_arith_reg_sweep
     wide_arith_randomized
     wide_arith_oob
+    wide_arith_dynamic_paging
 }
 
 run_test_blob_tests! {
