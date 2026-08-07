@@ -13,7 +13,7 @@
 # Note: the toolchain matters more than target-cpu here. On stable, native
 # changes little for this scalar code (Zen 3: ecdsa-k256 -7%, rest within a
 # few percent) and curve25519-dalek's SIMD/IFMA backends are unavailable;
-# on nightly those backends compile in (runtime-dispatched; ~1.6x faster
+# on nightly those backends compile in (runtime-dispatched; 1.5-1.9x faster
 # 25519 on AVX-512-IFMA CPUs) - see the report's toolchain note.
 #
 # WARNING: never copy *_native.so between machines - they are compiled for the

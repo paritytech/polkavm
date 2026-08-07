@@ -2859,6 +2859,26 @@ macro_rules! define_interpreter {
         $body
     }};
 
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: Reg, $a1:ident: Reg, $a2:ident: Reg, $a3:ident: Reg) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<Reg>, a1: impl Into<Reg>, a2: impl Into<Reg>, a3: impl Into<Reg>) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    a2: a2.into().to_u32(),
+                    a3: a3.into().to_u32(),
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_reg(args.a0);
+        let $a1 = transmute_reg(args.a1);
+        let $a2 = transmute_reg(args.a2);
+        let $a3 = transmute_reg(args.a3);
+        $body
+    }};
+
     (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: Reg, $a1:ident: Reg, $a2:ident: i32) => {{
         impl Args {
             pub fn $handler_name(a0: impl Into<Reg>, a1: impl Into<Reg>, a2: i32) -> Args {
@@ -3575,6 +3595,21 @@ define_interpreter! {
 
 
         visitor.set3_u64::<DEBUG>(compiled_offset, d, s1, s2, mulhu64)
+    }
+
+    fn mul_wide<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, dst_hi: Reg, dst_lo: Reg, s1: Reg, s2: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::mul_wide(dst_hi, dst_lo, s1, s2));
+        }
+
+        let lhs = visitor.get_u64::<DEBUG>(s1);
+        let rhs = visitor.get_u64::<DEBUG>(s2);
+        let (hi, lo) = mulwide64(lhs, rhs);
+        // Both sources are read before either destination is written, and the low
+        // half is written first, so `dst_hi == dst_lo` leaves the high half.
+        visitor.set_u64::<DEBUG>(dst_lo, lo);
+        visitor.set_u64::<DEBUG>(dst_hi, hi);
+        visitor.go_to_next_instruction(compiled_offset)
     }
 
     fn mul_upper_signed_unsigned_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s1: Reg, s2: Reg) -> Target {
@@ -4927,6 +4962,11 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
         } else {
             emit!(self, mul_upper_unsigned_unsigned_32(d, s1, s2));
         }
+    }
+
+    fn mul_wide(&mut self, dst_hi: RawReg, dst_lo: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.assert_64_bit();
+        emit!(self, mul_wide(dst_hi, dst_lo, s1, s2));
     }
 
     fn mul_upper_signed_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {

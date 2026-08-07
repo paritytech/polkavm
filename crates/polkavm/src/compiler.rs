@@ -893,6 +893,18 @@ where
     }
 
     #[inline(always)]
+    fn mul_wide(&mut self, code_offset: u32, args_length: u32, dst_hi: RawReg, dst_lo: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        emit_instruction!(
+            self,
+            code_offset,
+            args_length,
+            CONTINUE_BASIC_BLOCK,
+            mul_wide(dst_hi, dst_lo, s1, s2)
+        );
+    }
+
+    #[inline(always)]
     fn mul_upper_signed_unsigned(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         emit_instruction!(
             self,

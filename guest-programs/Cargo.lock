@@ -98,18 +98,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bench-hash"
-version = "0.1.0"
-dependencies = [
- "blake2b_simd",
- "picoalloc",
- "polkavm-derive",
- "sha2",
- "sha3",
- "twox-hash",
-]
-
-[[package]]
 name = "bench-keccak-256"
 version = "0.1.0"
 dependencies = [

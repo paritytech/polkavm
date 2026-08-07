@@ -2261,6 +2261,36 @@ where
         )
     }
 
+    fn mul_wide(&mut self, _offset: u32, _args_length: u32, dst_hi: RawReg, dst_lo: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        // The dispatch machinery only supports a single destination per entry, so a
+        // two-destination multiply is approximated as two entries reading the same
+        // sources: the multiply proper retiring the low half, plus a slot-free
+        // companion retiring the high half with the same latency. Only one hardware
+        // multiply is consumed, mirroring `mulx`.
+        self.dispatch_3op(
+            dst_lo,
+            s1,
+            s2,
+            InstCost {
+                latency: 4,
+                decode_slots: 4,
+                alu_slots: 1,
+                mul_slots: 1,
+                ..EMPTY_COST
+            },
+        );
+        self.dispatch_3op(
+            dst_hi,
+            s1,
+            s2,
+            InstCost {
+                latency: 4,
+                decode_slots: 0,
+                ..EMPTY_COST
+            },
+        )
+    }
+
     #[inline(always)]
     fn mul_upper_signed_unsigned(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_3op(

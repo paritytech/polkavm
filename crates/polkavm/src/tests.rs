@@ -5055,6 +5055,92 @@ fn jam_validate_ok(config: Config, isa: InstructionSetKind) {
     Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
 }
 
+fn mul_wide_expected(lhs: u64, rhs: u64) -> (u64, u64) {
+    let product = u128::from(lhs).wrapping_mul(u128::from(rhs));
+    ((product >> 64) as u64, product as u64)
+}
+
+fn mul_wide_run(engine: &Engine, hi: Reg, lo: Reg, s1: Reg, s2: Reg, a: u64, b: u64) -> (u64, u64) {
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::mul_wide(hi, lo, s1, s2), asm::ret()], &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let module = Module::from_blob(engine, &ModuleConfig::new(), blob).unwrap();
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_reg(s1, a);
+    instance.set_reg(s2, b);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    (instance.reg(hi), instance.reg(lo))
+}
+
+fn mul_wide_basic(config: Config, _isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let a = 0xdeadbeef12345678_u64;
+    let b = 0x9e3779b97f4a7c15_u64;
+    let (hi, lo) = mul_wide_expected(a, b);
+
+    // Distinct registers.
+    assert_eq!(mul_wide_run(&engine, A2, A3, A0, A1, a, b), (hi, lo));
+    // Sources aliased (square).
+    assert_eq!(mul_wide_run(&engine, A2, A3, A0, A0, a, a), mul_wide_expected(a, a));
+    // Destinations aliasing sources.
+    assert_eq!(mul_wide_run(&engine, A0, A2, A0, A1, a, b), (hi, lo));
+    assert_eq!(mul_wide_run(&engine, A2, A1, A0, A1, a, b), (hi, lo));
+    // dst_hi == dst_lo: the register must end up holding the high half.
+    assert_eq!(mul_wide_run(&engine, A2, A2, A0, A1, a, b), (hi, hi));
+    // Zero and full-width extremes.
+    assert_eq!(mul_wide_run(&engine, A2, A3, A0, A1, 0, b), (0, 0));
+    assert_eq!(
+        mul_wide_run(&engine, A2, A3, A0, A1, u64::MAX, u64::MAX),
+        mul_wide_expected(u64::MAX, u64::MAX)
+    );
+}
+
+fn mul_wide_reg_sweep(config: Config, _isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    // A2 maps to rdx on amd64 (mulx's implicit source), so sweeping it through
+    // every operand role is what actually exercises the compiler's special cases.
+    let regs = [A0, A1, A2, A3, A4];
+    let a = 0xdeadbeef12345678_u64;
+    let b = 0x9e3779b97f4a7c15_u64;
+
+    for hi in regs {
+        for lo in regs {
+            for s1 in regs {
+                for s2 in regs {
+                    let lhs = if s1 == s2 { b } else { a };
+                    let (hi_val, lo_val) = mul_wide_expected(lhs, b);
+                    let expected_lo = if lo == hi { hi_val } else { lo_val };
+                    assert_eq!(
+                        mul_wide_run(&engine, hi, lo, s1, s2, a, b),
+                        (hi_val, expected_lo),
+                        "mul_wide {hi:?}, {lo:?} = {s1:?} mulw {s2:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn mul_wide_unsupported(_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::mul_wide(A2, A3, A0, A1), asm::ret()], &[]);
+
+    // mul_wide is not part of this instruction set: building the blob must fail
+    // loudly, never silently emit the reserved raw opcode.
+    let error = builder.into_vec().unwrap_err();
+    assert!(error.to_string().contains("mul_wide"), "unexpected error: {error}");
+}
+
 fn jam_validate_invalid_opcode(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
@@ -5663,6 +5749,14 @@ run_tests_on_isa! { jam_v1, InstructionSetKind::JamV1,
     jam_validate_invalid_opcode
     jam_validate_invalid_fallthrough
     jam_validate_invalid_skip
+    mul_wide_unsupported
+}
+
+// `mul_wide` only exists in Latest64, so its tests cannot go through `run_tests!`
+// (which also fans out to ReviveV1).
+run_tests_on_isa! { latest64, InstructionSetKind::Latest64,
+    mul_wide_basic
+    mul_wide_reg_sweep
 }
 
 run_test_blob_tests! {

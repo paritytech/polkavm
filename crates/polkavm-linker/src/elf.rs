@@ -541,6 +541,11 @@ impl<'data> Elf<'data> {
         self.is_64_bit
     }
 
+    #[cfg(test)]
+    pub fn set_is_64_bit(&mut self, value: bool) {
+        self.is_64_bit = value;
+    }
+
     pub fn section_to_function_name(&self) -> BTreeMap<SectionTarget, String> {
         self.symbols()
             .filter_map(|symbol| {

@@ -167,7 +167,7 @@ macro_rules! define_cost_model_struct {
 }
 
 define_cost_model_struct! {
-    version: 2,
+    version: 3,
 
     add_32,
     add_64,
@@ -241,6 +241,7 @@ define_cost_model_struct! {
     mul_upper_signed_signed,
     mul_upper_signed_unsigned,
     mul_upper_unsigned_unsigned,
+    mul_wide,
     negate_and_add_imm_32,
     negate_and_add_imm_64,
     or,
@@ -498,6 +499,10 @@ impl InstructionVisitor for GasVisitor {
     #[inline(always)]
     fn mul_upper_unsigned_unsigned(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += self.cost_model.mul_upper_unsigned_unsigned;
+    }
+
+    fn mul_wide(&mut self, _dst_hi: RawReg, _dst_lo: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.mul_wide;
     }
 
     #[inline(always)]

@@ -1,1 +1,5 @@
 target
+**/*.csv
+tools/benchtool/*.txt
+tools/benchtool/*.md
+tools/benchtool/output_*

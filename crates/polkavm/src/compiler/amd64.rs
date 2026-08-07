@@ -1812,6 +1812,43 @@ where
     }
 
     #[inline(always)]
+    pub fn mul_wide(&mut self, dst_hi: RawReg, dst_lo: RawReg, s1: RawReg, s2: RawReg) {
+        let dst_hi = conv_reg(dst_hi);
+        let dst_lo = conv_reg(dst_lo);
+        let s1 = conv_reg(s1);
+        let s2 = conv_reg(s2);
+        match B::BITNESS {
+            Bitness::B32 => unreachable!("mul_wide is not part of any 32-bit instruction set"),
+            Bitness::B64 => {
+                const _: () = {
+                    assert!(TMP_REG as u32 != rdx as u32);
+                };
+
+                // `mulx` multiplies its explicit source by an implicit rdx, which holds
+                // a guest register (A2). If a source is rdx it is simply "moved" into
+                // rdx (a no-op), so its value never has to be taken from the saved copy.
+                // The save/restore of the guest value is only needed when neither
+                // destination overwrites rdx anyway.
+                let needs_restore = dst_hi != rdx && dst_lo != rdx;
+                if needs_restore {
+                    self.push(mov(RegSize::R64, TMP_REG, rdx));
+                }
+
+                let (arg_maybe_rdx, arg_not_rdx) = if s2 == rdx { (s2, s1) } else { (s1, s2) };
+                self.push(mov(RegSize::R64, rdx, arg_maybe_rdx));
+
+                // If `dst_hi == dst_lo` the hardware keeps the high half, matching the
+                // interpreter's write-low-first, write-high-last semantics.
+                self.push(mulx(RegSize::R64, dst_hi, dst_lo, arg_not_rdx));
+
+                if needs_restore {
+                    self.push(mov(RegSize::R64, rdx, TMP_REG));
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
     pub fn mul_upper_signed_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         // This instruction is equivalent to:
         //   let s1: i32;

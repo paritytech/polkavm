@@ -627,6 +627,12 @@ enum BasicInst<T> {
         src1: Reg,
         src2: Reg,
     },
+    MulWide {
+        dst_hi: Reg,
+        dst_lo: Reg,
+        src1: Reg,
+        src2: Reg,
+    },
     AnyAny {
         kind: AnyAnyKind,
         dst: Reg,
@@ -691,6 +697,7 @@ impl<T> BasicInst<T> {
             BasicInst::LoadIndirect { base, .. } => RegMask::from(base),
             BasicInst::StoreIndirect { src, base, .. } => RegMask::from(src) | RegMask::from(base),
             BasicInst::RegReg { src1, src2, .. } => RegMask::from(src1) | RegMask::from(src2),
+            BasicInst::MulWide { src1, src2, .. } => RegMask::from(src1) | RegMask::from(src2),
             BasicInst::AnyAny { src1, src2, .. } => RegMask::from(src1) | RegMask::from(src2),
             BasicInst::Cmov { dst, src, cond, .. } => RegMask::from(dst) | RegMask::from(src) | RegMask::from(cond),
             BasicInst::Ecalli { nth_import } => imports[nth_import].src_mask(),
@@ -716,6 +723,7 @@ impl<T> BasicInst<T> {
             | BasicInst::Cmov { dst, .. }
             | BasicInst::Reg { dst, .. }
             | BasicInst::AnyAny { dst, .. } => RegMask::from(dst),
+            BasicInst::MulWide { dst_hi, dst_lo, .. } => RegMask::from(dst_hi) | RegMask::from(dst_lo),
             BasicInst::Ecalli { nth_import } => imports[nth_import].dst_mask(),
             BasicInst::Sbrk { dst, .. } => RegMask::from(dst),
             BasicInst::Memset => RegMask::from(Reg::A0) | RegMask::from(Reg::A2),
@@ -743,6 +751,7 @@ impl<T> BasicInst<T> {
             | BasicInst::LoadAddress { .. }
             | BasicInst::LoadAddressIndirect { .. }
             | BasicInst::RegReg { .. }
+            | BasicInst::MulWide { .. }
             | BasicInst::Cmov { .. }
             | BasicInst::AnyAny { .. } => false,
         }
@@ -806,6 +815,23 @@ impl<T> BasicInst<T> {
                 src2: src2.map_register(|reg| map(reg, OpKind::Read)),
                 dst: map(dst, OpKind::Write),
             }),
+            BasicInst::MulWide {
+                dst_hi,
+                dst_lo,
+                src1,
+                src2,
+            } => {
+                let src1 = map(src1, OpKind::Read);
+                let src2 = map(src2, OpKind::Read);
+                let dst_lo = map(dst_lo, OpKind::Write);
+                let dst_hi = map(dst_hi, OpKind::Write);
+                Some(BasicInst::MulWide {
+                    dst_hi,
+                    dst_lo,
+                    src1,
+                    src2,
+                })
+            }
             BasicInst::MoveReg { dst, src } => Some(BasicInst::MoveReg {
                 src: map(src, OpKind::Read),
                 dst: map(dst, OpKind::Write),
@@ -912,6 +938,17 @@ impl<T> BasicInst<T> {
             BasicInst::StoreIndirect { kind, src, base, offset } => BasicInst::StoreIndirect { kind, src, base, offset },
             BasicInst::Reg { kind, dst, src } => BasicInst::Reg { kind, dst, src },
             BasicInst::RegReg { kind, dst, src1, src2 } => BasicInst::RegReg { kind, dst, src1, src2 },
+            BasicInst::MulWide {
+                dst_hi,
+                dst_lo,
+                src1,
+                src2,
+            } => BasicInst::MulWide {
+                dst_hi,
+                dst_lo,
+                src1,
+                src2,
+            },
             BasicInst::AnyAny { kind, dst, src1, src2 } => BasicInst::AnyAny { kind, dst, src1, src2 },
             BasicInst::Cmov { kind, dst, src, cond } => BasicInst::Cmov { kind, dst, src, cond },
             BasicInst::Ecalli { nth_import } => BasicInst::Ecalli { nth_import },
@@ -942,6 +979,7 @@ impl<T> BasicInst<T> {
             | BasicInst::StoreIndirect { .. }
             | BasicInst::Reg { .. }
             | BasicInst::RegReg { .. }
+            | BasicInst::MulWide { .. }
             | BasicInst::AnyAny { .. }
             | BasicInst::Cmov { .. }
             | BasicInst::Sbrk { .. }
@@ -6257,6 +6295,249 @@ fn gather_terminators(all_blocks: &[BasicBlock<AnyTarget, BlockTarget>]) -> Vec<
 }
 
 #[deny(clippy::as_conversions)]
+/// How far apart the two halves of a widening multiply are allowed to be.
+/// LLVM interleaves spill stores (and occasionally other independent products)
+/// between the `mulhu`/`mul` pair, so plain adjacency is not enough.
+const MUL_WIDE_FUSION_WINDOW: usize = 8;
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum MulHalf {
+    Hi,
+    Lo,
+}
+
+/// Matches the two shapes a 64x64->128 half-product takes in the IR.
+fn as_mul_half(op: &BasicInst<AnyTarget>) -> Option<(MulHalf, Reg, Reg, Reg)> {
+    match *op {
+        BasicInst::RegReg {
+            kind: RegRegKind::MulUpperUnsignedUnsigned64,
+            dst,
+            src1,
+            src2,
+        } => Some((MulHalf::Hi, dst, src1, src2)),
+        BasicInst::AnyAny {
+            kind: AnyAnyKind::Mul64,
+            dst,
+            src1: RegImm::Reg(src1),
+            src2: RegImm::Reg(src2),
+        } => Some((MulHalf::Lo, dst, src1, src2)),
+        _ => None,
+    }
+}
+
+#[derive(Copy, Clone)]
+struct MulWideFusionConfig {
+    pattern_a: bool,
+    pattern_b: bool,
+}
+
+impl MulWideFusionConfig {
+    fn from_env(isa: InstructionSetKind) -> Self {
+        let disabled = MulWideFusionConfig {
+            pattern_a: false,
+            pattern_b: false,
+        };
+
+        if !isa.supports_opcode(Opcode::mul_wide) {
+            return disabled;
+        }
+
+        match std::env::var("POLKAVM_MUL_WIDE_FUSION").as_deref() {
+            Ok("off") => disabled,
+            Ok("a") => MulWideFusionConfig {
+                pattern_a: true,
+                pattern_b: false,
+            },
+            Ok("b") => MulWideFusionConfig {
+                pattern_a: false,
+                pattern_b: true,
+            },
+            Ok(value) if value != "ab" => {
+                log::warn!("unknown POLKAVM_MUL_WIDE_FUSION value: {value:?}; assuming \"ab\"");
+                MulWideFusionConfig {
+                    pattern_a: true,
+                    pattern_b: true,
+                }
+            }
+            _ => MulWideFusionConfig {
+                pattern_a: true,
+                pattern_b: true,
+            },
+        }
+    }
+
+    fn enabled(self) -> bool {
+        self.pattern_a || self.pattern_b
+    }
+}
+
+#[derive(Default)]
+struct MulWideFusionStats {
+    fused_a: usize,
+    fused_b: usize,
+}
+
+fn perform_mul_wide_fusion(
+    imports: &[Import],
+    all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>],
+    reachability_graph: &ReachabilityGraph,
+    fusion_config: MulWideFusionConfig,
+    stats: &mut MulWideFusionStats,
+    block_target: BlockTarget,
+) -> bool {
+    if !reachability_graph.is_code_reachable(block_target) {
+        return false;
+    }
+
+    let mut modified = false;
+    'fuse_next: loop {
+        let block = &all_blocks[block_target.index()];
+        let ops = &block.ops;
+
+        for index in 0..ops.len() {
+            let Some((first_half, first_dst, a, b)) = as_mul_half(&ops[index].1) else {
+                continue;
+            };
+
+            // The original pair only computes the same product twice if the first
+            // instruction doesn't overwrite one of its own sources.
+            if first_dst == a || first_dst == b {
+                continue;
+            }
+
+            // Nothing in the window may redefine the sources or the first result.
+            let frozen = RegMask::from(a) | RegMask::from(b) | RegMask::from(first_dst);
+            let mut readers_of_first_dst: Vec<usize> = Vec::new();
+
+            let end = core::cmp::min(index.checked_add(1 + MUL_WIDE_FUSION_WINDOW).expect(OVERFLOW), ops.len());
+            for second_index in index + 1..end {
+                let op = &ops[second_index].1;
+                if let Some((second_half, second_dst, a2, b2)) = as_mul_half(op) {
+                    let operands_match = (a2 == a && b2 == b) || (a2 == b && b2 == a);
+                    if second_half != first_half && operands_match {
+                        if first_dst != second_dst {
+                            // Pattern A: both halves already have their own registers.
+                            // If nothing in between reads the first result, the fused
+                            // instruction goes into the *second* slot. If something does
+                            // (usually a spill store of the first half), it can go into
+                            // the *first* slot instead — the readers still see the same
+                            // value — as long as nothing in between touches the second
+                            // destination, whose write is what moves earlier.
+                            if fusion_config.pattern_a {
+                                let fuse_at = if readers_of_first_dst.is_empty() {
+                                    Some(second_index)
+                                } else {
+                                    let second_dst_untouched = ops[index + 1..second_index].iter().all(|(_, op)| {
+                                        ((op.src_mask(imports) | op.dst_mask(imports)) & RegMask::from(second_dst)).is_empty()
+                                    });
+                                    if second_dst_untouched {
+                                        Some(index)
+                                    } else {
+                                        None
+                                    }
+                                };
+
+                                if let Some(fuse_at) = fuse_at {
+                                    let nop_at = if fuse_at == index { second_index } else { index };
+                                    let (dst_hi, dst_lo) = match second_half {
+                                        MulHalf::Hi => (second_dst, first_dst),
+                                        MulHalf::Lo => (first_dst, second_dst),
+                                    };
+                                    let block = &mut all_blocks[block_target.index()];
+                                    block.ops[fuse_at].1 = BasicInst::MulWide {
+                                        dst_hi,
+                                        dst_lo,
+                                        src1: a,
+                                        src2: b,
+                                    };
+                                    block.ops[nop_at].1 = BasicInst::Nop;
+                                    stats.fused_a = stats.fused_a.checked_add(1).expect(OVERFLOW);
+                                    modified = true;
+                                    continue 'fuse_next;
+                                }
+                            }
+                        } else if fusion_config.pattern_b {
+                            // Pattern B: LLVM reused one register for both halves,
+                            // spilling the first before computing the second:
+                            //
+                            //     d = a mulhu b
+                            //     u64 [sp + X] = d
+                            //     d = a * b
+                            //
+                            // The fused instruction goes into the *first* slot, with the
+                            // first instruction's half redirected into the fake register
+                            // E0 (materialized later by `spill_fake_registers`), and every
+                            // intervening reader of `d` patched to read E0 instead. Only
+                            // plain spill stores are patched; any other reader bails.
+                            let all_readers_patchable = readers_of_first_dst.iter().all(|&reader_index| {
+                                matches!(
+                                    ops[reader_index].1,
+                                    BasicInst::StoreIndirect { src: RegImm::Reg(src), base, .. }
+                                        if src == first_dst && base != first_dst
+                                )
+                            });
+
+                            if all_readers_patchable {
+                                // Which half lands in E0 flips with the pair's order: the
+                                // interveners read the *first* instruction's half.
+                                let (dst_hi, dst_lo) = match first_half {
+                                    MulHalf::Hi => (Reg::E0, first_dst),
+                                    MulHalf::Lo => (first_dst, Reg::E0),
+                                };
+                                let readers = core::mem::take(&mut readers_of_first_dst);
+                                let block = &mut all_blocks[block_target.index()];
+                                block.ops[index].1 = BasicInst::MulWide {
+                                    dst_hi,
+                                    dst_lo,
+                                    src1: a,
+                                    src2: b,
+                                };
+                                block.ops[second_index].1 = BasicInst::Nop;
+                                for reader_index in readers {
+                                    let BasicInst::StoreIndirect { kind, base, offset, .. } = block.ops[reader_index].1 else {
+                                        unreachable!()
+                                    };
+                                    block.ops[reader_index].1 = BasicInst::StoreIndirect {
+                                        kind,
+                                        src: RegImm::Reg(Reg::E0),
+                                        base,
+                                        offset,
+                                    };
+                                }
+                                stats.fused_b = stats.fused_b.checked_add(1).expect(OVERFLOW);
+                                modified = true;
+                                continue 'fuse_next;
+                            }
+                        }
+                    }
+                }
+
+                // Never fuse across anything already touching a fake register;
+                // their live ranges must stay disjoint.
+                if !((op.src_mask(imports) | op.dst_mask(imports)) & RegMask::fake()).is_empty() {
+                    break;
+                }
+
+                if !(op.dst_mask(imports) & frozen).is_empty() {
+                    break;
+                }
+
+                if !(op.src_mask(imports) & RegMask::from(first_dst)).is_empty() {
+                    readers_of_first_dst.push(second_index);
+                }
+            }
+        }
+
+        break;
+    }
+
+    if modified {
+        perform_nop_elimination(all_blocks, block_target);
+    }
+
+    modified
+}
+
 fn optimize_program(
     config: &Config,
     elf: &Elf,
@@ -6439,6 +6720,18 @@ fn optimize_program(
         perform_meta_instruction_lowering(elf.is_64(), all_blocks, current);
     }
 
+    let fusion_config = MulWideFusionConfig::from_env(isa);
+    let mut fusion_stats = MulWideFusionStats::default();
+    let mulhu_total_before: usize = if fusion_config.enabled() {
+        all_blocks
+            .iter()
+            .flat_map(|block| block.ops.iter())
+            .filter(|(_, op)| matches!(as_mul_half(op), Some((MulHalf::Hi, ..))))
+            .count()
+    } else {
+        0
+    };
+
     let timestamp = std::time::Instant::now();
     let mut opt_brute_force_iterations: usize = 0;
     let mut modified = true;
@@ -6447,6 +6740,9 @@ fn optimize_program(
         modified = false;
         for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
             modified |= run_optimizations!(current, Some(&mut optimize_queue));
+            if fusion_config.enabled() {
+                modified |= perform_mul_wide_fusion(imports, all_blocks, reachability_graph, fusion_config, &mut fusion_stats, current);
+            }
         }
 
         while let Some(current) = optimize_queue.pop_non_unique() {
@@ -6460,6 +6756,20 @@ fn optimize_program(
         if modified {
             garbage_collect_reachability(all_blocks, reachability_graph);
         }
+    }
+
+    if fusion_config.enabled() {
+        log::info!(
+            "mul_wide fusion: pattern_a={} pattern_b={} mulhu_total_before={} coverage={:.0}%",
+            fusion_stats.fused_a,
+            fusion_stats.fused_b,
+            mulhu_total_before,
+            if mulhu_total_before == 0 {
+                0.0
+            } else {
+                (fusion_stats.fused_a + fusion_stats.fused_b) as f64 / mulhu_total_before as f64 * 100.0
+            },
+        );
     }
 
     perform_load_address_and_jump_fusion(all_blocks, reachability_graph);
@@ -6482,6 +6792,7 @@ mod test {
     use polkavm::Reg;
 
     struct ProgramBuilder {
+        isa: InstructionSetKind,
         data_section: SectionIndex,
         current_section: SectionIndex,
         next_free_section: SectionIndex,
@@ -6497,7 +6808,12 @@ mod test {
 
     impl ProgramBuilder {
         fn new() -> Self {
+            Self::new_with_isa(InstructionSetKind::Latest32)
+        }
+
+        fn new_with_isa(isa: InstructionSetKind) -> Self {
             ProgramBuilder {
+                isa,
                 data_section: SectionIndex::new(0),
                 current_section: SectionIndex::new(1),
                 next_free_section: SectionIndex::new(1),
@@ -6667,9 +6983,66 @@ mod test {
             }
         }
 
+        // The shared assembler has no syntax for `mulhu` (or `mul_wide`), so the
+        // fusion tests construct their programs directly in the IR.
+        fn push_mulhu64(&mut self, dst: super::Reg, src1: super::Reg, src2: super::Reg) {
+            self.push(BasicInst::RegReg {
+                kind: RegRegKind::MulUpperUnsignedUnsigned64,
+                dst,
+                src1,
+                src2,
+            });
+        }
+
+        fn push_mul64(&mut self, dst: super::Reg, src1: super::Reg, src2: super::Reg) {
+            self.push(BasicInst::AnyAny {
+                kind: AnyAnyKind::Mul64,
+                dst,
+                src1: RegImm::Reg(src1),
+                src2: RegImm::Reg(src2),
+            });
+        }
+
+        fn push_add64(&mut self, dst: super::Reg, src1: super::Reg, src2: super::Reg) {
+            self.push(BasicInst::AnyAny {
+                kind: AnyAnyKind::Add64,
+                dst,
+                src1: RegImm::Reg(src1),
+                src2: RegImm::Reg(src2),
+            });
+        }
+
+        fn push_store_indirect_u64(&mut self, src: super::Reg, base: super::Reg, offset: i32) {
+            self.push(BasicInst::StoreIndirect {
+                kind: StoreKind::U64,
+                src: RegImm::Reg(src),
+                base,
+                offset,
+            });
+        }
+
+        fn push_load_indirect_u64(&mut self, dst: super::Reg, base: super::Reg, offset: i32) {
+            self.push(BasicInst::LoadIndirect {
+                kind: LoadKind::U64,
+                dst,
+                base,
+                offset,
+            });
+        }
+
+        fn push_ret(&mut self) {
+            self.push(ControlInst::JumpIndirect {
+                base: super::Reg::RA,
+                offset: 0,
+            });
+        }
+
         fn build(&self, config: Config) -> TestProgram {
-            let isa = InstructionSetKind::Latest32;
-            let elf = Elf::default();
+            let isa = self.isa;
+            let is_rv64 = matches!(isa, InstructionSetKind::Latest64);
+            let mut elf = Elf::default();
+            elf.set_is_64_bit(is_rv64);
+            let elf = elf;
             let data_sections_set: HashSet<_> = core::iter::once(self.data_section).collect();
             let code_sections_set: HashSet<_> = self.next_offset_for_section.keys().copied().collect();
             let relocations = BTreeMap::default();
@@ -6697,6 +7070,20 @@ mod test {
             }
             let mut used_blocks = collect_used_blocks(&all_blocks, &reachability_graph);
 
+            // A section for `spill_fake_registers` to spill into; allocated past
+            // every section the builder itself hands out (and the GOT below).
+            let section_regspill = SectionIndex::new(self.next_free_section.raw().checked_add(1).unwrap());
+            let mut regspill_size = 0;
+            spill_fake_registers(
+                section_regspill,
+                &mut all_blocks,
+                &mut reachability_graph,
+                &imports,
+                &used_blocks,
+                &mut regspill_size,
+                is_rv64,
+            );
+
             if matches!(config.opt_level, OptLevel::O2 | OptLevel::Oexperimental) {
                 used_blocks = add_missing_fallthrough_blocks(&mut all_blocks, &mut reachability_graph, used_blocks);
                 merge_consecutive_fallthrough_blocks(&mut all_blocks, &mut reachability_graph, &mut section_to_block, &mut used_blocks);
@@ -6710,6 +7097,10 @@ mod test {
             let used_imports = HashSet::new();
             let mut base_address_for_section = HashMap::new();
             base_address_for_section.insert(self.data_section, 0);
+            // With no read-only data the RW data always lands at 0x20000 (one
+            // maximum-sized page past the address space bottom); regspill slots
+            // live at its start, tests store from 0x800 upwards to stay clear.
+            base_address_for_section.insert(section_regspill, 0x20000);
             let section_got = self.next_free_section;
             let target_to_got_offset = HashMap::new();
 
@@ -6725,7 +7116,7 @@ mod test {
                 &used_imports,
                 &jump_target_for_block,
                 true,
-                false,
+                is_rv64,
                 0,
             )
             .unwrap();
@@ -6751,7 +7142,7 @@ mod test {
             }
 
             builder.set_code(&raw_code, &jump_table);
-            builder.set_rw_data_size(1);
+            builder.set_rw_data_size(0x1000);
 
             let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
             let mut disassembler = polkavm_disassembler::Disassembler::new(&blob, polkavm_disassembler::DisassemblyFormat::Guest).unwrap();
@@ -6953,6 +7344,403 @@ mod test {
             expect_finished,
             expect_regs([(Reg::A0, 10), (Reg::A1, 8)]),
         )
+    }
+
+    const MUL_LHS: u64 = 0xdeadbeef12345678;
+    const MUL_RHS: u64 = 0x9e3779b97f4a7c15;
+    const MUL_HI: u64 = ((MUL_LHS as u128).wrapping_mul(MUL_RHS as u128) >> 64) as u64;
+    const MUL_LO: u64 = (MUL_LHS as u128).wrapping_mul(MUL_RHS as u128) as u64;
+
+    fn mul_inputs(i: &mut polkavm::RawInstance) {
+        i.set_reg(Reg::A0, MUL_LHS);
+        i.set_reg(Reg::A1, MUL_RHS);
+        expect_finished(i);
+    }
+
+    fn mul_pair_builder(isa: InstructionSetKind) -> ProgramBuilder {
+        let _ = env_logger::try_init();
+        let mut b = ProgramBuilder::new_with_isa(isa);
+        let main = b.add_section();
+        b.switch_section(main);
+        b.add_export("main", 1, 1, main);
+        b
+    }
+
+    #[test]
+    fn test_optimize_04_mul_wide_fusion_a_mulhu_first() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_mul64(R::A3, R::A0, R::A1);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs,
+            expect_regs([(Reg::A2, MUL_HI), (Reg::A3, MUL_LO)]),
+            "
+            @0 [export #0: 'main']
+                a2, a3 = a0 mulw a1
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_05_mul_wide_fusion_a_mul_first() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mul64(R::A3, R::A0, R::A1);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs,
+            expect_regs([(Reg::A2, MUL_HI), (Reg::A3, MUL_LO)]),
+            "
+            @0 [export #0: 'main']
+                a2, a3 = a0 mulw a1
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_06_mul_wide_fusion_a_commuted_operands() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_mul64(R::A3, R::A1, R::A0);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs,
+            expect_regs([(Reg::A2, MUL_HI), (Reg::A3, MUL_LO)]),
+            "
+            @0 [export #0: 'main']
+                a2, a3 = a0 mulw a1
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_07_mul_wide_fusion_a_interleaved() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_add64(R::T0, R::T1, R::T1);
+        b.push_add64(R::T2, R::T1, R::T0);
+        b.push_mul64(R::A3, R::A0, R::A1);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs,
+            expect_regs([(Reg::A2, MUL_HI), (Reg::A3, MUL_LO), (Reg::T0, 0), (Reg::T2, 0)]),
+            "
+            @0 [export #0: 'main']
+                t0 = t1 + t1
+                t2 = t1 + t0
+                a2, a3 = a0 mulw a1
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_08_mul_wide_fusion_negative_source_overwritten() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_add64(R::A0, R::A3, R::A3);
+        b.push_mul64(R::A3, R::A0, R::A1);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs,
+            expect_regs([(Reg::A2, MUL_HI), (Reg::A0, 0), (Reg::A3, 0)]),
+            "
+            @0 [export #0: 'main']
+                a2 = a0 mulhu a1
+                a0 = a3 + a3
+                a3 = a0 * a1
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_09_mul_wide_fusion_a_first_result_read_by_alu() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_add64(R::T0, R::A2, R::A2);
+        b.push_mul64(R::A3, R::A0, R::A1);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs,
+            expect_regs([(Reg::A2, MUL_HI), (Reg::T0, MUL_HI.wrapping_add(MUL_HI)), (Reg::A3, MUL_LO)]),
+            // The reader of the first half sees the same value either way, so
+            // the pair fuses into the first slot.
+            "
+            @0 [export #0: 'main']
+                a2, a3 = a0 mulw a1
+                t0 = a2 + a2
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_10_mul_wide_fusion_negative_dst_aliases_source() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mulhu64(R::A0, R::A0, R::A1);
+        b.push_mul64(R::A3, R::A0, R::A1);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs,
+            expect_regs([(Reg::A0, MUL_HI), (Reg::A3, (MUL_HI as u128).wrapping_mul(MUL_RHS as u128) as u64)]),
+            "
+            @0 [export #0: 'main']
+                a0 = a0 mulhu a1
+                a3 = a0 * a1
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_11_mul_wide_fusion_negative_window_exceeded() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        // A live dependency chain: dead-code elimination must not be able to
+        // shrink the distance between the two halves below the window size.
+        for _ in 0..MUL_WIDE_FUSION_WINDOW + 1 {
+            b.push_add64(R::T0, R::T0, R::T1);
+        }
+        b.push_mul64(R::A3, R::A0, R::A1);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs,
+            expect_regs([(Reg::A2, MUL_HI), (Reg::A3, MUL_LO), (Reg::T0, 0)]),
+            &format!(
+                "
+                @0 [export #0: 'main']
+                    a2 = a0 mulhu a1
+                {}    a3 = a0 * a1
+                    ret
+                ",
+                "t0 = t0 + t1\n".repeat(MUL_WIDE_FUSION_WINDOW + 1),
+            ),
+        );
+    }
+
+    fn mul_inputs_with_base(i: &mut polkavm::RawInstance) {
+        let base = u64::from(i.module().memory_map().rw_data_address());
+        i.set_reg(Reg::A5, base);
+        i.set_reg(Reg::A0, MUL_LHS);
+        i.set_reg(Reg::A1, MUL_RHS);
+        let interrupt = i.run().unwrap();
+        assert!(
+            matches!(interrupt, polkavm::InterruptKind::Finished),
+            "unexpected interrupt: {interrupt:?} at {:?} (rw data at 0x{base:x})",
+            i.program_counter(),
+        );
+    }
+
+    #[test]
+    fn test_optimize_13_mul_wide_fusion_b_mulhu_first() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_store_indirect_u64(R::A2, R::A5, 0x800);
+        b.push_mul64(R::A2, R::A0, R::A1);
+        b.push_load_indirect_u64(R::T2, R::A5, 0x800);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs_with_base,
+            expect_regs([(Reg::A2, MUL_LO), (Reg::T2, MUL_HI)]),
+            // Every register is live at `ret` in these tiny programs, so
+            // regalloc2 has no free register for E0 and wraps its live range in
+            // a save/restore via the regspill section — which conveniently also
+            // exercises the spill path. Real code with a dead register gets the
+            // fused instruction without the two extra memory operations.
+            "
+            @0 [export #0: 'main']
+                u64 [0x20000] = t1
+                t1, a2 = a0 mulw a1
+                u64 [a5 + 0x800] = t1
+                t1 = u64 [0x20000]
+                t2 = u64 [a5 + 0x800]
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_14_mul_wide_fusion_b_mul_first() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mul64(R::A2, R::A0, R::A1);
+        b.push_store_indirect_u64(R::A2, R::A5, 0x800);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_load_indirect_u64(R::T2, R::A5, 0x800);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs_with_base,
+            expect_regs([(Reg::A2, MUL_HI), (Reg::T2, MUL_LO)]),
+            "
+            @0 [export #0: 'main']
+                u64 [0x20000] = t0
+                a2, t0 = a0 mulw a1
+                u64 [a5 + 0x800] = t0
+                t0 = u64 [0x20000]
+                t2 = u64 [a5 + 0x800]
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_15_mul_wide_fusion_b_two_stores() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_store_indirect_u64(R::A2, R::A5, 0x800);
+        b.push_store_indirect_u64(R::A2, R::A5, 0x808);
+        b.push_mul64(R::A2, R::A0, R::A1);
+        b.push_load_indirect_u64(R::T1, R::A5, 0x800);
+        b.push_load_indirect_u64(R::T2, R::A5, 0x808);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs_with_base,
+            expect_regs([(Reg::A2, MUL_LO), (Reg::T1, MUL_HI), (Reg::T2, MUL_HI)]),
+            "
+            @0 [export #0: 'main']
+                u64 [0x20000] = t1
+                t1, a2 = a0 mulw a1
+                u64 [a5 + 0x800] = t1
+                u64 [a5 + 0x808] = t1
+                t1 = u64 [0x20000]
+                t1 = u64 [a5 + 0x800]
+                t2 = u64 [a5 + 0x808]
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_16_mul_wide_fusion_negative_b_non_store_reader() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_add64(R::T0, R::A2, R::A2);
+        b.push_mul64(R::A2, R::A0, R::A1);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs,
+            expect_regs([(Reg::A2, MUL_LO), (Reg::T0, MUL_HI.wrapping_add(MUL_HI))]),
+            "
+            @0 [export #0: 'main']
+                a2 = a0 mulhu a1
+                t0 = a2 + a2
+                a2 = a0 * a1
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_17_mul_wide_fusion_negative_b_store_base_is_dst() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_store_indirect_u64(R::A0, R::A2, 0);
+        b.push_mul64(R::A2, R::A0, R::A1);
+        b.push_ret();
+        b.test_optimize(
+            |i| {
+                i.set_reg(Reg::A0, MUL_LHS);
+                i.set_reg(Reg::A1, MUL_RHS);
+                // The store dereferences the high half as an address and traps;
+                // what matters is that it traps identically pre/post optimization.
+                assert!(matches!(i.run().unwrap(), polkavm::InterruptKind::Trap));
+            },
+            expect_regs([(Reg::A2, MUL_HI)]),
+            "
+            @0 [export #0: 'main']
+                a2 = a0 mulhu a1
+                u64 [a2] = a0
+                a2 = a0 * a1
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_18_mul_wide_fusion_a_first_result_spilled() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mul64(R::A3, R::A0, R::A1);
+        b.push_store_indirect_u64(R::A3, R::A5, 0x800);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_load_indirect_u64(R::T2, R::A5, 0x800);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs_with_base,
+            expect_regs([(Reg::A2, MUL_HI), (Reg::A3, MUL_LO), (Reg::T2, MUL_LO)]),
+            // The store reads the first half, so the fused instruction lands in
+            // the first slot; no fake register is needed.
+            "
+            @0 [export #0: 'main']
+                a2, a3 = a0 mulw a1
+                u64 [a5 + 0x800] = a3
+                t2 = u64 [a5 + 0x800]
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_19_mul_wide_fusion_negative_a_second_dst_touched() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_store_indirect_u64(R::A2, R::A5, 0x800);
+        b.push_add64(R::T0, R::A3, R::A3);
+        b.push_mul64(R::A3, R::A0, R::A1);
+        b.push_load_indirect_u64(R::T2, R::A5, 0x800);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs_with_base,
+            expect_regs([(Reg::A2, MUL_HI), (Reg::A3, MUL_LO), (Reg::T0, 0), (Reg::T2, MUL_HI)]),
+            // The first half is read (store) *and* the second destination is
+            // read in between, so neither fusion slot is legal.
+            "
+            @0 [export #0: 'main']
+                a2 = a0 mulhu a1
+                u64 [a5 + 0x800] = a2
+                t0 = a3 + a3
+                a3 = a0 * a1
+                t2 = u64 [a5 + 0x800]
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_12_mul_wide_fusion_negative_isa_without_mul_wide() {
+        use super::Reg as R;
+        let mut b = mul_pair_builder(InstructionSetKind::JamV1);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_mul64(R::A3, R::A0, R::A1);
+        b.push_ret();
+        b.test_optimize(
+            mul_inputs,
+            expect_regs([(Reg::A2, MUL_HI), (Reg::A3, MUL_LO)]),
+            "
+            @0 [export #0: 'main']
+                a2 = a0 mulhu a1
+                a3 = a0 * a1
+                ret
+            ",
+        );
     }
 }
 
@@ -8532,6 +9320,12 @@ fn emit_code(
                         }
                     }
                 }
+                BasicInst::MulWide {
+                    dst_hi,
+                    dst_lo,
+                    src1,
+                    src2,
+                } => Instruction::mul_wide(conv_reg(dst_hi), conv_reg(dst_lo), conv_reg(src1), conv_reg(src2)),
                 BasicInst::RegReg { kind, dst, src1, src2 } => {
                     use RegRegKind as K;
                     codegen! {

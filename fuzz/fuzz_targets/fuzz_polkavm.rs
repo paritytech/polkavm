@@ -123,6 +123,11 @@ enum RegRegOffsetKind {
 }
 
 #[derive(Arbitrary, Debug)]
+enum RegRegRegRegKind {
+    MulWide,
+}
+
+#[derive(Arbitrary, Debug)]
 enum RegRegRegKind {
     Add32,
     Add64,
@@ -263,6 +268,13 @@ enum OperationKind {
         reg1: OperationReg,
         reg2: OperationReg,
         reg3: OperationReg,
+    },
+    RegRegRegRegArgs {
+        kind: RegRegRegRegKind,
+        reg1: OperationReg,
+        reg2: OperationReg,
+        reg3: OperationReg,
+        reg4: OperationReg,
     },
     ImmImmArgs {
         kind: ImmImmKind,
@@ -429,6 +441,21 @@ fn transform_code(data: Vec<OperationKind>) -> Vec<Instruction> {
                         RegRegOffsetKind::BranchLessThanSigned => branch_less_signed,
                         RegRegOffsetKind::BranchGreaterThanOrEqualUnsigned => branch_greater_or_equal_unsigned,
                         RegRegOffsetKind::BranchGreaterThanOrEqualSigned => branch_greater_or_equal_signed,
+                    }
+                }
+            }
+            OperationKind::RegRegRegRegArgs {
+                kind,
+                reg1,
+                reg2,
+                reg3,
+                reg4,
+            } => {
+                codegen! {
+                    args = (reg1.into(), reg2.into(), reg3.into(), reg4.into()),
+                    kind = kind,
+                    {
+                        RegRegRegRegKind::MulWide => mul_wide,
                     }
                 }
             }

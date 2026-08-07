@@ -110,6 +110,12 @@ pub const fn mulhu64(lhs: u64, rhs: u64) -> u64 {
     ((lhs as i128).wrapping_mul(rhs as i128) >> 64) as u64
 }
 
+#[inline]
+pub const fn mulwide64(lhs: u64, rhs: u64) -> (u64, u64) {
+    let product = (lhs as u128).wrapping_mul(rhs as u128);
+    ((product >> 64) as u64, product as u64)
+}
+
 #[test]
 fn test_div_rem() {
     assert_eq!(divu(10, 2), 5);
