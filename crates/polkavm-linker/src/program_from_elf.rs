@@ -633,6 +633,16 @@ enum BasicInst<T> {
         src1: Reg,
         src2: Reg,
     },
+    WideArith {
+        op: WideArithOp,
+        // The destination *pointer* register (read, not written).
+        dst: Reg,
+        // The carry-out register, for the operations that have one; this is
+        // the only register a wide-arithmetic instruction writes.
+        carry: Option<Reg>,
+        src1: Reg,
+        src2: Reg,
+    },
     AnyAny {
         kind: AnyAnyKind,
         dst: Reg,
@@ -667,6 +677,15 @@ enum BasicInst<T> {
     },
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum WideArithOp {
+    Mul256,
+    Redc256,
+    Add256,
+    Sub256,
+    Mul256ByU64,
+}
+
 #[derive(Copy, Clone)]
 enum OpKind {
     Read,
@@ -698,6 +717,7 @@ impl<T> BasicInst<T> {
             BasicInst::StoreIndirect { src, base, .. } => RegMask::from(src) | RegMask::from(base),
             BasicInst::RegReg { src1, src2, .. } => RegMask::from(src1) | RegMask::from(src2),
             BasicInst::MulWide { src1, src2, .. } => RegMask::from(src1) | RegMask::from(src2),
+            BasicInst::WideArith { dst, src1, src2, .. } => RegMask::from(dst) | RegMask::from(src1) | RegMask::from(src2),
             BasicInst::AnyAny { src1, src2, .. } => RegMask::from(src1) | RegMask::from(src2),
             BasicInst::Cmov { dst, src, cond, .. } => RegMask::from(dst) | RegMask::from(src) | RegMask::from(cond),
             BasicInst::Ecalli { nth_import } => imports[nth_import].src_mask(),
@@ -724,6 +744,7 @@ impl<T> BasicInst<T> {
             | BasicInst::Reg { dst, .. }
             | BasicInst::AnyAny { dst, .. } => RegMask::from(dst),
             BasicInst::MulWide { dst_hi, dst_lo, .. } => RegMask::from(dst_hi) | RegMask::from(dst_lo),
+            BasicInst::WideArith { carry, .. } => carry.map_or(RegMask::empty(), RegMask::from),
             BasicInst::Ecalli { nth_import } => imports[nth_import].dst_mask(),
             BasicInst::Sbrk { dst, .. } => RegMask::from(dst),
             BasicInst::Memset => RegMask::from(Reg::A0) | RegMask::from(Reg::A2),
@@ -739,6 +760,7 @@ impl<T> BasicInst<T> {
             | BasicInst::Ecalli { .. }
             | BasicInst::StoreAbsolute { .. }
             | BasicInst::StoreIndirect { .. }
+            | BasicInst::WideArith { .. }
             | BasicInst::Memset => true,
             BasicInst::LoadAbsolute { .. } | BasicInst::LoadIndirect { .. } => !config.elide_unnecessary_loads,
             BasicInst::Nop
@@ -831,6 +853,14 @@ impl<T> BasicInst<T> {
                     src1,
                     src2,
                 })
+            }
+            BasicInst::WideArith { op, dst, carry, src1, src2 } => {
+                // The destination pointer is an input; only the carry-out is written.
+                let dst = map(dst, OpKind::Read);
+                let src1 = map(src1, OpKind::Read);
+                let src2 = map(src2, OpKind::Read);
+                let carry = carry.map(|carry| map(carry, OpKind::Write));
+                Some(BasicInst::WideArith { op, dst, carry, src1, src2 })
             }
             BasicInst::MoveReg { dst, src } => Some(BasicInst::MoveReg {
                 src: map(src, OpKind::Read),
@@ -949,6 +979,7 @@ impl<T> BasicInst<T> {
                 src1,
                 src2,
             },
+            BasicInst::WideArith { op, dst, carry, src1, src2 } => BasicInst::WideArith { op, dst, carry, src1, src2 },
             BasicInst::AnyAny { kind, dst, src1, src2 } => BasicInst::AnyAny { kind, dst, src1, src2 },
             BasicInst::Cmov { kind, dst, src, cond } => BasicInst::Cmov { kind, dst, src, cond },
             BasicInst::Ecalli { nth_import } => BasicInst::Ecalli { nth_import },
@@ -980,6 +1011,7 @@ impl<T> BasicInst<T> {
             | BasicInst::Reg { .. }
             | BasicInst::RegReg { .. }
             | BasicInst::MulWide { .. }
+            | BasicInst::WideArith { .. }
             | BasicInst::AnyAny { .. }
             | BasicInst::Cmov { .. }
             | BasicInst::Sbrk { .. }
@@ -2828,6 +2860,13 @@ const FUNC3_ECALLI: u32 = 0b000;
 const FUNC3_SBRK: u32 = 0b001;
 const FUNC3_MEMSET: u32 = 0b010;
 const FUNC3_HEAP_BASE: u32 = 0b011;
+// The 256-bit wide-arithmetic instructions. The 3-register operand shapes
+// (mul256, redc256) use the R format with `func7` selecting the operation;
+// the 4-register shapes (add256, sub256, mul256_by_u64) use the R4 format
+// with `func2` selecting the operation and `rs3` holding the destination
+// pointer register (`rd` is the carry-out, i.e. the only written register).
+const FUNC3_WIDE_ARITH_R: u32 = 0b100;
+const FUNC3_WIDE_ARITH_R4: u32 = 0b101;
 
 fn try_parse_epilogue(
     decoder_config: &DecoderConfig,
@@ -3018,6 +3057,7 @@ fn try_parse_prologue(
 fn parse_code_section(
     elf: &Elf,
     section: &Section,
+    isa: InstructionSetKind,
     decoder_config: &DecoderConfig,
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     imports: &mut Vec<Import>,
@@ -3164,6 +3204,73 @@ fn parse_code_section(
                     Some(dst) => InstExt::Basic(BasicInst::LoadHeapBase { dst }),
                     None => InstExt::Basic(BasicInst::Nop),
                 },
+            ));
+
+            relative_offset = relative_offset.checked_add(inst_size as usize).expect(OVERFLOW);
+            continue;
+        }
+
+        let r = crate::riscv::R(raw_inst);
+        if r.opcode() == crate::riscv::OPCODE_CUSTOM_0 && matches!(r.func3(), FUNC3_WIDE_ARITH_R | FUNC3_WIDE_ARITH_R4) {
+            let (op, opcode, dst, carry) = if r.func3() == FUNC3_WIDE_ARITH_R {
+                let op = match r.func7() {
+                    0 => WideArithOp::Mul256,
+                    1 => WideArithOp::Redc256,
+                    func7 => {
+                        return Err(ProgramFromElfError::other(format!(
+                            "found a wide-arithmetic instruction with an unknown func7: {func7}"
+                        )))
+                    }
+                };
+                let opcode = match op {
+                    WideArithOp::Mul256 => Opcode::mul256,
+                    _ => Opcode::redc256,
+                };
+                (op, opcode, r.dst(), None)
+            } else {
+                let (op, opcode) = match r.func2() {
+                    0 => (WideArithOp::Add256, Opcode::add256),
+                    1 => (WideArithOp::Sub256, Opcode::sub256),
+                    2 => (WideArithOp::Mul256ByU64, Opcode::mul256_by_u64),
+                    func2 => {
+                        return Err(ProgramFromElfError::other(format!(
+                            "found a wide-arithmetic instruction with an unknown func2: {func2}"
+                        )))
+                    }
+                };
+                // R4 shape: rd = carry-out (the only written register),
+                // rs3 = destination pointer.
+                (op, opcode, r.src3(), Some(r.dst()))
+            };
+
+            if !isa.supports_opcode(opcode) {
+                return Err(ProgramFromElfError::other(format!(
+                    "found a {op:?} instruction, but the target instruction set ({isa:?}) does not support it"
+                )));
+            }
+
+            let cast_pointer = |reg: RReg, what: &str| -> Result<Reg, ProgramFromElfError> {
+                cast_reg_non_zero(reg)?.ok_or_else(|| {
+                    ProgramFromElfError::other(format!(
+                        "found a {op:?} instruction with the zero register as the {what}"
+                    ))
+                })
+            };
+
+            let dst = cast_pointer(dst, "destination pointer")?;
+            let src1 = cast_pointer(r.src1(), "first source")?;
+            let src2 = cast_pointer(r.src2(), "second source")?;
+            let carry = match carry {
+                Some(reg) => Some(cast_pointer(reg, "carry-out register")?),
+                None => None,
+            };
+
+            output.push((
+                Source {
+                    section_index,
+                    offset_range: (relative_offset as u64..(relative_offset as u64).checked_add(inst_size).expect(OVERFLOW)).into(),
+                },
+                InstExt::Basic(BasicInst::WideArith { op, dst, carry, src1, src2 }),
             ));
 
             relative_offset = relative_offset.checked_add(inst_size as usize).expect(OVERFLOW);
@@ -9417,6 +9524,19 @@ fn emit_code(
                     src1,
                     src2,
                 } => Instruction::mul_wide(conv_reg(dst_hi), conv_reg(dst_lo), conv_reg(src1), conv_reg(src2)),
+                BasicInst::WideArith { op, dst, carry, src1, src2 } => match op {
+                    WideArithOp::Mul256 => Instruction::mul256(conv_reg(dst), conv_reg(src1), conv_reg(src2)),
+                    WideArithOp::Redc256 => Instruction::redc256(conv_reg(dst), conv_reg(src1), conv_reg(src2)),
+                    WideArithOp::Add256 => {
+                        Instruction::add256(conv_reg(dst), conv_reg(carry.unwrap()), conv_reg(src1), conv_reg(src2))
+                    }
+                    WideArithOp::Sub256 => {
+                        Instruction::sub256(conv_reg(dst), conv_reg(carry.unwrap()), conv_reg(src1), conv_reg(src2))
+                    }
+                    WideArithOp::Mul256ByU64 => {
+                        Instruction::mul256_by_u64(conv_reg(dst), conv_reg(carry.unwrap()), conv_reg(src1), conv_reg(src2))
+                    }
+                },
                 BasicInst::RegReg { kind, dst, src1, src2 } => {
                     use RegRegKind as K;
                     codegen! {
@@ -11204,6 +11324,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
         parse_code_section(
             &elf,
             section,
+            isa,
             &decoder_config,
             &relocations,
             &mut imports,

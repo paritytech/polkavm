@@ -719,6 +719,16 @@ impl R {
     pub fn unpack(self) -> (u32, u32, u32, Reg, Reg, Reg) {
         (self.opcode(), self.func3(), self.func7(), self.dst(), self.src1(), self.src2())
     }
+
+    /// The `func2` field of the R4 instruction format (bits 25..27).
+    pub fn func2(self) -> u32 {
+        (self.0 >> 25) & 0b11
+    }
+
+    /// The `rs3` field of the R4 instruction format (bits 27..32).
+    pub fn src3(self) -> Reg {
+        Reg::decode(self.0 >> 27)
+    }
 }
 
 macro_rules! ctx {
