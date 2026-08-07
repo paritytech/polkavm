@@ -241,9 +241,6 @@ pub struct VmCtx {
 
     /// The address of the native code to call inside of the VM process, if non-zero.
     pub next_native_program_counter: AtomicU64,
-    /// The continuation address of the wide-arithmetic trampoline currently
-    /// being executed, if any. Written by the compiled code itself.
-    pub wide_arith_continuation: AtomicU64,
 
     pub tmp_reg: AtomicU64,
     pub rip: AtomicU64,
@@ -315,6 +312,14 @@ pub struct VmCtx {
     pub message_length: UnsafeCell<u32>,
     /// A buffer used to marshal error messages.
     pub message_buffer: UnsafeCell<[u8; MESSAGE_BUFFER_SIZE]>,
+
+    /// The continuation address of the wide-arithmetic trampoline currently
+    /// being executed, if any. Written by the compiled code and only ever
+    /// read by the host, so it deliberately lives at the very end of the
+    /// struct: the prebuilt zygote binary was compiled against the layout
+    /// without this field and must keep seeing the same offsets for every
+    /// field it touches (its signal handler writes tmp_reg and rip).
+    pub wide_arith_continuation: AtomicU64,
 }
 
 #[test]
@@ -324,6 +329,24 @@ fn test_gas_offset() {
     #[allow(unsafe_code)]
     let vmctx: VmCtx = unsafe { core::mem::zeroed() };
     assert_eq!(core::ptr::addr_of!(vmctx.gas) as usize - core::ptr::addr_of!(vmctx) as usize, 0x60);
+}
+
+#[test]
+fn test_zygote_visible_offsets() {
+    // The prebuilt zygote binary accesses these fields at the offsets it was
+    // compiled with; inserting a field before them breaks the signal-handling
+    // path in a way most tests don't catch (the zygote's signal handler
+    // writes tmp_reg and rip). Only ever append new fields at the end of the
+    // struct, or rebuild and re-commit the zygote.
+    // SAFETY: It's valid to initialize VmCtx with all zeros, and it's only test code anyway.
+    #[allow(unsafe_code)]
+    let vmctx: VmCtx = unsafe { core::mem::zeroed() };
+    let base = core::ptr::addr_of!(vmctx) as usize;
+    assert_eq!(core::ptr::addr_of!(vmctx.futex) as usize - base, 0);
+    assert_eq!(core::ptr::addr_of!(vmctx.jump_into) as usize - base, 0x8);
+    assert_eq!(core::ptr::addr_of!(vmctx.next_native_program_counter) as usize - base, 0x10);
+    assert_eq!(core::ptr::addr_of!(vmctx.tmp_reg) as usize - base, 0x18);
+    assert_eq!(core::ptr::addr_of!(vmctx.rip) as usize - base, 0x20);
 }
 
 // Make sure it fits within a single page on amd64.
@@ -380,7 +403,6 @@ impl VmCtx {
             regs: [ATOMIC_U64_ZERO; REG_COUNT],
             jump_into: AtomicU64::new(0),
             next_native_program_counter: AtomicU64::new(0),
-            wide_arith_continuation: AtomicU64::new(0),
 
             futex: AtomicU32::new(VMCTX_FUTEX_BUSY),
 
@@ -420,6 +442,7 @@ impl VmCtx {
             },
 
             message_length: UnsafeCell::new(0),
+            wide_arith_continuation: AtomicU64::new(0),
             message_buffer: UnsafeCell::new([0; MESSAGE_BUFFER_SIZE]),
         }
     }
