@@ -1,0 +1,12 @@
+[package]
+name = "opcount"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+polkavm = { workspace = true, default-features = true }
+env_logger = { workspace = true }
+
+[lints]
+workspace = true

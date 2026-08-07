@@ -15,6 +15,7 @@ members = [
     "tools/polkavm-linux-raw-generate",
     "tools/spectool",
     "tools/gastool",
+    "tools/opcount",
 
     "examples/doom",
     "examples/quake",
