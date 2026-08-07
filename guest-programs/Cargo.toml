@@ -51,3 +51,9 @@ picoalloc = { version = "5.0.0", no-default-features = true }
 [workspace.lints.rust]
 unexpected-cfgs = "allow"
 static_mut_refs = "allow"
+
+# Wide-arithmetic PoC: the curve25519-dalek fork with the PVM 4x64 backend
+# (selected via WIDE_ARITH=1/redc in build-benchmarks.sh; without the cfg the
+# fork behaves identically to the crates.io release).
+[patch.crates-io]
+curve25519-dalek = { path = "../../curve25519-dalek/curve25519-dalek" }

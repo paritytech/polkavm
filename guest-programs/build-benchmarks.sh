@@ -63,8 +63,24 @@ if [ "${SOLANA_PLATFORM_TOOLS_DIR:-}" == "" ]; then
 fi
 
 build_polkavm() {
+    # Wide-arithmetic PoC: WIDE_ARITH=1 selects the curve25519-dalek PVM
+    # backend (requires the [patch.crates-io] fork); WIDE_ARITH=redc
+    # additionally routes the field reduction through redc256. Only the
+    # PVM guest builds are affected; when set, blobs are always relinked
+    # (--run-only-if-newer would skip the relink when only flags changed).
+    local wide_arith_flags=""
+    local relink_flag="--run-only-if-newer"
+    if [ -n "${WIDE_ARITH:-}" ]; then
+        wide_arith_flags="--cfg curve25519_dalek_backend=\"pvm\""
+        relink_flag=""
+        if [ "${WIDE_ARITH}" = "redc" ]; then
+            wide_arith_flags="$wide_arith_flags --cfg pvm_redc"
+        fi
+    fi
+
     echo "> Building: '$1' (polkavm, 32-bit)"
 
+    # The PVM dalek backend is 64-bit only; the 32-bit blob stays stock.
     RUSTFLAGS="$extra_flags" cargo build  \
         -Z build-std=core,alloc \
         --target "$PWD/../crates/polkavm-linker/targets/legacy/riscv32emac-unknown-none-polkavm.json" \
@@ -73,14 +89,14 @@ build_polkavm() {
     pushd ..
 
     cargo run -q -p polkatool link \
-        --run-only-if-newer $CARGO_TARGET_DIR/riscv32emac-unknown-none-polkavm/release/$1 \
+        $relink_flag $CARGO_TARGET_DIR/riscv32emac-unknown-none-polkavm/release/$1 \
         -o $CARGO_TARGET_DIR/riscv32emac-unknown-none-polkavm/release/$1.polkavm
 
     popd
 
     echo "> Building: '$1' (polkavm, 64-bit)"
 
-    RUSTFLAGS="$extra_flags" cargo build  \
+    RUSTFLAGS="$extra_flags $wide_arith_flags" cargo build  \
         -Z build-std=core,alloc \
         --target "$PWD/../crates/polkavm-linker/targets/legacy/riscv64emac-unknown-none-polkavm.json" \
         -q --release --bin $1 -p $1
@@ -88,7 +104,7 @@ build_polkavm() {
     pushd ..
 
     cargo run -q -p polkatool link \
-        --run-only-if-newer $CARGO_TARGET_DIR/riscv64emac-unknown-none-polkavm/release/$1 \
+        $relink_flag $CARGO_TARGET_DIR/riscv64emac-unknown-none-polkavm/release/$1 \
         -o $CARGO_TARGET_DIR/riscv64emac-unknown-none-polkavm/release/$1.polkavm
 
     popd
