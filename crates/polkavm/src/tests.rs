@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use polkavm_common::abi::MemoryMapBuilder;
 use polkavm_common::cast::cast;
-use polkavm_common::program::{asm, InstructionSet, InstructionSetKind, Opcode};
+use polkavm_common::program::{asm, Instruction, InstructionSet, InstructionSetKind, Opcode};
 use polkavm_common::program::{BlobLen, Reg::*, INTERPRETER_CACHE_ENTRY_SIZE};
 use polkavm_common::utils::align_to_next_page_u32;
 use polkavm_common::writer::ProgramBlobBuilder;
@@ -5141,6 +5141,477 @@ fn mul_wide_unsupported(_config: Config, isa: InstructionSetKind) {
     assert!(error.to_string().contains("mul_wide"), "unexpected error: {error}");
 }
 
+// # 256-bit wide-arithmetic instruction tests
+//
+// The expected values come from `polkavm_common::operation::wide_*`, which are
+// the same functions the interpreter executes — so for the interpreter these
+// are consistency checks, while for the compiler backends (and the tracing
+// crosscheck variants) they verify the recompiled sequences against the
+// reference semantics.
+
+struct WideArithTester {
+    engine: Engine,
+}
+
+impl WideArithTester {
+    fn new(config: &Config) -> Self {
+        let _ = env_logger::try_init();
+        WideArithTester {
+            engine: Engine::new(config).unwrap(),
+        }
+    }
+
+    /// Runs `code` with the given registers set and the given memory written,
+    /// returning the instance for inspection. Expects a clean finish.
+    fn run(&self, code: &[Instruction], regs: &[(Reg, u64)], memory: &[(u32, &[u8])]) -> crate::RawInstance {
+        self.run_impl(code, regs, memory, false)
+    }
+
+    /// Same as `run`, but expects the program to trap.
+    fn run_expect_trap(&self, code: &[Instruction], regs: &[(Reg, u64)], memory: &[(u32, &[u8])]) -> crate::RawInstance {
+        self.run_impl(code, regs, memory, true)
+    }
+
+    fn run_impl(&self, code: &[Instruction], regs: &[(Reg, u64)], memory: &[(u32, &[u8])], expect_trap: bool) -> crate::RawInstance {
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+        builder.set_rw_data_size(0x4000);
+        builder.add_export_by_basic_block(0, b"main");
+        let mut code = code.to_vec();
+        code.push(asm::ret());
+        builder.set_code(&code, &[]);
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let module = Module::from_blob(&self.engine, &ModuleConfig::new(), blob).unwrap();
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        for &(reg, value) in regs {
+            instance.set_reg(reg, value);
+        }
+        for &(address, data) in memory {
+            instance.write_memory(address, data).unwrap();
+        }
+        instance.set_next_program_counter(ProgramCounter(0));
+        if expect_trap {
+            match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+        } else {
+            match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+        }
+        instance
+    }
+
+    fn base(&self) -> u32 {
+        // Skip the first page of rw_data so tests can also place operands at
+        // negative offsets from the base.
+        0x20000 + 0x1000
+    }
+}
+
+fn limbs_to_bytes(limbs: &[u64]) -> Vec<u8> {
+    limbs.iter().flat_map(|limb| limb.to_le_bytes()).collect()
+}
+
+fn read_limbs<const N: usize>(instance: &mut crate::RawInstance, address: u32) -> [u64; N] {
+    let bytes = instance.read_memory(address, 8 * N as u32).unwrap();
+    let mut limbs = [0u64; N];
+    for (i, limb) in limbs.iter_mut().enumerate() {
+        *limb = u64::from_le_bytes(bytes[8 * i..8 * i + 8].try_into().unwrap());
+    }
+    limbs
+}
+
+fn wide_arith_xorshift(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+fn wide_arith_basic(config: Config, _isa: InstructionSetKind) {
+    use polkavm_common::operation::{wide_add256, wide_mul256, wide_mul256_by_u64, wide_redc256, wide_sub256};
+
+    let tester = WideArithTester::new(&config);
+    let base = tester.base();
+    let (d_at, a_at, b_at) = (base, base + 0x100, base + 0x200);
+
+    let a = [0xdeadbeef12345678, 0x9e3779b97f4a7c15, 0xfedcba9876543210, 0x0123456789abcdef];
+    let b = [u64::MAX, 0, 0x8000000000000000, 1];
+    let src512 = [1, 2, 3, 4, 5, 6, 7, u64::MAX];
+
+    // mul256
+    let mut instance = tester.run(
+        &[asm::mul256(A0, A1, A2)],
+        &[(A0, u64::from(d_at)), (A1, u64::from(a_at)), (A2, u64::from(b_at))],
+        &[(a_at, &limbs_to_bytes(&a)), (b_at, &limbs_to_bytes(&b))],
+    );
+    assert_eq!(read_limbs::<8>(&mut instance, d_at), wide_mul256(&a, &b));
+
+    // add256 / sub256, including the carry/borrow-out.
+    for is_add in [true, false] {
+        let op = if is_add { asm::add256 } else { asm::sub256 };
+        let (expected, expected_carry) = if is_add { wide_add256(&a, &b) } else { wide_sub256(&a, &b) };
+        let mut instance = tester.run(
+            &[op(A0, A3, A1, A2)],
+            &[(A0, u64::from(d_at)), (A1, u64::from(a_at)), (A2, u64::from(b_at)), (A3, 0x55)],
+            &[(a_at, &limbs_to_bytes(&a)), (b_at, &limbs_to_bytes(&b))],
+        );
+        assert_eq!(read_limbs::<4>(&mut instance, d_at), expected);
+        assert_eq!(instance.reg(A3), expected_carry);
+    }
+
+    // mul256_by_u64: the multiplier is a value, not a pointer.
+    let multiplier = 0x9e3779b97f4a7c15_u64;
+    let (expected, expected_hi) = wide_mul256_by_u64(&a, multiplier);
+    let mut instance = tester.run(
+        &[asm::mul256_by_u64(A0, A3, A1, A2)],
+        &[(A0, u64::from(d_at)), (A1, u64::from(a_at)), (A2, multiplier), (A3, 0x55)],
+        &[(a_at, &limbs_to_bytes(&a))],
+    );
+    assert_eq!(read_limbs::<4>(&mut instance, d_at), expected);
+    assert_eq!(instance.reg(A3), expected_hi);
+
+    // redc256 with the interesting k values: 0 (degenerate mod 2^256),
+    // 38 (curve25519), 2^32 + 977 (secp256k1), and the maximum.
+    for k in [0, 38, (1 << 32) + 977, u64::MAX] {
+        let mut instance = tester.run(
+            &[asm::redc256(A0, A1, A2)],
+            &[(A0, u64::from(d_at)), (A1, u64::from(a_at)), (A2, k)],
+            &[(a_at, &limbs_to_bytes(&src512))],
+        );
+        assert_eq!(read_limbs::<4>(&mut instance, d_at), wide_redc256(&src512, k), "k = {k}");
+    }
+}
+
+fn wide_arith_aliasing(config: Config, _isa: InstructionSetKind) {
+    use polkavm_common::operation::{wide_add256, wide_mul256, wide_redc256};
+
+    let tester = WideArithTester::new(&config);
+    let base = tester.base();
+
+    let a = [0xdeadbeef12345678, 0x9e3779b97f4a7c15, 0xfedcba9876543210, 0x0123456789abcdef];
+    let b = [0x0f0e0d0c0b0a0908, u64::MAX, 2, 0x7fffffffffffffff];
+
+    // Read-all-then-write: the destination may alias the sources at any
+    // offset; the result must always be computed from the original values.
+
+    // mul256 with dst == lhs (the destination is wider than the source and
+    // fully overwrites it).
+    let mut instance = tester.run(
+        &[asm::mul256(A0, A0, A1)],
+        &[(A0, u64::from(base)), (A1, u64::from(base + 0x100))],
+        &[(base, &limbs_to_bytes(&a)), (base + 0x100, &limbs_to_bytes(&b))],
+    );
+    assert_eq!(read_limbs::<8>(&mut instance, base), wide_mul256(&a, &b));
+
+    // mul256 squaring with all three operands aliased.
+    let mut instance = tester.run(
+        &[asm::mul256(A0, A0, A0)],
+        &[(A0, u64::from(base))],
+        &[(base, &limbs_to_bytes(&a))],
+    );
+    assert_eq!(read_limbs::<8>(&mut instance, base), wide_mul256(&a, &a));
+
+    // mul256 with the destination partially overlapping a source at a
+    // misaligned offset.
+    for offset in [8u32, 16, 24, 32] {
+        let mut instance = tester.run(
+            &[asm::mul256(A0, A1, A2)],
+            &[
+                (A0, u64::from(base + offset)),
+                (A1, u64::from(base)),
+                (A2, u64::from(base + 0x100)),
+            ],
+            &[(base, &limbs_to_bytes(&a)), (base + 0x100, &limbs_to_bytes(&b))],
+        );
+        assert_eq!(read_limbs::<8>(&mut instance, base + offset), wide_mul256(&a, &b), "offset = {offset}");
+    }
+
+    // add256 with everything aliased: d == s1 == s2, and the carry register
+    // aliasing a pointer register.
+    let (expected, expected_carry) = wide_add256(&a, &a);
+    let mut instance = tester.run(
+        &[asm::add256(A0, A0, A0, A0)],
+        &[(A0, u64::from(base))],
+        &[(base, &limbs_to_bytes(&a))],
+    );
+    assert_eq!(read_limbs::<4>(&mut instance, base), expected);
+    assert_eq!(instance.reg(A0), expected_carry);
+
+    // redc256 with the destination overlapping the middle of the 512-bit source.
+    let src512 = [a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]];
+    for offset in [0u32, 8, 32] {
+        let mut instance = tester.run(
+            &[asm::redc256(A0, A1, A2)],
+            &[(A0, u64::from(base + offset)), (A1, u64::from(base)), (A2, 38)],
+            &[(base, &limbs_to_bytes(&src512))],
+        );
+        assert_eq!(
+            read_limbs::<4>(&mut instance, base + offset),
+            wide_redc256(&src512, 38),
+            "offset = {offset}"
+        );
+    }
+}
+
+fn wide_arith_back_to_back(config: Config, _isa: InstructionSetKind) {
+    use polkavm_common::operation::{wide_add256, wide_mul256, wide_redc256, wide_sub256};
+
+    let tester = WideArithTester::new(&config);
+    let base = tester.base();
+    let (p_at, d_at, a_at, b_at) = (base, base + 0x100, base + 0x200, base + 0x300);
+
+    let a = [0xdeadbeef12345678, 0x9e3779b97f4a7c15, 0xfedcba9876543210, 0x0123456789abcdef];
+    let b = [0x243f6a8885a308d3, 0x13198a2e03707344, 0xa4093822299f31d0, 0x082efa98ec4e6c89];
+
+    // The fe_mul shape: mul256 into a 512-bit scratch, immediately folded by
+    // redc256. Two adjacent wide instructions must not assume any leftover
+    // scratch state from each other.
+    let mut instance = tester.run(
+        &[asm::mul256(A0, A1, A2), asm::redc256(A3, A0, A4)],
+        &[
+            (A0, u64::from(p_at)),
+            (A1, u64::from(a_at)),
+            (A2, u64::from(b_at)),
+            (A3, u64::from(d_at)),
+            (A4, 38),
+        ],
+        &[(a_at, &limbs_to_bytes(&a)), (b_at, &limbs_to_bytes(&b))],
+    );
+    let product = wide_mul256(&a, &b);
+    assert_eq!(read_limbs::<8>(&mut instance, p_at), product);
+    assert_eq!(read_limbs::<4>(&mut instance, d_at), wide_redc256(&product, 38));
+
+    // add256 whose carry-out register is a pointer operand of the next
+    // instruction: the next instruction must see the carry, not the pointer.
+    let (sum, carry) = wide_add256(&a, &b);
+    assert_eq!(carry, 0); // sanity: carry must be zero for A4 to remain a valid pointer below
+    let (expected, borrow) = wide_sub256(&sum, &a);
+    let mut instance = tester.run(
+        &[asm::add256(A0, A4, A1, A2), asm::sub256(A0, A3, A0, A1)],
+        &[
+            (A0, u64::from(d_at)),
+            (A1, u64::from(a_at)),
+            (A2, u64::from(b_at)),
+            (A3, 0x55),
+            (A4, 0x66),
+        ],
+        &[(a_at, &limbs_to_bytes(&a)), (b_at, &limbs_to_bytes(&b))],
+    );
+    assert_eq!(read_limbs::<4>(&mut instance, d_at), expected);
+    assert_eq!(instance.reg(A3), borrow);
+    assert_eq!(instance.reg(A4), carry);
+
+    // Two back-to-back mul256s writing to adjacent buffers.
+    let mut instance = tester.run(
+        &[asm::mul256(A0, A2, A3), asm::mul256(A1, A3, A2)],
+        &[
+            (A0, u64::from(p_at)),
+            (A1, u64::from(p_at + 64)),
+            (A2, u64::from(a_at)),
+            (A3, u64::from(b_at)),
+        ],
+        &[(a_at, &limbs_to_bytes(&a)), (b_at, &limbs_to_bytes(&b))],
+    );
+    assert_eq!(read_limbs::<8>(&mut instance, p_at), product);
+    assert_eq!(read_limbs::<8>(&mut instance, p_at + 64), wide_mul256(&b, &a));
+}
+
+fn wide_arith_reg_sweep(config: Config, _isa: InstructionSetKind) {
+    use polkavm_common::operation::{wide_add256, wide_mul256};
+
+    let tester = WideArithTester::new(&config);
+    let base = tester.base();
+    let (d_at, a_at, b_at) = (base, base + 0x100, base + 0x200);
+
+    let a = [0xdeadbeef12345678, 0x9e3779b97f4a7c15, 0xfedcba9876543210, 0x0123456789abcdef];
+    let b = [0x243f6a8885a308d3, u64::MAX, 0, 0x082efa98ec4e6c89];
+    let memory: &[(u32, &[u8])] = &[(a_at, &limbs_to_bytes(&a)), (b_at, &limbs_to_bytes(&b))];
+
+    // A2 maps to rdx on amd64 (mulx's implicit source register), so sweeping
+    // it through every operand role exercises the recompiler's special cases.
+    let regs = [A0, A1, A2, A3, A4];
+
+    // mul256: all register-role combinations (with distinct pointers).
+    for d in regs {
+        for s1 in regs {
+            for s2 in regs {
+                if d == s1 || d == s2 || s1 == s2 {
+                    continue;
+                }
+
+                let mut instance = tester.run(
+                    &[asm::mul256(d, s1, s2)],
+                    &[(d, u64::from(d_at)), (s1, u64::from(a_at)), (s2, u64::from(b_at))],
+                    memory,
+                );
+                assert_eq!(read_limbs::<8>(&mut instance, d_at), wide_mul256(&a, &b), "mul256 {d:?}, {s1:?}, {s2:?}");
+            }
+        }
+    }
+
+    // add256: sweep with the carry register in every role, including aliased
+    // with the pointer operands.
+    let (expected, expected_carry) = wide_add256(&a, &b);
+    for d in regs {
+        for c in regs {
+            for s1 in regs {
+                for s2 in regs {
+                    if d == s1 || d == s2 || s1 == s2 {
+                        continue;
+                    }
+
+                    // Register values are applied in order, so only pre-set
+                    // the carry register when it doesn't alias a pointer.
+                    let mut regs = vec![(d, u64::from(d_at)), (s1, u64::from(a_at)), (s2, u64::from(b_at))];
+                    if c != d && c != s1 && c != s2 {
+                        regs.push((c, 0x55));
+                    }
+                    let mut instance = tester.run(&[asm::add256(d, c, s1, s2)], &regs, memory);
+                    assert_eq!(
+                        read_limbs::<4>(&mut instance, d_at),
+                        expected,
+                        "add256 {d:?}, {c:?}, {s1:?}, {s2:?}"
+                    );
+                    assert_eq!(instance.reg(c), expected_carry, "add256 carry {d:?}, {c:?}, {s1:?}, {s2:?}");
+                }
+            }
+        }
+    }
+}
+
+fn wide_arith_randomized(config: Config, _isa: InstructionSetKind) {
+    use polkavm_common::operation::{wide_add256, wide_mul256, wide_mul256_by_u64, wide_redc256, wide_sub256};
+
+    let tester = WideArithTester::new(&config);
+    let base = tester.base();
+    let (d_at, a_at, b_at) = (base, base + 0x100, base + 0x200);
+
+    // A mix of random and adversarial limb patterns: all-ones, zero,
+    // non-canonical field elements (>= 2^255 - 19), and high-bit patterns.
+    let mut state = 0x853c49e6748fea9b_u64;
+    let mut interesting = vec![[u64::MAX; 4], [0, 0, 0, 0x8000000000000000], {
+        // 2^255 - 19 itself.
+        [0xffffffffffffffed, u64::MAX, u64::MAX, 0x7fffffffffffffff]
+    }];
+    for _ in 0..40 {
+        interesting.push(core::array::from_fn(|_| wide_arith_xorshift(&mut state)));
+    }
+
+    let k_values = [0u64, 1, 19, 38, (1 << 32) + 977, u64::MAX];
+
+    for (index, a) in interesting.iter().enumerate() {
+        let b = interesting[(index + 7) % interesting.len()];
+        let memory: &[(u32, &[u8])] = &[(a_at, &limbs_to_bytes(a)), (b_at, &limbs_to_bytes(&b))];
+        let regs: &[(Reg, u64)] = &[(A0, u64::from(d_at)), (A1, u64::from(a_at)), (A2, u64::from(b_at)), (A3, 0)];
+
+        let mut instance = tester.run(&[asm::mul256(A0, A1, A2)], regs, memory);
+        assert_eq!(read_limbs::<8>(&mut instance, d_at), wide_mul256(a, &b), "mul256 case {index}");
+
+        let mut instance = tester.run(&[asm::add256(A0, A3, A1, A2)], regs, memory);
+        let (expected, carry) = wide_add256(a, &b);
+        assert_eq!((read_limbs::<4>(&mut instance, d_at), instance.reg(A3)), (expected, carry), "add256 case {index}");
+
+        let mut instance = tester.run(&[asm::sub256(A0, A3, A1, A2)], regs, memory);
+        let (expected, borrow) = wide_sub256(a, &b);
+        assert_eq!((read_limbs::<4>(&mut instance, d_at), instance.reg(A3)), (expected, borrow), "sub256 case {index}");
+
+        let multiplier = b[0];
+        let mut instance = tester.run(
+            &[asm::mul256_by_u64(A0, A3, A1, A2)],
+            &[(A0, u64::from(d_at)), (A1, u64::from(a_at)), (A2, multiplier), (A3, 0)],
+            memory,
+        );
+        let (expected, hi) = wide_mul256_by_u64(a, multiplier);
+        assert_eq!(
+            (read_limbs::<4>(&mut instance, d_at), instance.reg(A3)),
+            (expected, hi),
+            "mul256_by_u64 case {index}"
+        );
+
+        // redc256 over a 512-bit source assembled from both operands.
+        let src512 = [a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]];
+        let k = k_values[index % k_values.len()];
+        let mut instance = tester.run(
+            &[asm::redc256(A0, A1, A2)],
+            &[(A0, u64::from(d_at)), (A1, u64::from(a_at)), (A2, k)],
+            &[(a_at, &limbs_to_bytes(&src512))],
+        );
+        assert_eq!(read_limbs::<4>(&mut instance, d_at), wide_redc256(&src512, k), "redc256 case {index}, k = {k}");
+    }
+}
+
+fn wide_arith_oob(config: Config, _isa: InstructionSetKind) {
+    let tester = WideArithTester::new(&config);
+    let base = tester.base();
+    let a = [1u64, 2, 3, 4];
+
+    // Reading/writing operands entirely outside of accessible memory.
+    for address in [0u64, 0x1000, 0xfffff000] {
+        tester.run_expect_trap(
+            &[asm::mul256(A0, A1, A2)],
+            &[(A0, u64::from(base)), (A1, address), (A2, u64::from(base + 0x100))],
+            &[(base + 0x100, &limbs_to_bytes(&a))],
+        );
+        tester.run_expect_trap(
+            &[asm::mul256(A0, A1, A2)],
+            &[(A0, address), (A1, u64::from(base)), (A2, u64::from(base + 0x100))],
+            &[(base, &limbs_to_bytes(&a)), (base + 0x100, &limbs_to_bytes(&a))],
+        );
+    }
+
+    // An operand range extending past the 4 GiB boundary must trap (limb
+    // addresses do not wrap around).
+    tester.run_expect_trap(
+        &[asm::add256(A0, A3, A1, A2)],
+        &[(A0, u64::from(base)), (A1, 0xffffffe8), (A2, u64::from(base + 0x100))],
+        &[(base + 0x100, &limbs_to_bytes(&a))],
+    );
+
+    // Pointer values have their upper 32 bits ignored.
+    let mut instance = tester.run(
+        &[asm::mul256(A0, A1, A2)],
+        &[
+            (A0, 0xdeadbeef_00000000 | u64::from(base)),
+            (A1, u64::from(base + 0x100)),
+            (A2, u64::from(base + 0x200)),
+        ],
+        &[(base + 0x100, &limbs_to_bytes(&a)), (base + 0x200, &limbs_to_bytes(&a))],
+    );
+    assert_eq!(
+        read_limbs::<8>(&mut instance, base),
+        polkavm_common::operation::wide_mul256(&a, &a)
+    );
+
+    // A destination on read-only memory must trap. (The read-only section
+    // starts at 0x10000.)
+    tester.run_expect_trap(
+        &[asm::redc256(A0, A1, A2)],
+        &[(A0, 0x10000), (A1, u64::from(base)), (A2, 38)],
+        &[(base, &limbs_to_bytes(&a)), (base + 32, &limbs_to_bytes(&a))],
+    );
+}
+
+fn wide_arith_unsupported(_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+
+    let instructions = [
+        ("mul256", asm::mul256(A0, A1, A2)),
+        ("redc256", asm::redc256(A0, A1, A2)),
+        ("add256", asm::add256(A0, A3, A1, A2)),
+        ("sub256", asm::sub256(A0, A3, A1, A2)),
+        ("mul256_by_u64", asm::mul256_by_u64(A0, A3, A1, A2)),
+    ];
+
+    for (name, instruction) in instructions {
+        let mut builder = ProgramBlobBuilder::new(isa);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[instruction, asm::ret()], &[]);
+
+        // These instructions are not part of this instruction set: building
+        // the blob must fail loudly, never silently emit a reserved opcode.
+        let error = builder.into_vec().unwrap_err();
+        assert!(error.to_string().contains(name), "unexpected error for {name}: {error}");
+    }
+}
+
 fn jam_validate_invalid_opcode(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
@@ -5750,13 +6221,21 @@ run_tests_on_isa! { jam_v1, InstructionSetKind::JamV1,
     jam_validate_invalid_fallthrough
     jam_validate_invalid_skip
     mul_wide_unsupported
+    wide_arith_unsupported
 }
 
-// `mul_wide` only exists in Latest64, so its tests cannot go through `run_tests!`
-// (which also fans out to ReviveV1).
+// `mul_wide` and the 256-bit wide-arithmetic instructions only exist in
+// Latest64, so their tests cannot go through `run_tests!` (which also fans
+// out to ReviveV1).
 run_tests_on_isa! { latest64, InstructionSetKind::Latest64,
     mul_wide_basic
     mul_wide_reg_sweep
+    wide_arith_basic
+    wide_arith_aliasing
+    wide_arith_back_to_back
+    wide_arith_reg_sweep
+    wide_arith_randomized
+    wide_arith_oob
 }
 
 run_test_blob_tests! {

@@ -2433,6 +2433,101 @@ where
             },
         )
     }
+
+    // The wide-arithmetic instruction costs below are coarse approximations
+    // derived from the recompiled x86 sequence sizes (see the wide-arith
+    // research report): mul256 ≈ 70 instructions / 16 hardware multiplies,
+    // redc256 ≈ 35 / 5, add256/sub256 ≈ 14, mul256_by_u64 ≈ 13 / 4. Memory
+    // dependencies are not modeled (same as memset above); only the register
+    // operands enter the dependency graph.
+
+    #[inline(always)]
+    fn mul256(&mut self, _offset: u32, _args_length: u32, _d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.dispatch_generic(
+            None,
+            Some(s1),
+            Some(s2),
+            InstCost {
+                latency: 25,
+                decode_slots: 70,
+                alu_slots: 4,
+                mul_slots: 1,
+                load_slots: 4,
+                store_slots: 4,
+                ..EMPTY_COST
+            },
+        )
+    }
+
+    #[inline(always)]
+    fn redc256(&mut self, _offset: u32, _args_length: u32, _d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.dispatch_generic(
+            None,
+            Some(s1),
+            Some(s2),
+            InstCost {
+                latency: 12,
+                decode_slots: 35,
+                alu_slots: 4,
+                mul_slots: 1,
+                load_slots: 4,
+                store_slots: 4,
+                ..EMPTY_COST
+            },
+        )
+    }
+
+    #[inline(always)]
+    fn add256(&mut self, _offset: u32, _args_length: u32, _d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.dispatch_generic(
+            Some(c),
+            Some(s1),
+            Some(s2),
+            InstCost {
+                latency: 6,
+                decode_slots: 14,
+                alu_slots: 4,
+                load_slots: 4,
+                store_slots: 4,
+                ..EMPTY_COST
+            },
+        )
+    }
+
+    #[inline(always)]
+    fn sub256(&mut self, _offset: u32, _args_length: u32, _d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.dispatch_generic(
+            Some(c),
+            Some(s1),
+            Some(s2),
+            InstCost {
+                latency: 6,
+                decode_slots: 14,
+                alu_slots: 4,
+                load_slots: 4,
+                store_slots: 4,
+                ..EMPTY_COST
+            },
+        )
+    }
+
+    #[inline(always)]
+    fn mul256_by_u64(&mut self, _offset: u32, _args_length: u32, _d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.dispatch_generic(
+            Some(c),
+            Some(s1),
+            Some(s2),
+            InstCost {
+                latency: 8,
+                decode_slots: 13,
+                alu_slots: 4,
+                mul_slots: 1,
+                load_slots: 4,
+                store_slots: 4,
+                ..EMPTY_COST
+            },
+        )
+    }
 }
 
 #[derive(Clone)]

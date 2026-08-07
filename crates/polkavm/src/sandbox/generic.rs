@@ -639,6 +639,7 @@ struct VmCtx {
     next_program_counter: AtomicU32,
     next_native_program_counter: AtomicU64,
     memset_continuation: AtomicU64,
+    wide_arith_continuation: AtomicU64,
 }
 
 impl VmCtx {
@@ -668,6 +669,7 @@ impl VmCtx {
             next_program_counter: AtomicU32::new(0),
             next_native_program_counter: AtomicU64::new(0),
             memset_continuation: AtomicU64::new(0),
+            wide_arith_continuation: AtomicU64::new(0),
         }
     }
 }
@@ -1075,6 +1077,15 @@ impl Sandbox {
                 .memset_continuation
                 .load(Ordering::Relaxed)
                 .wrapping_sub(native_code_origin)
+        } else if crate::compiler::are_we_executing_wide_arith(compiled_module, machine_code_offset) {
+            // Attribute the fault to the guest instruction whose site stub
+            // entered the trampoline; the continuation points just past the
+            // site's jump (the boundary with the next instruction), hence -1.
+            self.vmctx()
+                .wide_arith_continuation
+                .load(Ordering::Relaxed)
+                .wrapping_sub(native_code_origin)
+                .wrapping_sub(1)
         } else {
             machine_code_offset
         };
@@ -1156,6 +1167,16 @@ impl Sandbox {
         let memset_continuation = self.vmctx().memset_continuation.load(Ordering::Relaxed);
         let program_counter_offset = if memset.is_some() {
             memset_continuation.wrapping_sub(native_code_origin)
+        } else if crate::compiler::are_we_executing_wide_arith(compiled_module, machine_code_offset) {
+            // See handle_guest_signal: attribute to the originating site.
+            // The restart address for a resumable fault remains the faulting
+            // instruction itself (all trampoline faults happen in the probe
+            // phase, before any state is modified, so resuming there is safe).
+            self.vmctx()
+                .wide_arith_continuation
+                .load(Ordering::Relaxed)
+                .wrapping_sub(native_code_origin)
+                .wrapping_sub(1)
         } else {
             machine_code_offset
         };
@@ -2089,6 +2110,7 @@ impl super::Sandbox for Sandbox {
             heap_info: get_field_offset!(VmCtx::new(), |base| &base.heap_info),
             next_native_program_counter: get_field_offset!(VmCtx::new(), |base| base.next_native_program_counter.as_ptr()),
             memset_continuation: get_field_offset!(VmCtx::new(), |base| base.memset_continuation.as_ptr()),
+            wide_arith_continuation: get_field_offset!(VmCtx::new(), |base| base.wide_arith_continuation.as_ptr()),
             next_program_counter: get_field_offset!(VmCtx::new(), |base| base.next_program_counter.as_ptr()),
             program_counter: get_field_offset!(VmCtx::new(), |base| base.program_counter.as_ptr()),
             regs: get_field_offset!(VmCtx::new(), |base| &base.regs),

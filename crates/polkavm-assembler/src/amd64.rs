@@ -453,6 +453,7 @@ struct Inst {
     override_op_size: bool,
     override_addr_size: bool,
     op_alt: bool,
+    op_alt2: bool,
     force_enable_modrm: bool,
     rex: u8,
     opcode: u8,
@@ -478,6 +479,7 @@ impl Inst {
             override_op_size: false,
             override_addr_size: false,
             op_alt: false,
+            op_alt2: false,
             force_enable_modrm: false,
             rex: 0,
             opcode,
@@ -523,6 +525,13 @@ impl Inst {
     #[inline]
     const fn op_alt(mut self) -> Self {
         self.op_alt = true;
+        self
+    }
+
+    /// Emits the two-byte `0F 38` opcode escape.
+    #[inline]
+    const fn op_alt2(mut self) -> Self {
+        self.op_alt2 = true;
         self
     }
 
@@ -767,6 +776,12 @@ impl Inst {
 
             if self.op_alt {
                 buf.append(0x0f);
+            }
+
+            if self.op_alt2 {
+                debug_assert!(!self.op_alt);
+                buf.append(0x0f);
+                buf.append(0x38);
             }
         }
 
@@ -1518,6 +1533,42 @@ pub mod inst {
             alu_impl(0x00, 0x02, 0b000, self.0),
             None,
             (display_with_operands(fmt, "add", self.0)),
+
+        // https://www.felixcloutier.com/x86/adc
+        adc(Operands) =>
+            alu_impl(0x10, 0x12, 0b010, self.0),
+            None,
+            (display_with_operands(fmt, "adc", self.0)),
+
+        // https://www.felixcloutier.com/x86/sbb
+        sbb(Operands) =>
+            alu_impl(0x18, 0x1a, 0b011, self.0),
+            None,
+            (display_with_operands(fmt, "sbb", self.0)),
+
+        // https://www.felixcloutier.com/x86/adcx
+        // Add with carry, using and setting only the CF flag.
+        adcx(RegSize, Reg, RegMem) =>
+            Inst::new(0xf6)
+                .override_op_size()
+                .op_alt2()
+                .rex_64b_if(matches!(self.0, RegSize::R64))
+                .modrm_reg(self.1)
+                .regmem(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("adcx {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0))))),
+
+        // https://www.felixcloutier.com/x86/adox
+        // Add with carry, using and setting only the OF flag.
+        adox(RegSize, Reg, RegMem) =>
+            Inst::new(0xf6)
+                .op_rep_prefix()
+                .op_alt2()
+                .rex_64b_if(matches!(self.0, RegSize::R64))
+                .modrm_reg(self.1)
+                .regmem(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("adox {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0))))),
 
         // https://www.felixcloutier.com/x86/inc
         inc(Size, RegMem) =>
@@ -2502,7 +2553,10 @@ mod tests {
     }
 
     generate_tests! {
+        adc,
+        adcx,
         add,
+        adox,
         and,
         bts,
         call_rel32,
@@ -2576,6 +2630,7 @@ mod tests {
         popcnt,
         lzcnt,
         tzcnt,
+        sbb,
         setcc,
         bswap,
         shl_cl,

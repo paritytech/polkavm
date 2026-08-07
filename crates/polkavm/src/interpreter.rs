@@ -2859,6 +2859,47 @@ macro_rules! define_interpreter {
         $body
     }};
 
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: ProgramCounter, $a1:ident: Reg, $a2:ident: Reg, $a3:ident: Reg) => {{
+        impl Args {
+            pub fn $handler_name(a0: ProgramCounter, a1: impl Into<Reg>, a2: impl Into<Reg>, a3: impl Into<Reg>) -> Args {
+                Args {
+                    a0: a0.0,
+                    a1: a1.into().to_u32(),
+                    a2: a2.into().to_u32(),
+                    a3: a3.into().to_u32(),
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = ProgramCounter(args.a0);
+        let $a1 = transmute_reg(args.a1);
+        let $a2 = transmute_reg(args.a2);
+        let $a3 = transmute_reg(args.a3);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: ProgramCounter, $a1:ident: Reg, $a2:ident: Reg, $a3:ident: Reg, $a4:ident: Reg) => {{
+        impl Args {
+            pub fn $handler_name(a0: ProgramCounter, a1: impl Into<Reg>, a2: impl Into<Reg>, a3: impl Into<Reg>, a4: impl Into<Reg>) -> Args {
+                Args {
+                    a0: a0.0,
+                    a1: a1.into().to_u32() | (a2.into().to_u32() << 16),
+                    a2: a3.into().to_u32(),
+                    a3: a4.into().to_u32(),
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = ProgramCounter(args.a0);
+        let $a1 = transmute_reg(args.a1 & 0xffff);
+        let $a2 = transmute_reg(args.a1 >> 16);
+        let $a3 = transmute_reg(args.a2);
+        let $a4 = transmute_reg(args.a3);
+        $body
+    }};
+
     (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: Reg, $a1:ident: Reg, $a2:ident: Reg, $a3:ident: Reg) => {{
         impl Args {
             pub fn $handler_name(a0: impl Into<Reg>, a1: impl Into<Reg>, a2: impl Into<Reg>, a3: impl Into<Reg>) -> Args {
@@ -3158,6 +3199,154 @@ fn transmute_reg(value: u32) -> Reg {
     unsafe { core::mem::transmute(value) }
 }
 
+/// Shared state for the 256-bit wide-arithmetic handlers.
+///
+/// These instructions read and write guest memory through the regular
+/// `load`/`store` machinery, using `T0` as a scratch register: its value is
+/// saved on entry and restored both on success and on every fault path, so
+/// guest-visible register state is never affected by the scratch use (matching
+/// the recompiler, which uses host scratch registers).
+struct WideArithContext {
+    program_counter: ProgramCounter,
+    next_instruction: Target,
+    t0_saved: u64,
+}
+
+/// Extracts the value from a wide-arithmetic helper result, or returns the
+/// fault target from the enclosing handler.
+macro_rules! wide_try {
+    ($e:expr) => {
+        match $e {
+            Ok(value) => value,
+            Err(target) => return target,
+        }
+    };
+}
+
+#[inline(always)]
+fn wide_arith_load_limb<M: Memory, const DEBUG: bool>(
+    visitor: &mut InterpretedInstance,
+    compiled_offset: Target,
+    ctx: &WideArithContext,
+    address: u32,
+) -> Result<u64, Target> {
+    let target = visitor.load::<M, u64, DEBUG>(
+        compiled_offset,
+        ctx.program_counter,
+        Reg::T0,
+        None,
+        cast(address).bitwise_as_i32(),
+    );
+    if target != ctx.next_instruction {
+        visitor.set_u64::<false>(Reg::T0, ctx.t0_saved);
+        Err(target)
+    } else {
+        Ok(visitor.get_u64::<false>(Reg::T0))
+    }
+}
+
+#[inline(always)]
+fn wide_arith_store_limb<M: Memory, const DEBUG: bool>(
+    visitor: &mut InterpretedInstance,
+    compiled_offset: Target,
+    ctx: &WideArithContext,
+    address: u32,
+    value: u64,
+) -> Result<(), Target> {
+    visitor.set_u64::<false>(Reg::T0, value);
+    let target = visitor.store::<M, u64, DEBUG>(
+        compiled_offset,
+        ctx.program_counter,
+        Reg::T0,
+        None,
+        cast(address).bitwise_as_i32(),
+    );
+    if target != ctx.next_instruction {
+        visitor.set_u64::<false>(Reg::T0, ctx.t0_saved);
+        Err(target)
+    } else {
+        Ok(())
+    }
+}
+
+/// Computes the address of limb `i` of an operand based at `base`.
+///
+/// Limb addresses do not wrap: an operand range extending past the 4 GiB
+/// boundary traps, matching the recompiler (whose accesses land on the guard
+/// region beyond the guest address space).
+#[inline(always)]
+fn wide_arith_limb_address<const DEBUG: bool>(
+    visitor: &mut InterpretedInstance,
+    ctx: &WideArithContext,
+    base: u32,
+    index: usize,
+) -> Result<u32, Target> {
+    match u32::try_from(u64::from(base) + 8 * index as u64) {
+        Ok(address) => Ok(address),
+        Err(_) => {
+            visitor.set_u64::<false>(Reg::T0, ctx.t0_saved);
+            Err(trap_impl::<DEBUG>(visitor, ctx.program_counter))
+        }
+    }
+}
+
+/// Reads `N` consecutive little-endian limbs in ascending address order.
+#[inline(always)]
+fn wide_arith_read_limbs<M: Memory, const DEBUG: bool, const N: usize>(
+    visitor: &mut InterpretedInstance,
+    compiled_offset: Target,
+    ctx: &WideArithContext,
+    base: u32,
+) -> Result<[u64; N], Target> {
+    let mut limbs = [0u64; N];
+    for i in 0..N {
+        let address = wide_arith_limb_address::<DEBUG>(visitor, ctx, base, i)?;
+        limbs[i] = wide_arith_load_limb::<M, DEBUG>(visitor, compiled_offset, ctx, address)?;
+    }
+    Ok(limbs)
+}
+
+/// Probes `N` consecutive limbs of the destination for writability by writing
+/// each limb's current value back to itself, in ascending address order.
+///
+/// This runs after all sources are read and before any result limb is written,
+/// so that a fault (or a lazy-page segfault, which restarts the instruction)
+/// never leaves a partially-written destination: a restart would otherwise
+/// re-read sources that partial writes may have clobbered when the destination
+/// aliases them. The recompiler achieves the same by keeping the whole result
+/// in host registers until it starts storing.
+#[inline(always)]
+fn wide_arith_probe_dst<M: Memory, const DEBUG: bool, const N: usize>(
+    visitor: &mut InterpretedInstance,
+    compiled_offset: Target,
+    ctx: &WideArithContext,
+    base: u32,
+) -> Result<(), Target> {
+    for i in 0..N {
+        let address = wide_arith_limb_address::<DEBUG>(visitor, ctx, base, i)?;
+        let value = wide_arith_load_limb::<M, DEBUG>(visitor, compiled_offset, ctx, address)?;
+        wide_arith_store_limb::<M, DEBUG>(visitor, compiled_offset, ctx, address, value)?;
+    }
+    Ok(())
+}
+
+/// Writes `N` consecutive little-endian limbs in ascending address order.
+/// The destination must have been probed first; these stores cannot fault.
+#[inline(always)]
+fn wide_arith_write_limbs<M: Memory, const DEBUG: bool, const N: usize>(
+    visitor: &mut InterpretedInstance,
+    compiled_offset: Target,
+    ctx: &WideArithContext,
+    base: u32,
+    limbs: &[u64; N],
+) -> Result<(), Target> {
+    for (i, &limb) in limbs.iter().enumerate() {
+        let address = wide_arith_limb_address::<DEBUG>(visitor, ctx, base, i)?;
+        wide_arith_store_limb::<M, DEBUG>(visitor, compiled_offset, ctx, address, limb)?;
+    }
+    Ok(())
+}
+
 fn trap_impl<const DEBUG: bool>(visitor: &mut InterpretedInstance, program_counter: ProgramCounter) -> Target {
     visitor.program_counter = program_counter;
     visitor.program_counter_valid = true;
@@ -3379,6 +3568,144 @@ define_interpreter! {
         visitor.set_u64::<DEBUG>(Reg::A2, count);
 
         result
+    }
+
+    fn mul256<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: Reg, s1: Reg, s2: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::mul256(d, s1, s2));
+        }
+
+        let ctx = WideArithContext {
+            program_counter,
+            next_instruction: visitor.go_to_next_instruction(compiled_offset),
+            t0_saved: visitor.get_u64::<false>(Reg::T0),
+        };
+
+        let d_address = cast(visitor.get_u64::<DEBUG>(d)).truncate_to_u32();
+        let lhs_address = cast(visitor.get_u64::<DEBUG>(s1)).truncate_to_u32();
+        let rhs_address = cast(visitor.get_u64::<DEBUG>(s2)).truncate_to_u32();
+
+        let lhs = wide_try!(wide_arith_read_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, lhs_address));
+        let rhs = wide_try!(wide_arith_read_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, rhs_address));
+        wide_try!(wide_arith_probe_dst::<M, DEBUG, 8>(visitor, compiled_offset, &ctx, d_address));
+        wide_try!(wide_arith_write_limbs::<M, DEBUG, 8>(
+            visitor,
+            compiled_offset,
+            &ctx,
+            d_address,
+            &wide_mul256(&lhs, &rhs)
+        ));
+
+        visitor.set_u64::<false>(Reg::T0, ctx.t0_saved);
+        ctx.next_instruction
+    }
+
+    fn redc256<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: Reg, s1: Reg, s2: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::redc256(d, s1, s2));
+        }
+
+        let ctx = WideArithContext {
+            program_counter,
+            next_instruction: visitor.go_to_next_instruction(compiled_offset),
+            t0_saved: visitor.get_u64::<false>(Reg::T0),
+        };
+
+        let d_address = cast(visitor.get_u64::<DEBUG>(d)).truncate_to_u32();
+        let src_address = cast(visitor.get_u64::<DEBUG>(s1)).truncate_to_u32();
+        let k = visitor.get_u64::<DEBUG>(s2);
+
+        let src = wide_try!(wide_arith_read_limbs::<M, DEBUG, 8>(visitor, compiled_offset, &ctx, src_address));
+        wide_try!(wide_arith_probe_dst::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, d_address));
+        wide_try!(wide_arith_write_limbs::<M, DEBUG, 4>(
+            visitor,
+            compiled_offset,
+            &ctx,
+            d_address,
+            &wide_redc256(&src, k)
+        ));
+
+        visitor.set_u64::<false>(Reg::T0, ctx.t0_saved);
+        ctx.next_instruction
+    }
+
+    fn add256<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: Reg, c: Reg, s1: Reg, s2: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::add256(d, c, s1, s2));
+        }
+
+        let ctx = WideArithContext {
+            program_counter,
+            next_instruction: visitor.go_to_next_instruction(compiled_offset),
+            t0_saved: visitor.get_u64::<false>(Reg::T0),
+        };
+
+        let d_address = cast(visitor.get_u64::<DEBUG>(d)).truncate_to_u32();
+        let lhs_address = cast(visitor.get_u64::<DEBUG>(s1)).truncate_to_u32();
+        let rhs_address = cast(visitor.get_u64::<DEBUG>(s2)).truncate_to_u32();
+
+        let lhs = wide_try!(wide_arith_read_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, lhs_address));
+        let rhs = wide_try!(wide_arith_read_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, rhs_address));
+        wide_try!(wide_arith_probe_dst::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, d_address));
+        let (result, carry) = wide_add256(&lhs, &rhs);
+        wide_try!(wide_arith_write_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, d_address, &result));
+
+        // The carry-out register is written last, after the scratch register is
+        // restored, so `c` may alias any operand register (including T0).
+        visitor.set_u64::<false>(Reg::T0, ctx.t0_saved);
+        visitor.set_u64::<DEBUG>(c, carry);
+        ctx.next_instruction
+    }
+
+    fn sub256<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: Reg, c: Reg, s1: Reg, s2: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::sub256(d, c, s1, s2));
+        }
+
+        let ctx = WideArithContext {
+            program_counter,
+            next_instruction: visitor.go_to_next_instruction(compiled_offset),
+            t0_saved: visitor.get_u64::<false>(Reg::T0),
+        };
+
+        let d_address = cast(visitor.get_u64::<DEBUG>(d)).truncate_to_u32();
+        let lhs_address = cast(visitor.get_u64::<DEBUG>(s1)).truncate_to_u32();
+        let rhs_address = cast(visitor.get_u64::<DEBUG>(s2)).truncate_to_u32();
+
+        let lhs = wide_try!(wide_arith_read_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, lhs_address));
+        let rhs = wide_try!(wide_arith_read_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, rhs_address));
+        wide_try!(wide_arith_probe_dst::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, d_address));
+        let (result, borrow) = wide_sub256(&lhs, &rhs);
+        wide_try!(wide_arith_write_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, d_address, &result));
+
+        visitor.set_u64::<false>(Reg::T0, ctx.t0_saved);
+        visitor.set_u64::<DEBUG>(c, borrow);
+        ctx.next_instruction
+    }
+
+    fn mul256_by_u64<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: Reg, c: Reg, s1: Reg, s2: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::mul256_by_u64(d, c, s1, s2));
+        }
+
+        let ctx = WideArithContext {
+            program_counter,
+            next_instruction: visitor.go_to_next_instruction(compiled_offset),
+            t0_saved: visitor.get_u64::<false>(Reg::T0),
+        };
+
+        let d_address = cast(visitor.get_u64::<DEBUG>(d)).truncate_to_u32();
+        let lhs_address = cast(visitor.get_u64::<DEBUG>(s1)).truncate_to_u32();
+        let rhs = visitor.get_u64::<DEBUG>(s2);
+
+        let lhs = wide_try!(wide_arith_read_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, lhs_address));
+        wide_try!(wide_arith_probe_dst::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, d_address));
+        let (result, hi_limb) = wide_mul256_by_u64(&lhs, rhs);
+        wide_try!(wide_arith_write_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, d_address, &result));
+
+        visitor.set_u64::<false>(Reg::T0, ctx.t0_saved);
+        visitor.set_u64::<DEBUG>(c, hi_limb);
+        ctx.next_instruction
     }
 
     fn ecalli<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, hostcall_number: u32) -> Target {
@@ -4967,6 +5294,31 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
     fn mul_wide(&mut self, dst_hi: RawReg, dst_lo: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.assert_64_bit();
         emit!(self, mul_wide(dst_hi, dst_lo, s1, s2));
+    }
+
+    fn mul256(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.assert_64_bit();
+        emit_load_store!(self, mul256(self.program_counter, d, s1, s2));
+    }
+
+    fn redc256(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.assert_64_bit();
+        emit_load_store!(self, redc256(self.program_counter, d, s1, s2));
+    }
+
+    fn add256(&mut self, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.assert_64_bit();
+        emit_load_store!(self, add256(self.program_counter, d, c, s1, s2));
+    }
+
+    fn sub256(&mut self, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.assert_64_bit();
+        emit_load_store!(self, sub256(self.program_counter, d, c, s1, s2));
+    }
+
+    fn mul256_by_u64(&mut self, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        self.assert_64_bit();
+        emit_load_store!(self, mul256_by_u64(self.program_counter, d, c, s1, s2));
     }
 
     fn mul_upper_signed_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {

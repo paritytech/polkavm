@@ -125,10 +125,15 @@ enum RegRegOffsetKind {
 #[derive(Arbitrary, Debug)]
 enum RegRegRegRegKind {
     MulWide,
+    Add256,
+    Sub256,
+    Mul256ByU64,
 }
 
 #[derive(Arbitrary, Debug)]
 enum RegRegRegKind {
+    Mul256,
+    Redc256,
     Add32,
     Add64,
     Sub32,
@@ -456,6 +461,9 @@ fn transform_code(data: Vec<OperationKind>) -> Vec<Instruction> {
                     kind = kind,
                     {
                         RegRegRegRegKind::MulWide => mul_wide,
+                        RegRegRegRegKind::Add256 => add256,
+                        RegRegRegRegKind::Sub256 => sub256,
+                        RegRegRegRegKind::Mul256ByU64 => mul256_by_u64,
                     }
                 }
             }
@@ -464,6 +472,8 @@ fn transform_code(data: Vec<OperationKind>) -> Vec<Instruction> {
                     args = (reg1.into(), reg2.into(), reg3.into()),
                     kind = kind,
                     {
+                        RegRegRegKind::Mul256 => mul256,
+                        RegRegRegKind::Redc256 => redc256,
                         RegRegRegKind::Add32 => add_32,
                         RegRegRegKind::Add64 => add_64,
                         RegRegRegKind::Sub32 => sub_32,

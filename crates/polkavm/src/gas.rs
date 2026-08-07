@@ -167,8 +167,9 @@ macro_rules! define_cost_model_struct {
 }
 
 define_cost_model_struct! {
-    version: 3,
+    version: 4,
 
+    add256,
     add_32,
     add_64,
     add_imm_32,
@@ -234,6 +235,8 @@ define_cost_model_struct! {
     minimum,
     minimum_unsigned,
     move_reg,
+    mul256,
+    mul256_by_u64,
     mul_32,
     mul_64,
     mul_imm_32,
@@ -247,6 +250,7 @@ define_cost_model_struct! {
     or,
     or_imm,
     or_inverted,
+    redc256,
     rem_signed_32,
     rem_signed_64,
     rem_unsigned_32,
@@ -303,6 +307,7 @@ define_cost_model_struct! {
     store_u32,
     store_u64,
     store_u8,
+    sub256,
     sub_32,
     sub_64,
     trap,
@@ -503,6 +508,26 @@ impl InstructionVisitor for GasVisitor {
 
     fn mul_wide(&mut self, _dst_hi: RawReg, _dst_lo: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += self.cost_model.mul_wide;
+    }
+
+    fn mul256(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.mul256;
+    }
+
+    fn redc256(&mut self, _d: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.redc256;
+    }
+
+    fn add256(&mut self, _d: RawReg, _c: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.add256;
+    }
+
+    fn sub256(&mut self, _d: RawReg, _c: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.sub256;
+    }
+
+    fn mul256_by_u64(&mut self, _d: RawReg, _c: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.mul256_by_u64;
     }
 
     #[inline(always)]

@@ -1369,6 +1369,7 @@ macro_rules! weights_io {
         weights_io! {
             $($args)+
 
+            add256,
             add_32,
             add_64,
             add_imm_32,
@@ -1443,11 +1444,14 @@ macro_rules! weights_io {
             mul_upper_signed_unsigned,
             mul_upper_unsigned_unsigned,
             mul_wide,
+            mul256,
+            mul256_by_u64,
             negate_and_add_imm_32,
             negate_and_add_imm_64,
             or,
             or_imm,
             or_inverted,
+            redc256,
             rem_signed_32,
             rem_signed_64,
             rem_unsigned_32,
@@ -1504,6 +1508,7 @@ macro_rules! weights_io {
             store_u32,
             store_u64,
             store_u8,
+            sub256,
             sub_32,
             sub_64,
             trap,
@@ -2622,6 +2627,34 @@ fn main_generate_model(
         zero_extend_16(A0, A0),
     }
 
+    // The wide-arithmetic instructions take pointer operands, so they need
+    // registers pointing into rw_data (which starts at 0x20000).
+    macro_rules! define_wide_arith_benches {
+        ($(
+            $inst:ident($($arg:expr),+) with ($($setup_reg:ident = $setup_value:expr),+),
+        )+) => {
+            $({
+                let result = ctx
+                    .benchmark(stringify!($inst), |mut code| code.push($inst($($arg),+)))
+                    .setup_code(|mut code| {
+                        $(code.push(load_imm64($setup_reg, $setup_value));)+
+                    })
+                    .repeat_code(100000)
+                    .rw_data_size(1024 * 1024)
+                    .run();
+                model.$inst = result.cost_per_operation;
+            })+
+        };
+    }
+
+    define_wide_arith_benches! {
+        mul256(A0, A1, A2) with (A0 = 0x20000, A1 = 0x20100, A2 = 0x20200),
+        redc256(A0, A1, A2) with (A0 = 0x20000, A1 = 0x20100, A2 = 38),
+        add256(A0, A3, A1, A2) with (A0 = 0x20000, A1 = 0x20100, A2 = 0x20200),
+        sub256(A0, A3, A1, A2) with (A0 = 0x20000, A1 = 0x20100, A2 = 0x20200),
+        mul256_by_u64(A0, A3, A1, A2) with (A0 = 0x20000, A1 = 0x20100, A2 = 0x8000_0000_0000_0001u64),
+    }
+
     macro_rules! equalize {
         ($lhs:ident, $rhs:ident, $($rem:ident),+) => {
             equalize!($lhs, $rhs);
@@ -2926,6 +2959,11 @@ impl Category {
             mul_upper_signed_unsigned => DivMul,
             mul_upper_unsigned_unsigned => DivMul,
             mul_wide => DivMul,
+            mul256 => DivMul,
+            mul256_by_u64 => DivMul,
+            redc256 => DivMul,
+            add256 => Compute,
+            sub256 => Compute,
             negate_and_add_imm_32 => Compute,
             negate_and_add_imm_64 => Compute,
             or => Compute,

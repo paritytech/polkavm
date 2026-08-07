@@ -1788,6 +1788,9 @@ define_all_instructions! {
         rotate_left_64,
         rotate_right_32,
         rotate_right_64,
+
+        mul256,
+        redc256,
     ]
 
     // Instructions with args: offset
@@ -1837,6 +1840,9 @@ define_all_instructions! {
     // Instructions with args: reg, reg, reg, reg
     [
         mul_wide,
+        add256,
+        sub256,
+        mul256_by_u64,
     ]
 }
 
@@ -2298,6 +2304,8 @@ define_instruction_set! {
         rotate_left_64                           = 220,
         rotate_right_32                          = 223,
         rotate_right_64                          = 222,
+        mul256                                   = 232,
+        redc256                                  = 233,
     ]
     [
         jump                                     = 40,
@@ -2333,6 +2341,9 @@ define_instruction_set! {
     ]
     [
         mul_wide                                 = 231,
+        add256                                   = 234,
+        sub256                                   = 235,
+        mul256_by_u64                            = 236,
     ]
 }
 
@@ -3066,6 +3077,44 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
         write!(self, "{dst_hi}, {dst_lo} = {s1} mulw {s2}")
+    }
+
+    fn mul256(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "u512 [{d}] = u256 [{s1}] * u256 [{s2}]")
+    }
+
+    fn redc256(&mut self, d: RawReg, s1: RawReg, k: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let s1 = self.format_reg(s1);
+        let k = self.format_reg(k);
+        write!(self, "u256 [{d}] = u512 [{s1}] mod (2^256 - {k})")
+    }
+
+    fn add256(&mut self, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let c = self.format_reg(c);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "u256 [{d}], {c} = u256 [{s1}] + u256 [{s2}]")
+    }
+
+    fn sub256(&mut self, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let c = self.format_reg(c);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "u256 [{d}], {c} = u256 [{s1}] - u256 [{s2}]")
+    }
+
+    fn mul256_by_u64(&mut self, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        let c = self.format_reg(c);
+        let s1 = self.format_reg(s1);
+        let s2 = self.format_reg(s2);
+        write!(self, "u256 [{d}], {c} = u256 [{s1}] * {s2}")
     }
 
     fn mul_upper_signed_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {

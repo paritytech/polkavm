@@ -80,6 +80,7 @@ pub struct OffsetTable {
     pub heap_info: usize,
     pub next_native_program_counter: usize,
     pub memset_continuation: usize,
+    pub wide_arith_continuation: usize,
     pub next_program_counter: usize,
     pub program_counter: usize,
     pub regs: usize,

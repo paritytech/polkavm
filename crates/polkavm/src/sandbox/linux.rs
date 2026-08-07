@@ -2604,6 +2604,7 @@ impl super::Sandbox for Sandbox {
             heap_info: get_field_offset!(VmCtx::new(), |base| &base.heap_info),
             next_native_program_counter: get_field_offset!(VmCtx::new(), |base| base.next_native_program_counter.as_ptr()),
             memset_continuation: usize::MAX,
+            wide_arith_continuation: get_field_offset!(VmCtx::new(), |base| base.wide_arith_continuation.as_ptr()),
             next_program_counter: get_field_offset!(VmCtx::new(), |base| base.next_program_counter.as_ptr()),
             program_counter: get_field_offset!(VmCtx::new(), |base| base.program_counter.as_ptr()),
             regs: get_field_offset!(VmCtx::new(), |base| base.regs.as_ptr()),

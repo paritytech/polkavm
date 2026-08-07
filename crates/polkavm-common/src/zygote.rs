@@ -241,6 +241,9 @@ pub struct VmCtx {
 
     /// The address of the native code to call inside of the VM process, if non-zero.
     pub next_native_program_counter: AtomicU64,
+    /// The continuation address of the wide-arithmetic trampoline currently
+    /// being executed, if any. Written by the compiled code itself.
+    pub wide_arith_continuation: AtomicU64,
 
     pub tmp_reg: AtomicU64,
     pub rip: AtomicU64,
@@ -377,6 +380,7 @@ impl VmCtx {
             regs: [ATOMIC_U64_ZERO; REG_COUNT],
             jump_into: AtomicU64::new(0),
             next_native_program_counter: AtomicU64::new(0),
+            wide_arith_continuation: AtomicU64::new(0),
 
             futex: AtomicU32::new(VMCTX_FUTEX_BUSY),
 

@@ -9,6 +9,17 @@ use polkavm_common::program::{is_jump_target_valid, InstructionSetKind, JumpTabl
 use polkavm_common::utils::{Bitness, BitnessT, GasVisitorT};
 use polkavm_common::zygote::VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH;
 
+/// One of the 256-bit wide-arithmetic instructions, used as part of the key
+/// identifying a register-specialized wide-arithmetic trampoline.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum WideArithOp {
+    Mul256,
+    Redc256,
+    Add256,
+    Sub256,
+    Mul256ByU64,
+}
+
 use crate::error::Error;
 
 use crate::api::CompileError;
@@ -24,7 +35,7 @@ mod amd64;
 pub use crate::compiler::amd64::{extract_gas_cost, on_page_fault, on_signal_trap, step_prelude_length};
 
 #[cfg(all(target_arch = "x86_64", feature = "generic-sandbox"))]
-pub(crate) use crate::compiler::amd64::{are_we_executing_memset, MemsetKind};
+pub(crate) use crate::compiler::amd64::{are_we_executing_memset, are_we_executing_wide_arith, MemsetKind};
 
 /// The address to which to jump to for invalid dynamic jumps.
 ///
@@ -110,6 +121,14 @@ where
     instruction_set: InstructionSetKind,
     memset_trampoline_start: usize,
     memset_trampoline_end: usize,
+    // The 256-bit wide-arithmetic instructions are compiled as jumps to
+    // register-specialized trampolines shared per (opcode, operand registers),
+    // both to respect VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH and to bound the
+    // worst-case native code size.
+    wide_arith_trampolines: std::collections::BTreeMap<(WideArithOp, [u32; 4]), Label>,
+    wide_arith_pending: Vec<(Label, WideArithOp, [RawReg; 4])>,
+    wide_arith_trampoline_start: usize,
+    wide_arith_trampoline_end: usize,
     custom_codegen: Option<Arc<dyn CustomCodegen>>,
     first_invalid_offset: Option<ProgramCounter>,
 
@@ -275,6 +294,10 @@ where
             instruction_set,
             memset_trampoline_start: 0,
             memset_trampoline_end: 0,
+            wide_arith_trampolines: std::collections::BTreeMap::new(),
+            wide_arith_pending: Vec::new(),
+            wide_arith_trampoline_start: 0,
+            wide_arith_trampoline_end: 0,
             custom_codegen: config.custom_codegen.clone(),
             first_invalid_offset: None,
             _phantom: PhantomData,
@@ -354,6 +377,10 @@ where
                 ArchVisitor(&mut self).emit_weight(cast(native_code_offset).to_usize(), cost);
             }
         }
+
+        self.wide_arith_trampoline_start = self.asm.len();
+        ArchVisitor(&mut self).emit_wide_arith_trampolines();
+        self.wide_arith_trampoline_end = self.asm.len();
 
         let label_sysenter = ArchVisitor(&mut self).emit_sysenter();
         let label_sysreturn = ArchVisitor(&mut self).emit_sysreturn();
@@ -446,6 +473,8 @@ where
                 step_tracing: self.step_tracing,
                 memset_trampoline_start: polkavm_common::cast::cast(self.memset_trampoline_start).to_u64(),
                 memset_trampoline_end: polkavm_common::cast::cast(self.memset_trampoline_end).to_u64(),
+                wide_arith_trampoline_start: polkavm_common::cast::cast(self.wide_arith_trampoline_start).to_u64(),
+                wide_arith_trampoline_end: polkavm_common::cast::cast(self.wide_arith_trampoline_end).to_u64(),
             }
         };
 
@@ -902,6 +931,36 @@ where
             CONTINUE_BASIC_BLOCK,
             mul_wide(dst_hi, dst_lo, s1, s2)
         );
+    }
+
+    #[inline(always)]
+    fn mul256(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, mul256(d, s1, s2));
+    }
+
+    #[inline(always)]
+    fn redc256(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, redc256(d, s1, s2));
+    }
+
+    #[inline(always)]
+    fn add256(&mut self, code_offset: u32, args_length: u32, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, add256(d, c, s1, s2));
+    }
+
+    #[inline(always)]
+    fn sub256(&mut self, code_offset: u32, args_length: u32, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, sub256(d, c, s1, s2));
+    }
+
+    #[inline(always)]
+    fn mul256_by_u64(&mut self, code_offset: u32, args_length: u32, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, mul256_by_u64(d, c, s1, s2));
     }
 
     #[inline(always)]
@@ -1733,6 +1792,9 @@ where
 
     pub(crate) memset_trampoline_start: u64,
     pub(crate) memset_trampoline_end: u64,
+
+    pub(crate) wide_arith_trampoline_start: u64,
+    pub(crate) wide_arith_trampoline_end: u64,
 }
 
 impl<S> CompiledModule<S>
