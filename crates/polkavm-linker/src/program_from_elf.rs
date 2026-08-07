@@ -6377,6 +6377,40 @@ struct MulWideFusionStats {
     fused_b: usize,
 }
 
+/// Whether `reg` can hold a new value defined at `def_index` and last read at
+/// `last_use` without interfering with any of the register's existing uses in
+/// the block. A window-local scan is not enough: an existing live range can
+/// straddle the candidate range entirely (defined before it, read after it, with
+/// no mention of the register in between), so this scans forward from the
+/// definition to the end of the block.
+fn fake_reg_is_free(imports: &[Import], ops: &[(SourceStack, BasicInst<AnyTarget>)], def_index: usize, last_use: usize, reg: Reg) -> bool {
+    let mask = RegMask::from(reg);
+    for (op_index, (_, op)) in ops.iter().enumerate().skip(def_index) {
+        if op_index == def_index {
+            continue;
+        }
+
+        let is_read = !(op.src_mask(imports) & mask).is_empty();
+        let is_written = !(op.dst_mask(imports) & mask).is_empty();
+        if op_index <= last_use {
+            // Anything touching the register inside the new live range conflicts.
+            if is_read || is_written {
+                return false;
+            }
+        } else if is_read {
+            // A read with no redefinition since `def_index` means a value defined
+            // *before* the candidate is still live through it.
+            return false;
+        } else if is_written {
+            // The register is redefined before it is ever read again; whatever
+            // was in it is dead across the candidate range.
+            return true;
+        }
+    }
+
+    true
+}
+
 fn perform_mul_wide_fusion(
     imports: &[Import],
     all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>],
@@ -6478,44 +6512,53 @@ fn perform_mul_wide_fusion(
                             });
 
                             if all_readers_patchable {
-                                // Which half lands in E0 flips with the pair's order: the
-                                // interveners read the *first* instruction's half.
-                                let (dst_hi, dst_lo) = match first_half {
-                                    MulHalf::Hi => (Reg::E0, first_dst),
-                                    MulHalf::Lo => (first_dst, Reg::E0),
-                                };
-                                let readers = core::mem::take(&mut readers_of_first_dst);
-                                let block = &mut all_blocks[block_target.index()];
-                                block.ops[index].1 = BasicInst::MulWide {
-                                    dst_hi,
-                                    dst_lo,
-                                    src1: a,
-                                    src2: b,
-                                };
-                                block.ops[second_index].1 = BasicInst::Nop;
-                                for reader_index in readers {
-                                    let BasicInst::StoreIndirect { kind, base, offset, .. } = block.ops[reader_index].1 else {
-                                        unreachable!()
+                                // Fake-register live ranges must stay disjoint. Nested
+                                // same-destination pairs are real (LLVM interleaves
+                                // independent products and sinks spill stores), and an
+                                // already-assigned fake register can be live *through*
+                                // this candidate without appearing in its window — so
+                                // pick a register that a whole-block liveness scan
+                                // proves free, or don't fuse.
+                                let last_use = readers_of_first_dst.iter().copied().max().unwrap_or(index);
+                                let fake_reg = Reg::FAKE
+                                    .into_iter()
+                                    .find(|&reg| fake_reg_is_free(imports, ops, index, last_use, reg));
+
+                                if let Some(fake_reg) = fake_reg {
+                                    // Which half lands in the fake register flips with the
+                                    // pair's order: the interveners read the *first*
+                                    // instruction's half.
+                                    let (dst_hi, dst_lo) = match first_half {
+                                        MulHalf::Hi => (fake_reg, first_dst),
+                                        MulHalf::Lo => (first_dst, fake_reg),
                                     };
-                                    block.ops[reader_index].1 = BasicInst::StoreIndirect {
-                                        kind,
-                                        src: RegImm::Reg(Reg::E0),
-                                        base,
-                                        offset,
+                                    let readers = core::mem::take(&mut readers_of_first_dst);
+                                    let block = &mut all_blocks[block_target.index()];
+                                    block.ops[index].1 = BasicInst::MulWide {
+                                        dst_hi,
+                                        dst_lo,
+                                        src1: a,
+                                        src2: b,
                                     };
+                                    block.ops[second_index].1 = BasicInst::Nop;
+                                    for reader_index in readers {
+                                        let BasicInst::StoreIndirect { kind, base, offset, .. } = block.ops[reader_index].1 else {
+                                            unreachable!()
+                                        };
+                                        block.ops[reader_index].1 = BasicInst::StoreIndirect {
+                                            kind,
+                                            src: RegImm::Reg(fake_reg),
+                                            base,
+                                            offset,
+                                        };
+                                    }
+                                    stats.fused_b = stats.fused_b.checked_add(1).expect(OVERFLOW);
+                                    modified = true;
+                                    continue 'fuse_next;
                                 }
-                                stats.fused_b = stats.fused_b.checked_add(1).expect(OVERFLOW);
-                                modified = true;
-                                continue 'fuse_next;
                             }
                         }
                     }
-                }
-
-                // Never fuse across anything already touching a fake register;
-                // their live ranges must stay disjoint.
-                if !((op.src_mask(imports) | op.dst_mask(imports)) & RegMask::fake()).is_empty() {
-                    break;
                 }
 
                 if !(op.dst_mask(imports) & frozen).is_empty() {
@@ -7719,6 +7762,54 @@ mod test {
                 t0 = a3 + a3
                 a3 = a0 * a1
                 t2 = u64 [a5 + 0x800]
+                ret
+            ",
+        );
+    }
+
+    #[test]
+    fn test_optimize_20_mul_wide_fusion_b_nested_pairs() {
+        use super::Reg as R;
+        const INNER_RHS: u64 = 0x123456789abcdef1;
+        let inner_product = (MUL_LHS as u128).wrapping_mul(INNER_RHS as u128);
+        let (inner_hi, inner_lo) = ((inner_product >> 64) as u64, inner_product as u64);
+
+        // The outer pair's spill store is sunk below a fully enclosed inner pair.
+        // Both pairs fuse; their fake-register live ranges nest, so they must be
+        // assigned *different* fake registers — with a single shared one the
+        // outer spill store would silently read the inner product's half.
+        let mut b = mul_pair_builder(InstructionSetKind::Latest64);
+        b.push_mulhu64(R::A2, R::A0, R::A1);
+        b.push_mulhu64(R::A3, R::A0, R::A4);
+        b.push_store_indirect_u64(R::A3, R::A5, 0x808);
+        b.push_mul64(R::A3, R::A0, R::A4);
+        b.push_store_indirect_u64(R::A2, R::A5, 0x800);
+        b.push_mul64(R::A2, R::A0, R::A1);
+        b.push_load_indirect_u64(R::T1, R::A5, 0x800);
+        b.push_load_indirect_u64(R::T2, R::A5, 0x808);
+        b.push_ret();
+        b.test_optimize(
+            |i| {
+                let base = u64::from(i.module().memory_map().rw_data_address());
+                i.set_reg(Reg::A5, base);
+                i.set_reg(Reg::A0, MUL_LHS);
+                i.set_reg(Reg::A1, MUL_RHS);
+                i.set_reg(Reg::A4, INNER_RHS);
+                expect_finished(i);
+            },
+            expect_regs([(Reg::A2, MUL_LO), (Reg::A3, inner_lo), (Reg::T1, MUL_HI), (Reg::T2, inner_hi)]),
+            "
+            @0 [export #0: 'main']
+                u64 [0x20000] = t1
+                u64 [0x20008] = t2
+                t1, a2 = a0 mulw a1
+                t2, a3 = a0 mulw a4
+                u64 [a5 + 0x808] = t2
+                u64 [a5 + 0x800] = t1
+                t1 = u64 [0x20000]
+                t2 = u64 [0x20008]
+                t1 = u64 [a5 + 0x800]
+                t2 = u64 [a5 + 0x808]
                 ret
             ",
         );
