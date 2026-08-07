@@ -2439,7 +2439,9 @@ where
     // research report): mul256 ≈ 70 instructions / 16 hardware multiplies,
     // redc256 ≈ 35 / 5, add256/sub256 ≈ 14, mul256_by_u64 ≈ 13 / 4. Memory
     // dependencies are not modeled (same as memset above); only the register
-    // operands enter the dependency graph.
+    // operands enter the dependency graph. `decode_slots` is capped at
+    // MAX_DECODE_PER_CYCLE (it is a per-cycle decoder width, not a µop
+    // count), so the multi-cycle occupancy is expressed through latency.
 
     #[inline(always)]
     fn mul256(&mut self, _offset: u32, _args_length: u32, _d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
@@ -2449,7 +2451,7 @@ where
             Some(s2),
             InstCost {
                 latency: 25,
-                decode_slots: 70,
+                decode_slots: MAX_DECODE_PER_CYCLE,
                 alu_slots: 4,
                 mul_slots: 1,
                 load_slots: 4,
@@ -2467,7 +2469,7 @@ where
             Some(s2),
             InstCost {
                 latency: 12,
-                decode_slots: 35,
+                decode_slots: MAX_DECODE_PER_CYCLE,
                 alu_slots: 4,
                 mul_slots: 1,
                 load_slots: 4,
@@ -2485,7 +2487,7 @@ where
             Some(s2),
             InstCost {
                 latency: 6,
-                decode_slots: 14,
+                decode_slots: MAX_DECODE_PER_CYCLE,
                 alu_slots: 4,
                 load_slots: 4,
                 store_slots: 4,
@@ -2502,7 +2504,7 @@ where
             Some(s2),
             InstCost {
                 latency: 6,
-                decode_slots: 14,
+                decode_slots: MAX_DECODE_PER_CYCLE,
                 alu_slots: 4,
                 load_slots: 4,
                 store_slots: 4,
@@ -2519,7 +2521,7 @@ where
             Some(s2),
             InstCost {
                 latency: 8,
-                decode_slots: 13,
+                decode_slots: MAX_DECODE_PER_CYCLE,
                 alu_slots: 4,
                 mul_slots: 1,
                 load_slots: 4,
