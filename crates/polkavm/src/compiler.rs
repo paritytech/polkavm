@@ -357,6 +357,12 @@ where
             return 0;
         }
 
+        // Kill switch, for A/B measurements and for differential fuzzing
+        // against the interpreter (which compares full register state).
+        if std::env::var_os("POLKAVM_WIDE_ARITH_NO_LIVENESS").is_some_and(|value| value == "1") {
+            return 0;
+        }
+
         const SCAN_LIMIT: usize = 48;
 
         let mut dead: u16 = 0;
