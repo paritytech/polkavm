@@ -5589,6 +5589,119 @@ fn wide_arith_oob(config: Config, _isa: InstructionSetKind) {
     );
 }
 
+fn wide_arith_fused_pairs(config: Config, _isa: InstructionSetKind) {
+    use polkavm_common::operation::{wide_mul256, wide_redc256};
+
+    let tester = WideArithTester::new(&config);
+    let base = tester.base();
+    let (p_at, d_at, a_at, b_at) = (base, base + 0x100, base + 0x200, base + 0x300);
+
+    let a = [0xdeadbeef12345678u64, 0x9e3779b97f4a7c15, 0xfedcba9876543210, 0x0123456789abcdef];
+    let b = [0x243f6a8885a308d3u64, u64::MAX, 0, 0x082efa98ec4e6c89];
+    let product = wide_mul256(&a, &b);
+    let memory: &[(u32, &[u8])] = &[(a_at, &limbs_to_bytes(&a)), (b_at, &limbs_to_bytes(&b))];
+
+    // The compiler fuses an adjacent mul256 + redc256 whose source is the
+    // product (on backends without step tracing). The fused path must be
+    // architecturally indistinguishable: both the product buffer and the
+    // fold destination end up written.
+    let mut instance = tester.run(
+        &[asm::mul256(A0, A1, A2), asm::redc256(A3, A0, A4)],
+        &[
+            (A0, u64::from(p_at)),
+            (A1, u64::from(a_at)),
+            (A2, u64::from(b_at)),
+            (A3, u64::from(d_at)),
+            (A4, 38),
+        ],
+        memory,
+    );
+    assert_eq!(read_limbs::<8>(&mut instance, p_at), product);
+    assert_eq!(read_limbs::<4>(&mut instance, d_at), wide_redc256(&product, 38));
+
+    // Fused pair with the fold destination overlapping the product buffer.
+    for offset in [0u32, 8, 32] {
+        let mut instance = tester.run(
+            &[asm::mul256(A0, A1, A2), asm::redc256(A3, A0, A4)],
+            &[
+                (A0, u64::from(p_at)),
+                (A1, u64::from(a_at)),
+                (A2, u64::from(b_at)),
+                (A3, u64::from(p_at + offset)),
+                (A4, 38),
+            ],
+            memory,
+        );
+        assert_eq!(
+            read_limbs::<4>(&mut instance, p_at + offset),
+            wide_redc256(&product, 38),
+            "overlap offset {offset}"
+        );
+    }
+
+    // A2 (rdx on amd64) in every fused role, including k.
+    let mut instance = tester.run(
+        &[asm::mul256(A2, A1, A0), asm::redc256(A3, A2, A4)],
+        &[
+            (A2, u64::from(p_at)),
+            (A1, u64::from(a_at)),
+            (A0, u64::from(b_at)),
+            (A3, u64::from(d_at)),
+            (A4, (1 << 32) + 977),
+        ],
+        memory,
+    );
+    assert_eq!(read_limbs::<4>(&mut instance, d_at), wide_redc256(&product, (1 << 32) + 977));
+
+    let mut instance = tester.run(
+        &[asm::mul256(A0, A1, A3), asm::redc256(A4, A0, A2)],
+        &[
+            (A0, u64::from(p_at)),
+            (A1, u64::from(a_at)),
+            (A3, u64::from(b_at)),
+            (A4, u64::from(d_at)),
+            (A2, u64::MAX),
+        ],
+        memory,
+    );
+    assert_eq!(read_limbs::<4>(&mut instance, d_at), wide_redc256(&product, u64::MAX));
+
+    // Adjacent but NOT fusable: the redc256 reads a different buffer than the
+    // mul256 writes. Both must still execute correctly, unfused.
+    let src512 = [b[0], b[1], b[2], b[3], a[0], a[1], a[2], a[3]];
+    let mut instance = tester.run(
+        &[asm::mul256(A0, A1, A2), asm::redc256(A3, A4, A5)],
+        &[
+            (A0, u64::from(p_at)),
+            (A1, u64::from(a_at)),
+            (A2, u64::from(b_at)),
+            (A3, u64::from(d_at)),
+            (A4, u64::from(base + 0x400)),
+            (A5, 38),
+        ],
+        &[
+            (a_at, &limbs_to_bytes(&a)),
+            (b_at, &limbs_to_bytes(&b)),
+            (base + 0x400, &limbs_to_bytes(&src512)),
+        ],
+    );
+    assert_eq!(read_limbs::<8>(&mut instance, p_at), product);
+    assert_eq!(read_limbs::<4>(&mut instance, d_at), wide_redc256(&src512, 38));
+
+    // A fused pair faulting on the redc destination must still trap.
+    tester.run_expect_trap(
+        &[asm::mul256(A0, A1, A2), asm::redc256(A3, A0, A4)],
+        &[
+            (A0, u64::from(p_at)),
+            (A1, u64::from(a_at)),
+            (A2, u64::from(b_at)),
+            (A3, 0x1000),
+            (A4, 38),
+        ],
+        memory,
+    );
+}
+
 fn wide_arith_dynamic_paging(mut engine_config: Config, _isa: InstructionSetKind) {
     use polkavm_common::operation::wide_mul256;
 
@@ -6296,6 +6409,7 @@ run_tests_on_isa! { latest64, InstructionSetKind::Latest64,
     wide_arith_randomized
     wide_arith_oob
     wide_arith_dynamic_paging
+    wide_arith_fused_pairs
 }
 
 run_test_blob_tests! {

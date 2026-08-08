@@ -18,6 +18,9 @@ pub(crate) enum WideArithOp {
     Add256,
     Sub256,
     Mul256ByU64,
+    /// An adjacent `mul256` + `redc256` pair fused into one trampoline
+    /// (the product is kept in host registers between the two operations).
+    Mul256Redc256,
 }
 
 use crate::error::Error;
@@ -125,8 +128,11 @@ where
     // register-specialized trampolines shared per (opcode, operand registers),
     // both to respect VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH and to bound the
     // worst-case native code size.
-    wide_arith_trampolines: std::collections::BTreeMap<(WideArithOp, [u32; 4]), Label>,
-    wide_arith_pending: Vec<(Label, WideArithOp, [RawReg; 4])>,
+    wide_arith_trampolines: std::collections::BTreeMap<(WideArithOp, [u32; 5]), Label>,
+    wide_arith_pending: Vec<(Label, WideArithOp, [RawReg; 5])>,
+    // Set when the previous instruction was fused with the next one, which
+    // must therefore emit no code of its own.
+    wide_arith_skip_next: bool,
     wide_arith_trampoline_start: usize,
     wide_arith_trampoline_end: usize,
     custom_codegen: Option<Arc<dyn CustomCodegen>>,
@@ -296,6 +302,7 @@ where
             memset_trampoline_end: 0,
             wide_arith_trampolines: std::collections::BTreeMap::new(),
             wide_arith_pending: Vec::new(),
+            wide_arith_skip_next: false,
             wide_arith_trampoline_start: 0,
             wide_arith_trampoline_end: 0,
             custom_codegen: config.custom_codegen.clone(),
@@ -936,12 +943,49 @@ where
     #[inline(always)]
     fn mul256(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
+
+        // If the next instruction is a redc256 folding exactly the product
+        // this instruction writes, fuse the pair into one trampoline: one
+        // probe/save/dispatch overhead block instead of two, and the product
+        // never has to be reloaded from memory (it is still stored, so the
+        // architectural memory state is unchanged). Not applicable when the
+        // redc256 can be jumped to directly, or under step tracing (the
+        // interpreter-lockstep crosscheck steps per instruction).
+        let next_offset = code_offset + args_length + 1;
+        if !self.step_tracing && !self.is_jump_target_valid(next_offset) {
+            let next = polkavm_common::program::Instructions::new_bounded(self.instruction_set, self.code, self.bitmask, next_offset)
+                .next()
+                .map(|instruction| instruction.kind);
+            if let Some(polkavm_common::program::Instruction::redc256(r_d, r_src, r_k)) = next {
+                if r_src == d {
+                    self.wide_arith_skip_next = true;
+                    // Hand-expanded emit_instruction!: gas must be charged
+                    // under the architectural opcode (mul256), while the code
+                    // comes from the fused emitter.
+                    self.before_instruction(code_offset);
+                    self.gas_visitor.mul256(code_offset, args_length, d, s1, s2);
+                    ArchVisitor(self).mul256_redc256_fused(d, s1, s2, r_d, r_k);
+                    self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+                    return;
+                }
+            }
+        }
+
         emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, mul256(d, s1, s2));
     }
 
     #[inline(always)]
     fn redc256(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
+        if core::mem::take(&mut self.wide_arith_skip_next) {
+            // Fused into the previous mul256's trampoline; charge gas as
+            // usual, emit no code of its own.
+            self.before_instruction(code_offset);
+            self.gas_visitor.redc256(code_offset, args_length, d, s1, s2);
+            self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+            return;
+        }
+
         emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, redc256(d, s1, s2));
     }
 
