@@ -1534,6 +1534,32 @@ pub mod inst {
             None,
             (display_with_operands(fmt, "add", self.0)),
 
+        // https://www.felixcloutier.com/x86/movd:movq
+        // MOVQ xmm, r64. The first operand is an XMM register *numbered via
+        // the general-purpose Reg enum* (xmm3 is passed as rbx, etc.): the
+        // modrm/REX encoding bits are identical, only the opcode decides the
+        // register file.
+        movq_xmm_from_gpr(Reg, Reg) =>
+            Inst::new(0x6e)
+                .override_op_size()
+                .op_alt()
+                .rex_64b()
+                .modrm_reg(self.0)
+                .regmem(RegMem::Reg(self.1)),
+            None,
+            (fmt.write_fmt(core::format_args!("movq xmm{}, {}", self.0 as usize, self.1.name_from(RegSize::R64)))),
+
+        // MOVQ r64, xmm; same XMM-as-Reg numbering convention (second operand).
+        movq_gpr_from_xmm(Reg, Reg) =>
+            Inst::new(0x7e)
+                .override_op_size()
+                .op_alt()
+                .rex_64b()
+                .modrm_reg(self.1)
+                .regmem(RegMem::Reg(self.0)),
+            None,
+            (fmt.write_fmt(core::format_args!("movq {}, xmm{}", self.0.name_from(RegSize::R64), self.1 as usize))),
+
         // https://www.felixcloutier.com/x86/adc
         adc(Operands) =>
             alu_impl(0x10, 0x12, 0b010, self.0),
@@ -2555,6 +2581,8 @@ mod tests {
     generate_tests! {
         adc,
         adcx,
+        movq_xmm_from_gpr,
+        movq_gpr_from_xmm,
         add,
         adox,
         and,

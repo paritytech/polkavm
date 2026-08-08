@@ -2105,7 +2105,39 @@ where
         self.push(add((Self::wide_arith_probe_mem(length - 8), imm64(0))));
     }
 
+    /// MEASUREMENT: saves the scratch registers in xmm registers instead of
+    /// on the stack - same instruction count, but zero memory traffic (no
+    /// store-queue pressure). Guest code never touches vector registers, so
+    /// they are free real estate between the save and the restore.
+    fn wide_arith_xmm_saves() -> bool {
+        std::env::var_os("POLKAVM_WIDE_ARITH_XMM_SAVES").is_some_and(|value| value == "1")
+    }
+
+    /// The XMM registers, numbered via the GPR enum (see the assembler's
+    /// movq_xmm_from_gpr).
+    const WIDE_ARITH_XMM: [polkavm_assembler::amd64::Reg; 12] = {
+        use polkavm_assembler::amd64::Reg::*;
+        [rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8, r9, r10, r11]
+    };
+
+    /// The number of save slots that end up on the stack (bodies use this to
+    /// compute the offsets of values they pushed above the saves).
+    fn wide_arith_pushed_saves(count: usize) -> i32 {
+        if Self::wide_arith_xmm_saves() {
+            0
+        } else {
+            count as i32
+        }
+    }
+
     fn wide_arith_push_saves(&mut self, regs: &[NativeReg]) {
+        if Self::wide_arith_xmm_saves() {
+            for (index, &reg) in regs.iter().enumerate() {
+                self.push(movq_xmm_from_gpr(Self::WIDE_ARITH_XMM[index], reg));
+            }
+            return;
+        }
+
         let times = if Self::wide_arith_extra_saves() { 2 } else { 1 };
         for _ in 0..times {
             for &reg in regs {
@@ -2115,6 +2147,16 @@ where
     }
 
     fn wide_arith_pop_saves(&mut self, regs: &[NativeReg]) {
+        if Self::wide_arith_xmm_saves() {
+            // regs is the pop-ordered (reversed) list; index from the end so
+            // each register reads back the same xmm slot it was saved to.
+            let count = regs.len();
+            for (index, &reg) in regs.iter().enumerate() {
+                self.push(movq_gpr_from_xmm(reg, Self::WIDE_ARITH_XMM[count - 1 - index]));
+            }
+            return;
+        }
+
         let times = if Self::wide_arith_extra_saves() { 2 } else { 1 };
         for _ in 0..times {
             for &reg in regs {
@@ -2198,7 +2240,7 @@ where
 
         // Phase 3: stores + restores. Stack (top first): limb2, limb1, limb0,
         // <9 saved registers>, <d snapshot>.
-        self.wide_arith_capture_ea_from_stack(p_a, (3 + 9) * 8);
+        self.wide_arith_capture_ea_from_stack(p_a, (3 + Self::wide_arith_pushed_saves(9)) * 8);
         for (k, reg) in win.into_iter().enumerate() {
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p_a + 8 * (3 + k as i32)), reg));
         }
@@ -2266,7 +2308,7 @@ where
         self.push(adc((l3, imm64(0))));
 
         // Phase 3.
-        self.wide_arith_capture_ea_from_stack(p_s, 8 * 8);
+        self.wide_arith_capture_ea_from_stack(p_s, Self::wide_arith_pushed_saves(8) * 8);
         for (i, reg) in [l0, l1, l2, l3].into_iter().enumerate() {
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p_s + 8 * i as i32), reg));
         }
@@ -2354,7 +2396,7 @@ where
         self.push(adc((l4, imm64(0))));
 
         // Phase 3.
-        self.wide_arith_capture_ea_from_stack(p, 7 * 8);
+        self.wide_arith_capture_ea_from_stack(p, Self::wide_arith_pushed_saves(7) * 8);
         for (i, reg) in [l0, l1, l2, l3].into_iter().enumerate() {
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p + 8 * i as i32), reg));
         }
@@ -2401,7 +2443,8 @@ where
 
         // Stack layout (offsets from rsp): [0..96) saves, then the snapshots:
         // r_k at 96, r_d at 104, m_d at 112, m_s2 at 120, m_s1 at 128.
-        const SAVES: i32 = 12 * 8;
+        #[allow(non_snake_case)]
+        let SAVES: i32 = Self::wide_arith_pushed_saves(12) * 8;
         self.wide_arith_capture_ea_from_stack(p_a, SAVES + 32);
         self.wide_arith_capture_ea_from_stack(p_b, SAVES + 24);
 
