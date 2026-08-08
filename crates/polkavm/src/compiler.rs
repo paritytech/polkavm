@@ -128,18 +128,13 @@ where
     // register-specialized trampolines shared per (opcode, operand registers),
     // both to respect VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH and to bound the
     // worst-case native code size.
-    wide_arith_trampolines: std::collections::BTreeMap<(WideArithOp, [u32; 5], u16), Label>,
-    wide_arith_pending: Vec<(Label, WideArithOp, [RawReg; 5], u16)>,
+    wide_arith_trampolines: std::collections::BTreeMap<(WideArithOp, [u32; 5]), Label>,
+    wide_arith_pending: Vec<(Label, WideArithOp, [RawReg; 5])>,
     // Set when the previous instruction was fused with the next one, which
     // must therefore emit no code of its own.
     wide_arith_skip_next: bool,
     wide_arith_trampoline_start: usize,
     wide_arith_trampoline_end: usize,
-    // The dead-register mask computed for the wide-arithmetic instruction
-    // currently being emitted (bit = Reg as usize): guest registers that are
-    // written before being read further down the same basic block, whose
-    // host homes the trampoline may therefore clobber without saving them.
-    wide_arith_dead_mask: u16,
     custom_codegen: Option<Arc<dyn CustomCodegen>>,
     first_invalid_offset: Option<ProgramCounter>,
 
@@ -310,7 +305,6 @@ where
             wide_arith_skip_next: false,
             wide_arith_trampoline_start: 0,
             wide_arith_trampoline_end: 0,
-            wide_arith_dead_mask: 0,
             custom_codegen: config.custom_codegen.clone(),
             first_invalid_offset: None,
             _phantom: PhantomData,
@@ -342,45 +336,6 @@ where
 
     fn is_jump_target_valid(&self, offset: u32) -> bool {
         is_jump_target_valid(self.instruction_set, self.code, self.bitmask, offset)
-    }
-
-    /// Computes which guest registers are dead after the instruction ending
-    /// at `next_offset`: written before being read further down the same
-    /// basic block. Bounded, block-local and conservative: an unclassified
-    /// instruction, a possible jump target or the scan bound stops it (a
-    /// register not yet proven dead stays live).
-    fn wide_arith_compute_dead_mask(&self, next_offset: u32) -> u16 {
-        if self.step_tracing {
-            // The interpreter-lockstep crosscheck compares every register
-            // after every instruction; clobbered dead registers would
-            // spuriously diverge.
-            return 0;
-        }
-
-        const SCAN_LIMIT: usize = 48;
-
-        let mut dead: u16 = 0;
-        let mut live_or_unknown: u16 = 0;
-        let mut instructions =
-            polkavm_common::program::Instructions::new_bounded(self.instruction_set, self.code, self.bitmask, next_offset);
-
-        for _ in 0..SCAN_LIMIT {
-            let Some(instruction) = instructions.next() else { break };
-            if instruction.offset.0 != next_offset && self.is_jump_target_valid(instruction.offset.0) {
-                break;
-            }
-
-            let Some((reads, writes)) = wide_arith_classify_registers(&instruction.kind) else { break };
-            live_or_unknown |= reads;
-            dead |= writes & !live_or_unknown;
-            live_or_unknown |= writes;
-
-            if instruction.kind.opcode().starts_new_basic_block() {
-                break;
-            }
-        }
-
-        dead
     }
 
     pub(crate) fn finish_compilation(
@@ -695,93 +650,6 @@ where
     }
 }
 
-/// Classifies an instruction's guest-register reads and writes as bitmasks
-/// (bit = `Reg as usize`), for the wide-arithmetic dead-register scan.
-///
-/// Returns `None` for instructions it doesn't know, which conservatively
-/// stops the scan. Only unconditional whole-register writes may appear in the
-/// writes mask; a conditional write (cmov) must be treated as read+write.
-/// Only the opcodes common in field-arithmetic glue need to be here.
-fn wide_arith_classify_registers(instruction: &polkavm_common::program::Instruction) -> Option<(u16, u16)> {
-    use polkavm_common::program::Instruction as I;
-
-    fn bit(reg: RawReg) -> u16 {
-        1 << (reg.get() as usize)
-    }
-
-    Some(match *instruction {
-        // dst = imm
-        I::load_imm(d, _) => (0, bit(d)),
-        I::load_imm64(d, _) => (0, bit(d)),
-        // dst = src
-        I::move_reg(d, s) | I::sign_extend_8(d, s) | I::sign_extend_16(d, s) | I::zero_extend_16(d, s) => (bit(s), bit(d)),
-        // dst = src1 op src2
-        I::add_32(d, s1, s2)
-        | I::add_64(d, s1, s2)
-        | I::sub_32(d, s1, s2)
-        | I::sub_64(d, s1, s2)
-        | I::and(d, s1, s2)
-        | I::or(d, s1, s2)
-        | I::xor(d, s1, s2)
-        | I::mul_32(d, s1, s2)
-        | I::mul_64(d, s1, s2)
-        | I::mul_upper_unsigned_unsigned(d, s1, s2)
-        | I::shift_logical_left_64(d, s1, s2)
-        | I::shift_logical_right_64(d, s1, s2)
-        | I::set_less_than_unsigned(d, s1, s2) => (bit(s1) | bit(s2), bit(d)),
-        // dst = src op imm
-        I::add_imm_32(d, s, _)
-        | I::add_imm_64(d, s, _)
-        | I::mul_imm_32(d, s, _)
-        | I::mul_imm_64(d, s, _)
-        | I::and_imm(d, s, _)
-        | I::or_imm(d, s, _)
-        | I::xor_imm(d, s, _)
-        | I::shift_logical_left_imm_32(d, s, _)
-        | I::shift_logical_left_imm_64(d, s, _)
-        | I::shift_logical_right_imm_32(d, s, _)
-        | I::shift_logical_right_imm_64(d, s, _)
-        | I::shift_arithmetic_right_imm_64(d, s, _)
-        | I::negate_and_add_imm_64(d, s, _)
-        | I::rotate_right_imm_64(d, s, _) => (bit(s), bit(d)),
-        // loads
-        I::load_u8(d, _) | I::load_i8(d, _) | I::load_u16(d, _) | I::load_i16(d, _) | I::load_i32(d, _) | I::load_u32(d, _) | I::load_u64(d, _) => {
-            (0, bit(d))
-        }
-        I::load_indirect_u8(d, b, _)
-        | I::load_indirect_i8(d, b, _)
-        | I::load_indirect_u16(d, b, _)
-        | I::load_indirect_i16(d, b, _)
-        | I::load_indirect_i32(d, b, _)
-        | I::load_indirect_u32(d, b, _)
-        | I::load_indirect_u64(d, b, _) => (bit(b), bit(d)),
-        // stores (no register writes)
-        I::store_u8(s, _) | I::store_u16(s, _) | I::store_u32(s, _) | I::store_u64(s, _) => (bit(s), 0),
-        I::store_indirect_u8(s, b, _) | I::store_indirect_u16(s, b, _) | I::store_indirect_u32(s, b, _) | I::store_indirect_u64(s, b, _) => {
-            (bit(s) | bit(b), 0)
-        }
-        I::store_imm_u8(..) | I::store_imm_u16(..) | I::store_imm_u32(..) | I::store_imm_u64(..) => (0, 0),
-        // Hint; touches nothing.
-        I::unlikely => (0, 0),
-        // Conditional write: the destination must be treated as read, not killed.
-        I::cmov_if_zero(d, s, c) | I::cmov_if_not_zero(d, s, c) => (bit(d) | bit(s) | bit(c), 0),
-        I::cmov_if_zero_imm(d, c, _) | I::cmov_if_not_zero_imm(d, c, _) => (bit(d) | bit(c), 0),
-        I::rotate_right_64(d, s1, s2) | I::rotate_left_64(d, s1, s2) => (bit(s1) | bit(s2), bit(d)),
-        I::mul_upper_signed_signed(d, s1, s2) | I::mul_upper_signed_unsigned(d, s1, s2) => (bit(s1) | bit(s2), bit(d)),
-        I::mul_wide(hi, lo, s1, s2) => (bit(s1) | bit(s2), bit(hi) | bit(lo)),
-        I::store_imm_indirect_u8(b, ..) | I::store_imm_indirect_u16(b, ..) | I::store_imm_indirect_u32(b, ..) | I::store_imm_indirect_u64(b, ..) => {
-            (bit(b), 0)
-        }
-        // The wide instructions themselves (all pointer/value registers are
-        // reads; only the carry-out is written).
-        I::mul256(d, s1, s2) | I::redc256(d, s1, s2) => (bit(d) | bit(s1) | bit(s2), 0),
-        I::add256(d, c, s1, s2) | I::sub256(d, c, s1, s2) | I::mul256_by_u64(d, c, s1, s2) => {
-            (bit(d) | bit(s1) | bit(s2), bit(c))
-        }
-        _ => return None,
-    })
-}
-
 macro_rules! emit_instruction {
     ($self:ident, $code_offset:ident, $args_length:ident, $kind:ident, $name:ident($($arg:expr),*)) => {{
         $self.before_instruction($code_offset);
@@ -1086,26 +954,23 @@ where
         let next_offset = code_offset + args_length + 1;
         if !self.step_tracing && !self.is_jump_target_valid(next_offset) {
             let next = polkavm_common::program::Instructions::new_bounded(self.instruction_set, self.code, self.bitmask, next_offset)
-                .next();
-            if let Some(next) = next {
-                if let polkavm_common::program::Instruction::redc256(r_d, r_src, r_k) = next.kind {
-                    if r_src == d {
-                        self.wide_arith_skip_next = true;
-                        self.wide_arith_dead_mask = self.wide_arith_compute_dead_mask(next.next_offset.0);
-                        // Hand-expanded emit_instruction!: gas must be charged
-                        // under the architectural opcode (mul256), while the code
-                        // comes from the fused emitter.
-                        self.before_instruction(code_offset);
-                        self.gas_visitor.mul256(code_offset, args_length, d, s1, s2);
-                        ArchVisitor(self).mul256_redc256_fused(d, s1, s2, r_d, r_k);
-                        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
-                        return;
-                    }
+                .next()
+                .map(|instruction| instruction.kind);
+            if let Some(polkavm_common::program::Instruction::redc256(r_d, r_src, r_k)) = next {
+                if r_src == d {
+                    self.wide_arith_skip_next = true;
+                    // Hand-expanded emit_instruction!: gas must be charged
+                    // under the architectural opcode (mul256), while the code
+                    // comes from the fused emitter.
+                    self.before_instruction(code_offset);
+                    self.gas_visitor.mul256(code_offset, args_length, d, s1, s2);
+                    ArchVisitor(self).mul256_redc256_fused(d, s1, s2, r_d, r_k);
+                    self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+                    return;
                 }
             }
         }
 
-        self.wide_arith_dead_mask = self.wide_arith_compute_dead_mask(next_offset);
         emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, mul256(d, s1, s2));
     }
 
@@ -1121,28 +986,24 @@ where
             return;
         }
 
-        self.wide_arith_dead_mask = self.wide_arith_compute_dead_mask(code_offset + args_length + 1);
         emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, redc256(d, s1, s2));
     }
 
     #[inline(always)]
     fn add256(&mut self, code_offset: u32, args_length: u32, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        self.wide_arith_dead_mask = self.wide_arith_compute_dead_mask(code_offset + args_length + 1);
         emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, add256(d, c, s1, s2));
     }
 
     #[inline(always)]
     fn sub256(&mut self, code_offset: u32, args_length: u32, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        self.wide_arith_dead_mask = self.wide_arith_compute_dead_mask(code_offset + args_length + 1);
         emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, sub256(d, c, s1, s2));
     }
 
     #[inline(always)]
     fn mul256_by_u64(&mut self, code_offset: u32, args_length: u32, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        self.wide_arith_dead_mask = self.wide_arith_compute_dead_mask(code_offset + args_length + 1);
         emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, mul256_by_u64(d, c, s1, s2));
     }
 
