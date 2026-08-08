@@ -17,11 +17,29 @@ use std::collections::HashMap;
 fn main() {
     env_logger::init();
 
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
+
+    // Timing mode: compiled backend (generic sandbox, so it works in
+    // containers), initialize once, then time `run` in batches. Only useful
+    // for RELATIVE comparisons between blobs on the same machine.
+    let timing = args.peek().map(|arg| arg == "--time").unwrap_or(false);
+    if timing {
+        args.next();
+    }
+
+    let linux_sandbox = args.peek().map(|arg| arg == "--linux").unwrap_or(false);
+    if linux_sandbox {
+        args.next();
+    }
+
     let Some(path) = args.next() else {
-        eprintln!("usage: opcount <blob.polkavm> [<export> ...]");
+        eprintln!("usage: opcount [--time] <blob.polkavm> [<export> ...]");
         std::process::exit(1);
     };
+
+    if timing {
+        return time_blob(&path, linux_sandbox);
+    }
 
     let exports: Vec<String> = {
         let list: Vec<String> = args.collect();
@@ -69,6 +87,66 @@ fn main() {
             println!("{count:>12} {name}");
         }
     }
+}
+
+fn time_blob(path: &str, linux_sandbox: bool) {
+    let raw = std::fs::read(path).expect("failed to read the blob");
+    let blob = ProgramBlob::parse(raw.into()).expect("failed to parse the blob");
+
+    let mut config = Config::from_env().expect("invalid config");
+    config.set_backend(Some(polkavm::BackendKind::Compiler));
+    if linux_sandbox {
+        config.set_sandbox(Some(polkavm::SandboxKind::Linux));
+    } else {
+        config.set_sandbox(Some(polkavm::SandboxKind::Generic));
+        config.set_allow_experimental(true);
+    }
+    let engine = Engine::new(&config).expect("failed to create engine");
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).expect("failed to create module");
+    let mut instance = module.instantiate().expect("failed to instantiate");
+
+    let call = |name: &str, instance: &mut polkavm::RawInstance| {
+        let pc = module
+            .exports()
+            .find(|export| export.symbol().as_bytes() == name.as_bytes())
+            .map(|export| export.program_counter())
+            .unwrap_or_else(|| panic!("export not found: {name}"));
+        instance.set_gas(i64::MAX / 2);
+        instance.set_reg(polkavm::Reg::RA, polkavm::RETURN_TO_HOST);
+        instance.set_reg(polkavm::Reg::SP, module.default_sp());
+        instance.set_next_program_counter(pc);
+        match instance.run().expect("run failed") {
+            InterruptKind::Finished => {}
+            interrupt => panic!("unexpected interrupt: {interrupt:?}"),
+        }
+    };
+
+    call("initialize", &mut instance);
+
+    // Warmup, then batches; report the per-iteration time of the fastest
+    // batch (least-disturbed sample - this is for A/B comparisons only).
+    const BATCH: u32 = 200;
+    const BATCHES: u32 = 30;
+    for _ in 0..BATCH {
+        call("run", &mut instance);
+    }
+
+    let mut best_ns = f64::INFINITY;
+    let mut sum_ns = 0.0;
+    for _ in 0..BATCHES {
+        let start = std::time::Instant::now();
+        for _ in 0..BATCH {
+            call("run", &mut instance);
+        }
+        let ns = start.elapsed().as_nanos() as f64 / f64::from(BATCH);
+        best_ns = best_ns.min(ns);
+        sum_ns += ns;
+    }
+
+    println!("{path}: best {best_ns:.0} ns/iter, mean {:.0} ns/iter over {BATCHES} batches of {BATCH}", sum_ns / f64::from(BATCHES));
 }
 
 fn run_and_count(

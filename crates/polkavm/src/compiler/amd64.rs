@@ -2066,18 +2066,61 @@ where
         }
     }
 
+    /// MEASUREMENT ONLY: skips the operand probes (breaks the fault contract;
+    /// only valid for benchmarking runs that never fault).
+    fn wide_arith_skip_probes() -> bool {
+        std::env::var_os("POLKAVM_WIDE_ARITH_NO_PROBES").is_some_and(|value| value == "1")
+    }
+
+    /// MEASUREMENT ONLY: emits every scratch save/restore twice, to measure
+    /// the marginal cost of the save/restore tax by extrapolation.
+    fn wide_arith_extra_saves() -> bool {
+        std::env::var_os("POLKAVM_WIDE_ARITH_EXTRA_SAVES").is_some_and(|value| value == "1")
+    }
+
     /// Read-probes the first and the last byte of `[ptr, ptr + length)`.
     fn wide_arith_probe_read(&mut self, ptr: RawReg, length: i32) {
+        if Self::wide_arith_skip_probes() {
+            return;
+        }
+
+        // 8-byte probe accesses (still within the operand's range, still
+        // touching both boundary pages): byte-sized probes leave a 1-byte
+        // store in the store queue that later full-width loads of the same
+        // location partially overlap, defeating store-to-load forwarding on
+        // the serial field-arithmetic dependency chain.
         self.push(mov(RegSize::R32, TMP_REG, conv_reg(ptr)));
-        self.push(cmp((Self::wide_arith_probe_mem(0), imm8(0))));
-        self.push(cmp((Self::wide_arith_probe_mem(length - 1), imm8(0))));
+        self.push(cmp((Self::wide_arith_probe_mem(0), imm64(0))));
+        self.push(cmp((Self::wide_arith_probe_mem(length - 8), imm64(0))));
     }
 
     /// Write-probes (read-modify-write) the first and the last byte of `[ptr, ptr + length)`.
     fn wide_arith_probe_write(&mut self, ptr: RawReg, length: i32) {
+        if Self::wide_arith_skip_probes() {
+            return;
+        }
+
         self.push(mov(RegSize::R32, TMP_REG, conv_reg(ptr)));
-        self.push(add((Self::wide_arith_probe_mem(0), imm8(0))));
-        self.push(add((Self::wide_arith_probe_mem(length - 1), imm8(0))));
+        self.push(add((Self::wide_arith_probe_mem(0), imm64(0))));
+        self.push(add((Self::wide_arith_probe_mem(length - 8), imm64(0))));
+    }
+
+    fn wide_arith_push_saves(&mut self, regs: &[NativeReg]) {
+        let times = if Self::wide_arith_extra_saves() { 2 } else { 1 };
+        for _ in 0..times {
+            for &reg in regs {
+                self.push(push(reg));
+            }
+        }
+    }
+
+    fn wide_arith_pop_saves(&mut self, regs: &[NativeReg]) {
+        let times = if Self::wide_arith_extra_saves() { 2 } else { 1 };
+        for _ in 0..times {
+            for &reg in regs {
+                self.push(pop(reg));
+            }
+        }
     }
 
     /// Captures the host effective address of guest pointer `ptr` into `dst`.
@@ -2116,9 +2159,7 @@ where
         // Snapshot the destination pointer: its home register may be rdx,
         // which the body clobbers.
         self.push(push(conv_reg(d)));
-        for reg in [p_a, p_b, t1, w0, w1, w2, w3, w4, rdx] {
-            self.push(push(reg));
-        }
+        self.wide_arith_push_saves(&[p_a, p_b, t1, w0, w1, w2, w3, w4, rdx]);
 
         self.wide_arith_capture_ea(p_a, s1);
         self.wide_arith_capture_ea(p_b, s2);
@@ -2166,9 +2207,7 @@ where
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p_a + 8 * k), TMP_REG));
         }
 
-        for reg in [rdx, w4, w3, w2, w1, w0, t1, p_b, p_a] {
-            self.push(pop(reg));
-        }
+        self.wide_arith_pop_saves(&[rdx, w4, w3, w2, w1, w0, t1, p_b, p_a]);
         self.push(add((rsp, imm64(8))));
     }
 
@@ -2184,9 +2223,7 @@ where
 
         // Phase 2: body.
         self.push(push(conv_reg(d)));
-        for reg in [p_s, l0, l1, l2, l3, t1, t4, rdx] {
-            self.push(push(reg));
-        }
+        self.wide_arith_push_saves(&[p_s, l0, l1, l2, l3, t1, t4, rdx]);
 
         self.wide_arith_capture_ea(p_s, s1);
         if conv_reg(k) != rdx {
@@ -2234,9 +2271,7 @@ where
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p_s + 8 * i as i32), reg));
         }
 
-        for reg in [rdx, t4, t1, l3, l2, l1, l0, p_s] {
-            self.push(pop(reg));
-        }
+        self.wide_arith_pop_saves(&[rdx, t4, t1, l3, l2, l1, l0, p_s]);
         self.push(add((rsp, imm64(8))));
     }
 
@@ -2252,9 +2287,7 @@ where
         self.wide_arith_probe_write(d, 32);
 
         // Phase 2: body.
-        for reg in [p, l0, l1, l2, l3] {
-            self.push(push(reg));
-        }
+        self.wide_arith_push_saves(&[p, l0, l1, l2, l3]);
 
         self.wide_arith_capture_ea(p, s1);
         self.push(load(LoadKind::U64, l0, reg_indirect(RegSize::R64, p)));
@@ -2285,9 +2318,7 @@ where
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p + 8 * i as i32), reg));
         }
 
-        for reg in [l3, l2, l1, l0, p] {
-            self.push(pop(reg));
-        }
+        self.wide_arith_pop_saves(&[l3, l2, l1, l0, p]);
 
         // The carry-out register is written last, so it may alias any operand.
         self.push(mov(RegSize::R64, conv_reg(c), TMP_REG));
@@ -2306,9 +2337,7 @@ where
 
         // Phase 2: body.
         self.push(push(conv_reg(d)));
-        for reg in [p, l0, l1, l2, l3, l4, rdx] {
-            self.push(push(reg));
-        }
+        self.wide_arith_push_saves(&[p, l0, l1, l2, l3, l4, rdx]);
 
         self.wide_arith_capture_ea(p, s1);
         if conv_reg(s2) != rdx {
@@ -2331,9 +2360,7 @@ where
         }
         self.push(mov(RegSize::R64, TMP_REG, l4));
 
-        for reg in [rdx, l4, l3, l2, l1, l0, p] {
-            self.push(pop(reg));
-        }
+        self.wide_arith_pop_saves(&[rdx, l4, l3, l2, l1, l0, p]);
         self.push(add((rsp, imm64(8))));
 
         // The carry-out register (bits 256..319) is written last.
@@ -2370,9 +2397,7 @@ where
         for reg in [m_s1, m_s2, m_d, r_d, r_k] {
             self.push(push(conv_reg(reg)));
         }
-        for reg in [p_a, p_b, t1, x0, x1, x2, x3, x4, x5, x6, x7, rdx] {
-            self.push(push(reg));
-        }
+        self.wide_arith_push_saves(&[p_a, p_b, t1, x0, x1, x2, x3, x4, x5, x6, x7, rdx]);
 
         // Stack layout (offsets from rsp): [0..96) saves, then the snapshots:
         // r_k at 96, r_d at 104, m_d at 112, m_s2 at 120, m_s1 at 128.
@@ -2446,9 +2471,7 @@ where
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, TMP_REG + 8 * k as i32), reg));
         }
 
-        for reg in [rdx, x7, x6, x5, x4, x3, x2, x1, x0, t1, p_b, p_a] {
-            self.push(pop(reg));
-        }
+        self.wide_arith_pop_saves(&[rdx, x7, x6, x5, x4, x3, x2, x1, x0, t1, p_b, p_a]);
         self.push(add((rsp, imm64(40))));
     }
 
