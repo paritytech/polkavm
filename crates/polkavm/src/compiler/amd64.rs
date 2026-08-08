@@ -1965,6 +1965,9 @@ where
 
         // Registers are canonicalized through `get()` so that equivalent raw
         // encodings share a trampoline.
+        // The dead-register mask is part of the trampoline identity, since
+        // it changes which registers the body saves.
+        let free_mask = self.0.wide_arith_dead_mask;
         let key = (
             op,
             [
@@ -1974,13 +1977,14 @@ where
                 regs[3].get() as u32,
                 regs[4].get() as u32,
             ],
+            free_mask,
         );
         let label = if let Some(&label) = self.0.wide_arith_trampolines.get(&key) {
             label
         } else {
             let label = self.asm.forward_declare_label();
             self.0.wide_arith_trampolines.insert(key, label);
-            self.0.wide_arith_pending.push((label, op, regs));
+            self.0.wide_arith_pending.push((label, op, regs, free_mask));
             label
         };
 
@@ -2008,47 +2012,73 @@ where
     /// it (see `are_we_executing_wide_arith`).
     pub(crate) fn emit_wide_arith_trampolines(&mut self) {
         let pending = core::mem::take(&mut self.0.wide_arith_pending);
-        for (label, op, regs) in pending {
+        for (label, op, regs, free_mask) in pending {
             self.asm.define_label(label);
             match op {
-                WideArithOp::Mul256 => self.wide_arith_body_mul256(regs[0], regs[1], regs[2]),
-                WideArithOp::Redc256 => self.wide_arith_body_redc256(regs[0], regs[1], regs[2]),
-                WideArithOp::Add256 => self.wide_arith_body_add_sub(regs[0], regs[1], regs[2], regs[3], true),
-                WideArithOp::Sub256 => self.wide_arith_body_add_sub(regs[0], regs[1], regs[2], regs[3], false),
-                WideArithOp::Mul256ByU64 => self.wide_arith_body_mul256_by_u64(regs[0], regs[1], regs[2], regs[3]),
+                WideArithOp::Mul256 => self.wide_arith_body_mul256(regs[0], regs[1], regs[2], free_mask),
+                WideArithOp::Redc256 => self.wide_arith_body_redc256(regs[0], regs[1], regs[2], free_mask),
+                WideArithOp::Add256 => self.wide_arith_body_add_sub(regs[0], regs[1], regs[2], regs[3], true, free_mask),
+                WideArithOp::Sub256 => self.wide_arith_body_add_sub(regs[0], regs[1], regs[2], regs[3], false, free_mask),
+                WideArithOp::Mul256ByU64 => self.wide_arith_body_mul256_by_u64(regs[0], regs[1], regs[2], regs[3], free_mask),
                 WideArithOp::Mul256Redc256 => {
-                    self.wide_arith_body_mul256_redc256(regs[0], regs[1], regs[2], regs[3], regs[4])
+                    self.wide_arith_body_mul256_redc256(regs[0], regs[1], regs[2], regs[3], regs[4], free_mask)
                 }
             }
 
             // Return to the site that called the trampoline; paired with the
             // site's `call`, this is predicted by the return stack buffer.
             self.push(ret());
+            log::debug!("wide-arith trampoline: {op:?} free_mask={free_mask:#015b}");
         }
     }
 
-    fn wide_arith_pick_scratch<const N: usize>(exclude: &[NativeReg]) -> [NativeReg; N] {
+    /// Picks `N` scratch registers, preferring the homes of guest registers
+    /// that the caller has proven dead (bit set in `free_mask`, bit index =
+    /// `Reg as usize`): those may be clobbered without being saved. Returns
+    /// the picked registers and the subset that must be saved/restored.
+    ///
+    /// Clobbering dead registers is invisible to well-formed programs by
+    /// construction, and invisible on every fault path too, because faults
+    /// only happen in the probe phase, before any clobbering. It is disabled
+    /// under step tracing (the mask is always 0 there), where the lockstep
+    /// crosscheck compares every register after every instruction.
+    fn wide_arith_pick_scratch<const N: usize>(exclude: &[NativeReg], free_mask: u16) -> ([NativeReg; N], Vec<NativeReg>) {
         // Every guest register home except rdx (which mulx needs and which is
         // handled separately by the sequences that use it).
         const WIDE_ARITH_SCRATCH_POOL: [NativeReg; 12] = [rbx, rsi, rdi, rax, r8, r9, r10, r11, rbp, r12, r14, r15];
 
+        let is_free = |reg: NativeReg| {
+            polkavm_common::regmap::to_guest_reg(reg).is_some_and(|guest| free_mask & (1 << guest as usize) != 0)
+        };
+
         let mut out = [TMP_REG; N];
         let mut count = 0;
-        for reg in WIDE_ARITH_SCRATCH_POOL {
-            if count == N {
-                break;
-            }
+        for prefer_free in [true, false] {
+            for reg in WIDE_ARITH_SCRATCH_POOL {
+                if count == N {
+                    break;
+                }
 
-            if exclude.contains(&reg) {
-                continue;
-            }
+                if exclude.contains(&reg) || is_free(reg) != prefer_free || out[..count].contains(&reg) {
+                    continue;
+                }
 
-            out[count] = reg;
-            count += 1;
+                out[count] = reg;
+                count += 1;
+            }
         }
 
         assert_eq!(count, N, "ran out of scratch registers in a wide-arithmetic sequence");
-        out
+        let saves = out.iter().copied().filter(|&reg| !is_free(reg)).collect();
+        (out, saves)
+    }
+
+    /// Adds rdx to the save list unless guest register A2 (whose home rdx is)
+    /// is dead at this site.
+    fn wide_arith_maybe_save_rdx(saves: &mut Vec<NativeReg>, free_mask: u16) {
+        if free_mask & (1 << Reg::A2 as usize) == 0 {
+            saves.push(rdx);
+        }
     }
 
     /// A memory operand for `[<guest address in TMP_REG> + offset]`.
@@ -2114,10 +2144,11 @@ where
         }
     }
 
+    /// Pops in reverse order of `wide_arith_push_saves`.
     fn wide_arith_pop_saves(&mut self, regs: &[NativeReg]) {
         let times = if Self::wide_arith_extra_saves() { 2 } else { 1 };
         for _ in 0..times {
-            for &reg in regs {
+            for &reg in regs.iter().rev() {
                 self.push(pop(reg));
             }
         }
@@ -2140,13 +2171,15 @@ where
         }
     }
 
-    fn wide_arith_body_mul256(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+    fn wide_arith_body_mul256(&mut self, d: RawReg, s1: RawReg, s2: RawReg, free_mask: u16) {
 
         // p_a, p_b: source pointers; t1: high-half temporary; win: a rolling
         // window of five 512-bit result limbs (finalized limbs are parked on
         // the stack). TMP_REG holds each product's low half; rdx is the
         // per-row multiplicand (implicit mulx operand).
-        let [p_a, p_b, t1, w0, w1, w2, w3, w4] = Self::wide_arith_pick_scratch::<8>(&[conv_reg(d), conv_reg(s1), conv_reg(s2)]);
+        let ([p_a, p_b, t1, w0, w1, w2, w3, w4], mut saves) =
+            Self::wide_arith_pick_scratch::<8>(&[conv_reg(d), conv_reg(s1), conv_reg(s2)], free_mask);
+        Self::wide_arith_maybe_save_rdx(&mut saves, free_mask);
         let mut win = [w0, w1, w2, w3, w4];
 
         // Phase 1: probes. All faults happen here.
@@ -2159,7 +2192,7 @@ where
         // Snapshot the destination pointer: its home register may be rdx,
         // which the body clobbers.
         self.push(push(conv_reg(d)));
-        self.wide_arith_push_saves(&[p_a, p_b, t1, w0, w1, w2, w3, w4, rdx]);
+        self.wide_arith_push_saves(&saves);
 
         self.wide_arith_capture_ea(p_a, s1);
         self.wide_arith_capture_ea(p_b, s2);
@@ -2198,7 +2231,7 @@ where
 
         // Phase 3: stores + restores. Stack (top first): limb2, limb1, limb0,
         // <9 saved registers>, <d snapshot>.
-        self.wide_arith_capture_ea_from_stack(p_a, (3 + 9) * 8);
+        self.wide_arith_capture_ea_from_stack(p_a, (3 + saves.len() as i32) * 8);
         for (k, reg) in win.into_iter().enumerate() {
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p_a + 8 * (3 + k as i32)), reg));
         }
@@ -2207,15 +2240,17 @@ where
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p_a + 8 * k), TMP_REG));
         }
 
-        self.wide_arith_pop_saves(&[rdx, w4, w3, w2, w1, w0, t1, p_b, p_a]);
+        self.wide_arith_pop_saves(&saves);
         self.push(add((rsp, imm64(8))));
     }
 
-    fn wide_arith_body_redc256(&mut self, d: RawReg, s1: RawReg, k: RawReg) {
+    fn wide_arith_body_redc256(&mut self, d: RawReg, s1: RawReg, k: RawReg, free_mask: u16) {
 
         // p_s: source pointer; l0..l3: the 256-bit accumulator; t1: product
         // high halves; t4: the fold count h (= t >> 256). rdx holds k.
-        let [p_s, l0, l1, l2, l3, t1, t4] = Self::wide_arith_pick_scratch::<7>(&[conv_reg(d), conv_reg(s1), conv_reg(k)]);
+        let ([p_s, l0, l1, l2, l3, t1, t4], mut saves) =
+            Self::wide_arith_pick_scratch::<7>(&[conv_reg(d), conv_reg(s1), conv_reg(k)], free_mask);
+        Self::wide_arith_maybe_save_rdx(&mut saves, free_mask);
 
         // Phase 1: probes.
         self.wide_arith_probe_read(s1, 64);
@@ -2223,7 +2258,7 @@ where
 
         // Phase 2: body.
         self.push(push(conv_reg(d)));
-        self.wide_arith_push_saves(&[p_s, l0, l1, l2, l3, t1, t4, rdx]);
+        self.wide_arith_push_saves(&saves);
 
         self.wide_arith_capture_ea(p_s, s1);
         if conv_reg(k) != rdx {
@@ -2266,20 +2301,20 @@ where
         self.push(adc((l3, imm64(0))));
 
         // Phase 3.
-        self.wide_arith_capture_ea_from_stack(p_s, 8 * 8);
+        self.wide_arith_capture_ea_from_stack(p_s, saves.len() as i32 * 8);
         for (i, reg) in [l0, l1, l2, l3].into_iter().enumerate() {
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p_s + 8 * i as i32), reg));
         }
 
-        self.wide_arith_pop_saves(&[rdx, t4, t1, l3, l2, l1, l0, p_s]);
+        self.wide_arith_pop_saves(&saves);
         self.push(add((rsp, imm64(8))));
     }
 
-    fn wide_arith_body_add_sub(&mut self, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg, is_add: bool) {
+    fn wide_arith_body_add_sub(&mut self, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg, is_add: bool, free_mask: u16) {
 
         // p: one pointer at a time (s1, then s2, then d); l0..l3: the limbs.
-        let [p, l0, l1, l2, l3] =
-            Self::wide_arith_pick_scratch::<5>(&[conv_reg(d), conv_reg(c), conv_reg(s1), conv_reg(s2)]);
+        let ([p, l0, l1, l2, l3], saves) =
+            Self::wide_arith_pick_scratch::<5>(&[conv_reg(d), conv_reg(c), conv_reg(s1), conv_reg(s2)], free_mask);
 
         // Phase 1: probes.
         self.wide_arith_probe_read(s1, 32);
@@ -2287,7 +2322,7 @@ where
         self.wide_arith_probe_write(d, 32);
 
         // Phase 2: body.
-        self.wide_arith_push_saves(&[p, l0, l1, l2, l3]);
+        self.wide_arith_push_saves(&saves);
 
         self.wide_arith_capture_ea(p, s1);
         self.push(load(LoadKind::U64, l0, reg_indirect(RegSize::R64, p)));
@@ -2318,18 +2353,19 @@ where
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p + 8 * i as i32), reg));
         }
 
-        self.wide_arith_pop_saves(&[l3, l2, l1, l0, p]);
+        self.wide_arith_pop_saves(&saves);
 
         // The carry-out register is written last, so it may alias any operand.
         self.push(mov(RegSize::R64, conv_reg(c), TMP_REG));
     }
 
-    fn wide_arith_body_mul256_by_u64(&mut self, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) {
+    fn wide_arith_body_mul256_by_u64(&mut self, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg, free_mask: u16) {
 
         // p: source, then destination pointer; l0..l4: the 320-bit product.
         // rdx holds the multiplier.
-        let [p, l0, l1, l2, l3, l4] =
-            Self::wide_arith_pick_scratch::<6>(&[conv_reg(d), conv_reg(c), conv_reg(s1), conv_reg(s2)]);
+        let ([p, l0, l1, l2, l3, l4], mut saves) =
+            Self::wide_arith_pick_scratch::<6>(&[conv_reg(d), conv_reg(c), conv_reg(s1), conv_reg(s2)], free_mask);
+        Self::wide_arith_maybe_save_rdx(&mut saves, free_mask);
 
         // Phase 1: probes.
         self.wide_arith_probe_read(s1, 32);
@@ -2337,7 +2373,7 @@ where
 
         // Phase 2: body.
         self.push(push(conv_reg(d)));
-        self.wide_arith_push_saves(&[p, l0, l1, l2, l3, l4, rdx]);
+        self.wide_arith_push_saves(&saves);
 
         self.wide_arith_capture_ea(p, s1);
         if conv_reg(s2) != rdx {
@@ -2354,13 +2390,13 @@ where
         self.push(adc((l4, imm64(0))));
 
         // Phase 3.
-        self.wide_arith_capture_ea_from_stack(p, 7 * 8);
+        self.wide_arith_capture_ea_from_stack(p, saves.len() as i32 * 8);
         for (i, reg) in [l0, l1, l2, l3].into_iter().enumerate() {
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p + 8 * i as i32), reg));
         }
         self.push(mov(RegSize::R64, TMP_REG, l4));
 
-        self.wide_arith_pop_saves(&[rdx, l4, l3, l2, l1, l0, p]);
+        self.wide_arith_pop_saves(&saves);
         self.push(add((rsp, imm64(8))));
 
         // The carry-out register (bits 256..319) is written last.
@@ -2378,11 +2414,12 @@ where
     /// only via diagnostics on a fatal trap: the reported program counter is
     /// the mul256's, and a fault on redc256's destination is raised before
     /// (rather than after) the product buffer is written.
-    fn wide_arith_body_mul256_redc256(&mut self, m_d: RawReg, m_s1: RawReg, m_s2: RawReg, r_d: RawReg, r_k: RawReg) {
+    fn wide_arith_body_mul256_redc256(&mut self, m_d: RawReg, m_s1: RawReg, m_s2: RawReg, r_d: RawReg, r_k: RawReg, free_mask: u16) {
         // Uses 13 host registers (the full 512-bit product stays resident),
         // so every operand value is snapshotted to the stack up front and the
         // scratch set is picked with no exclusions.
-        let [p_a, p_b, t1, x0, x1, x2, x3, x4, x5, x6, x7] = Self::wide_arith_pick_scratch::<11>(&[]);
+        let ([p_a, p_b, t1, x0, x1, x2, x3, x4, x5, x6, x7], mut saves) = Self::wide_arith_pick_scratch::<11>(&[], free_mask);
+        Self::wide_arith_maybe_save_rdx(&mut saves, free_mask);
         let limbs = [x0, x1, x2, x3, x4, x5, x6, x7];
 
         // Phase 1: probes, in the same order the interpreter faults
@@ -2397,13 +2434,13 @@ where
         for reg in [m_s1, m_s2, m_d, r_d, r_k] {
             self.push(push(conv_reg(reg)));
         }
-        self.wide_arith_push_saves(&[p_a, p_b, t1, x0, x1, x2, x3, x4, x5, x6, x7, rdx]);
+        self.wide_arith_push_saves(&saves);
 
         // Stack layout (offsets from rsp): [0..96) saves, then the snapshots:
         // r_k at 96, r_d at 104, m_d at 112, m_s2 at 120, m_s1 at 128.
-        const SAVES: i32 = 12 * 8;
-        self.wide_arith_capture_ea_from_stack(p_a, SAVES + 32);
-        self.wide_arith_capture_ea_from_stack(p_b, SAVES + 24);
+        let saves_bytes: i32 = saves.len() as i32 * 8;
+        self.wide_arith_capture_ea_from_stack(p_a, saves_bytes + 32);
+        self.wide_arith_capture_ea_from_stack(p_b, saves_bytes + 24);
 
         // The multiplication: row-major with dual carry chains, full product
         // in x0..x7.
@@ -2433,14 +2470,14 @@ where
 
         // Store the full product (architecturally required), while it also
         // stays in x0..x7 for the fold.
-        self.wide_arith_capture_ea_from_stack(TMP_REG, SAVES + 16);
+        self.wide_arith_capture_ea_from_stack(TMP_REG, saves_bytes + 16);
         for (k, &reg) in limbs.iter().enumerate() {
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, TMP_REG + 8 * k as i32), reg));
         }
 
         // The fold, from registers: t = t_lo + k·t_hi with t_lo = x0..x3,
         // t_hi = x4..x7; h accumulates in p_a (free after the rows).
-        self.push(load(LoadKind::U64, rdx, reg_indirect(RegSize::R64, rsp + SAVES)));
+        self.push(load(LoadKind::U64, rdx, reg_indirect(RegSize::R64, rsp + saves_bytes)));
         self.push(mov_imm(p_a, imm32(0)));
         self.push(xor((RegSize::R32, TMP_REG, TMP_REG)));
         for j in 0..4usize {
@@ -2466,12 +2503,12 @@ where
         self.push(adc((limbs[3], imm64(0))));
 
         // Phase 3: the redc destination, restores, return.
-        self.wide_arith_capture_ea_from_stack(TMP_REG, SAVES + 8);
+        self.wide_arith_capture_ea_from_stack(TMP_REG, saves_bytes + 8);
         for (k, &reg) in limbs[..4].iter().enumerate() {
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, TMP_REG + 8 * k as i32), reg));
         }
 
-        self.wide_arith_pop_saves(&[rdx, x7, x6, x5, x4, x3, x2, x1, x0, t1, p_b, p_a]);
+        self.wide_arith_pop_saves(&saves);
         self.push(add((rsp, imm64(40))));
     }
 
