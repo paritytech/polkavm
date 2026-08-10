@@ -5361,31 +5361,39 @@ fn wide_arith_back_to_back(config: Config, _isa: InstructionSetKind) {
     let a = [0xdeadbeef12345678, 0x9e3779b97f4a7c15, 0xfedcba9876543210, 0x0123456789abcdef];
     let b = [0x243f6a8885a308d3, 0x13198a2e03707344, 0xa4093822299f31d0, 0x082efa98ec4e6c89];
 
-    // The fe_mul shape: mul256 into a 512-bit scratch, immediately folded by
-    // redc256. Two adjacent wide instructions must not assume any leftover
-    // scratch state from each other.
+    // The fe_mul shape as two *standalone* instructions: the mul256 destroys
+    // its operand registers (and the whole MUL_FAMILY set), so the pointers
+    // must be re-materialized before the redc256 — exactly what guest code
+    // has to do when it does not use the fused opcode. Two adjacent wide
+    // instructions must not assume any leftover scratch state from each
+    // other.
     let mut instance = tester.run(
-        &[asm::mul256(A0, A1, A2), asm::redc256(A3, A0, A4)],
         &[
-            (A0, u64::from(p_at)),
-            (A1, u64::from(a_at)),
-            (A2, u64::from(b_at)),
-            (A3, u64::from(d_at)),
-            (A4, 38),
+            asm::mul256(A0, A1, A2),
+            asm::load_imm(A3, d_at as i32),
+            asm::load_imm(A0, p_at as i32),
+            asm::load_imm(A4, 38),
+            asm::redc256(A3, A0, A4),
         ],
+        &[(A0, u64::from(p_at)), (A1, u64::from(a_at)), (A2, u64::from(b_at))],
         &[(a_at, &limbs_to_bytes(&a)), (b_at, &limbs_to_bytes(&b))],
     );
     let product = wide_mul256(&a, &b);
     assert_eq!(read_limbs::<8>(&mut instance, p_at), product);
     assert_eq!(read_limbs::<4>(&mut instance, d_at), wide_redc256(&product, 38));
 
-    // add256 whose carry-out register is a pointer operand of the next
-    // instruction: the next instruction must see the carry, not the pointer.
+    // add256 whose carry-out lands in A4 — outside add/sub's fixed destroyed
+    // set and written after the zeroing, so it must survive both this
+    // instruction and the following sub256.
     let (sum, carry) = wide_add256(&a, &b);
-    assert_eq!(carry, 0); // sanity: carry must be zero for A4 to remain a valid pointer below
     let (expected, borrow) = wide_sub256(&sum, &a);
     let mut instance = tester.run(
-        &[asm::add256(A0, A4, A1, A2), asm::sub256(A0, A3, A0, A1)],
+        &[
+            asm::add256(A0, A4, A1, A2),
+            asm::load_imm(A0, d_at as i32),
+            asm::load_imm(A1, a_at as i32),
+            asm::sub256(A0, A3, A0, A1),
+        ],
         &[
             (A0, u64::from(d_at)),
             (A1, u64::from(a_at)),
@@ -5401,13 +5409,14 @@ fn wide_arith_back_to_back(config: Config, _isa: InstructionSetKind) {
 
     // Two back-to-back mul256s writing to adjacent buffers.
     let mut instance = tester.run(
-        &[asm::mul256(A0, A2, A3), asm::mul256(A1, A3, A2)],
         &[
-            (A0, u64::from(p_at)),
-            (A1, u64::from(p_at + 64)),
-            (A2, u64::from(a_at)),
-            (A3, u64::from(b_at)),
+            asm::mul256(A0, A2, A3),
+            asm::load_imm(A1, (p_at + 64) as i32),
+            asm::load_imm(A3, b_at as i32),
+            asm::load_imm(A2, a_at as i32),
+            asm::mul256(A1, A3, A2),
         ],
+        &[(A0, u64::from(p_at)), (A2, u64::from(a_at)), (A3, u64::from(b_at))],
         &[(a_at, &limbs_to_bytes(&a)), (b_at, &limbs_to_bytes(&b))],
     );
     assert_eq!(read_limbs::<8>(&mut instance, p_at), product);
@@ -5601,12 +5610,11 @@ fn wide_arith_fused_pairs(config: Config, _isa: InstructionSetKind) {
     let product = wide_mul256(&a, &b);
     let memory: &[(u32, &[u8])] = &[(a_at, &limbs_to_bytes(&a)), (b_at, &limbs_to_bytes(&b))];
 
-    // The compiler fuses an adjacent mul256 + redc256 whose source is the
-    // product (on backends without step tracing). The fused path must be
-    // architecturally indistinguishable: both the product buffer and the
-    // fold destination end up written.
+    // The fused mul256+redc256 opcode (k implicitly in A4): both the product
+    // buffer and the fold destination end up written, exactly as if the two
+    // operations ran back to back.
     let mut instance = tester.run(
-        &[asm::mul256(A0, A1, A2), asm::redc256(A3, A0, A4)],
+        &[asm::mul256_redc256(A0, A1, A2, A3)],
         &[
             (A0, u64::from(p_at)),
             (A1, u64::from(a_at)),
@@ -5622,7 +5630,7 @@ fn wide_arith_fused_pairs(config: Config, _isa: InstructionSetKind) {
     // Fused pair with the fold destination overlapping the product buffer.
     for offset in [0u32, 8, 32] {
         let mut instance = tester.run(
-            &[asm::mul256(A0, A1, A2), asm::redc256(A3, A0, A4)],
+            &[asm::mul256_redc256(A0, A1, A2, A3)],
             &[
                 (A0, u64::from(p_at)),
                 (A1, u64::from(a_at)),
@@ -5639,9 +5647,9 @@ fn wide_arith_fused_pairs(config: Config, _isa: InstructionSetKind) {
         );
     }
 
-    // A2 (rdx on amd64) in every fused role, including k.
+    // A2 (rdx on amd64) in every pointer role, and non-trivial k values.
     let mut instance = tester.run(
-        &[asm::mul256(A2, A1, A0), asm::redc256(A3, A2, A4)],
+        &[asm::mul256_redc256(A2, A1, A0, A3)],
         &[
             (A2, u64::from(p_at)),
             (A1, u64::from(a_at)),
@@ -5654,31 +5662,33 @@ fn wide_arith_fused_pairs(config: Config, _isa: InstructionSetKind) {
     assert_eq!(read_limbs::<4>(&mut instance, d_at), wide_redc256(&product, (1 << 32) + 977));
 
     let mut instance = tester.run(
-        &[asm::mul256(A0, A1, A3), asm::redc256(A4, A0, A2)],
+        &[asm::mul256_redc256(A0, A1, A3, A2)],
         &[
             (A0, u64::from(p_at)),
             (A1, u64::from(a_at)),
             (A3, u64::from(b_at)),
-            (A4, u64::from(d_at)),
-            (A2, u64::MAX),
+            (A2, u64::from(d_at)),
+            (A4, u64::MAX),
         ],
         memory,
     );
     assert_eq!(read_limbs::<4>(&mut instance, d_at), wide_redc256(&product, u64::MAX));
 
-    // Adjacent but NOT fusable: the redc256 reads a different buffer than the
-    // mul256 writes. Both must still execute correctly, unfused.
+    // An adjacent standalone mul256 + redc256 (the shape the linker would
+    // fuse) must also work when expressed as separate instructions with the
+    // pointers re-materialized in between — the two must share no scratch
+    // state, and the mul256's zeroing must be visible to the re-materialized
+    // redc256 (i.e. the pair is NOT implicitly fused at this level).
     let src512 = [b[0], b[1], b[2], b[3], a[0], a[1], a[2], a[3]];
     let mut instance = tester.run(
-        &[asm::mul256(A0, A1, A2), asm::redc256(A3, A4, A5)],
         &[
-            (A0, u64::from(p_at)),
-            (A1, u64::from(a_at)),
-            (A2, u64::from(b_at)),
-            (A3, u64::from(d_at)),
-            (A4, u64::from(base + 0x400)),
-            (A5, 38),
+            asm::mul256(A0, A1, A2),
+            asm::load_imm(A3, d_at as i32),
+            asm::load_imm(A4, (base + 0x400) as i32),
+            asm::load_imm(A5, 38),
+            asm::redc256(A3, A4, A5),
         ],
+        &[(A0, u64::from(p_at)), (A1, u64::from(a_at)), (A2, u64::from(b_at))],
         &[
             (a_at, &limbs_to_bytes(&a)),
             (b_at, &limbs_to_bytes(&b)),
@@ -5690,7 +5700,7 @@ fn wide_arith_fused_pairs(config: Config, _isa: InstructionSetKind) {
 
     // A fused pair faulting on the redc destination must still trap.
     tester.run_expect_trap(
-        &[asm::mul256(A0, A1, A2), asm::redc256(A3, A0, A4)],
+        &[asm::mul256_redc256(A0, A1, A2, A3)],
         &[
             (A0, u64::from(p_at)),
             (A1, u64::from(a_at)),
@@ -5700,6 +5710,115 @@ fn wide_arith_fused_pairs(config: Config, _isa: InstructionSetKind) {
         ],
         memory,
     );
+}
+
+fn wide_arith_destroyed_regs(config: Config, _isa: InstructionSetKind) {
+    use polkavm_common::operation::{wide_add256, wide_mul256_by_u64};
+    use polkavm_common::program::wide_arith_destroyed;
+
+    let tester = WideArithTester::new(&config);
+    let base = tester.base();
+    let (d_at, a_at, b_at) = (base, base + 0x100, base + 0x200);
+
+    let a = [0xdeadbeef12345678u64, 0x9e3779b97f4a7c15, 0xfedcba9876543210, 0x0123456789abcdef];
+    let b = [0x243f6a8885a308d3u64, u64::MAX, 0, 0x082efa98ec4e6c89];
+    let memory: &[(u32, &[u8])] = &[(a_at, &limbs_to_bytes(&a)), (b_at, &limbs_to_bytes(&b))];
+
+    // Registers not destroyed by the instruction keep these markers; the
+    // destroyed ones must read as zero afterwards. (RA is set by the tester,
+    // so it is only checked for non-zero survival.)
+    let markers: &[(Reg, u64)] = &[
+        (Reg::SP, 0x8888),
+        (Reg::T0, 0x1111),
+        (Reg::T1, 0x2222),
+        (Reg::T2, 0x3333),
+        (Reg::S0, 0x4444),
+        (Reg::S1, 0x5555),
+        (A4, 0x6666),
+        (A5, 0x7777),
+    ];
+
+    let cases: &[(&str, Instruction, &[Reg], &[(Reg, u64)], Option<(Reg, u64)>)] = &[
+        (
+            "mul256",
+            asm::mul256(A0, A1, A2),
+            &wide_arith_destroyed::MUL_FAMILY,
+            &[(A0, u64::from(d_at)), (A1, u64::from(a_at)), (A2, u64::from(b_at))],
+            None,
+        ),
+        (
+            "redc256",
+            asm::redc256(A0, A1, A2),
+            &wide_arith_destroyed::MUL_FAMILY,
+            &[(A0, u64::from(d_at)), (A1, u64::from(a_at)), (A2, 38)],
+            None,
+        ),
+        (
+            "add256",
+            asm::add256(A0, A3, A1, A2),
+            &wide_arith_destroyed::ADD_SUB,
+            &[(A0, u64::from(d_at)), (A1, u64::from(a_at)), (A2, u64::from(b_at))],
+            Some((A3, wide_add256(&a, &b).1)),
+        ),
+        (
+            "mul256_by_u64",
+            asm::mul256_by_u64(A0, A3, A1, A2),
+            &wide_arith_destroyed::MUL_FAMILY,
+            &[(A0, u64::from(d_at)), (A1, u64::from(a_at)), (A2, 977)],
+            Some((A3, wide_mul256_by_u64(&a, 977).1)),
+        ),
+        (
+            "mul256_redc256",
+            asm::mul256_redc256(A0, A1, A2, A3),
+            &wide_arith_destroyed::MUL_FAMILY,
+            &[
+                (A0, u64::from(d_at)),
+                (A1, u64::from(a_at)),
+                (A2, u64::from(b_at)),
+                (A3, u64::from(base + 0x300)),
+                (A4, 38),
+            ],
+            None,
+        ),
+    ];
+
+    for (name, instruction, fixed, operands, carry) in cases {
+        let mut regs = markers.to_vec();
+        regs.extend_from_slice(operands);
+        let instance = tester.run(&[*instruction], &regs, memory);
+
+        let mut destroyed: Vec<Reg> = fixed.to_vec();
+        destroyed.extend(operands.iter().map(|&(reg, _)| reg));
+
+        for reg in Reg::ALL {
+            let value = instance.reg(reg);
+            if let Some((carry_reg, carry_value)) = carry {
+                if reg == *carry_reg {
+                    assert_eq!(value, *carry_value, "{name}: carry-out in {reg}");
+                    continue;
+                }
+            }
+
+            if destroyed.contains(&reg) {
+                assert_eq!(value, 0, "{name}: destroyed register {reg} must be zeroed");
+            } else if let Some(&(_, marker)) = markers.iter().find(|&&(marker_reg, _)| marker_reg == reg) {
+                assert_eq!(value, marker, "{name}: register {reg} must survive");
+            } else if matches!(reg, Reg::RA) {
+                assert_ne!(value, 0, "{name}: {reg} must survive");
+            }
+        }
+    }
+
+    // A faulting instruction destroys nothing: all registers stay pristine.
+    let mut regs = markers.to_vec();
+    regs.extend_from_slice(&[(A0, 0x1000), (A1, u64::from(a_at)), (A2, u64::from(b_at))]);
+    let instance = tester.run_expect_trap(&[asm::mul256(A0, A1, A2)], &regs, memory);
+    for &(reg, marker) in markers {
+        assert_eq!(instance.reg(reg), marker, "fault: register {reg} must stay pristine");
+    }
+    assert_eq!(instance.reg(A0), 0x1000, "fault: operand A0 must stay pristine");
+    assert_eq!(instance.reg(A1), u64::from(a_at), "fault: operand A1 must stay pristine");
+    assert_eq!(instance.reg(A2), u64::from(b_at), "fault: operand A2 must stay pristine");
 }
 
 fn wide_arith_dynamic_paging(mut engine_config: Config, _isa: InstructionSetKind) {
@@ -5770,6 +5889,7 @@ fn wide_arith_unsupported(_config: Config, isa: InstructionSetKind) {
         ("add256", asm::add256(A0, A3, A1, A2)),
         ("sub256", asm::sub256(A0, A3, A1, A2)),
         ("mul256_by_u64", asm::mul256_by_u64(A0, A3, A1, A2)),
+        ("mul256_redc256", asm::mul256_redc256(A0, A1, A2, A3)),
     ];
 
     for (name, instruction) in instructions {
@@ -6408,6 +6528,7 @@ run_tests_on_isa! { latest64, InstructionSetKind::Latest64,
     wide_arith_reg_sweep
     wide_arith_randomized
     wide_arith_oob
+    wide_arith_destroyed_regs
     wide_arith_dynamic_paging
     wide_arith_fused_pairs
 }

@@ -9,7 +9,7 @@ use polkavm_assembler::amd64::{Condition, LoadKind, MemOp, RegMem, RegSize, Scal
 use polkavm_assembler::{Label, NonZero, ReservedAssembler, U1, U2, U3, U4};
 
 use polkavm_common::cast::cast;
-use polkavm_common::program::{ProgramCounter, RawReg, Reg};
+use polkavm_common::program::{wide_arith_destroyed, ProgramCounter, RawReg, Reg};
 use polkavm_common::utils::GasVisitorT;
 use polkavm_common::zygote::{VmCtx, VM_ADDR_VMCTX};
 
@@ -1903,14 +1903,21 @@ where
     //    add256/sub256/mul256_by_u64) writes the carry-out register last, so the
     //    carry-out register may alias any other operand.
     //
-    // ## Clobber contract
+    // ## The destroyed-register contract
     //
-    // Each sequence may clobber: TMP_REG (rcx, always), rdx (mulx-based
-    // sequences; saved and restored via the stack), and a per-instance scratch
-    // set drawn from WIDE_ARITH_SCRATCH_POOL excluding the operands' home
-    // registers (saved and restored via the stack). No guest register holds a
-    // dirty value at any point where a fault is possible. Two adjacent wide
-    // instructions share no scratch state — every sequence is self-contained.
+    // Every wide-arithmetic instruction architecturally *destroys* a fixed
+    // register set plus its operand registers — destroyed registers read as
+    // zero after the instruction, and the carry-out (where present) is
+    // written after the zeroing (see
+    // `polkavm_common::program::wide_arith_destroyed`; the interpreter
+    // implements the identical rule). The destroyed homes are save-free
+    // scratch for these sequences: only scratch drawn from *outside* the
+    // destroyed set is saved and restored via the stack. TMP_REG (rcx) is
+    // clobbered as always (not a guest register). No guest register holds a
+    // dirty value at any point where a fault is possible — the zeroing and
+    // all scratch use happen strictly after the probe phase. Two adjacent
+    // wide instructions share no scratch state — every sequence is
+    // self-contained.
     //
     // ## Addressing and bounds
     //
@@ -1947,8 +1954,10 @@ where
     }
 
     #[inline(always)]
-    pub fn mul256_redc256_fused(&mut self, m_d: RawReg, m_s1: RawReg, m_s2: RawReg, r_d: RawReg, r_k: RawReg) {
-        self.wide_arith_instruction(WideArithOp::Mul256Redc256, [m_d, m_s1, m_s2, r_d, r_k]);
+    pub fn mul256_redc256(&mut self, m_d: RawReg, m_s1: RawReg, m_s2: RawReg, r_d: RawReg) {
+        // The fold constant k is hardcoded to A4 (see the instruction's spec
+        // comment in polkavm-common).
+        self.wide_arith_instruction(WideArithOp::Mul256Redc256, [m_d, m_s1, m_s2, r_d, Reg::A4.raw()]);
     }
 
     /// Emits the per-site stub for a wide-arithmetic instruction.
@@ -2027,24 +2036,50 @@ where
         }
     }
 
-    fn wide_arith_pick_scratch<const N: usize>(exclude: &[NativeReg]) -> [NativeReg; N] {
+    /// The host homes of every register the instruction destroys: the
+    /// family's fixed set plus the operand registers (deduplicated). See
+    /// `polkavm_common::program::wide_arith_destroyed` for the contract.
+    fn wide_arith_destroyed_homes(fixed: &[Reg], operands: &[RawReg]) -> Vec<NativeReg> {
+        let mut homes: Vec<NativeReg> = fixed.iter().map(|&reg| conv_reg_const(reg)).collect();
+        for &reg in operands {
+            let home = conv_reg(reg);
+            if !homes.contains(&home) {
+                homes.push(home);
+            }
+        }
+        homes
+    }
+
+    /// Zeroes every destroyed register's home. Runs at the very end of a
+    /// sequence (after the restores of the saved registers), except that the
+    /// carry-out write, where the instruction has one, comes after.
+    fn wide_arith_zero_destroyed(&mut self, destroyed: &[NativeReg]) {
+        for &reg in destroyed {
+            self.push(xor((RegSize::R32, reg, reg)));
+        }
+    }
+
+    fn wide_arith_pick_scratch<const N: usize>(exclude: &[NativeReg], destroyed: &[NativeReg]) -> [NativeReg; N] {
         // Every guest register home except rdx (which mulx needs and which is
-        // handled separately by the sequences that use it).
-        const WIDE_ARITH_SCRATCH_POOL: [NativeReg; 12] = [rbx, rsi, rdi, rax, r8, r9, r10, r11, rbp, r12, r14, r15];
+        // handled separately by the sequences that use it). Destroyed homes
+        // are save-free scratch, so they are picked first.
+        const POOL: [NativeReg; 12] = [rbx, rsi, rdi, rax, r8, r9, r10, r11, rbp, r12, r14, r15];
 
         let mut out = [TMP_REG; N];
         let mut count = 0;
-        for reg in WIDE_ARITH_SCRATCH_POOL {
-            if count == N {
-                break;
-            }
+        for pass in 0..2 {
+            for reg in POOL {
+                if count == N {
+                    break;
+                }
 
-            if exclude.contains(&reg) {
-                continue;
-            }
+                if exclude.contains(&reg) || (pass == 0) != destroyed.contains(&reg) {
+                    continue;
+                }
 
-            out[count] = reg;
-            count += 1;
+                out[count] = reg;
+                count += 1;
+            }
         }
 
         assert_eq!(count, N, "ran out of scratch registers in a wide-arithmetic sequence");
@@ -2070,12 +2105,6 @@ where
     /// only valid for benchmarking runs that never fault).
     fn wide_arith_skip_probes() -> bool {
         std::env::var_os("POLKAVM_WIDE_ARITH_NO_PROBES").is_some_and(|value| value == "1")
-    }
-
-    /// MEASUREMENT ONLY: emits every scratch save/restore twice, to measure
-    /// the marginal cost of the save/restore tax by extrapolation.
-    fn wide_arith_extra_saves() -> bool {
-        std::env::var_os("POLKAVM_WIDE_ARITH_EXTRA_SAVES").is_some_and(|value| value == "1")
     }
 
     /// Read-probes the first and the last byte of `[ptr, ptr + length)`.
@@ -2105,61 +2134,24 @@ where
         self.push(add((Self::wide_arith_probe_mem(length - 8), imm64(0))));
     }
 
-    /// MEASUREMENT: saves the scratch registers in xmm registers instead of
-    /// on the stack - same instruction count, but zero memory traffic (no
-    /// store-queue pressure). Guest code never touches vector registers, so
-    /// they are free real estate between the save and the restore.
-    fn wide_arith_xmm_saves() -> bool {
-        std::env::var_os("POLKAVM_WIDE_ARITH_XMM_SAVES").is_some_and(|value| value == "1")
-    }
-
-    /// The XMM registers, numbered via the GPR enum (see the assembler's
-    /// movq_xmm_from_gpr).
-    const WIDE_ARITH_XMM: [polkavm_assembler::amd64::Reg; 12] = {
-        use polkavm_assembler::amd64::Reg::*;
-        [rax, rcx, rdx, rbx, rsp, rbp, rsi, rdi, r8, r9, r10, r11]
-    };
-
     /// The number of save slots that end up on the stack (bodies use this to
-    /// compute the offsets of values they pushed above the saves).
-    fn wide_arith_pushed_saves(count: usize) -> i32 {
-        if Self::wide_arith_xmm_saves() {
-            0
-        } else {
-            count as i32
-        }
+    /// compute the offsets of values they pushed above the saves). Destroyed
+    /// registers are not saved — that is the whole point of the contract.
+    fn wide_arith_pushed_saves(regs: &[NativeReg], destroyed: &[NativeReg]) -> i32 {
+        regs.iter().filter(|reg| !destroyed.contains(reg)).count() as i32
     }
 
-    fn wide_arith_push_saves(&mut self, regs: &[NativeReg]) {
-        if Self::wide_arith_xmm_saves() {
-            for (index, &reg) in regs.iter().enumerate() {
-                self.push(movq_xmm_from_gpr(Self::WIDE_ARITH_XMM[index], reg));
-            }
-            return;
-        }
-
-        let times = if Self::wide_arith_extra_saves() { 2 } else { 1 };
-        for _ in 0..times {
-            for &reg in regs {
+    fn wide_arith_push_saves(&mut self, regs: &[NativeReg], destroyed: &[NativeReg]) {
+        for &reg in regs {
+            if !destroyed.contains(&reg) {
                 self.push(push(reg));
             }
         }
     }
 
-    fn wide_arith_pop_saves(&mut self, regs: &[NativeReg]) {
-        if Self::wide_arith_xmm_saves() {
-            // regs is the pop-ordered (reversed) list; index from the end so
-            // each register reads back the same xmm slot it was saved to.
-            let count = regs.len();
-            for (index, &reg) in regs.iter().enumerate() {
-                self.push(movq_gpr_from_xmm(reg, Self::WIDE_ARITH_XMM[count - 1 - index]));
-            }
-            return;
-        }
-
-        let times = if Self::wide_arith_extra_saves() { 2 } else { 1 };
-        for _ in 0..times {
-            for &reg in regs {
+    fn wide_arith_pop_saves(&mut self, regs: &[NativeReg], destroyed: &[NativeReg]) {
+        for &reg in regs {
+            if !destroyed.contains(&reg) {
                 self.push(pop(reg));
             }
         }
@@ -2183,12 +2175,14 @@ where
     }
 
     fn wide_arith_body_mul256(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
+        let destroyed = Self::wide_arith_destroyed_homes(&wide_arith_destroyed::MUL_FAMILY, &[d, s1, s2]);
 
         // p_a, p_b: source pointers; t1: high-half temporary; win: a rolling
         // window of five 512-bit result limbs (finalized limbs are parked on
         // the stack). TMP_REG holds each product's low half; rdx is the
         // per-row multiplicand (implicit mulx operand).
-        let [p_a, p_b, t1, w0, w1, w2, w3, w4] = Self::wide_arith_pick_scratch::<8>(&[conv_reg(d), conv_reg(s1), conv_reg(s2)]);
+        let [p_a, p_b, t1, w0, w1, w2, w3, w4] =
+            Self::wide_arith_pick_scratch::<8>(&[conv_reg(d), conv_reg(s1), conv_reg(s2)], &destroyed);
         let mut win = [w0, w1, w2, w3, w4];
 
         // Phase 1: probes. All faults happen here.
@@ -2201,7 +2195,7 @@ where
         // Snapshot the destination pointer: its home register may be rdx,
         // which the body clobbers.
         self.push(push(conv_reg(d)));
-        self.wide_arith_push_saves(&[p_a, p_b, t1, w0, w1, w2, w3, w4, rdx]);
+        self.wide_arith_push_saves(&[p_a, p_b, t1, w0, w1, w2, w3, w4, rdx], &destroyed);
 
         self.wide_arith_capture_ea(p_a, s1);
         self.wide_arith_capture_ea(p_b, s2);
@@ -2239,8 +2233,11 @@ where
         }
 
         // Phase 3: stores + restores. Stack (top first): limb2, limb1, limb0,
-        // <9 saved registers>, <d snapshot>.
-        self.wide_arith_capture_ea_from_stack(p_a, (3 + Self::wide_arith_pushed_saves(9)) * 8);
+        // <saved registers>, <d snapshot>.
+        self.wide_arith_capture_ea_from_stack(
+            p_a,
+            (3 + Self::wide_arith_pushed_saves(&[p_a, p_b, t1, w0, w1, w2, w3, w4, rdx], &destroyed)) * 8,
+        );
         for (k, reg) in win.into_iter().enumerate() {
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p_a + 8 * (3 + k as i32)), reg));
         }
@@ -2249,15 +2246,18 @@ where
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p_a + 8 * k), TMP_REG));
         }
 
-        self.wide_arith_pop_saves(&[rdx, w4, w3, w2, w1, w0, t1, p_b, p_a]);
+        self.wide_arith_pop_saves(&[rdx, w4, w3, w2, w1, w0, t1, p_b, p_a], &destroyed);
         self.push(add((rsp, imm64(8))));
+        self.wide_arith_zero_destroyed(&destroyed);
     }
 
     fn wide_arith_body_redc256(&mut self, d: RawReg, s1: RawReg, k: RawReg) {
+        let destroyed = Self::wide_arith_destroyed_homes(&wide_arith_destroyed::MUL_FAMILY, &[d, s1, k]);
 
         // p_s: source pointer; l0..l3: the 256-bit accumulator; t1: product
         // high halves; t4: the fold count h (= t >> 256). rdx holds k.
-        let [p_s, l0, l1, l2, l3, t1, t4] = Self::wide_arith_pick_scratch::<7>(&[conv_reg(d), conv_reg(s1), conv_reg(k)]);
+        let [p_s, l0, l1, l2, l3, t1, t4] =
+            Self::wide_arith_pick_scratch::<7>(&[conv_reg(d), conv_reg(s1), conv_reg(k)], &destroyed);
 
         // Phase 1: probes.
         self.wide_arith_probe_read(s1, 64);
@@ -2265,7 +2265,7 @@ where
 
         // Phase 2: body.
         self.push(push(conv_reg(d)));
-        self.wide_arith_push_saves(&[p_s, l0, l1, l2, l3, t1, t4, rdx]);
+        self.wide_arith_push_saves(&[p_s, l0, l1, l2, l3, t1, t4, rdx], &destroyed);
 
         self.wide_arith_capture_ea(p_s, s1);
         if conv_reg(k) != rdx {
@@ -2308,20 +2308,25 @@ where
         self.push(adc((l3, imm64(0))));
 
         // Phase 3.
-        self.wide_arith_capture_ea_from_stack(p_s, Self::wide_arith_pushed_saves(8) * 8);
+        self.wide_arith_capture_ea_from_stack(
+            p_s,
+            Self::wide_arith_pushed_saves(&[p_s, l0, l1, l2, l3, t1, t4, rdx], &destroyed) * 8,
+        );
         for (i, reg) in [l0, l1, l2, l3].into_iter().enumerate() {
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p_s + 8 * i as i32), reg));
         }
 
-        self.wide_arith_pop_saves(&[rdx, t4, t1, l3, l2, l1, l0, p_s]);
+        self.wide_arith_pop_saves(&[rdx, t4, t1, l3, l2, l1, l0, p_s], &destroyed);
         self.push(add((rsp, imm64(8))));
+        self.wide_arith_zero_destroyed(&destroyed);
     }
 
     fn wide_arith_body_add_sub(&mut self, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg, is_add: bool) {
+        let destroyed = Self::wide_arith_destroyed_homes(&wide_arith_destroyed::ADD_SUB, &[d, c, s1, s2]);
 
         // p: one pointer at a time (s1, then s2, then d); l0..l3: the limbs.
         let [p, l0, l1, l2, l3] =
-            Self::wide_arith_pick_scratch::<5>(&[conv_reg(d), conv_reg(c), conv_reg(s1), conv_reg(s2)]);
+            Self::wide_arith_pick_scratch::<5>(&[conv_reg(d), conv_reg(c), conv_reg(s1), conv_reg(s2)], &destroyed);
 
         // Phase 1: probes.
         self.wide_arith_probe_read(s1, 32);
@@ -2329,7 +2334,7 @@ where
         self.wide_arith_probe_write(d, 32);
 
         // Phase 2: body.
-        self.wide_arith_push_saves(&[p, l0, l1, l2, l3]);
+        self.wide_arith_push_saves(&[p, l0, l1, l2, l3], &destroyed);
 
         self.wide_arith_capture_ea(p, s1);
         self.push(load(LoadKind::U64, l0, reg_indirect(RegSize::R64, p)));
@@ -2360,18 +2365,21 @@ where
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p + 8 * i as i32), reg));
         }
 
-        self.wide_arith_pop_saves(&[l3, l2, l1, l0, p]);
+        self.wide_arith_pop_saves(&[l3, l2, l1, l0, p], &destroyed);
+        self.wide_arith_zero_destroyed(&destroyed);
 
-        // The carry-out register is written last, so it may alias any operand.
+        // The carry-out register is written last (after the zeroing), so it
+        // may alias any operand, including a destroyed register.
         self.push(mov(RegSize::R64, conv_reg(c), TMP_REG));
     }
 
     fn wide_arith_body_mul256_by_u64(&mut self, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) {
+        let destroyed = Self::wide_arith_destroyed_homes(&wide_arith_destroyed::MUL_FAMILY, &[d, c, s1, s2]);
 
         // p: source, then destination pointer; l0..l4: the 320-bit product.
         // rdx holds the multiplier.
         let [p, l0, l1, l2, l3, l4] =
-            Self::wide_arith_pick_scratch::<6>(&[conv_reg(d), conv_reg(c), conv_reg(s1), conv_reg(s2)]);
+            Self::wide_arith_pick_scratch::<6>(&[conv_reg(d), conv_reg(c), conv_reg(s1), conv_reg(s2)], &destroyed);
 
         // Phase 1: probes.
         self.wide_arith_probe_read(s1, 32);
@@ -2379,7 +2387,7 @@ where
 
         // Phase 2: body.
         self.push(push(conv_reg(d)));
-        self.wide_arith_push_saves(&[p, l0, l1, l2, l3, l4, rdx]);
+        self.wide_arith_push_saves(&[p, l0, l1, l2, l3, l4, rdx], &destroyed);
 
         self.wide_arith_capture_ea(p, s1);
         if conv_reg(s2) != rdx {
@@ -2396,16 +2404,21 @@ where
         self.push(adc((l4, imm64(0))));
 
         // Phase 3.
-        self.wide_arith_capture_ea_from_stack(p, Self::wide_arith_pushed_saves(7) * 8);
+        self.wide_arith_capture_ea_from_stack(
+            p,
+            Self::wide_arith_pushed_saves(&[p, l0, l1, l2, l3, l4, rdx], &destroyed) * 8,
+        );
         for (i, reg) in [l0, l1, l2, l3].into_iter().enumerate() {
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, p + 8 * i as i32), reg));
         }
         self.push(mov(RegSize::R64, TMP_REG, l4));
 
-        self.wide_arith_pop_saves(&[rdx, l4, l3, l2, l1, l0, p]);
+        self.wide_arith_pop_saves(&[rdx, l4, l3, l2, l1, l0, p], &destroyed);
         self.push(add((rsp, imm64(8))));
+        self.wide_arith_zero_destroyed(&destroyed);
 
-        // The carry-out register (bits 256..319) is written last.
+        // The carry-out register (bits 256..319) is written last (after the
+        // zeroing).
         self.push(mov(RegSize::R64, conv_reg(c), TMP_REG));
     }
 
@@ -2421,10 +2434,15 @@ where
     /// the mul256's, and a fault on redc256's destination is raised before
     /// (rather than after) the product buffer is written.
     fn wide_arith_body_mul256_redc256(&mut self, m_d: RawReg, m_s1: RawReg, m_s2: RawReg, r_d: RawReg, r_k: RawReg) {
+        // The fused pair destroys the union of what the two instructions
+        // destroy separately — same final register state as the interpreter
+        // executing them back to back.
+        let destroyed = Self::wide_arith_destroyed_homes(&wide_arith_destroyed::MUL_FAMILY, &[m_d, m_s1, m_s2, r_d, r_k]);
+
         // Uses 13 host registers (the full 512-bit product stays resident),
         // so every operand value is snapshotted to the stack up front and the
         // scratch set is picked with no exclusions.
-        let [p_a, p_b, t1, x0, x1, x2, x3, x4, x5, x6, x7] = Self::wide_arith_pick_scratch::<11>(&[]);
+        let [p_a, p_b, t1, x0, x1, x2, x3, x4, x5, x6, x7] = Self::wide_arith_pick_scratch::<11>(&[], &destroyed);
         let limbs = [x0, x1, x2, x3, x4, x5, x6, x7];
 
         // Phase 1: probes, in the same order the interpreter faults
@@ -2439,12 +2457,13 @@ where
         for reg in [m_s1, m_s2, m_d, r_d, r_k] {
             self.push(push(conv_reg(reg)));
         }
-        self.wide_arith_push_saves(&[p_a, p_b, t1, x0, x1, x2, x3, x4, x5, x6, x7, rdx]);
+        self.wide_arith_push_saves(&[p_a, p_b, t1, x0, x1, x2, x3, x4, x5, x6, x7, rdx], &destroyed);
 
-        // Stack layout (offsets from rsp): [0..96) saves, then the snapshots:
-        // r_k at 96, r_d at 104, m_d at 112, m_s2 at 120, m_s1 at 128.
+        // Stack layout (offsets from rsp): [0..SAVES) saves, then the
+        // snapshots: r_k at SAVES, r_d at SAVES+8, m_d at SAVES+16,
+        // m_s2 at SAVES+24, m_s1 at SAVES+32.
         #[allow(non_snake_case)]
-        let SAVES: i32 = Self::wide_arith_pushed_saves(12) * 8;
+        let SAVES: i32 = Self::wide_arith_pushed_saves(&[p_a, p_b, t1, x0, x1, x2, x3, x4, x5, x6, x7, rdx], &destroyed) * 8;
         self.wide_arith_capture_ea_from_stack(p_a, SAVES + 32);
         self.wide_arith_capture_ea_from_stack(p_b, SAVES + 24);
 
@@ -2514,8 +2533,9 @@ where
             self.push(store(RegSize::R64, reg_indirect(RegSize::R64, TMP_REG + 8 * k as i32), reg));
         }
 
-        self.wide_arith_pop_saves(&[rdx, x7, x6, x5, x4, x3, x2, x1, x0, t1, p_b, p_a]);
+        self.wide_arith_pop_saves(&[rdx, x7, x6, x5, x4, x3, x2, x1, x0, t1, p_b, p_a], &destroyed);
         self.push(add((rsp, imm64(40))));
+        self.wide_arith_zero_destroyed(&destroyed);
     }
 
     #[inline(always)]

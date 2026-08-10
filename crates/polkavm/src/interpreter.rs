@@ -19,8 +19,8 @@ use polkavm_common::abi::VM_ADDR_RETURN_TO_HOST;
 use polkavm_common::cast::cast;
 use polkavm_common::operation::*;
 use polkavm_common::program::{
-    asm, interpreter_calculate_cache_num_entries, InstructionVisitor, RawReg, Reg, INTERPRETER_CACHE_ENTRY_SIZE,
-    INTERPRETER_FLATMAP_ENTRY_SIZE,
+    asm, interpreter_calculate_cache_num_entries, wide_arith_destroyed, InstructionVisitor, RawReg, Reg,
+    INTERPRETER_CACHE_ENTRY_SIZE, INTERPRETER_FLATMAP_ENTRY_SIZE,
 };
 use polkavm_common::utils::{align_to_next_page_usize, slice_assume_init_mut, ArcBytes, GasVisitorT};
 
@@ -3203,13 +3203,28 @@ fn transmute_reg(value: u32) -> Reg {
 ///
 /// These instructions read and write guest memory through the regular
 /// `load`/`store` machinery, using `T0` as a scratch register: its value is
-/// saved on entry and restored both on success and on every fault path, so
-/// guest-visible register state is never affected by the scratch use (matching
-/// the recompiler, which uses host scratch registers).
+/// saved on entry and restored on every fault path, so a faulting instruction
+/// reports pristine register state (matching the recompiler, which probes all
+/// operands before touching any guest register). On success `T0` is zeroed
+/// anyway — it is in every fixed destroyed set (see
+/// `polkavm_common::program::wide_arith_destroyed`).
 struct WideArithContext {
     program_counter: ProgramCounter,
     next_instruction: Target,
     t0_saved: u64,
+}
+
+/// Applies the destroyed-register contract (see
+/// `polkavm_common::program::wide_arith_destroyed`) on the successful path:
+/// the fixed set plus the operand registers are zeroed. Only ever called
+/// after the last possible fault — a faulting instruction destroys nothing.
+/// The carry/borrow-out register, where the instruction has one, is written
+/// by the caller *after* this.
+#[inline(always)]
+fn wide_arith_zero_destroyed(visitor: &mut InterpretedInstance, fixed: &[Reg], operands: &[Reg]) {
+    for &reg in fixed.iter().chain(operands) {
+        visitor.set_u64::<false>(reg, 0);
+    }
 }
 
 #[inline(always)]
@@ -3361,7 +3376,7 @@ fn wide_arith_mul256_impl<M: Memory, const DEBUG: bool>(
     wide_arith_probe_dst::<M, DEBUG, 8>(visitor, compiled_offset, &ctx, d_address)?;
     wide_arith_write_limbs::<M, DEBUG, 8>(visitor, compiled_offset, &ctx, d_address, &wide_mul256(&lhs, &rhs))?;
 
-    visitor.set_u64::<false>(Reg::T0, ctx.t0_saved);
+    wide_arith_zero_destroyed(visitor, &wide_arith_destroyed::MUL_FAMILY, &[d, s1, s2]);
     Ok(ctx.next_instruction)
 }
 
@@ -3389,7 +3404,7 @@ fn wide_arith_redc256_impl<M: Memory, const DEBUG: bool>(
     wide_arith_probe_dst::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, d_address)?;
     wide_arith_write_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, d_address, &wide_redc256(&src, k))?;
 
-    visitor.set_u64::<false>(Reg::T0, ctx.t0_saved);
+    wide_arith_zero_destroyed(visitor, &wide_arith_destroyed::MUL_FAMILY, &[d, s1, s2]);
     Ok(ctx.next_instruction)
 }
 
@@ -3424,7 +3439,7 @@ fn wide_arith_add_sub_impl<M: Memory, const DEBUG: bool, const IS_ADD: bool>(
     let (result, carry) = if IS_ADD { wide_add256(&lhs, &rhs) } else { wide_sub256(&lhs, &rhs) };
     wide_arith_write_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, d_address, &result)?;
 
-    visitor.set_u64::<false>(Reg::T0, ctx.t0_saved);
+    wide_arith_zero_destroyed(visitor, &wide_arith_destroyed::ADD_SUB, &[d, c, s1, s2]);
     visitor.set_u64::<DEBUG>(c, carry);
     Ok(ctx.next_instruction)
 }
@@ -3455,8 +3470,52 @@ fn wide_arith_mul256_by_u64_impl<M: Memory, const DEBUG: bool>(
     let (result, hi_limb) = wide_mul256_by_u64(&lhs, rhs);
     wide_arith_write_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, d_address, &result)?;
 
-    visitor.set_u64::<false>(Reg::T0, ctx.t0_saved);
+    wide_arith_zero_destroyed(visitor, &wide_arith_destroyed::MUL_FAMILY, &[d, c, s1, s2]);
     visitor.set_u64::<DEBUG>(c, hi_limb);
+    Ok(ctx.next_instruction)
+}
+
+/// The fused `mul256` + `redc256` pair as a single architectural
+/// instruction: the full 512-bit product `[m_s1] * [m_s2]` is written to
+/// `[m_d]`, then folded modulo `2^256 - k` into `[r_d]`, with `k` taken from
+/// `A4` (hardcoded so the pair fits the 4-register instruction shape).
+///
+/// The fault order is: mul sources, mul destination, redc destination — a
+/// fault on the redc destination is raised *before* the product buffer is
+/// written (all probes precede all writes), and faults leave every register
+/// pristine.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn wide_arith_mul256_redc256_impl<M: Memory, const DEBUG: bool>(
+    visitor: &mut InterpretedInstance,
+    compiled_offset: Target,
+    program_counter: ProgramCounter,
+    m_d: Reg,
+    m_s1: Reg,
+    m_s2: Reg,
+    r_d: Reg,
+) -> Result<Target, Target> {
+    let ctx = WideArithContext {
+        program_counter,
+        next_instruction: visitor.go_to_next_instruction(compiled_offset),
+        t0_saved: visitor.get_u64::<false>(Reg::T0),
+    };
+
+    let m_d_address = cast(visitor.get_u64::<DEBUG>(m_d)).truncate_to_u32();
+    let lhs_address = cast(visitor.get_u64::<DEBUG>(m_s1)).truncate_to_u32();
+    let rhs_address = cast(visitor.get_u64::<DEBUG>(m_s2)).truncate_to_u32();
+    let r_d_address = cast(visitor.get_u64::<DEBUG>(r_d)).truncate_to_u32();
+    let k = visitor.get_u64::<DEBUG>(Reg::A4);
+
+    let lhs = wide_arith_read_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, lhs_address)?;
+    let rhs = wide_arith_read_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, rhs_address)?;
+    wide_arith_probe_dst::<M, DEBUG, 8>(visitor, compiled_offset, &ctx, m_d_address)?;
+    wide_arith_probe_dst::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, r_d_address)?;
+    let product = wide_mul256(&lhs, &rhs);
+    wide_arith_write_limbs::<M, DEBUG, 8>(visitor, compiled_offset, &ctx, m_d_address, &product)?;
+    wide_arith_write_limbs::<M, DEBUG, 4>(visitor, compiled_offset, &ctx, r_d_address, &wide_redc256(&product, k))?;
+
+    wide_arith_zero_destroyed(visitor, &wide_arith_destroyed::MUL_FAMILY, &[m_d, m_s1, m_s2, r_d]);
     Ok(ctx.next_instruction)
 }
 
@@ -3729,6 +3788,16 @@ define_interpreter! {
         }
 
         match wide_arith_mul256_by_u64_impl::<M, DEBUG>(visitor, compiled_offset, program_counter, d, c, s1, s2) {
+            Ok(target) | Err(target) => target,
+        }
+    }
+
+    fn mul256_redc256<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, m_d: Reg, m_s1: Reg, m_s2: Reg, r_d: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::mul256_redc256(m_d, m_s1, m_s2, r_d));
+        }
+
+        match wide_arith_mul256_redc256_impl::<M, DEBUG>(visitor, compiled_offset, program_counter, m_d, m_s1, m_s2, r_d) {
             Ok(target) | Err(target) => target,
         }
     }
@@ -5344,6 +5413,11 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
     fn mul256_by_u64(&mut self, d: RawReg, c: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.assert_64_bit();
         emit_load_store!(self, mul256_by_u64(self.program_counter, d, c, s1, s2));
+    }
+
+    fn mul256_redc256(&mut self, m_d: RawReg, m_s1: RawReg, m_s2: RawReg, r_d: RawReg) -> Self::ReturnTy {
+        self.assert_64_bit();
+        emit_load_store!(self, mul256_redc256(self.program_counter, m_d, m_s1, m_s2, r_d));
     }
 
     fn mul_upper_signed_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {

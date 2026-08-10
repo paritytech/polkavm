@@ -167,7 +167,7 @@ macro_rules! define_cost_model_struct {
 }
 
 define_cost_model_struct! {
-    version: 4,
+    version: 5,
 
     add256,
     add_32,
@@ -237,6 +237,7 @@ define_cost_model_struct! {
     move_reg,
     mul256,
     mul256_by_u64,
+    mul256_redc256,
     mul_32,
     mul_64,
     mul_imm_32,
@@ -528,6 +529,10 @@ impl InstructionVisitor for GasVisitor {
 
     fn mul256_by_u64(&mut self, _d: RawReg, _c: RawReg, _s1: RawReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += self.cost_model.mul256_by_u64;
+    }
+
+    fn mul256_redc256(&mut self, _m_d: RawReg, _m_s1: RawReg, _m_s2: RawReg, _r_d: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.mul256_redc256;
     }
 
     #[inline(always)]

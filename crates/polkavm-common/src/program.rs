@@ -174,6 +174,44 @@ impl Reg {
     pub const MAXIMUM_OUTPUT_REGS: usize = 2;
 }
 
+/// The destroyed-register contract of the 256-bit wide-arithmetic
+/// instructions.
+///
+/// Every wide-arithmetic instruction *destroys* a fixed set of registers plus
+/// its own operand registers: after the instruction retires, each destroyed
+/// register reads as zero. The carry/borrow-out register (where the
+/// instruction has one) is written *after* the zeroing, so a carry-out
+/// aliasing a destroyed register still receives the carry. An instruction
+/// that faults destroys nothing — all faults are raised before any register
+/// is modified.
+///
+/// This is what lets implementations use the destroyed registers as
+/// scratch space for the multi-register kernels these instructions expand
+/// into, without saving and restoring them, while remaining fully
+/// deterministic: every conforming implementation leaves bit-identical
+/// register state. Guest code must declare the destroyed set as clobbers on
+/// the inline-asm blocks emitting these instructions, which delegates the
+/// job of keeping values out of harm's way to the guest compiler — the one
+/// party that actually knows what is live.
+///
+/// `RA`, `SP`, `S0` and `S1` are never in a fixed set (`s0`/`s1` cannot be
+/// declared as clobbers in rv64e inline asm, and destroying `RA` would break
+/// the ubiquitous `op; ret` pattern), though they are destroyed like any
+/// other register when used as an operand.
+pub mod wide_arith_destroyed {
+    use super::Reg;
+
+    /// Destroyed by `mul256`, `redc256` and `mul256_by_u64` (in addition to
+    /// their operand registers).
+    pub const MUL_FAMILY: [Reg; 9] = [Reg::T0, Reg::T1, Reg::T2, Reg::A0, Reg::A1, Reg::A2, Reg::A3, Reg::A4, Reg::A5];
+
+    /// Destroyed by `add256` and `sub256` (in addition to their operand
+    /// registers). A smaller set: their kernels need less scratch, and
+    /// sparing `A4`/`A5` leaves the guest compiler some registers that
+    /// survive the additions between multiplies.
+    pub const ADD_SUB: [Reg; 7] = [Reg::T0, Reg::T1, Reg::T2, Reg::A0, Reg::A1, Reg::A2, Reg::A3];
+}
+
 impl core::fmt::Display for Reg {
     fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
         fmt.write_str(self.name())
@@ -1843,6 +1881,7 @@ define_all_instructions! {
         add256,
         sub256,
         mul256_by_u64,
+        mul256_redc256,
     ]
 }
 
@@ -2344,6 +2383,7 @@ define_instruction_set! {
         add256                                   = 234,
         sub256                                   = 235,
         mul256_by_u64                            = 236,
+        mul256_redc256                           = 237,
     ]
 }
 
@@ -3115,6 +3155,14 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
         write!(self, "u256 [{d}], {c} = u256 [{s1}] * {s2}")
+    }
+
+    fn mul256_redc256(&mut self, m_d: RawReg, m_s1: RawReg, m_s2: RawReg, r_d: RawReg) -> Self::ReturnTy {
+        let m_d = self.format_reg(m_d);
+        let m_s1 = self.format_reg(m_s1);
+        let m_s2 = self.format_reg(m_s2);
+        let r_d = self.format_reg(r_d);
+        write!(self, "u512 [{m_d}] = u256 [{m_s1}] * u256 [{m_s2}], u256 [{r_d}] = u512 [{m_d}] mod (2^256 - a4)")
     }
 
     fn mul_upper_signed_unsigned(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {

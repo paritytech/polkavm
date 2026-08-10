@@ -2530,6 +2530,26 @@ where
             },
         )
     }
+
+    #[inline(always)]
+    fn mul256_redc256(&mut self, _offset: u32, _args_length: u32, _m_d: RawReg, m_s1: RawReg, m_s2: RawReg, _r_d: RawReg) -> Self::ReturnTy {
+        // The fused pair: roughly a mul256 plus a from-registers fold (the
+        // reload of the product from memory is what fusion eliminates).
+        self.dispatch_generic(
+            None,
+            Some(m_s1),
+            Some(m_s2),
+            InstCost {
+                latency: 32,
+                decode_slots: MAX_DECODE_PER_CYCLE,
+                alu_slots: 4,
+                mul_slots: 1,
+                load_slots: 4,
+                store_slots: 4,
+                ..EMPTY_COST
+            },
+        )
+    }
 }
 
 #[derive(Clone)]
