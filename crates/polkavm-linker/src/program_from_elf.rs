@@ -684,6 +684,10 @@ enum WideArithOp {
     Add256,
     Sub256,
     Mul256ByU64,
+    /// The fused `mul256` + `redc256` pair (one architectural instruction;
+    /// the fold constant k is implicitly taken from A4). The `carry` field
+    /// holds the redc destination *pointer* (read, not written).
+    Mul256Redc256,
 }
 
 #[derive(Copy, Clone)]
@@ -717,7 +721,15 @@ impl<T> BasicInst<T> {
             BasicInst::StoreIndirect { src, base, .. } => RegMask::from(src) | RegMask::from(base),
             BasicInst::RegReg { src1, src2, .. } => RegMask::from(src1) | RegMask::from(src2),
             BasicInst::MulWide { src1, src2, .. } => RegMask::from(src1) | RegMask::from(src2),
-            BasicInst::WideArith { dst, src1, src2, .. } => RegMask::from(dst) | RegMask::from(src1) | RegMask::from(src2),
+            BasicInst::WideArith { op, dst, carry, src1, src2 } => {
+                let mut mask = RegMask::from(dst) | RegMask::from(src1) | RegMask::from(src2);
+                if matches!(op, WideArithOp::Mul256Redc256) {
+                    // `carry` holds the redc destination pointer (read), and
+                    // the fold constant is implicitly taken from A4.
+                    mask |= carry.map_or(RegMask::empty(), RegMask::from) | RegMask::from(Reg::A4);
+                }
+                mask
+            }
             BasicInst::AnyAny { src1, src2, .. } => RegMask::from(src1) | RegMask::from(src2),
             BasicInst::Cmov { dst, src, cond, .. } => RegMask::from(dst) | RegMask::from(src) | RegMask::from(cond),
             BasicInst::Ecalli { nth_import } => imports[nth_import].src_mask(),
@@ -744,7 +756,22 @@ impl<T> BasicInst<T> {
             | BasicInst::Reg { dst, .. }
             | BasicInst::AnyAny { dst, .. } => RegMask::from(dst),
             BasicInst::MulWide { dst_hi, dst_lo, .. } => RegMask::from(dst_hi) | RegMask::from(dst_lo),
-            BasicInst::WideArith { carry, .. } => carry.map_or(RegMask::empty(), RegMask::from),
+            BasicInst::WideArith { op, dst, carry, src1, src2 } => {
+                // The destroyed-register contract (see
+                // `polkavm_common::program::wide_arith_destroyed`): the
+                // instruction zeroes its fixed destroyed set plus its operand
+                // registers; the carry-out, where present, is written after
+                // the zeroing.
+                let fixed = match op {
+                    WideArithOp::Add256 | WideArithOp::Sub256 => &polkavm_common::program::wide_arith_destroyed::ADD_SUB[..],
+                    _ => &polkavm_common::program::wide_arith_destroyed::MUL_FAMILY[..],
+                };
+                RegMask::from_regs(fixed.iter().map(|&reg| Reg::from(reg)))
+                    | RegMask::from(dst)
+                    | RegMask::from(src1)
+                    | RegMask::from(src2)
+                    | carry.map_or(RegMask::empty(), RegMask::from)
+            }
             BasicInst::Ecalli { nth_import } => imports[nth_import].dst_mask(),
             BasicInst::Sbrk { dst, .. } => RegMask::from(dst),
             BasicInst::Memset => RegMask::from(Reg::A0) | RegMask::from(Reg::A2),
@@ -3264,6 +3291,47 @@ fn parse_code_section(
                 Some(reg) => Some(cast_pointer(reg, "carry-out register")?),
                 None => None,
             };
+
+            // Fuse an adjacent `mul256` + `redc256` whose source is exactly
+            // the product buffer and whose fold constant lives in A4 into the
+            // single fused opcode. The destroyed-register contract makes the
+            // unfused register-operand pair unusable (the mul256 zeroes the
+            // registers the redc256 would read), which is why the intrinsics
+            // emit the pair as one inline-asm block — no jump target can
+            // exist between the two words.
+            if op == WideArithOp::Mul256 && isa.supports_opcode(Opcode::mul256_redc256) {
+                let next_offset = relative_offset.checked_add(inst_size as usize).expect(OVERFLOW);
+                if next_offset.checked_add(4).expect(OVERFLOW) <= text.len() {
+                    let (next_inst_size, next_raw_inst) = read_instruction_bytes(text, next_offset);
+                    let next_r = crate::riscv::R(next_raw_inst);
+                    if next_r.opcode() == crate::riscv::OPCODE_CUSTOM_0
+                        && next_r.func3() == FUNC3_WIDE_ARITH_R
+                        && next_r.func7() == 1
+                        && next_r.src1() == r.dst()
+                        && next_r.src2() == RReg::A4
+                    {
+                        let r_d = cast_pointer(next_r.dst(), "redc destination pointer")?;
+                        output.push((
+                            Source {
+                                section_index,
+                                offset_range: (relative_offset as u64
+                                    ..(next_offset as u64).checked_add(next_inst_size).expect(OVERFLOW))
+                                    .into(),
+                            },
+                            InstExt::Basic(BasicInst::WideArith {
+                                op: WideArithOp::Mul256Redc256,
+                                dst,
+                                carry: Some(r_d),
+                                src1,
+                                src2,
+                            }),
+                        ));
+
+                        relative_offset = next_offset.checked_add(next_inst_size as usize).expect(OVERFLOW);
+                        continue;
+                    }
+                }
+            }
 
             output.push((
                 Source {
@@ -9535,6 +9603,9 @@ fn emit_code(
                     }
                     WideArithOp::Mul256ByU64 => {
                         Instruction::mul256_by_u64(conv_reg(dst), conv_reg(carry.unwrap()), conv_reg(src1), conv_reg(src2))
+                    }
+                    WideArithOp::Mul256Redc256 => {
+                        Instruction::mul256_redc256(conv_reg(dst), conv_reg(src1), conv_reg(src2), conv_reg(carry.unwrap()))
                     }
                 },
                 BasicInst::RegReg { kind, dst, src1, src2 } => {
