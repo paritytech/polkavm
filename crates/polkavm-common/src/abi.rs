@@ -45,6 +45,7 @@ pub struct MemoryMapBuilder {
     rw_data_size: u32,
     stack_size: u32,
     aux_data_size: u32,
+    max_heap_size: Option<u32>,
 }
 
 impl MemoryMapBuilder {
@@ -55,6 +56,7 @@ impl MemoryMapBuilder {
             rw_data_size: 0,
             stack_size: 0,
             aux_data_size: 0,
+            max_heap_size: None,
         }
     }
 
@@ -78,6 +80,11 @@ impl MemoryMapBuilder {
         self
     }
 
+    pub fn max_heap_size(&mut self, value: Option<u32>) -> &mut Self {
+        self.max_heap_size = value;
+        self
+    }
+
     pub fn build(&self) -> Result<MemoryMap, &'static str> {
         let MemoryMapBuilder {
             page_size,
@@ -85,6 +92,7 @@ impl MemoryMapBuilder {
             rw_data_size,
             stack_size,
             aux_data_size,
+            max_heap_size,
         } = *self;
 
         if page_size < VM_MIN_PAGE_SIZE {
@@ -155,7 +163,7 @@ impl MemoryMapBuilder {
             return Err("maximum memory size exceeded");
         }
 
-        let max_heap_size = address_high as u64 - address_low + heap_slack;
+        let max_heap_size = (address_high as u64 - address_low + heap_slack).min(u64::from(max_heap_size.unwrap_or(u32::MAX)));
 
         Ok(MemoryMap {
             page_size,
@@ -304,6 +312,14 @@ fn test_memory_map() {
             u64::from(map.max_heap_size()),
             ADDRESS_SPACE_SIZE - u64::from(VM_MAX_PAGE_SIZE) * 4 - u64::from(map.heap_base())
         );
+    }
+
+    {
+        let map = MemoryMapBuilder::new(0x4000)
+            .max_heap_size(Some(0x20000))
+            .build()
+            .unwrap();
+        assert_eq!(map.max_heap_size(), 0x20000);
     }
 
     let max_size = (ADDRESS_SPACE_SIZE - u64::from(VM_MAX_PAGE_SIZE) * 5) as u32;
