@@ -117,6 +117,16 @@ use libc as sys;
 use core::ffi::c_void;
 use sys::{c_int, size_t, MADV_DONTNEED, MADV_FREE, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, PROT_EXEC, PROT_READ, PROT_WRITE};
 
+#[cfg(target_os = "macos")]
+const MAP_JIT: c_int = 0x0800;
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn pthread_jit_write_protect_supported_np() -> c_int;
+    fn pthread_jit_write_protect_np(enabled: c_int);
+}
+
+
 pub(crate) const GUEST_MEMORY_TO_VMCTX_OFFSET: isize = -4096;
 
 #[cfg(target_arch = "x86_64")]
@@ -157,6 +167,7 @@ impl From<std::io::Error> for Error {
 pub struct Mmap {
     pointer: *mut c_void,
     length: usize,
+    jit: bool,
 }
 
 // SAFETY: The ownership of an mmapped piece of memory can be safely transferred to other threads.
@@ -174,8 +185,12 @@ impl Mmap {
             }
             pointer
         };
+        #[cfg(target_os = "macos")]
+        let jit = flags & MAP_JIT != 0;
+        #[cfg(not(target_os = "macos"))]
+        let jit = false;
 
-        Ok(Self { pointer, length })
+        Ok(Self { pointer, length, jit })
     }
 
     fn mmap_within(&mut self, offset: usize, length: usize, protection: c_int) -> Result<(), Error> {
@@ -222,6 +237,17 @@ impl Mmap {
         unsafe { Mmap::raw_mmap(core::ptr::null_mut(), length, 0, MAP_ANONYMOUS | MAP_PRIVATE) }
     }
 
+    pub fn reserve_executable_address_space(length: size_t) -> Result<Self, Error> {
+        #[cfg(target_os = "macos")]
+        let flags = MAP_ANONYMOUS | MAP_PRIVATE | MAP_JIT;
+        #[cfg(not(target_os = "macos"))]
+        let flags = MAP_ANONYMOUS | MAP_PRIVATE;
+
+        // SAFETY: `MAP_FIXED` is not specified, so this is always safe.
+        unsafe { Mmap::raw_mmap(core::ptr::null_mut(), length, 0, flags) }
+    }
+
+
     pub fn madvise(&mut self, offset: usize, length: usize, advice: c_int) -> Result<(), Error> {
         if !offset.checked_add(length).map_or(false, |end| end <= self.length) {
             return Err("out of bounds madvise".into());
@@ -259,28 +285,48 @@ impl Mmap {
         protection: c_int,
         callback: impl FnOnce(&mut [u8]),
     ) -> Result<(), Error> {
-        self.mprotect(offset, length, PROT_READ | PROT_WRITE)?;
-        callback(&mut self.as_slice_mut()[offset..offset + length]);
-        if protection != PROT_READ | PROT_WRITE {
-            self.mprotect(offset, length, protection)?;
+        #[cfg(target_os = "macos")]
+        let jit_write_protection = self.jit && unsafe { pthread_jit_write_protect_supported_np() != 0 };
+        #[cfg(target_os = "macos")]
+        if jit_write_protection {
+            // SAFETY: This changes write protection only for MAP_JIT mappings
+            // on the current thread and is restored before returning.
+            unsafe { pthread_jit_write_protect_np(0) };
         }
 
-        // On AArch64, the instruction and data caches are not coherent.
-        // After writing code and switching to RX, we must invalidate the icache.
-        #[cfg(target_arch = "aarch64")]
-        if protection & PROT_EXEC != 0 {
-            extern "C" {
-                fn sys_icache_invalidate(start: *mut c_void, size: usize);
+        let result = (|| {
+            self.mprotect(offset, length, PROT_READ | PROT_WRITE)?;
+            callback(&mut self.as_slice_mut()[offset..offset + length]);
+            if protection != PROT_READ | PROT_WRITE {
+                self.mprotect(offset, length, protection)?;
             }
-            unsafe {
-                sys_icache_invalidate(
-                    self.pointer.cast::<u8>().add(offset).cast(),
-                    length,
-                );
+
+            // On AArch64, the instruction and data caches are not coherent.
+            // After writing code and switching to RX, we must invalidate the icache.
+            #[cfg(target_arch = "aarch64")]
+            if protection & PROT_EXEC != 0 {
+                extern "C" {
+                    fn sys_icache_invalidate(start: *mut c_void, size: usize);
+                }
+                unsafe {
+                    sys_icache_invalidate(
+                        self.pointer.cast::<u8>().add(offset).cast(),
+                        length,
+                    );
+                }
             }
+
+            Ok(())
+        })();
+
+        #[cfg(target_os = "macos")]
+        if jit_write_protection {
+            // SAFETY: Re-enable per-thread JIT write protection after the map
+            // has reached its final protection.
+            unsafe { pthread_jit_write_protect_np(1) };
         }
 
-        Ok(())
+        result
     }
 
     pub fn as_ptr(&self) -> *const c_void {
@@ -321,6 +367,7 @@ impl Default for Mmap {
         Self {
             pointer: core::ptr::NonNull::<u8>::dangling().as_ptr().cast::<c_void>(),
             length: 0,
+            jit: false,
         }
     }
 }
@@ -1426,7 +1473,9 @@ impl super::Sandbox for Sandbox {
     }
 
     fn reserve_address_space() -> Result<Self::AddressSpace, Self::Error> {
-        Mmap::reserve_address_space(VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE as usize + VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE as usize)
+        Mmap::reserve_executable_address_space(
+            VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE as usize + VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE as usize,
+        )
     }
 
     fn prepare_program(
