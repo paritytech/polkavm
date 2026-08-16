@@ -10,6 +10,7 @@ pub struct GuestInit<'a> {
     pub rw_data_size: u32,
     pub stack_size: u32,
     pub aux_data_size: u32,
+    pub max_heap_size: Option<u32>,
 }
 
 impl<'a> GuestInit<'a> {
@@ -19,6 +20,7 @@ impl<'a> GuestInit<'a> {
             .rw_data_size(self.rw_data_size)
             .stack_size(self.stack_size)
             .aux_data_size(self.aux_data_size)
+            .max_heap_size(self.max_heap_size)
             .build()
     }
 }

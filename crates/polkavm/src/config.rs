@@ -510,6 +510,7 @@ pub struct ModuleConfig {
     pub(crate) step_tracing: bool,
     pub(crate) dynamic_paging: bool,
     pub(crate) aux_data_size: u32,
+    pub(crate) max_heap_size: Option<u32>,
     cache_by_hash: bool,
     pub(crate) custom_codegen: Option<Arc<dyn CustomCodegen>>,
     pub(crate) cost_model: Option<CostModelKind>,
@@ -532,6 +533,7 @@ impl ModuleConfig {
             step_tracing: false,
             dynamic_paging: false,
             aux_data_size: 0,
+            max_heap_size: None,
             cache_by_hash: false,
             custom_codegen: None,
             cost_model: None,
@@ -557,6 +559,20 @@ impl ModuleConfig {
     /// Default: `0`
     pub fn set_aux_data_size(&mut self, aux_data_size: u32) -> &mut Self {
         self.aux_data_size = aux_data_size;
+        self
+    }
+
+    /// Returns the maximum size of the guest heap, or `None` when only the
+    /// address-space layout limits it.
+    pub fn max_heap_size(&self) -> Option<u32> {
+        self.max_heap_size
+    }
+
+    /// Sets the maximum size of the guest heap.
+    ///
+    /// Default: `None`
+    pub fn set_max_heap_size(&mut self, max_heap_size: Option<u32>) -> &mut Self {
+        self.max_heap_size = max_heap_size;
         self
     }
 
@@ -666,6 +682,7 @@ impl ModuleConfig {
         let &ModuleConfig {
             page_size,
             aux_data_size,
+            max_heap_size,
             gas_metering,
             is_strict,
             step_tracing,
@@ -681,6 +698,7 @@ impl ModuleConfig {
         hasher.update_u32_array([
             page_size,
             aux_data_size,
+            max_heap_size.unwrap_or(u32::MAX),
             match gas_metering {
                 None => 0,
                 Some(GasMeteringKind::Sync) => 1,
