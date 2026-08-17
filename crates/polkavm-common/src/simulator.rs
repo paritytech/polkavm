@@ -1662,6 +1662,21 @@ where
     }
 
     #[inline(always)]
+    fn wide_count_set_bits(&mut self, _offset: u32, _args_length: u32, _s: RawWideReg, d: RawReg) -> Self::ReturnTy {
+        self.dispatch_wide(Some(d), None, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
+    fn wide_count_leading_zero_bits(&mut self, _offset: u32, _args_length: u32, _s: RawWideReg, d: RawReg) -> Self::ReturnTy {
+        self.dispatch_wide(Some(d), None, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
+    fn wide_count_trailing_zero_bits(&mut self, _offset: u32, _args_length: u32, _s: RawWideReg, d: RawReg) -> Self::ReturnTy {
+        self.dispatch_wide(Some(d), None, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
     fn wide_from_reg_unsigned(&mut self, _offset: u32, _args_length: u32, _d: RawWideReg, s: RawReg) -> Self::ReturnTy {
         self.dispatch_wide(None, Some(s), self.wide_alu_cost(1))
     }

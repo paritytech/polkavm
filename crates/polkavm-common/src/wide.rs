@@ -263,6 +263,35 @@ impl U256 {
         Self(limbs)
     }
 
+    /// The number of one bits.
+    pub fn count_ones(self) -> u32 {
+        self.0.iter().map(|limb| limb.count_ones()).sum()
+    }
+
+    /// The number of zero bits above the most significant one, or 256 if there is none.
+    pub fn leading_zeros(self) -> u32 {
+        let mut count = 0;
+        for limb in self.0.iter().rev() {
+            count += limb.leading_zeros();
+            if *limb != 0 {
+                break;
+            }
+        }
+        count
+    }
+
+    /// The number of zero bits below the least significant one, or 256 if there is none.
+    pub fn trailing_zeros(self) -> u32 {
+        let mut count = 0;
+        for limb in self.0.iter() {
+            count += limb.trailing_zeros();
+            if *limb != 0 {
+                break;
+            }
+        }
+        count
+    }
+
     #[inline]
     fn bit(self, index: usize) -> bool {
         self.0[index / 64] & (1 << (index % 64)) != 0
@@ -286,11 +315,17 @@ impl U256 {
         let mut quotient = Self::ZERO;
         let mut remainder = Self::ZERO;
         for index in (0..256).rev() {
+            // Shifting the running remainder can carry a bit out of the top, and it does
+            // whenever the divisor is at least 2^255. The remainder is below the divisor at
+            // the start of every step, so doubling it stays below twice the divisor and one
+            // subtraction always brings it back into range; the bit that left has to be part
+            // of that decision or the step keeps a remainder it should have reduced.
+            let carry = remainder.0[3] >> 63 != 0;
             remainder = remainder.shift_left(1);
             if self.bit(index) {
                 remainder.0[0] |= 1;
             }
-            if !remainder.less_than(divisor) {
+            if carry || !remainder.less_than(divisor) {
                 remainder = remainder.wrapping_sub(divisor);
                 quotient.set_bit(index);
             }
@@ -359,11 +394,13 @@ impl U256 {
         let product = self.widening_mul(other);
         let mut remainder = Self::ZERO;
         for index in (0..512).rev() {
+            // As in `div_rem`, the bit shifted off the top is part of the comparison.
+            let carry = remainder.0[3] >> 63 != 0;
             remainder = remainder.shift_left(1);
             if product[index / 64] & (1 << (index % 64)) != 0 {
                 remainder.0[0] |= 1;
             }
-            if !remainder.less_than(modulus) {
+            if carry || !remainder.less_than(modulus) {
                 remainder = remainder.wrapping_sub(modulus);
             }
         }
@@ -508,6 +545,59 @@ mod tests {
         assert_eq!(value.sign_extend_byte(U256::ONE), value);
         assert_eq!(value.sign_extend_byte(from_parts(31)), value);
         assert_eq!(value.sign_extend_byte(from_parts(1000)), value);
+    }
+
+    #[test]
+    fn bit_counts_span_the_whole_width() {
+        assert_eq!(U256::ZERO.count_ones(), 0);
+        assert_eq!(U256([u64::MAX; 4]).count_ones(), 256);
+        assert_eq!(U256([0, 0, 0, 1 << 63]).count_ones(), 1);
+
+        assert_eq!(U256::ZERO.leading_zeros(), 256);
+        assert_eq!(U256::ZERO.trailing_zeros(), 256);
+        assert_eq!(U256::ONE.leading_zeros(), 255);
+        assert_eq!(U256::ONE.trailing_zeros(), 0);
+        assert_eq!(U256([0, 0, 0, 1 << 63]).leading_zeros(), 0);
+        assert_eq!(U256([0, 0, 0, 1 << 63]).trailing_zeros(), 255);
+        assert_eq!(U256([0, 1, 0, 0]).trailing_zeros(), 64);
+        assert_eq!(U256([0, 1, 0, 0]).leading_zeros(), 191);
+    }
+
+    #[test]
+    fn division_keeps_the_bit_shifted_off_the_top() {
+        // A divisor at or above 2^255 makes the running remainder overflow when it is
+        // doubled, which a 256-bit accumulator drops unless the carry is kept.
+        let high = U256([0, 0, 0, 1 << 63]);
+        let (quotient, remainder) = U256([u64::MAX; 4]).div_rem(high);
+        assert_eq!(quotient, U256::ONE);
+        assert_eq!(remainder, U256([u64::MAX, u64::MAX, u64::MAX, u64::MAX >> 1]));
+
+        let divisor = U256([1, 0, 0, 1 << 63]);
+        let (quotient, remainder) = U256([u64::MAX; 4]).div_rem(divisor);
+        assert_eq!(quotient, U256::ONE);
+        assert_eq!(remainder, U256([u64::MAX; 4]).wrapping_sub(divisor));
+    }
+
+    #[test]
+    fn mul_mod_reduces_against_a_high_modulus() {
+        let modulus = U256([1, 2, 3, 1 << 63]);
+        let a = U256([0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, 7, 11]);
+        let b = U256([0xdead_beef_cafe_babe, 3, 0, 1 << 62]);
+
+        // Cross checked against repeated shift-and-add modular multiplication, which never
+        // needs more than the modulus in range.
+        let mut expected = U256::ZERO;
+        let (_, mut base) = a.div_rem(modulus);
+        let mut exponent = b;
+        while !exponent.is_zero() {
+            if exponent.0[0] & 1 != 0 {
+                expected = expected.add_mod(base, modulus);
+            }
+            base = base.add_mod(base, modulus);
+            exponent = exponent.shift_right(1);
+        }
+
+        assert_eq!(a.mul_mod(b, modulus), expected);
     }
 
     #[test]

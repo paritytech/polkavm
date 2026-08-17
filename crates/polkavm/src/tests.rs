@@ -5940,6 +5940,26 @@ fn wide_moves_and_conversions_round_trip() {
 
 #[cfg(feature = "std")]
 #[test]
+fn wide_bit_counts_write_a_general_purpose_register() {
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    let count = |body: polkavm_common::program::Instruction, operand: U256| -> u64 {
+        let bytes = run_wide_program(&[operand], &[body, asm::store_indirect_u64(A1, A0, 96)]);
+        u64::from_le_bytes(bytes[..8].try_into().unwrap())
+    };
+
+    let top = U256([0, 0, 0, 1 << 63]);
+    assert_eq!(count(asm::wide_count_set_bits(W0, A1), U256([u64::MAX; 4])), 256);
+    assert_eq!(count(asm::wide_count_set_bits(W0, A1), U256::ZERO), 0);
+    assert_eq!(count(asm::wide_count_leading_zero_bits(W0, A1), U256::ZERO), 256);
+    assert_eq!(count(asm::wide_count_leading_zero_bits(W0, A1), top), 0);
+    assert_eq!(count(asm::wide_count_trailing_zero_bits(W0, A1), U256::ZERO), 256);
+    assert_eq!(count(asm::wide_count_trailing_zero_bits(W0, A1), top), 255);
+}
+
+#[cfg(feature = "std")]
+#[test]
 fn wide_comparisons_write_a_general_purpose_register() {
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;

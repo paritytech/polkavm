@@ -20,8 +20,8 @@ use crate::fast_range_map::RangeMap;
 use crate::riscv::DecoderConfig;
 use crate::riscv::Reg as RReg;
 use crate::riscv::{
-    AtomicKind, BranchKind, CmovKind, Inst, LoadKind, RegImmKind, StoreKind, WideCompareKind, WideFromRegKind, WideModularKind,
-    WideMoveKind, WideReg, WideRegRegKind, WideShiftKind,
+    AtomicKind, BranchKind, CmovKind, Inst, LoadKind, RegImmKind, StoreKind, WideCompareKind, WideCountKind, WideFromRegKind,
+    WideModularKind, WideMoveKind, WideReg, WideRegRegKind, WideShiftKind,
 };
 
 static OVERFLOW: &str = "internal error: numerical overflow; this is a bug - please report it";
@@ -706,6 +706,11 @@ enum WideInst {
         dst: Reg,
         src: WideReg,
     },
+    Count {
+        kind: WideCountKind,
+        dst: Reg,
+        src: WideReg,
+    },
     FromReg {
         kind: WideFromRegKind,
         dst: WideReg,
@@ -731,14 +736,14 @@ impl WideInst {
             WideInst::FromReg { src, .. } => RegMask::from(src),
             WideInst::Load { base, .. } | WideInst::Store { base, .. } => RegMask::from(base),
             WideInst::RegReg { .. } | WideInst::Compare { .. } | WideInst::Modular { .. } | WideInst::Move { .. } => RegMask::empty(),
-            WideInst::ToReg { .. } => RegMask::empty(),
+            WideInst::ToReg { .. } | WideInst::Count { .. } => RegMask::empty(),
         }
     }
 
     /// The general purpose registers this writes.
     fn dst_mask(self) -> RegMask {
         match self {
-            WideInst::Compare { dst, .. } | WideInst::ToReg { dst, .. } => RegMask::from(dst),
+            WideInst::Compare { dst, .. } | WideInst::ToReg { dst, .. } | WideInst::Count { dst, .. } => RegMask::from(dst),
             _ => RegMask::empty(),
         }
     }
@@ -773,6 +778,11 @@ impl WideInst {
                 src2,
             },
             WideInst::ToReg { dst, src } => WideInst::ToReg {
+                dst: map(dst, OpKind::Write),
+                src,
+            },
+            WideInst::Count { kind, dst, src } => WideInst::Count {
+                kind,
                 dst: map(dst, OpKind::Write),
                 src,
             },
@@ -2162,6 +2172,15 @@ fn convert_instruction(
             };
 
             emit(InstExt::Basic(BasicInst::Wide(WideInst::ToReg { dst, src })));
+            Ok(())
+        }
+        Inst::WideCount { kind, dst, src } => {
+            let Some(dst) = cast_reg_non_zero(dst)? else {
+                emit(InstExt::nop());
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Wide(WideInst::Count { kind, dst, src })));
             Ok(())
         }
         Inst::WideFromReg { kind, dst, src } => {
@@ -9030,6 +9049,14 @@ fn emit_code(
                             }
                         }
                         WideInst::ToReg { dst, src } => Instruction::wide_to_reg(conv_wide(src), conv_reg(dst)),
+                        WideInst::Count { kind, dst, src } => {
+                            let (dst, src) = (conv_reg(dst), conv_wide(src));
+                            match kind {
+                                WideCountKind::SetBits => Instruction::wide_count_set_bits(src, dst),
+                                WideCountKind::LeadingZeroBits => Instruction::wide_count_leading_zero_bits(src, dst),
+                                WideCountKind::TrailingZeroBits => Instruction::wide_count_trailing_zero_bits(src, dst),
+                            }
+                        }
                         WideInst::FromReg { kind, dst, src } => {
                             let (dst, src) = (conv_wide(dst), conv_reg(src));
                             match kind {

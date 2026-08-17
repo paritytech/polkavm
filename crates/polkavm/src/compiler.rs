@@ -809,6 +809,18 @@ where
         self.unsupported_wide_instruction(code_offset, args_length);
     }
 
+    fn wide_count_set_bits(&mut self, code_offset: u32, args_length: u32, _s: RawWideReg, _d: RawReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_count_leading_zero_bits(&mut self, code_offset: u32, args_length: u32, _s: RawWideReg, _d: RawReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_count_trailing_zero_bits(&mut self, code_offset: u32, args_length: u32, _s: RawWideReg, _d: RawReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
     fn wide_from_reg_unsigned(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s: RawReg) -> Self::ReturnTy {
         self.unsupported_wide_instruction(code_offset, args_length);
     }

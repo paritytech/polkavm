@@ -181,6 +181,13 @@ pub enum WideFromRegKind {
     Signed,
 }
 
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum WideCountKind {
+    SetBits,
+    LeadingZeroBits,
+    TrailingZeroBits,
+}
+
 pub struct DecoderConfig {
     pub(crate) rv64: bool,
 }
@@ -684,6 +691,11 @@ pub enum Inst {
         src: WideReg,
     },
     WideToReg {
+        dst: Reg,
+        src: WideReg,
+    },
+    WideCount {
+        kind: WideCountKind,
         dst: Reg,
         src: WideReg,
     },
@@ -1746,6 +1758,15 @@ impl Inst {
                         2 => Some(Inst::WideMove {
                             kind: WideMoveKind::ReverseBytes,
                             dst: WideReg::decode(op >> 7)?,
+                            src: WideReg::decode(op >> 15)?,
+                        }),
+                        3 | 4 | 5 => Some(Inst::WideCount {
+                            kind: match funct7 {
+                                3 => WideCountKind::SetBits,
+                                4 => WideCountKind::LeadingZeroBits,
+                                _ => WideCountKind::TrailingZeroBits,
+                            },
+                            dst: Reg::decode(op >> 7),
                             src: WideReg::decode(op >> 15)?,
                         }),
                         _ => None,

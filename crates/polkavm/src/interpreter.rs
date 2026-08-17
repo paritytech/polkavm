@@ -3924,6 +3924,36 @@ define_interpreter! {
         visitor.go_to_next_instruction(compiled_offset)
     }
 
+    fn wide_count_set_bits<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s: WideReg, d: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_count_set_bits(s, d));
+        }
+
+        let value = u64::from(visitor.wide_reg(s).count_ones());
+        visitor.set_u64::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_count_leading_zero_bits<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s: WideReg, d: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_count_leading_zero_bits(s, d));
+        }
+
+        let value = u64::from(visitor.wide_reg(s).leading_zeros());
+        visitor.set_u64::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_count_trailing_zero_bits<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s: WideReg, d: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_count_trailing_zero_bits(s, d));
+        }
+
+        let value = u64::from(visitor.wide_reg(s).trailing_zeros());
+        visitor.set_u64::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
     fn wide_from_reg_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s: Reg) -> Target {
         if DEBUG {
             log::trace!("[{}]: {}", compiled_offset, asm::wide_from_reg_unsigned(d, s));
@@ -5465,6 +5495,18 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
 
     fn wide_to_reg(&mut self, s: RawWideReg, d: RawReg) -> Self::ReturnTy {
         emit!(self, wide_to_reg(s, d));
+    }
+
+    fn wide_count_set_bits(&mut self, s: RawWideReg, d: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_count_set_bits(s, d));
+    }
+
+    fn wide_count_leading_zero_bits(&mut self, s: RawWideReg, d: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_count_leading_zero_bits(s, d));
+    }
+
+    fn wide_count_trailing_zero_bits(&mut self, s: RawWideReg, d: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_count_trailing_zero_bits(s, d));
     }
 
     fn wide_from_reg_unsigned(&mut self, d: RawWideReg, s: RawReg) -> Self::ReturnTy {

@@ -743,9 +743,13 @@ pub fn read_args_regs2(chunk: u128) -> (RawReg, RawReg) {
 }
 
 #[inline(always)]
-pub fn read_args_wregs3(chunk: u128) -> (RawWideReg, RawWideReg, RawWideReg) {
+pub fn read_args_wregs3(chunk: u128, skip: u32) -> (RawWideReg, RawWideReg, RawWideReg) {
     let chunk = chunk as u32;
-    let (reg2, reg3, reg1) = (RawWideReg(chunk), RawWideReg(chunk >> 4), RawWideReg(chunk >> 8));
+    let (reg2, reg3) = (RawWideReg(chunk), RawWideReg(chunk >> 4));
+    // A destination that repeats the first source is left out of the encoding, which is
+    // most of them: the register allocator has no reason to pick a third register when the
+    // first source dies here.
+    let reg1 = if skip < 2 { reg2 } else { RawWideReg(chunk >> 8) };
     (reg1, reg2, reg3)
 }
 
@@ -757,9 +761,11 @@ pub fn read_args_reg_wregs2(chunk: u128) -> (RawReg, RawWideReg, RawWideReg) {
 }
 
 #[inline(always)]
-pub fn read_args_wregs2_reg(chunk: u128) -> (RawWideReg, RawWideReg, RawReg) {
+pub fn read_args_wregs2_reg(chunk: u128, skip: u32) -> (RawWideReg, RawWideReg, RawReg) {
     let chunk = chunk as u32;
-    let (reg2, reg3, reg1) = (RawWideReg(chunk), RawReg(chunk >> 4), RawWideReg(chunk >> 8));
+    let (reg2, reg3) = (RawWideReg(chunk), RawReg(chunk >> 4));
+    // As in `read_args_wregs3`, a repeated destination is not encoded.
+    let reg1 = if skip < 2 { reg2 } else { RawWideReg(chunk >> 8) };
     (reg1, reg2, reg3)
 }
 
@@ -1701,7 +1707,7 @@ macro_rules! define_instruction_set {
                     )*
                     $(
                         $value_wreg_wreg_wreg => {
-                            let (reg1, reg2, reg3) = $crate::program::read_args_wregs3(chunk);
+                            let (reg1, reg2, reg3) = $crate::program::read_args_wregs3(chunk, skip);
                             Instruction::$name_wreg_wreg_wreg(reg1, reg2, reg3)
                         }
                     )*
@@ -1713,7 +1719,7 @@ macro_rules! define_instruction_set {
                     )*
                     $(
                         $value_wreg_wreg_reg => {
-                            let (reg1, reg2, reg3) = $crate::program::read_args_wregs2_reg(chunk);
+                            let (reg1, reg2, reg3) = $crate::program::read_args_wregs2_reg(chunk, skip);
                             Instruction::$name_wreg_wreg_reg(reg1, reg2, reg3)
                         }
                     )*
@@ -1939,8 +1945,7 @@ macro_rules! define_instruction_set {
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
                         fn $name_wreg_wreg_wreg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let _ = skip;
-                            let (reg1, reg2, reg3) = $crate::program::read_args_wregs3(chunk);
+                            let (reg1, reg2, reg3) = $crate::program::read_args_wregs3(chunk, skip);
                             state.$name_wreg_wreg_wreg(instruction_offset, skip, reg1, reg2, reg3)
                         }
 
@@ -1951,7 +1956,6 @@ macro_rules! define_instruction_set {
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
                         fn $name_reg_wreg_wreg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let _ = skip;
                             let (reg1, reg2, reg3) = $crate::program::read_args_reg_wregs2(chunk);
                             state.$name_reg_wreg_wreg(instruction_offset, skip, reg1, reg2, reg3)
                         }
@@ -1963,8 +1967,7 @@ macro_rules! define_instruction_set {
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
                         fn $name_wreg_wreg_reg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let _ = skip;
-                            let (reg1, reg2, reg3) = $crate::program::read_args_wregs2_reg(chunk);
+                            let (reg1, reg2, reg3) = $crate::program::read_args_wregs2_reg(chunk, skip);
                             state.$name_wreg_wreg_reg(instruction_offset, skip, reg1, reg2, reg3)
                         }
 
@@ -1975,7 +1978,6 @@ macro_rules! define_instruction_set {
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
                         fn $name_wreg_wreg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let _ = skip;
                             let (reg1, reg2) = $crate::program::read_args_wregs2(chunk);
                             state.$name_wreg_wreg(instruction_offset, skip, reg1, reg2)
                         }
@@ -1987,7 +1989,6 @@ macro_rules! define_instruction_set {
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
                         fn $name_wreg_reg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let _ = skip;
                             let (reg1, reg2) = $crate::program::read_args_wreg_reg(chunk);
                             state.$name_wreg_reg(instruction_offset, skip, reg1, reg2)
                         }
@@ -1999,7 +2000,6 @@ macro_rules! define_instruction_set {
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
                         fn $name_wreg_reg_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let _ = skip;
                             let (reg1, reg2, imm) = $crate::program::read_args_wreg_reg_imm(chunk, skip);
                             state.$name_wreg_reg_imm(instruction_offset, skip, reg1, reg2, imm)
                         }
@@ -2011,7 +2011,6 @@ macro_rules! define_instruction_set {
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
                         fn $name_wreg_wreg_wreg_wreg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let _ = skip;
                             let (reg1, reg2, reg3, reg4) = $crate::program::read_args_wregs4(chunk);
                             state.$name_wreg_wreg_wreg_wreg(instruction_offset, skip, reg1, reg2, reg3, reg4)
                         }
@@ -2300,6 +2299,9 @@ define_all_instructions! {
         wide_to_reg,
         wide_from_reg_unsigned,
         wide_from_reg_signed,
+        wide_count_set_bits,
+        wide_count_leading_zero_bits,
+        wide_count_trailing_zero_bits,
     ]
 
     // Instructions with args: wreg, reg, imm
@@ -2520,6 +2522,9 @@ define_instruction_set! {
         wide_to_reg                              = 252,
         wide_from_reg_unsigned                   = 253,
         wide_from_reg_signed                     = 254,
+        wide_count_set_bits                      = 116,
+        wide_count_leading_zero_bits             = 117,
+        wide_count_trailing_zero_bits            = 118,
     ]
     [
         wide_load                                = 112,
@@ -3318,6 +3323,10 @@ impl Instruction {
     fn serialize_wreg_wreg_wreg(buffer: &mut [u8], opcode: u8, reg1: RawWideReg, reg2: RawWideReg, reg3: RawWideReg) -> usize {
         buffer[0] = opcode;
         buffer[1] = reg2.0 as u8 | (reg3.0 as u8) << 4;
+        if reg1 == reg2 {
+            return 2;
+        }
+
         buffer[2] = reg1.0 as u8;
         3
     }
@@ -3332,6 +3341,10 @@ impl Instruction {
     fn serialize_wreg_wreg_reg(buffer: &mut [u8], opcode: u8, reg1: RawWideReg, reg2: RawWideReg, reg3: RawReg) -> usize {
         buffer[0] = opcode;
         buffer[1] = reg2.0 as u8 | (reg3.0 as u8) << 4;
+        if reg1 == reg2 {
+            return 2;
+        }
+
         buffer[2] = reg1.0 as u8;
         3
     }
@@ -4600,7 +4613,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     }
 
     fn wide_sign_extend_byte(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
-        write!(self, "{d} = signextend {s1}, {s2}")
+        write!(self, "{d} = signextend {s1} from byte {s2}")
     }
 
     fn wide_set_equal(&mut self, d: RawReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
@@ -4659,6 +4672,21 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn wide_from_reg_signed(&mut self, d: RawWideReg, s: RawReg) -> Self::ReturnTy {
         let s = self.format_reg(s);
         write!(self, "{d} = sign extend {s}")
+    }
+
+    fn wide_count_set_bits(&mut self, s: RawWideReg, d: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        write!(self, "{d} = cpop {s}")
+    }
+
+    fn wide_count_leading_zero_bits(&mut self, s: RawWideReg, d: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        write!(self, "{d} = clz {s}")
+    }
+
+    fn wide_count_trailing_zero_bits(&mut self, s: RawWideReg, d: RawReg) -> Self::ReturnTy {
+        let d = self.format_reg(d);
+        write!(self, "{d} = ctz {s}")
     }
 
     fn wide_load(&mut self, d: RawWideReg, base: RawReg, offset: i32) -> Self::ReturnTy {

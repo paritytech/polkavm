@@ -309,6 +309,9 @@ define_cost_model_struct! {
     wide_add,
     wide_add_mod,
     wide_and,
+    wide_count_leading_zero_bits,
+    wide_count_set_bits,
+    wide_count_trailing_zero_bits,
     wide_div_signed,
     wide_div_unsigned,
     wide_exp,
@@ -1212,6 +1215,21 @@ impl InstructionVisitor for GasVisitor {
     #[inline(always)]
     fn wide_to_reg(&mut self, _s: RawWideReg, _d: RawReg) -> Self::ReturnTy {
         self.cost += self.cost_model.wide_to_reg;
+    }
+
+    #[inline(always)]
+    fn wide_count_set_bits(&mut self, _s: RawWideReg, _d: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_count_set_bits;
+    }
+
+    #[inline(always)]
+    fn wide_count_leading_zero_bits(&mut self, _s: RawWideReg, _d: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_count_leading_zero_bits;
+    }
+
+    #[inline(always)]
+    fn wide_count_trailing_zero_bits(&mut self, _s: RawWideReg, _d: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_count_trailing_zero_bits;
     }
 
     #[inline(always)]
