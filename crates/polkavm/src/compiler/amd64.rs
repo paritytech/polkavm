@@ -9,8 +9,9 @@ use polkavm_assembler::amd64::{Condition, LoadKind, MemOp, RegSize, Size};
 use polkavm_assembler::{Label, NonZero, ReservedAssembler, U1, U2, U3, U4};
 
 use polkavm_common::cast::cast;
-use polkavm_common::program::{ProgramCounter, RawReg, Reg};
+use polkavm_common::program::{ProgramCounter, RawReg, RawVecReg, RawWideReg, Reg};
 use polkavm_common::utils::GasVisitorT;
+use polkavm_common::vector_state::{WideOperation, WideOperationKind};
 use polkavm_common::zygote::{VmCtx, VM_ADDR_VMCTX};
 
 use crate::compiler::{ArchVisitor, Bitness, BitnessT, SandboxKind};
@@ -241,6 +242,19 @@ const GAS_METERING_TRAP_OFFSET: u64 = 3;
 const GAS_COST_LINUX_SANDBOX_OFFSET: usize = 4;
 const GAS_COST_GENERIC_SANDBOX_OFFSET: usize = 7;
 const REP_STOSB_MACHINE_CODE: &[u8] = &[0xf3, 0xaa];
+const REP_MOVSB_MACHINE_CODE: &[u8] = &[0xf3, 0xa4];
+
+fn wide_field(reg: RawWideReg) -> u8 {
+    reg.get() as u8
+}
+
+fn vector_field(reg: RawVecReg) -> u8 {
+    reg.get() as u8
+}
+
+fn register_field(reg: RawReg) -> u8 {
+    reg.get() as u8
+}
 
 #[derive(Copy, Clone)]
 pub(crate) enum MemsetKind {
@@ -266,6 +280,13 @@ where
     } else {
         None
     }
+}
+
+pub(crate) fn are_we_executing_wide_copy<S>(compiled_module: &crate::compiler::CompiledModule<S>, machine_code_offset: u64) -> bool
+where
+    S: Sandbox,
+{
+    machine_code_offset >= compiled_module.wide_copy_trampoline_start && machine_code_offset < compiled_module.wide_copy_trampoline_end
 }
 
 fn set_program_counter_after_interruption<S>(
@@ -714,6 +735,856 @@ where
         self.restore_registers_from_vmctx();
         self.push(pop(TMP_REG));
         self.push(ret());
+    }
+
+    /// The one trampoline every wide and vector instruction calls.
+    ///
+    /// The descriptor arrives in the temporary register and is handed to the native helper,
+    /// which runs the operation against the register file in the context. A memory
+    /// operation is answered rather than performed: the helper leaves a source, a
+    /// destination and a byte count behind, and the bytes move here, in code the signal
+    /// handler can recognize, so that a page fault is attributed to the guest address the
+    /// call site recorded. Every other operation leaves a zero count and the copy is a
+    /// no-op.
+    pub(crate) fn emit_wide_op_trampoline(&mut self) {
+        log::trace!("Emitting trampoline: wide operations");
+        let label = self.wide_op_label;
+        self.define_label(label);
+
+        self.push(push(TMP_REG));
+        self.save_registers_to_vmctx();
+        self.push(mov_imm64(TMP_REG, S::address_table().syscall_wide_op));
+        self.push(pop(rdi));
+        self.push(call(TMP_REG));
+
+        self.push(load(LoadKind::U64, rsi, Self::vmctx_field(S::offset_table().wide_copy_source)));
+        self.push(load(LoadKind::U64, rdi, Self::vmctx_field(S::offset_table().wide_copy_destination)));
+        self.push(load(LoadKind::U64, rcx, Self::vmctx_field(S::offset_table().wide_copy_length)));
+        self.asm.push_raw(REP_MOVSB_MACHINE_CODE);
+
+        self.restore_registers_from_vmctx();
+        self.push(ret());
+    }
+
+    /// Emits one wide or vector instruction as a call into the trampoline above.
+    fn wide_operation(&mut self, code_offset: u32, kind: WideOperationKind, a: u8, b: u8, c: u8, immediate: i32) {
+        let label = self.wide_op_label;
+        let operation = WideOperation { kind, a, b, c, immediate };
+
+        self.push(mov_imm(Self::vmctx_field(S::offset_table().program_counter), imm32(code_offset)));
+        self.push(mov_imm64(TMP_REG, operation.to_packed()));
+        self.call_to_label(label);
+    }
+
+    #[inline(always)]
+    pub fn wide_add(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideAdd,
+            wide_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_sub(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideSubtract,
+            wide_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_mul(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideMultiply,
+            wide_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_and(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideAnd,
+            wide_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_or(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideOr,
+            wide_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_xor(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideXor,
+            wide_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_div_unsigned(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideDivideUnsigned,
+            wide_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_div_signed(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideDivideSigned,
+            wide_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_rem_unsigned(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideRemainderUnsigned,
+            wide_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_rem_signed(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideRemainderSigned,
+            wide_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_exp(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideExponent,
+            wide_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_sign_extend_byte(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideSignExtendByte,
+            wide_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_set_equal(&mut self, code_offset: u32, d: RawReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideSetEqual,
+            register_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_set_not_equal(&mut self, code_offset: u32, d: RawReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideSetNotEqual,
+            register_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_set_less_than_unsigned(&mut self, code_offset: u32, d: RawReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideSetLessThanUnsigned,
+            register_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_set_less_than_signed(&mut self, code_offset: u32, d: RawReg, s1: RawWideReg, s2: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideSetLessThanSigned,
+            register_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_shift_logical_left(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideShiftLeft,
+            wide_field(d),
+            wide_field(s1),
+            register_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_shift_logical_right(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideShiftRight,
+            wide_field(d),
+            wide_field(s1),
+            register_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_shift_arithmetic_right(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideShiftRightSigned,
+            wide_field(d),
+            wide_field(s1),
+            register_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_add_mod(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg, s3: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideAddModulo,
+            wide_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            i32::from(wide_field(s3)),
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_mul_mod(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg, s3: RawWideReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideMultiplyModulo,
+            wide_field(d),
+            wide_field(s1),
+            wide_field(s2),
+            i32::from(wide_field(s3)),
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_move(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg) {
+        self.wide_operation(code_offset, WideOperationKind::WideMove, wide_field(d), wide_field(s), 0, 0);
+    }
+
+    #[inline(always)]
+    pub fn wide_reverse_bytes(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg) {
+        self.wide_operation(code_offset, WideOperationKind::WideReverseBytes, wide_field(d), wide_field(s), 0, 0);
+    }
+
+    #[inline(always)]
+    pub fn wide_to_reg(&mut self, code_offset: u32, s: RawWideReg, d: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideToRegister,
+            register_field(d),
+            wide_field(s),
+            0,
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_count_set_bits(&mut self, code_offset: u32, s: RawWideReg, d: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideCountSetBits,
+            register_field(d),
+            wide_field(s),
+            0,
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_count_leading_zero_bits(&mut self, code_offset: u32, s: RawWideReg, d: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideCountLeadingZeroBits,
+            register_field(d),
+            wide_field(s),
+            0,
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_count_trailing_zero_bits(&mut self, code_offset: u32, s: RawWideReg, d: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideCountTrailingZeroBits,
+            register_field(d),
+            wide_field(s),
+            0,
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_from_reg_unsigned(&mut self, code_offset: u32, d: RawWideReg, s: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideFromRegisterUnsigned,
+            wide_field(d),
+            0,
+            register_field(s),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_from_reg_signed(&mut self, code_offset: u32, d: RawWideReg, s: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideFromRegisterSigned,
+            wide_field(d),
+            0,
+            register_field(s),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_load(&mut self, code_offset: u32, d: RawWideReg, base: RawReg, offset: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideLoad,
+            wide_field(d),
+            0,
+            register_field(base),
+            offset,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_store(&mut self, code_offset: u32, s: RawWideReg, base: RawReg, offset: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideStore,
+            wide_field(s),
+            0,
+            register_field(base),
+            offset,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_load_imm_unsigned(&mut self, code_offset: u32, d: RawWideReg, imm: i32) {
+        self.wide_operation(code_offset, WideOperationKind::WideLoadImmediateUnsigned, wide_field(d), 0, 0, imm);
+    }
+
+    #[inline(always)]
+    pub fn wide_load_imm_signed(&mut self, code_offset: u32, d: RawWideReg, imm: i32) {
+        self.wide_operation(code_offset, WideOperationKind::WideLoadImmediateSigned, wide_field(d), 0, 0, imm);
+    }
+
+    #[inline(always)]
+    pub fn wide_load_absolute(&mut self, code_offset: u32, d: RawWideReg, imm: i32) {
+        self.wide_operation(code_offset, WideOperationKind::WideLoadAbsolute, wide_field(d), 0, 0, imm);
+    }
+
+    #[inline(always)]
+    pub fn wide_shift_logical_left_imm(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg, imm: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideShiftLeftImmediate,
+            wide_field(d),
+            wide_field(s),
+            0,
+            imm,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_shift_logical_right_imm(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg, imm: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideShiftRightImmediate,
+            wide_field(d),
+            wide_field(s),
+            0,
+            imm,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_shift_arithmetic_right_imm(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg, imm: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideShiftRightSignedImmediate,
+            wide_field(d),
+            wide_field(s),
+            0,
+            imm,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_arithmetic(&mut self, code_offset: u32, packed: i32) {
+        self.wide_operation(code_offset, WideOperationKind::VectorArithmetic, 0, 0, 0, packed);
+    }
+
+    #[inline(always)]
+    pub fn vector_config(&mut self, code_offset: u32, packed: i32) {
+        self.wide_operation(code_offset, WideOperationKind::VectorConfig, 0, 0, 0, packed);
+    }
+
+    #[inline(always)]
+    pub fn vector_config_dynamic(&mut self, code_offset: u32, d: RawReg, s: RawReg, vtype: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorConfigDynamic,
+            register_field(d),
+            0,
+            register_field(s),
+            vtype,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_config_dynamic_discard(&mut self, code_offset: u32, s: RawReg, vtype: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorConfigDynamicDiscard,
+            0,
+            0,
+            register_field(s),
+            vtype,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_move(&mut self, code_offset: u32, d: RawVecReg, s: RawVecReg) {
+        self.wide_operation(code_offset, WideOperationKind::VectorMove, vector_field(d), vector_field(s), 0, 0);
+    }
+
+    #[inline(always)]
+    pub fn vector_load(&mut self, code_offset: u32, d: RawVecReg, base: RawReg, offset: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorLoad,
+            vector_field(d),
+            0,
+            register_field(base),
+            offset,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_store(&mut self, code_offset: u32, s: RawVecReg, base: RawReg, offset: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorStore,
+            vector_field(s),
+            0,
+            register_field(base),
+            offset,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_set_equal(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorSetEqual,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_set_not_equal(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorSetNotEqual,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_set_equal_imm(&mut self, code_offset: u32, d: RawVecReg, s: RawVecReg, imm: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorSetEqualImmediate,
+            vector_field(d),
+            vector_field(s),
+            0,
+            imm,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_set_not_equal_imm(&mut self, code_offset: u32, d: RawVecReg, s: RawVecReg, imm: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorSetNotEqualImmediate,
+            vector_field(d),
+            vector_field(s),
+            0,
+            imm,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_mask_and(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorMaskAnd,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_mask_and_not(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorMaskAndNot,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_mask_or(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorMaskOr,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_mask_xor(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorMaskXor,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_mask_nand(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorMaskNand,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_mask_nor(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorMaskNor,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_mask_or_not(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorMaskOrNot,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_mask_xnor(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorMaskXnor,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_load_u8(&mut self, code_offset: u32, d: RawVecReg, base: RawReg, offset: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorLoadElements,
+            vector_field(d),
+            1,
+            register_field(base),
+            offset,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_load_u16(&mut self, code_offset: u32, d: RawVecReg, base: RawReg, offset: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorLoadElements,
+            vector_field(d),
+            2,
+            register_field(base),
+            offset,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_load_u32(&mut self, code_offset: u32, d: RawVecReg, base: RawReg, offset: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorLoadElements,
+            vector_field(d),
+            4,
+            register_field(base),
+            offset,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_load_u64(&mut self, code_offset: u32, d: RawVecReg, base: RawReg, offset: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorLoadElements,
+            vector_field(d),
+            8,
+            register_field(base),
+            offset,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_store_u8(&mut self, code_offset: u32, s: RawVecReg, base: RawReg, offset: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorStoreElements,
+            vector_field(s),
+            1,
+            register_field(base),
+            offset,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_store_u16(&mut self, code_offset: u32, s: RawVecReg, base: RawReg, offset: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorStoreElements,
+            vector_field(s),
+            2,
+            register_field(base),
+            offset,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_store_u32(&mut self, code_offset: u32, s: RawVecReg, base: RawReg, offset: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorStoreElements,
+            vector_field(s),
+            4,
+            register_field(base),
+            offset,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_store_u64(&mut self, code_offset: u32, s: RawVecReg, base: RawReg, offset: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorStoreElements,
+            vector_field(s),
+            8,
+            register_field(base),
+            offset,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_count_mask(&mut self, code_offset: u32, d: RawReg, s: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorCountMask,
+            register_field(d),
+            vector_field(s),
+            0,
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_count_mask_masked(&mut self, code_offset: u32, d: RawReg, s: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorCountMaskMasked,
+            register_field(d),
+            vector_field(s),
+            0,
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_first_mask(&mut self, code_offset: u32, d: RawReg, s: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorFirstMask,
+            register_field(d),
+            vector_field(s),
+            0,
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_first_mask_masked(&mut self, code_offset: u32, d: RawReg, s: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorFirstMaskMasked,
+            register_field(d),
+            vector_field(s),
+            0,
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_extract(&mut self, code_offset: u32, d: RawReg, s: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorExtract,
+            register_field(d),
+            vector_field(s),
+            0,
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_splat(&mut self, code_offset: u32, d: RawVecReg, s: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorSplat,
+            vector_field(d),
+            0,
+            register_field(s),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_splat_imm(&mut self, code_offset: u32, d: RawVecReg, imm: i32) {
+        self.wide_operation(code_offset, WideOperationKind::VectorSplatImmediate, vector_field(d), 0, 0, imm);
+    }
+
+    #[inline(always)]
+    pub fn vector_insert(&mut self, code_offset: u32, d: RawVecReg, s: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::VectorInsert,
+            vector_field(d),
+            0,
+            register_field(s),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn vector_insert_imm(&mut self, code_offset: u32, d: RawVecReg, imm: i32) {
+        self.wide_operation(code_offset, WideOperationKind::VectorInsertImmediate, vector_field(d), 0, 0, imm);
+    }
+
+    #[inline(always)]
+    pub fn vector_element_index(&mut self, code_offset: u32, d: RawVecReg) {
+        self.wide_operation(code_offset, WideOperationKind::VectorElementIndex, vector_field(d), 0, 0, 0);
     }
 
     fn emit_rep_stosb(&mut self) {
@@ -2520,12 +3391,15 @@ where
 {
     enum TrapKind {
         Memset { kind: MemsetKind },
+        WideCopy,
         NotEnoughGas,
         Trap,
     }
 
     let trap_kind = if let Some(kind) = are_we_executing_memset(compiled_module, machine_code_offset) {
         TrapKind::Memset { kind }
+    } else if are_we_executing_wide_copy(compiled_module, machine_code_offset) {
+        TrapKind::WideCopy
     } else if is_gas_metering_enabled && vmctx.gas.load(Ordering::Relaxed) < 0 {
         TrapKind::NotEnoughGas
     } else {
@@ -2570,6 +3444,15 @@ where
 
             Ok(false)
         }
+        // The copy inside the wide operation trampoline faulted. Its native address maps
+        // back to no guest instruction; the guest address is the one the call site stored.
+        TrapKind::WideCopy => {
+            let program_counter = vmctx.program_counter.load(Ordering::Relaxed);
+            vmctx.next_program_counter.store(program_counter, Ordering::Relaxed);
+            vmctx.next_native_program_counter.store(0, Ordering::Relaxed);
+
+            Ok(false)
+        }
         // Did we prematurely trigger a page fault during a memset?
         TrapKind::Memset { kind } => {
             handle_interruption_during_memset(kind, compiled_module, is_gas_metering_enabled, machine_code_offset, vmctx)?;
@@ -2594,6 +3477,11 @@ where
 {
     if let Some(kind) = are_we_executing_memset(compiled_module, machine_code_offset) {
         handle_interruption_during_memset(kind, compiled_module, is_gas_metering_enabled, machine_code_offset, vmctx)?;
+    } else if are_we_executing_wide_copy(compiled_module, machine_code_offset) {
+        // The guest address is the one the call site stored, and the copy is restartable.
+        let program_counter = vmctx.program_counter.load(Ordering::Relaxed);
+        vmctx.next_program_counter.store(program_counter, Ordering::Relaxed);
+        vmctx.next_native_program_counter.store(machine_code_address, Ordering::Relaxed);
     } else {
         set_program_counter_after_interruption(compiled_module, machine_code_offset, vmctx)?;
         vmctx.next_native_program_counter.store(machine_code_address, Ordering::Relaxed);

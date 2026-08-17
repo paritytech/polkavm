@@ -28,6 +28,7 @@ pub mod program;
 pub mod utils;
 pub mod varint;
 pub mod vector;
+pub mod vector_state;
 pub mod wide;
 
 #[cfg(feature = "alloc")]

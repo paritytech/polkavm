@@ -24,6 +24,7 @@ use polkavm_common::program::{
 };
 use polkavm_common::utils::{align_to_next_page_usize, slice_assume_init_mut, ArcBytes, GasVisitorT};
 use polkavm_common::vector::VectorConfig;
+use polkavm_common::vector_state::VectorState;
 use polkavm_common::wide::U256;
 
 type Target = u32;
@@ -1433,9 +1434,6 @@ macro_rules! access_memory_mut {
 /// How many 64-bit words one vector register holds.
 const VECTOR_WORDS_PER_REG: usize = VECTOR_LENGTH_WORDS;
 
-/// How many 64-bit words one wide register holds, which is a pair of vector registers.
-const WIDE_WORDS_PER_REG: usize = VECTOR_WORDS_PER_REG * 2;
-
 /// How many bytes one vector register holds.
 const VECTOR_BYTES_PER_REG: usize = VECTOR_WORDS_PER_REG * 8;
 
@@ -1444,12 +1442,11 @@ pub(crate) struct InterpretedInstance {
     standard_memory: StandardMemory,
     dynamic_memory: DynamicMemory,
     regs: [i64; Reg::ALL.len()],
-    /// The vector register file, two words to a register.
+    /// The vector register file and its configuration.
     ///
-    /// A wide register is a pair of these, so the two files are one: wide register `n` is
-    /// the four words starting at `n * 4`, which is vector registers `2n` and `2n + 1`.
-    vector_regs: [u64; VecReg::ALL.len() * VECTOR_WORDS_PER_REG],
-    vector_config: VectorConfig,
+    /// The operations on it are shared with the recompiler, so they live on the state
+    /// itself rather than here.
+    vector: VectorState,
     program_counter: ProgramCounter,
     program_counter_valid: bool,
     charge_gas_on_entry: bool,
@@ -1481,8 +1478,7 @@ impl InterpretedInstance {
             standard_memory: StandardMemory::new(),
             dynamic_memory: DynamicMemory::new(),
             regs: [0; Reg::ALL.len()],
-            vector_regs: [0; VecReg::ALL.len() * VECTOR_WORDS_PER_REG],
-            vector_config: VectorConfig::default(),
+            vector: VectorState::new(),
             program_counter: ProgramCounter(!0),
             program_counter_valid: false,
             charge_gas_on_entry: true,
@@ -2141,19 +2137,12 @@ impl InterpretedInstance {
 
     #[inline(always)]
     fn wide_reg(&self, reg: WideReg) -> U256 {
-        let base = reg.to_usize() * WIDE_WORDS_PER_REG;
-        U256([
-            self.vector_regs[base],
-            self.vector_regs[base + 1],
-            self.vector_regs[base + 2],
-            self.vector_regs[base + 3],
-        ])
+        self.vector.wide_reg(reg)
     }
 
     #[inline(always)]
     fn vector_reg(&self, reg: VecReg) -> [u64; VECTOR_WORDS_PER_REG] {
-        let base = reg.to_usize() * VECTOR_WORDS_PER_REG;
-        [self.vector_regs[base], self.vector_regs[base + 1]]
+        self.vector.vector_reg(reg)
     }
 
     #[inline(always)]
@@ -2162,30 +2151,7 @@ impl InterpretedInstance {
             log::trace!("  {dst} = 0x{:016x}{:016x}", value[1], value[0]);
         }
 
-        let base = dst.to_usize() * VECTOR_WORDS_PER_REG;
-        self.vector_regs[base] = value[0];
-        self.vector_regs[base + 1] = value[1];
-    }
-
-    /// One element of a register group, as the current configuration divides it up.
-    ///
-    /// Elements never straddle a word because their width divides it, so this is a shift
-    /// rather than an unaligned read. A group that runs past the end of the file cannot be
-    /// produced by a well formed program, and reads zero rather than trapping.
-    #[inline(always)]
-    fn vector_element(&self, group: VecReg, index: u32, bits: u32) -> u64 {
-        let byte = index * (bits / 8);
-        let word = group.to_usize() * VECTOR_WORDS_PER_REG + cast(byte / 8).to_usize();
-        let Some(&word) = self.vector_regs.get(word) else {
-            return 0;
-        };
-
-        let value = word >> ((byte % 8) * 8);
-        if bits == 64 {
-            value
-        } else {
-            value & ((1 << bits) - 1)
-        }
+        self.vector.set_vector_reg(dst, value);
     }
 
     #[inline(always)]
@@ -2200,11 +2166,7 @@ impl InterpretedInstance {
             );
         }
 
-        let base = dst.to_usize() * WIDE_WORDS_PER_REG;
-        self.vector_regs[base] = value.0[0];
-        self.vector_regs[base + 1] = value.0[1];
-        self.vector_regs[base + 2] = value.0[2];
-        self.vector_regs[base + 3] = value.0[3];
+        self.vector.set_wide_reg(dst, value);
     }
 
     #[inline(always)]
@@ -2334,9 +2296,6 @@ impl InterpretedInstance {
     }
 
     /// An element-wise comparison, whose result is one bit per element rather than a value.
-    ///
-    /// The bits past `vl` are cleared. The specification lets a mask destination leave them
-    /// at anything, and clearing them keeps the machine deterministic.
     #[inline(always)]
     fn vector_compare<const DEBUG: bool>(
         &mut self,
@@ -2346,16 +2305,15 @@ impl InterpretedInstance {
         src2: VecReg,
         equal: bool,
     ) -> Target {
-        let bits = self.vector_config.element_bits();
-        self.write_mask::<DEBUG>(compiled_offset, dst, |this, index| {
-            (this.vector_element(src1, index, bits) == this.vector_element(src2, index, bits)) == equal
-        })
+        self.vector.compare(dst, src1, src2, equal);
+        if DEBUG {
+            log::trace!("  {dst} = 0x{:016x}{:016x}", self.vector_reg(dst)[1], self.vector_reg(dst)[0]);
+        }
+
+        self.go_to_next_instruction(compiled_offset)
     }
 
     /// A comparison against one value repeated across every element.
-    ///
-    /// The immediate stands for a value in a register, so it reaches the element width sign
-    /// extended and is then compared at that width.
     #[inline(always)]
     fn vector_compare_imm<const DEBUG: bool>(
         &mut self,
@@ -2365,36 +2323,15 @@ impl InterpretedInstance {
         imm: i32,
         equal: bool,
     ) -> Target {
-        let bits = self.vector_config.element_bits();
-        let mask = if bits == 64 { u64::MAX } else { (1_u64 << bits).wrapping_sub(1) };
-        let value = cast(cast(imm).to_i64_sign_extend()).bitwise_as_u64() & mask;
-        self.write_mask::<DEBUG>(compiled_offset, dst, |this, index| {
-            (this.vector_element(src, index, bits) == value) == equal
-        })
-    }
-
-    /// Writes one bit per active element, clearing what is above them.
-    ///
-    /// The specification lets a mask destination leave those at anything, and clearing them
-    /// keeps the machine deterministic.
-    #[inline(always)]
-    fn write_mask<const DEBUG: bool>(&mut self, compiled_offset: Target, dst: VecReg, callback: impl Fn(&Self, u32) -> bool) -> Target {
-        let mut mask = [0; VECTOR_WORDS_PER_REG];
-        for index in 0..self.vector_config.vl() {
-            if callback(self, index) {
-                let index = cast(index).to_usize();
-                mask[index.wrapping_div(64)] |= 1_u64 << index.wrapping_rem(64);
-            }
+        self.vector.compare_immediate(dst, src, imm, equal);
+        if DEBUG {
+            log::trace!("  {dst} = 0x{:016x}{:016x}", self.vector_reg(dst)[1], self.vector_reg(dst)[0]);
         }
 
-        self.set_vector_reg::<DEBUG>(dst, mask);
         self.go_to_next_instruction(compiled_offset)
     }
 
     /// A bitwise operation over the active bits of two mask registers.
-    ///
-    /// A mask holds one bit per element, so the operation reaches the low `vl` bits of the
-    /// register. What is above them is left alone, which the specification permits.
     #[inline(always)]
     fn vector_mask<const DEBUG: bool>(
         &mut self,
@@ -2404,30 +2341,12 @@ impl InterpretedInstance {
         src2: VecReg,
         callback: impl Fn(u64, u64) -> u64,
     ) -> Target {
-        let (first, second, mut result) = (self.vector_reg(src1), self.vector_reg(src2), self.vector_reg(dst));
-        let mut counted = 0;
-        for index in 0..VECTOR_WORDS_PER_REG {
-            let bits = self.vector_config.vl().saturating_sub(counted).min(64);
-            let mask = if bits >= 64 { u64::MAX } else { (1_u64 << bits).wrapping_sub(1) };
-            result[index] = (result[index] & !mask) | (callback(first[index], second[index]) & mask);
-            counted = counted.wrapping_add(64);
+        self.vector.mask_operation(dst, src1, src2, callback);
+        if DEBUG {
+            log::trace!("  {dst} = 0x{:016x}{:016x}", self.vector_reg(dst)[1], self.vector_reg(dst)[0]);
         }
 
-        self.set_vector_reg::<DEBUG>(dst, result);
         self.go_to_next_instruction(compiled_offset)
-    }
-
-    /// The bytes a unit-stride access moves, which is one element per active element.
-    ///
-    /// The element width is the instruction's rather than the configuration's, so the two
-    /// can differ; the count is still `vl`. It is capped at what the register file holds so
-    /// that a program whose configuration does not match its instruction cannot reach past
-    /// the end of it.
-    #[inline(always)]
-    fn vector_element_bytes(&self, register: VecReg, element_bytes: u32) -> usize {
-        let requested = self.vector_config.vl().saturating_mul(element_bytes);
-        let available = (VecReg::ALL.len().wrapping_sub(register.to_usize())).wrapping_mul(VECTOR_BYTES_PER_REG);
-        core::cmp::min(cast(requested).to_usize(), available)
     }
 
     fn vector_load_elements<const DEBUG: bool>(
@@ -2441,14 +2360,14 @@ impl InterpretedInstance {
     ) -> Target {
         self.program_counter = program_counter;
 
-        let length = self.vector_element_bytes(dst, element_bytes);
+        let length = self.vector.unit_stride_length(dst, element_bytes);
         let address = self.wide_address(Some(base), offset);
         let mut buffer = [MaybeUninit::uninit(); VecReg::ALL.len() * VECTOR_BYTES_PER_REG];
         match self.read_memory_into(address, &mut buffer[..length]) {
             Ok(bytes) => {
                 let start = dst.to_usize().wrapping_mul(VECTOR_BYTES_PER_REG);
                 for (index, byte) in bytes.iter().enumerate() {
-                    self.set_vector_byte(start.wrapping_add(index), *byte);
+                    self.vector.set_vector_byte(start.wrapping_add(index), *byte);
                 }
                 if DEBUG {
                     log::trace!("  {dst} = {length} bytes from 0x{address:x}");
@@ -2470,12 +2389,12 @@ impl InterpretedInstance {
     ) -> Target {
         self.program_counter = program_counter;
 
-        let length = self.vector_element_bytes(src, element_bytes);
+        let length = self.vector.unit_stride_length(src, element_bytes);
         let address = self.wide_address(Some(base), offset);
         let start = src.to_usize().wrapping_mul(VECTOR_BYTES_PER_REG);
         let mut buffer = [0; VecReg::ALL.len() * VECTOR_BYTES_PER_REG];
         for (index, byte) in buffer[..length].iter_mut().enumerate() {
-            *byte = self.vector_byte(start.wrapping_add(index));
+            *byte = self.vector.vector_byte(start.wrapping_add(index));
         }
 
         match self.write_memory(address, &buffer[..length]) {
@@ -2485,164 +2404,12 @@ impl InterpretedInstance {
     }
 
     /// Runs one element-wise operation across the active elements.
-    ///
-    /// Elements are held zero extended, so the signed operations sign extend from the
-    /// element width first and the result is truncated back to it on the way out.
     fn vector_arithmetic<const DEBUG: bool>(&mut self, compiled_offset: Target, packed: u32) -> Target {
-        use polkavm_common::vector::{VectorArithmetic, VectorOperand, VectorOperation};
-
-        let instruction = VectorArithmetic::from_packed(packed);
-        let (Some(dst), Some(src)) = (VecReg::from_raw(instruction.dst), VecReg::from_raw(instruction.src)) else {
-            unreachable!("ICE: a vector register field wider than the file")
-        };
-
-        let bits = self.vector_config.element_bits();
-        let selector = if instruction.operation == VectorOperation::Merge {
-            self.vector_reg(VecReg::V0)
-        } else {
-            [0; VECTOR_WORDS_PER_REG]
-        };
-        let operand = match instruction.operand {
-            VectorOperand::Vector(reg) => {
-                let Some(reg) = VecReg::from_raw(reg) else {
-                    unreachable!("ICE: a vector register field wider than the file")
-                };
-                Err(reg)
-            }
-            VectorOperand::Register(reg) => {
-                let Some(reg) = Reg::from_raw(reg) else {
-                    unreachable!("ICE: a general purpose register field wider than the file")
-                };
-                Ok(cast(self.regs[reg.to_usize()]).bitwise_as_u64())
-            }
-            VectorOperand::Immediate(value) => Ok(cast(cast(value).to_i64_sign_extend()).bitwise_as_u64()),
-        };
-
-        // The slides are the two operations that do not line their elements up, so they
-        // read their source at an offset rather than at the index being written.
-        if matches!(instruction.operation, VectorOperation::SlideUp | VectorOperation::SlideDown) {
-            // The immediate form's offset is a count rather than a value, so the five bits
-            // it was encoded in are read unsigned.
-            let offset = match operand {
-                Ok(value) => value & 0b11111,
-                Err(_) => unreachable!("ICE: a slide by a vector register"),
-            };
-            let offset = cast(offset).truncate_to_u32();
-            let length = self.vector_config.vl();
-            let up = instruction.operation == VectorOperation::SlideUp;
-            for index in 0..length {
-                let value = if up {
-                    if index < offset {
-                        continue;
-                    }
-                    self.vector_element(src, index.wrapping_sub(offset), bits)
-                } else {
-                    let source = index.wrapping_add(offset);
-                    if source >= self.vector_config.max_element_count() {
-                        0
-                    } else {
-                        self.vector_element(src, source, bits)
-                    }
-                };
-
-                self.set_vector_element(dst, index, bits, value);
-            }
-
-            return self.go_to_next_instruction(compiled_offset);
-        }
-
-        for index in 0..self.vector_config.vl() {
-            let first = self.vector_element(src, index, bits);
-            let second = match operand {
-                Ok(value) => value & element_mask(bits),
-                Err(reg) => self.vector_element(reg, index, bits),
-            };
-
-            let result = match instruction.operation {
-                VectorOperation::Add => first.wrapping_add(second),
-                VectorOperation::Subtract => first.wrapping_sub(second),
-                VectorOperation::SubtractFrom => second.wrapping_sub(first),
-                VectorOperation::MinimumUnsigned => core::cmp::min(first, second),
-                VectorOperation::MaximumUnsigned => core::cmp::max(first, second),
-                VectorOperation::MinimumSigned => {
-                    cast(core::cmp::min(sign_extend_element(first, bits), sign_extend_element(second, bits))).bitwise_as_u64()
-                }
-                VectorOperation::MaximumSigned => {
-                    cast(core::cmp::max(sign_extend_element(first, bits), sign_extend_element(second, bits))).bitwise_as_u64()
-                }
-                VectorOperation::And => first & second,
-                VectorOperation::Or => first | second,
-                VectorOperation::Xor => first ^ second,
-                // Only as many bits of the shift amount as the element width can use.
-                VectorOperation::ShiftLeft => first.wrapping_shl(cast(second).truncate_to_u32()),
-                VectorOperation::ShiftRight => (first & element_mask(bits)).wrapping_shr(cast(second).truncate_to_u32() % bits),
-                VectorOperation::ShiftRightSigned => {
-                    cast(sign_extend_element(first, bits).wrapping_shr(cast(second).truncate_to_u32() % bits)).bitwise_as_u64()
-                }
-                VectorOperation::Multiply => first.wrapping_mul(second),
-                VectorOperation::MultiplyHighUnsigned => truncate_u128(u128::from(first).wrapping_mul(u128::from(second)) >> bits),
-                VectorOperation::MultiplyHighSigned => {
-                    let first = i128::from(sign_extend_element(first, bits));
-                    let second = i128::from(sign_extend_element(second, bits));
-                    truncate_i128(first.wrapping_mul(second) >> bits)
-                }
-                // Division by zero has the result the scalar instructions give it.
-                VectorOperation::DivideUnsigned => {
-                    if second == 0 {
-                        u64::MAX
-                    } else {
-                        first.wrapping_div(second)
-                    }
-                }
-                VectorOperation::RemainderUnsigned => {
-                    if second == 0 {
-                        first
-                    } else {
-                        first.wrapping_rem(second)
-                    }
-                }
-                VectorOperation::DivideSigned => {
-                    let (first, second) = (sign_extend_element(first, bits), sign_extend_element(second, bits));
-                    if second == 0 {
-                        u64::MAX
-                    } else {
-                        cast(first.wrapping_div(second)).bitwise_as_u64()
-                    }
-                }
-                VectorOperation::RemainderSigned => {
-                    let (first, second) = (sign_extend_element(first, bits), sign_extend_element(second, bits));
-                    if second == 0 {
-                        cast(first).bitwise_as_u64()
-                    } else {
-                        cast(first.wrapping_rem(second)).bitwise_as_u64()
-                    }
-                }
-                // The accumulating forms read the destination as a third operand.
-                VectorOperation::MultiplyAdd => self.vector_element(dst, index, bits).wrapping_add(first.wrapping_mul(second)),
-                VectorOperation::MultiplySubtract => self.vector_element(dst, index, bits).wrapping_sub(first.wrapping_mul(second)),
-                VectorOperation::MultiplyAddToSource => self.vector_element(dst, index, bits).wrapping_mul(second).wrapping_add(first),
-                VectorOperation::MultiplySubtractFromSource => {
-                    first.wrapping_sub(self.vector_element(dst, index, bits).wrapping_mul(second))
-                }
-                VectorOperation::SlideUp | VectorOperation::SlideDown => {
-                    unreachable!("ICE: a slide reached the element-wise loop")
-                }
-                VectorOperation::Merge => {
-                    let index = cast(index).to_usize();
-                    let selected = selector[index.wrapping_div(64)] >> index.wrapping_rem(64) & 1 != 0;
-                    if selected {
-                        second
-                    } else {
-                        first
-                    }
-                }
-            };
-
-            self.set_vector_element(dst, index, bits, result);
-        }
-
+        let registers = &self.regs;
+        self.vector
+            .arithmetic(packed, |register| cast(registers[register.to_usize()]).bitwise_as_u64());
         if DEBUG {
-            log::trace!("  {}", instruction);
+            log::trace!("  {}", polkavm_common::vector::VectorArithmetic::from_packed(packed));
         }
 
         self.go_to_next_instruction(compiled_offset)
@@ -2651,73 +2418,20 @@ impl InterpretedInstance {
     /// The index of the first selected element, or minus one when there is none.
     #[inline(always)]
     fn vector_first<const DEBUG: bool>(&mut self, compiled_offset: Target, dst: Reg, src: VecReg, masked: bool) -> Target {
-        let selector = self.vector_reg(VecReg::V0);
-        let value = self.vector_reg(src);
-        let mut found = -1_i64;
-        for index in 0..cast(self.vector_config.vl()).to_usize() {
-            let word = index.wrapping_div(64);
-            let bit = index.wrapping_rem(64);
-            if masked && selector[word] >> bit & 1 == 0 {
-                continue;
-            }
-
-            if value[word] >> bit & 1 != 0 {
-                let Ok(index) = i64::try_from(index) else {
-                    unreachable!("ICE: an element index that does not fit in a register")
-                };
-                found = index;
-                break;
-            }
-        }
-
-        self.set_u64::<DEBUG>(dst, cast(found).bitwise_as_u64());
+        let value = self.vector.first_mask(src, masked);
+        self.set_u64::<DEBUG>(dst, value);
         self.go_to_next_instruction(compiled_offset)
     }
 
     /// Writes the same value to every active element of a register group.
     #[inline(always)]
     fn vector_splat<const DEBUG: bool>(&mut self, compiled_offset: Target, dst: VecReg, value: u64) -> Target {
-        let bits = self.vector_config.element_bits();
-        for index in 0..self.vector_config.vl() {
-            self.set_vector_element(dst, index, bits, value);
-        }
-
+        self.vector.splat(dst, value);
         if DEBUG {
-            log::trace!("  {dst} = {} elements of 0x{value:x}", self.vector_config.vl());
+            log::trace!("  {dst} = {} elements of 0x{value:x}", self.vector.config().vl());
         }
 
         self.go_to_next_instruction(compiled_offset)
-    }
-
-    /// The counterpart of [`Self::vector_element`], which the same bounds apply to.
-    #[inline(always)]
-    fn set_vector_element(&mut self, group: VecReg, index: u32, bits: u32, value: u64) {
-        let byte = index.wrapping_mul(bits / 8);
-        let word = group
-            .to_usize()
-            .wrapping_mul(VECTOR_WORDS_PER_REG)
-            .wrapping_add(cast(byte / 8).to_usize());
-        let Some(word) = self.vector_regs.get_mut(word) else {
-            return;
-        };
-
-        let shift = byte.wrapping_rem(8).wrapping_mul(8);
-        let mask = if bits == 64 { u64::MAX } else { (1_u64 << bits).wrapping_sub(1) };
-        *word = (*word & !(mask << shift)) | ((value & mask) << shift);
-    }
-
-    /// One byte of the register file, counted from the start of register zero.
-    #[inline(always)]
-    fn vector_byte(&self, index: usize) -> u8 {
-        let word = self.vector_regs[index.wrapping_div(8)];
-        cast(word >> (index.wrapping_rem(8).wrapping_mul(8))).truncate_to_u8()
-    }
-
-    #[inline(always)]
-    fn set_vector_byte(&mut self, index: usize, value: u8) {
-        let shift = index.wrapping_rem(8).wrapping_mul(8);
-        let word = &mut self.vector_regs[index.wrapping_div(8)];
-        *word = (*word & !(0xff_u64 << shift)) | (u64::from(value) << shift);
     }
 
     #[must_use]
@@ -4092,42 +3806,6 @@ macro_rules! define_interpreter {
 }
 
 #[inline(always)]
-/// The low 64 bits of a double width product.
-#[inline(always)]
-fn truncate_u128(value: u128) -> u64 {
-    let Ok(value) = u64::try_from(value & 0xffff_ffff_ffff_ffff) else {
-        unreachable!("ICE: the low 64 bits of a value do not fit in 64 bits")
-    };
-    value
-}
-
-/// As above, for a product that was computed as signed.
-#[inline(always)]
-fn truncate_i128(value: i128) -> u64 {
-    let Ok(value) = u64::try_from(value & 0xffff_ffff_ffff_ffff) else {
-        unreachable!("ICE: the low 64 bits of a value do not fit in 64 bits")
-    };
-    value
-}
-
-/// The bits an element of the given width occupies.
-#[inline(always)]
-fn element_mask(bits: u32) -> u64 {
-    if bits >= 64 {
-        u64::MAX
-    } else {
-        (1_u64 << bits).wrapping_sub(1)
-    }
-}
-
-/// An element held zero extended, read as a signed value of its own width.
-#[inline(always)]
-fn sign_extend_element(value: u64, bits: u32) -> i64 {
-    let shift = 64_u32.wrapping_sub(bits);
-    cast(value.wrapping_shl(shift)).bitwise_as_i64() >> shift
-}
-
-#[inline(always)]
 fn transmute_vec_reg(value: u32) -> VecReg {
     debug_assert!(VecReg::from_raw(value).is_some());
 
@@ -4832,7 +4510,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", compiled_offset, asm::vector_config(cast(packed).bitwise_as_i32()));
         }
 
-        visitor.vector_config = VectorConfig::from_packed(packed);
+        visitor.vector.set_config(VectorConfig::from_packed(packed));
         visitor.go_to_next_instruction(compiled_offset)
     }
 
@@ -4843,10 +4521,8 @@ define_interpreter! {
 
         // The requested length is capped by what the configuration holds, and the length
         // that was settled on is what the instruction returns.
-        let vtype = cast(vtype).bitwise_as_u32();
         let requested = cast(visitor.regs[s.to_usize()]).bitwise_as_u64();
-        let length = core::cmp::min(requested, u64::from(VectorConfig::new(vtype, 0).max_element_count()));
-        visitor.vector_config = VectorConfig::new(vtype, cast(length).truncate_to_u32());
+        let length = visitor.vector.configure_dynamic(cast(vtype).bitwise_as_u32(), requested);
         visitor.set_u64::<DEBUG>(d, length);
         visitor.go_to_next_instruction(compiled_offset)
     }
@@ -4898,19 +4574,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", compiled_offset, asm::vector_count_mask(d, s));
         }
 
-        // Only the bits standing for an active element are counted; what is above `vl` is
-        // not part of the mask.
-        let length = visitor.vector_config.vl();
-        let value = visitor.vector_reg(s);
-        let mut count = 0;
-        let mut counted = 0;
-        for word in value {
-            let bits = length.saturating_sub(counted).min(64);
-            let mask = if bits >= 64 { u64::MAX } else { (1_u64 << bits).wrapping_sub(1) };
-            count += u64::from((word & mask).count_ones());
-            counted = counted.wrapping_add(64);
-        }
-
+        let count = visitor.vector.count_mask(s, false);
         visitor.set_u64::<DEBUG>(d, count);
         visitor.go_to_next_instruction(compiled_offset)
     }
@@ -5070,10 +4734,7 @@ define_interpreter! {
 
         // Only the first element is written, and nothing else in the group changes.
         let value = cast(visitor.regs[s.to_usize()]).bitwise_as_u64();
-        let bits = visitor.vector_config.element_bits();
-        if visitor.vector_config.vl() > 0 {
-            visitor.set_vector_element(d, 0, bits, value);
-        }
+        visitor.vector.insert(d, value);
 
         visitor.go_to_next_instruction(compiled_offset)
     }
@@ -5084,10 +4745,7 @@ define_interpreter! {
         }
 
         let value = cast(cast(imm).to_i64_sign_extend()).bitwise_as_u64();
-        let bits = visitor.vector_config.element_bits();
-        if visitor.vector_config.vl() > 0 {
-            visitor.set_vector_element(d, 0, bits, value);
-        }
+        visitor.vector.insert(d, value);
 
         visitor.go_to_next_instruction(compiled_offset)
     }
@@ -5097,10 +4755,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", compiled_offset, asm::vector_element_index(d));
         }
 
-        let bits = visitor.vector_config.element_bits();
-        for index in 0..visitor.vector_config.vl() {
-            visitor.set_vector_element(d, index, bits, u64::from(index));
-        }
+        visitor.vector.element_index(d);
 
         visitor.go_to_next_instruction(compiled_offset)
     }
@@ -5127,9 +4782,8 @@ define_interpreter! {
         }
 
         // The element reaches the register sign extended, whatever the element width is.
-        let bits = visitor.vector_config.element_bits();
-        let value = sign_extend_element(visitor.vector_element(s, 0, bits), bits);
-        visitor.set_u64::<DEBUG>(d, cast(value).bitwise_as_u64());
+        let value = visitor.vector.extract(s);
+        visitor.set_u64::<DEBUG>(d, value);
         visitor.go_to_next_instruction(compiled_offset)
     }
 
@@ -5155,18 +4809,7 @@ define_interpreter! {
         }
 
         // Only the elements the mask in `v0` selects are counted.
-        let selector = visitor.vector_reg(VecReg::V0);
-        let length = visitor.vector_config.vl();
-        let value = visitor.vector_reg(s);
-        let mut count = 0;
-        let mut counted = 0;
-        for index in 0..VECTOR_WORDS_PER_REG {
-            let bits = length.saturating_sub(counted).min(64);
-            let mask = if bits >= 64 { u64::MAX } else { (1_u64 << bits).wrapping_sub(1) };
-            count += u64::from((value[index] & selector[index] & mask).count_ones());
-            counted = counted.wrapping_add(64);
-        }
-
+        let count = visitor.vector.count_mask(s, true);
         visitor.set_u64::<DEBUG>(d, count);
         visitor.go_to_next_instruction(compiled_offset)
     }
@@ -5176,10 +4819,8 @@ define_interpreter! {
             log::trace!("[{}]: {}", compiled_offset, asm::vector_config_dynamic_discard(s, vtype));
         }
 
-        let vtype = cast(vtype).bitwise_as_u32();
         let requested = cast(visitor.regs[s.to_usize()]).bitwise_as_u64();
-        let length = core::cmp::min(requested, u64::from(VectorConfig::new(vtype, 0).max_element_count()));
-        visitor.vector_config = VectorConfig::new(vtype, cast(length).truncate_to_u32());
+        let _ = visitor.vector.configure_dynamic(cast(vtype).bitwise_as_u32(), requested);
         visitor.go_to_next_instruction(compiled_offset)
     }
 

@@ -4,6 +4,7 @@ use polkavm_common::{
     cast::cast,
     program::Reg,
     utils::{align_to_next_page_usize, byte_slice_init, Bitness},
+    vector_state::{VectorState, WideOperation},
     zygote::{
         AddressTable, AddressTableRaw, CacheAligned, VM_ADDR_JUMP_TABLE, VM_ADDR_JUMP_TABLE_RETURN_TO_HOST,
         VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE, VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE,
@@ -639,6 +640,15 @@ struct VmCtx {
     next_program_counter: AtomicU32,
     next_native_program_counter: AtomicU64,
     memset_continuation: AtomicU64,
+
+    /// The vector register file and its configuration.
+    vector_state: UnsafeCell<VectorState>,
+
+    /// The unit-stride copy the wide operation helper answered with, as two native
+    /// addresses and a byte count. Zero length when there is nothing to move.
+    wide_copy_source: AtomicU64,
+    wide_copy_destination: AtomicU64,
+    wide_copy_length: AtomicU64,
 }
 
 impl VmCtx {
@@ -668,6 +678,10 @@ impl VmCtx {
             next_program_counter: AtomicU32::new(0),
             next_native_program_counter: AtomicU64::new(0),
             memset_continuation: AtomicU64::new(0),
+            vector_state: UnsafeCell::new(VectorState::new()),
+            wide_copy_source: AtomicU64::new(0),
+            wide_copy_destination: AtomicU64::new(0),
+            wide_copy_length: AtomicU64::new(0),
         }
     }
 }
@@ -756,6 +770,46 @@ unsafe extern "C" fn syscall_sbrk(pending_heap_top: u64) -> u32 {
             trigger_exit(vmctx, ExitReason::Error);
         }
     }
+}
+
+unsafe extern "C" fn syscall_wide_op(packed: u64) {
+    // SAFETY: We were called from the inside of the guest program, so vmctx must be valid.
+    let vmctx = unsafe { conjure_vmctx() };
+
+    let Some(operation) = WideOperation::from_packed(packed) else {
+        trigger_exit(vmctx, ExitReason::Error);
+    };
+
+    // SAFETY: Only recompiled code reaches the register file while the guest runs, and it
+    // is not running while it waits for this call.
+    let vector_state = unsafe { &mut *vmctx.vector_state.get() };
+    let registers = vmctx.regs.0.as_mut_ptr();
+    // SAFETY: Every register index is in bounds by construction, and recompiled code does
+    // not touch the registers while it waits for this call.
+    let copy = vector_state.dispatch(
+        operation,
+        |register| unsafe { *registers.add(register.to_usize()) },
+        |register, value| unsafe { *registers.add(register.to_usize()) = value },
+    );
+
+    let (source, destination, length) = match copy {
+        None => (0, 0, 0),
+        Some(copy) => {
+            let file = vmctx.vector_state.get() as u64 + copy.file_offset as u64;
+            // SAFETY: The guest memory always begins at a fixed offset from the context.
+            let memory_base = unsafe { (vmctx as *mut VmCtx).cast::<u8>().offset(-GUEST_MEMORY_TO_VMCTX_OFFSET) };
+            let memory = memory_base as u64 + u64::from(copy.guest_address);
+            if copy.into_file {
+                (memory, file, copy.length as u64)
+            } else {
+                (file, memory, copy.length as u64)
+            }
+        }
+    };
+
+    vmctx.wide_copy_source.store(source, Ordering::Relaxed);
+    vmctx.wide_copy_destination.store(destination, Ordering::Relaxed);
+    vmctx.wide_copy_length.store(length, Ordering::Relaxed);
 }
 
 unsafe extern "C" fn syscall_not_enough_gas() -> ! {
@@ -2079,6 +2133,7 @@ impl super::Sandbox for Sandbox {
             syscall_step,
             syscall_sbrk,
             syscall_not_enough_gas,
+            syscall_wide_op,
         })
     }
 
@@ -2093,6 +2148,9 @@ impl super::Sandbox for Sandbox {
             program_counter: get_field_offset!(VmCtx::new(), |base| base.program_counter.as_ptr()),
             regs: get_field_offset!(VmCtx::new(), |base| &base.regs),
             futex: usize::MAX,
+            wide_copy_source: get_field_offset!(VmCtx::new(), |base| base.wide_copy_source.as_ptr()),
+            wide_copy_destination: get_field_offset!(VmCtx::new(), |base| base.wide_copy_destination.as_ptr()),
+            wide_copy_length: get_field_offset!(VmCtx::new(), |base| base.wide_copy_length.as_ptr()),
         }
     }
 }

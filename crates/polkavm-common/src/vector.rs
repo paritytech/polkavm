@@ -14,6 +14,7 @@ use crate::program::VECTOR_LENGTH_BITS;
 /// with the `vl` that was in effect when it was written. Both are set together by the
 /// configuration instructions and read by everything else.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default, Hash)]
+#[repr(C)]
 pub struct VectorConfig {
     vtype: u32,
     vl: u32,

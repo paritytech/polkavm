@@ -980,6 +980,43 @@ pub unsafe extern "C" fn syscall_sbrk(pending_heap_top: u64) -> u32 {
     pending_heap_top as u32
 }
 
+/// Runs one wide or vector operation against the register file in the context.
+///
+/// A memory operation is not performed here: the helper answers it by leaving the source,
+/// destination and length in the context, and the recompiled trampoline moves the bytes,
+/// so that a fault lands in code the signal handler knows how to attribute. Every other
+/// operation leaves a zero length behind, which makes the trampoline's copy a no-op.
+pub unsafe extern "C" fn syscall_wide_op(packed: u64) {
+    let Some(operation) = polkavm_common::vector_state::WideOperation::from_packed(packed) else {
+        abort_with_message("unknown wide operation");
+    };
+
+    let vector_state = &mut *VMCTX.vector_state.get();
+    let copy = vector_state.dispatch(
+        operation,
+        |register| VMCTX.regs[register.to_usize()].load(Ordering::Relaxed),
+        |register, value| VMCTX.regs[register.to_usize()].store(value, Ordering::Relaxed),
+    );
+
+    let (source, destination, length) = match copy {
+        None => (0, 0, 0),
+        Some(copy) => {
+            let file = VMCTX.vector_state.get() as u64 + copy.file_offset as u64;
+            // The guest's addresses are this process's addresses.
+            let memory = u64::from(copy.guest_address);
+            if copy.into_file {
+                (memory, file, copy.length as u64)
+            } else {
+                (file, memory, copy.length as u64)
+            }
+        }
+    };
+
+    VMCTX.wide_copy_source.store(source, Ordering::Relaxed);
+    VMCTX.wide_copy_destination.store(destination, Ordering::Relaxed);
+    VMCTX.wide_copy_length.store(length, Ordering::Relaxed);
+}
+
 // A table for functions which can be called from *within* the VM (by the guest program).
 #[link_section = ".address_table"]
 #[no_mangle]
@@ -990,6 +1027,7 @@ pub static ADDRESS_TABLE: AddressTableRaw = AddressTableRaw {
     syscall_step,
     syscall_sbrk,
     syscall_not_enough_gas,
+    syscall_wide_op,
 };
 
 // A table for functions which can be called from *outside* the VM (by the host).

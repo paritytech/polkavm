@@ -64,6 +64,7 @@ define_address_table! {
     syscall_step: unsafe extern "C" fn() -> !,
     syscall_sbrk: unsafe extern "C" fn(u64) -> u32,
     syscall_not_enough_gas: unsafe extern "C" fn() -> !,
+    syscall_wide_op: unsafe extern "C" fn(u64),
 }
 
 define_address_table! {
@@ -302,6 +303,18 @@ pub struct VmCtx {
     /// The page size.
     pub page_size: UnsafeCell<u32>,
 
+    /// The vector register file and its configuration.
+    ///
+    /// Only the wide operation helper and the recompiled code it serves touch this while
+    /// the guest runs; the host reads it at most while the sandbox is idle.
+    pub vector_state: UnsafeCell<crate::vector_state::VectorState>,
+
+    /// The unit-stride copy the wide operation helper answered with, as two native
+    /// addresses and a byte count. Zero length when there is nothing to move.
+    pub wide_copy_source: AtomicU64,
+    pub wide_copy_destination: AtomicU64,
+    pub wide_copy_length: AtomicU64,
+
     /// Performance counters. Only for debugging.
     pub counters: CacheAligned<VmCtxCounters>,
 
@@ -397,6 +410,11 @@ impl VmCtx {
                 heap_top: UnsafeCell::new(0),
                 heap_threshold: UnsafeCell::new(0),
             },
+
+            vector_state: UnsafeCell::new(crate::vector_state::VectorState::new()),
+            wide_copy_source: AtomicU64::new(0),
+            wide_copy_destination: AtomicU64::new(0),
+            wide_copy_length: AtomicU64::new(0),
 
             counters: CacheAligned(VmCtxCounters {
                 syscall_wait_loop_start: UnsafeCell::new(0),

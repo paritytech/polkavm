@@ -84,6 +84,9 @@ pub struct OffsetTable {
     pub program_counter: usize,
     pub regs: usize,
     pub futex: usize,
+    pub wide_copy_source: usize,
+    pub wide_copy_destination: usize,
+    pub wide_copy_length: usize,
 }
 
 pub(crate) trait Sandbox: Sized {

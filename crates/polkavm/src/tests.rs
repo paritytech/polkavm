@@ -5740,7 +5740,291 @@ assert_send_sync! {
 /// The program reads its two operands from the start of the read-write data, runs `body`,
 /// and the caller reads the result back from the third slot.
 #[cfg(feature = "std")]
-fn run_wide_program(operands: &[polkavm_common::wide::U256], body: &[polkavm_common::program::Instruction]) -> [u8; 32] {
+/// Runs every wide and vector instruction once and folds each result into an accumulator,
+/// then checks the accumulator against a fresh interpreter run of the same program.
+///
+/// The point is the recompiler's operand plumbing: each instruction's call site packs its
+/// registers and immediate into a descriptor by hand, and a transposed field would produce
+/// a program that runs fine and computes something else. The interpreter is the reference,
+/// so no result here is hand computed.
+#[cfg(feature = "std")]
+fn every_wide_and_vector_instruction_matches_the_interpreter(config: Config) {
+    use polkavm_common::program::Instruction;
+    use polkavm_common::program::Reg::*;
+    use polkavm_common::program::VecReg::*;
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::vector::{VectorArithmetic, VectorConfig, VectorOperand, VectorOperation};
+    use polkavm_common::wide::U256;
+
+    let arithmetic = |operation, dst: u32, src: u32, operand| {
+        let packed = VectorArithmetic {
+            operation,
+            dst,
+            src,
+            operand,
+        }
+        .to_packed();
+        asm::vector_arithmetic(cast(packed).bitwise_as_i32())
+    };
+
+    let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(0x4000).build().unwrap();
+    let absolute_address = cast(memory_map.rw_data_address()).bitwise_as_i32();
+
+    let operands = [
+        U256([0x0123_4567_89ab_cdef, 0xfeed_face_0000_0007, 3, 0x8000_0000_0000_0001]),
+        U256([29, 0, 0xffff_ffff_ffff_fffb, 1 << 62]),
+        (U256::ONE.shift_left(255)).wrapping_add(U256::from_u64(9)),
+    ];
+
+    let mut body: Vec<Instruction> = Vec::new();
+    body.push(asm::load_imm(A2, 77));
+    body.push(asm::wide_load_imm_signed(W3, -19));
+
+    // Everything that writes a wide register, computed into W4 and folded.
+    let wide_results = [
+        asm::wide_add(W4, W0, W1),
+        asm::wide_sub(W4, W0, W1),
+        asm::wide_mul(W4, W0, W1),
+        asm::wide_and(W4, W0, W1),
+        asm::wide_or(W4, W0, W1),
+        asm::wide_xor(W4, W0, W1),
+        asm::wide_div_unsigned(W4, W0, W1),
+        asm::wide_div_signed(W4, W0, W1),
+        asm::wide_rem_unsigned(W4, W0, W1),
+        asm::wide_rem_signed(W4, W0, W1),
+        asm::wide_exp(W4, W0, W1),
+        asm::wide_sign_extend_byte(W4, W1, W0),
+        asm::wide_add_mod(W4, W0, W1, W2),
+        asm::wide_mul_mod(W4, W0, W1, W2),
+        asm::wide_shift_logical_left(W4, W0, A2),
+        asm::wide_shift_logical_right(W4, W0, A2),
+        asm::wide_shift_arithmetic_right(W4, W0, A2),
+        asm::wide_shift_logical_left_imm(W4, W0, 13),
+        asm::wide_shift_logical_right_imm(W4, W0, 13),
+        asm::wide_shift_arithmetic_right_imm(W4, W0, 250),
+        asm::wide_move(W4, W0),
+        asm::wide_reverse_bytes(W4, W0),
+        asm::wide_from_reg_unsigned(W4, A2),
+        asm::wide_from_reg_signed(W4, A2),
+        asm::wide_load_imm_unsigned(W4, -5),
+        asm::wide_load_imm_signed(W4, -5),
+        asm::wide_load(W4, A0, 32),
+        asm::wide_load_absolute(W4, absolute_address),
+    ];
+    for instruction in wide_results {
+        body.push(instruction);
+        body.push(asm::wide_xor(W3, W3, W4));
+    }
+
+    // A round trip through memory.
+    body.push(asm::wide_store(W3, A0, 128));
+    body.push(asm::wide_load(W4, A0, 128));
+    body.push(asm::wide_xor(W3, W3, W4));
+
+    // Everything that writes a general purpose register, folded through a widening.
+    let register_results = [
+        asm::wide_set_equal(A1, W0, W1),
+        asm::wide_set_not_equal(A1, W0, W1),
+        asm::wide_set_less_than_unsigned(A1, W0, W1),
+        asm::wide_set_less_than_signed(A1, W0, W1),
+        asm::wide_to_reg(W0, A1),
+        asm::wide_count_set_bits(W0, A1),
+        asm::wide_count_leading_zero_bits(W0, A1),
+        asm::wide_count_trailing_zero_bits(W0, A1),
+    ];
+    for instruction in register_results {
+        body.push(instruction);
+        body.push(asm::wide_from_reg_unsigned(W4, A1));
+        body.push(asm::wide_xor(W3, W3, W4));
+    }
+
+    // Four 64-bit elements across a register pair. The operand data sits in v0 to v3
+    // because the harness loaded W0 and W1, and v0 doubles as the mask register, which is
+    // what the merge and the masked forms read.
+    let configure = VectorConfig::new(0b011_001, 4);
+    body.push(asm::vector_config(cast(configure.to_packed()).bitwise_as_i32()));
+
+    // Element-wise operations in every operand shape, plus the ones with special paths.
+    let element_wise = [
+        arithmetic(VectorOperation::Add, 12, 0, VectorOperand::Vector(2)),
+        arithmetic(VectorOperation::Subtract, 12, 0, VectorOperand::Register(A2 as u32)),
+        arithmetic(VectorOperation::Xor, 12, 0, VectorOperand::Immediate(-3)),
+        arithmetic(VectorOperation::MinimumSigned, 12, 0, VectorOperand::Vector(2)),
+        arithmetic(VectorOperation::MaximumUnsigned, 12, 0, VectorOperand::Vector(2)),
+        arithmetic(VectorOperation::ShiftLeft, 12, 0, VectorOperand::Register(A2 as u32)),
+        arithmetic(VectorOperation::ShiftRightSigned, 12, 0, VectorOperand::Immediate(7)),
+        arithmetic(VectorOperation::Multiply, 12, 0, VectorOperand::Vector(2)),
+        arithmetic(VectorOperation::MultiplyHighSigned, 12, 0, VectorOperand::Vector(2)),
+        arithmetic(VectorOperation::MultiplyHighUnsigned, 12, 0, VectorOperand::Vector(2)),
+        arithmetic(VectorOperation::DivideUnsigned, 12, 0, VectorOperand::Vector(2)),
+        arithmetic(VectorOperation::DivideSigned, 12, 0, VectorOperand::Vector(2)),
+        arithmetic(VectorOperation::RemainderUnsigned, 12, 0, VectorOperand::Vector(2)),
+        arithmetic(VectorOperation::RemainderSigned, 12, 0, VectorOperand::Vector(2)),
+        arithmetic(VectorOperation::MultiplyAdd, 12, 0, VectorOperand::Vector(2)),
+        arithmetic(VectorOperation::Merge, 12, 2, VectorOperand::Vector(4)),
+        arithmetic(VectorOperation::SlideUp, 12, 0, VectorOperand::Immediate(1)),
+        arithmetic(VectorOperation::SlideDown, 12, 0, VectorOperand::Immediate(2)),
+        asm::vector_move(V12, V0),
+        asm::vector_splat(V12, A2),
+        asm::vector_splat_imm(V12, -7),
+        asm::vector_insert(V12, A2),
+        asm::vector_insert_imm(V12, 9),
+        asm::vector_element_index(V12),
+        asm::vector_set_equal(V12, V0, V2),
+        asm::vector_set_not_equal(V12, V0, V2),
+        asm::vector_set_equal_imm(V12, V0, -1),
+        asm::vector_set_not_equal_imm(V12, V0, 29),
+        asm::vector_mask_and(V12, V0, V2),
+        asm::vector_mask_and_not(V12, V0, V2),
+        asm::vector_mask_or(V12, V0, V2),
+        asm::vector_mask_xor(V12, V0, V2),
+        asm::vector_mask_nand(V12, V0, V2),
+        asm::vector_mask_nor(V12, V0, V2),
+        asm::vector_mask_or_not(V12, V0, V2),
+        asm::vector_mask_xnor(V12, V0, V2),
+    ];
+    for instruction in element_wise {
+        body.push(instruction);
+        body.push(asm::wide_xor(W3, W3, W6));
+    }
+
+    // Everything that reads the file into a general purpose register.
+    let register_reads = [
+        asm::vector_count_mask(A1, V0),
+        asm::vector_count_mask_masked(A1, V2),
+        asm::vector_first_mask(A1, V2),
+        asm::vector_first_mask_masked(A1, V2),
+        asm::vector_extract(A1, V2),
+    ];
+    for instruction in register_reads {
+        body.push(instruction);
+        body.push(asm::wide_from_reg_unsigned(W4, A1));
+        body.push(asm::wide_xor(W3, W3, W4));
+    }
+
+    // The memory forms: whole register, and one unit-stride width at a time.
+    let memory_forms = [
+        [asm::vector_store(V0, A0, 160), asm::vector_load(V12, A0, 160)],
+        [asm::vector_store_u8(V0, A0, 192), asm::vector_load_u8(V12, A0, 192)],
+        [asm::vector_store_u16(V0, A0, 224), asm::vector_load_u16(V12, A0, 224)],
+        [asm::vector_store_u32(V0, A0, 256), asm::vector_load_u32(V12, A0, 256)],
+        [asm::vector_store_u64(V0, A0, 288), asm::vector_load_u64(V12, A0, 288)],
+    ];
+    for [store, load] in memory_forms {
+        body.push(store);
+        body.push(load);
+        body.push(asm::wide_xor(W3, W3, W6));
+    }
+
+    // The dynamic configurations, which write the settled element count back.
+    body.push(asm::load_imm(A3, 3));
+    body.push(asm::vector_config_dynamic(A1, A3, cast(0b000_000_u32).bitwise_as_i32()));
+    body.push(asm::wide_from_reg_unsigned(W4, A1));
+    body.push(asm::wide_xor(W3, W3, W4));
+    body.push(asm::vector_config_dynamic_discard(A3, cast(0b011_001_u32).bitwise_as_i32()));
+    body.push(arithmetic(VectorOperation::Add, 12, 0, VectorOperand::Vector(2)));
+    body.push(asm::wide_xor(W3, W3, W6));
+
+    body.push(asm::wide_store(W3, A0, 96));
+
+    let expected = {
+        let mut reference = Config::default();
+        reference.set_backend(Some(BackendKind::Interpreter));
+        run_wide_program(&reference, &operands, &body)
+    };
+    let actual = run_wide_program(&config, &operands, &body);
+    assert_eq!(U256::from_le_bytes(actual), U256::from_le_bytes(expected));
+}
+
+/// Generates per-backend wrappers for the wide and vector execution tests.
+///
+/// These always build a `ReviveV1` blob, because no other instruction set holds the wide
+/// instructions, so they cannot go through `run_tests!`. The tracing variants run the
+/// recompiler and the interpreter in lockstep and compare the registers after every
+/// instruction.
+#[cfg(feature = "std")]
+macro_rules! run_wide_tests {
+    ($($test_name:ident)+) => {
+        if_compiler_is_supported! {
+            $(
+                paste! {
+                    #[cfg(target_os = "linux")]
+                    #[test]
+                    fn [<compiler_linux_ $test_name>]() {
+                        let mut config = crate::Config::default();
+                        config.set_worker_count(1);
+                        config.set_backend(Some(crate::BackendKind::Compiler));
+                        config.set_sandbox(Some(crate::SandboxKind::Linux));
+                        $test_name(config);
+                    }
+
+                    #[cfg(target_os = "linux")]
+                    #[test]
+                    fn [<tracing_linux_ $test_name>]() {
+                        let mut config = crate::Config::default();
+                        config.set_backend(Some(crate::BackendKind::Compiler));
+                        config.set_sandbox(Some(crate::SandboxKind::Linux));
+                        config.set_allow_experimental(true);
+                        config.set_crosscheck(true);
+                        $test_name(config);
+                    }
+
+                    #[cfg(feature = "generic-sandbox")]
+                    #[test]
+                    fn [<compiler_generic_ $test_name>]() {
+                        let mut config = crate::Config::default();
+                        config.set_backend(Some(crate::BackendKind::Compiler));
+                        config.set_sandbox(Some(crate::SandboxKind::Generic));
+                        config.set_allow_experimental(true);
+                        $test_name(config);
+                    }
+
+                    #[cfg(feature = "generic-sandbox")]
+                    #[test]
+                    fn [<tracing_generic_ $test_name>]() {
+                        let mut config = crate::Config::default();
+                        config.set_backend(Some(crate::BackendKind::Compiler));
+                        config.set_sandbox(Some(crate::SandboxKind::Generic));
+                        config.set_allow_experimental(true);
+                        config.set_crosscheck(true);
+                        $test_name(config);
+                    }
+                }
+            )+
+        }
+
+        $(
+            paste! {
+                #[test]
+                fn [<interpreter_ $test_name>]() {
+                    let mut config = crate::Config::default();
+                    config.set_backend(Some(crate::BackendKind::Interpreter));
+                    $test_name(config);
+                }
+            }
+        )+
+    };
+}
+
+#[cfg(feature = "std")]
+run_wide_tests! {
+    wide_arithmetic_follows_evm_semantics
+    wide_signed_division_takes_the_sign_of_the_dividend
+    wide_modular_operations_use_the_untruncated_result
+    wide_shifts_past_the_width_clear_the_value
+    wide_moves_and_conversions_round_trip
+    wide_comparisons_write_a_general_purpose_register
+    wide_load_imm_widens_like_the_register_form
+    wide_load_absolute_reads_without_a_base_register
+    wide_shift_imm_matches_the_register_form
+    wide_bit_counts_write_a_general_purpose_register
+    vector_whole_register_moves_reach_the_halves_of_a_wide_one
+    vector_loads_and_stores_reach_one_register
+    vector_compares_produce_a_mask_the_population_count_reads
+    every_wide_and_vector_instruction_matches_the_interpreter
+}
+
+fn run_wide_program(config: &Config, operands: &[polkavm_common::wide::U256], body: &[polkavm_common::program::Instruction]) -> [u8; 32] {
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
 
@@ -5763,9 +6047,7 @@ fn run_wide_program(operands: &[polkavm_common::wide::U256], body: &[polkavm_com
     builder.set_code(&code, &[]);
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
 
-    let mut config = Config::default();
-    config.set_backend(Some(BackendKind::Interpreter));
-    let engine = Engine::new(&config).unwrap();
+    let engine = Engine::new(config).unwrap();
     let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
     let mut instance = module.instantiate().unwrap();
 
@@ -5788,13 +6070,16 @@ fn run_wide_program(operands: &[polkavm_common::wide::U256], body: &[polkavm_com
 
 /// Runs `body` and returns the 256-bit value it stored.
 #[cfg(feature = "std")]
-fn run_wide(operands: &[polkavm_common::wide::U256], body: &[polkavm_common::program::Instruction]) -> polkavm_common::wide::U256 {
-    polkavm_common::wide::U256::from_le_bytes(run_wide_program(operands, body))
+fn run_wide(
+    config: &Config,
+    operands: &[polkavm_common::wide::U256],
+    body: &[polkavm_common::program::Instruction],
+) -> polkavm_common::wide::U256 {
+    polkavm_common::wide::U256::from_le_bytes(run_wide_program(config, operands, body))
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn wide_arithmetic_follows_evm_semantics() {
+fn wide_arithmetic_follows_evm_semantics(config: Config) {
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
 
@@ -5823,13 +6108,12 @@ fn wide_arithmetic_follows_evm_semantics() {
             max,
         ),
     ] {
-        assert_eq!(run_wide(&operands, &[body, store]), expected, "{name}");
+        assert_eq!(run_wide(&config, &operands, &[body, store]), expected, "{name}");
     }
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn wide_signed_division_takes_the_sign_of_the_dividend() {
+fn wide_signed_division_takes_the_sign_of_the_dividend(config: Config) {
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
 
@@ -5838,18 +6122,17 @@ fn wide_signed_division_takes_the_sign_of_the_dividend() {
     let store = asm::wide_store(W3, A0, 96);
 
     assert_eq!(
-        run_wide(&[minus_seven, two], &[asm::wide_div_signed(W3, W0, W1), store]),
+        run_wide(&config, &[minus_seven, two], &[asm::wide_div_signed(W3, W0, W1), store]),
         U256::from_u64(3).wrapping_neg()
     );
     assert_eq!(
-        run_wide(&[minus_seven, two], &[asm::wide_rem_signed(W3, W0, W1), store]),
+        run_wide(&config, &[minus_seven, two], &[asm::wide_rem_signed(W3, W0, W1), store]),
         U256::ONE.wrapping_neg()
     );
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn wide_modular_operations_use_the_untruncated_result() {
+fn wide_modular_operations_use_the_untruncated_result(config: Config) {
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
 
@@ -5858,25 +6141,29 @@ fn wide_modular_operations_use_the_untruncated_result() {
 
     // 2^256 mod 7 is 2, which a truncating add would have lost.
     assert_eq!(
-        run_wide(&[max, U256::ONE, U256::from_u64(7)], &[asm::wide_add_mod(W3, W0, W1, W2), store]),
+        run_wide(
+            &config,
+            &[max, U256::ONE, U256::from_u64(7)],
+            &[asm::wide_add_mod(W3, W0, W1, W2), store]
+        ),
         U256::from_u64(2)
     );
     assert_eq!(
         run_wide(
+            &config,
             &[U256::from_u64(5), U256::from_u64(6), U256::from_u64(7)],
             &[asm::wide_mul_mod(W3, W0, W1, W2), store]
         ),
         U256::from_u64(30 % 7)
     );
     assert_eq!(
-        run_wide(&[max, U256::ONE, U256::ZERO], &[asm::wide_add_mod(W3, W0, W1, W2), store]),
+        run_wide(&config, &[max, U256::ONE, U256::ZERO], &[asm::wide_add_mod(W3, W0, W1, W2), store]),
         U256::ZERO
     );
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn wide_shifts_past_the_width_clear_the_value() {
+fn wide_shifts_past_the_width_clear_the_value(config: Config) {
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
 
@@ -5885,17 +6172,23 @@ fn wide_shifts_past_the_width_clear_the_value() {
 
     assert_eq!(
         run_wide(
+            &config,
             &[U256::ONE],
             &[asm::load_imm(A1, 8), asm::wide_shift_logical_left(W3, W0, A1), store]
         ),
         U256::from_u64(256)
     );
     assert_eq!(
-        run_wide(&[max], &[asm::load_imm(A1, 256), asm::wide_shift_logical_left(W3, W0, A1), store]),
+        run_wide(
+            &config,
+            &[max],
+            &[asm::load_imm(A1, 256), asm::wide_shift_logical_left(W3, W0, A1), store]
+        ),
         U256::ZERO
     );
     assert_eq!(
         run_wide(
+            &config,
             &[max],
             &[asm::load_imm(A1, 256), asm::wide_shift_arithmetic_right(W3, W0, A1), store]
         ),
@@ -5903,6 +6196,7 @@ fn wide_shifts_past_the_width_clear_the_value() {
     );
     assert_eq!(
         run_wide(
+            &config,
             &[U256::ONE],
             &[asm::load_imm(A1, 256), asm::wide_shift_arithmetic_right(W3, W0, A1), store]
         ),
@@ -5911,22 +6205,29 @@ fn wide_shifts_past_the_width_clear_the_value() {
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn wide_moves_and_conversions_round_trip() {
+fn wide_moves_and_conversions_round_trip(config: Config) {
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
 
     let value = U256([0x0123_4567_89ab_cdef, 2, 3, 4]);
     let store = asm::wide_store(W3, A0, 96);
 
-    assert_eq!(run_wide(&[value], &[asm::wide_move(W3, W0), store]), value);
-    assert_eq!(run_wide(&[value], &[asm::wide_reverse_bytes(W3, W0), store]), value.swap_bytes());
+    assert_eq!(run_wide(&config, &[value], &[asm::wide_move(W3, W0), store]), value);
     assert_eq!(
-        run_wide(&[value], &[asm::wide_to_reg(W0, A1), asm::wide_from_reg_unsigned(W3, A1), store]),
+        run_wide(&config, &[value], &[asm::wide_reverse_bytes(W3, W0), store]),
+        value.swap_bytes()
+    );
+    assert_eq!(
+        run_wide(
+            &config,
+            &[value],
+            &[asm::wide_to_reg(W0, A1), asm::wide_from_reg_unsigned(W3, A1), store]
+        ),
         U256::from_u64(value.low_u64())
     );
     assert_eq!(
         run_wide(
+            &config,
             &[],
             &[
                 asm::load_imm(A1, -1),
@@ -5939,8 +6240,7 @@ fn wide_moves_and_conversions_round_trip() {
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn wide_load_imm_widens_like_the_register_form() {
+fn wide_load_imm_widens_like_the_register_form(config: Config) {
     use polkavm_common::program::Reg::*;
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
@@ -5949,30 +6249,42 @@ fn wide_load_imm_widens_like_the_register_form() {
 
     // The immediate stands for a general purpose register the caller would have loaded, so
     // it is sign extended to the register width before the widening kind applies.
-    assert_eq!(run_wide(&[], &[asm::wide_load_imm_unsigned(W3, 255), store]), U256::from_u64(255));
-    assert_eq!(run_wide(&[], &[asm::wide_load_imm_signed(W3, 255), store]), U256::from_u64(255));
     assert_eq!(
-        run_wide(&[], &[asm::wide_load_imm_unsigned(W3, -1), store]),
+        run_wide(&config, &[], &[asm::wide_load_imm_unsigned(W3, 255), store]),
+        U256::from_u64(255)
+    );
+    assert_eq!(
+        run_wide(&config, &[], &[asm::wide_load_imm_signed(W3, 255), store]),
+        U256::from_u64(255)
+    );
+    assert_eq!(
+        run_wide(&config, &[], &[asm::wide_load_imm_unsigned(W3, -1), store]),
         U256::from_u64(u64::MAX)
     );
-    assert_eq!(run_wide(&[], &[asm::wide_load_imm_signed(W3, -1), store]), U256([u64::MAX; 4]));
+    assert_eq!(
+        run_wide(&config, &[], &[asm::wide_load_imm_signed(W3, -1), store]),
+        U256([u64::MAX; 4])
+    );
 
     // And it agrees with loading the same value into a register and widening that.
     for value in [0, 1, -1, i32::MIN, i32::MAX] {
         assert_eq!(
-            run_wide(&[], &[asm::wide_load_imm_unsigned(W3, value), store]),
-            run_wide(&[], &[asm::load_imm(A1, value), asm::wide_from_reg_unsigned(W3, A1), store])
+            run_wide(&config, &[], &[asm::wide_load_imm_unsigned(W3, value), store]),
+            run_wide(
+                &config,
+                &[],
+                &[asm::load_imm(A1, value), asm::wide_from_reg_unsigned(W3, A1), store]
+            )
         );
         assert_eq!(
-            run_wide(&[], &[asm::wide_load_imm_signed(W3, value), store]),
-            run_wide(&[], &[asm::load_imm(A1, value), asm::wide_from_reg_signed(W3, A1), store])
+            run_wide(&config, &[], &[asm::wide_load_imm_signed(W3, value), store]),
+            run_wide(&config, &[], &[asm::load_imm(A1, value), asm::wide_from_reg_signed(W3, A1), store])
         );
     }
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn wide_load_absolute_reads_without_a_base_register() {
+fn wide_load_absolute_reads_without_a_base_register(config: Config) {
     use polkavm_common::program::Reg::*;
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
@@ -5984,14 +6296,17 @@ fn wide_load_absolute_reads_without_a_base_register() {
     let value = U256([0x0123_4567_89ab_cdef, 2, 3, 4]);
 
     assert_eq!(
-        run_wide(&[value], &[asm::wide_load_absolute(W3, address), asm::wide_store(W3, A0, 96)]),
+        run_wide(
+            &config,
+            &[value],
+            &[asm::wide_load_absolute(W3, address), asm::wide_store(W3, A0, 96)]
+        ),
         value
     );
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn wide_shift_imm_matches_the_register_form() {
+fn wide_shift_imm_matches_the_register_form(config: Config) {
     use polkavm_common::program::Reg::*;
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
@@ -6015,8 +6330,8 @@ fn wide_shift_imm_matches_the_register_form() {
             ),
         ] {
             assert_eq!(
-                run_wide(&[value], &[with_imm, store]),
-                run_wide(&[value], &[asm::load_imm(A1, amount), with_reg, store]),
+                run_wide(&config, &[value], &[with_imm, store]),
+                run_wide(&config, &[value], &[asm::load_imm(A1, amount), with_reg, store]),
                 "shift by {amount}"
             );
         }
@@ -6024,13 +6339,12 @@ fn wide_shift_imm_matches_the_register_form() {
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn wide_bit_counts_write_a_general_purpose_register() {
+fn wide_bit_counts_write_a_general_purpose_register(config: Config) {
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
 
     let count = |body: polkavm_common::program::Instruction, operand: U256| -> u64 {
-        let bytes = run_wide_program(&[operand], &[body, asm::store_indirect_u64(A1, A0, 96)]);
+        let bytes = run_wide_program(&config, &[operand], &[body, asm::store_indirect_u64(A1, A0, 96)]);
         u64::from_le_bytes(bytes[..8].try_into().unwrap())
     };
 
@@ -6044,8 +6358,7 @@ fn wide_bit_counts_write_a_general_purpose_register() {
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn wide_comparisons_write_a_general_purpose_register() {
+fn wide_comparisons_write_a_general_purpose_register(config: Config) {
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
 
@@ -6053,7 +6366,7 @@ fn wide_comparisons_write_a_general_purpose_register() {
     let one = U256::ONE;
 
     let compare = |body: polkavm_common::program::Instruction, operands: [U256; 2]| -> u64 {
-        let bytes = run_wide_program(&operands, &[body, asm::store_indirect_u64(A1, A0, 96)]);
+        let bytes = run_wide_program(&config, &operands, &[body, asm::store_indirect_u64(A1, A0, 96)]);
         u64::from_le_bytes(bytes[..8].try_into().unwrap())
     };
 
@@ -6067,8 +6380,7 @@ fn wide_comparisons_write_a_general_purpose_register() {
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn vector_whole_register_moves_reach_the_halves_of_a_wide_one() {
+fn vector_whole_register_moves_reach_the_halves_of_a_wide_one(config: Config) {
     use polkavm_common::program::VecReg::*;
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
@@ -6079,21 +6391,24 @@ fn vector_whole_register_moves_reach_the_halves_of_a_wide_one() {
     let value = U256([1, 2, 3, 4]);
     let store = asm::wide_store(W3, A0, 96);
     assert_eq!(
-        run_wide(&[value], &[asm::vector_move(V6, V0), asm::vector_move(V7, V1), store]),
+        run_wide(&config, &[value], &[asm::vector_move(V6, V0), asm::vector_move(V7, V1), store]),
         value
     );
 
     // Only the named register moves, so moving the low half alone leaves the high half of
     // the destination as it was.
     assert_eq!(
-        run_wide(&[value, U256::ZERO], &[asm::wide_move(W3, W1), asm::vector_move(V6, V0), store]),
+        run_wide(
+            &config,
+            &[value, U256::ZERO],
+            &[asm::wide_move(W3, W1), asm::vector_move(V6, V0), store]
+        ),
         U256([1, 2, 0, 0])
     );
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn vector_loads_and_stores_reach_one_register() {
+fn vector_loads_and_stores_reach_one_register(config: Config) {
     use polkavm_common::program::VecReg::*;
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
@@ -6103,6 +6418,7 @@ fn vector_loads_and_stores_reach_one_register() {
     let value = U256([1, 2, 3, 4]);
     assert_eq!(
         run_wide(
+            &config,
             &[value],
             &[
                 asm::wide_store(W0, A0, 96),
@@ -6116,6 +6432,7 @@ fn vector_loads_and_stores_reach_one_register() {
     // And a vector load fills only the register it names.
     assert_eq!(
         run_wide(
+            &config,
             &[value, U256::ZERO],
             &[asm::wide_move(W3, W1), asm::vector_load(V7, A0, 0), asm::wide_store(W3, A0, 96),]
         ),
@@ -6124,18 +6441,17 @@ fn vector_loads_and_stores_reach_one_register() {
 }
 
 #[cfg(feature = "std")]
-#[test]
-fn vector_compares_produce_a_mask_the_population_count_reads() {
+fn vector_compares_produce_a_mask_the_population_count_reads(config: Config) {
     use polkavm_common::program::VecReg::*;
     use polkavm_common::vector::VectorConfig;
     use polkavm_common::wide::U256;
 
     // Thirty-two byte-wide elements across a pair of registers, which is the shape a
     // comparison of two 256-bit values in memory takes.
-    let config = VectorConfig::new(0b11_000_001, 32);
-    assert_eq!(config.element_bits(), 8);
-    assert_eq!(config.max_element_count(), 32);
-    let configure = asm::vector_config(cast(config.to_packed()).bitwise_as_i32());
+    let vector_config = VectorConfig::new(0b11_000_001, 32);
+    assert_eq!(vector_config.element_bits(), 8);
+    assert_eq!(vector_config.max_element_count(), 32);
+    let configure = asm::vector_config(cast(vector_config.to_packed()).bitwise_as_i32());
 
     let count = |operands: [U256; 2], equal: bool| -> u64 {
         let compare = if equal {
@@ -6144,6 +6460,7 @@ fn vector_compares_produce_a_mask_the_population_count_reads() {
             asm::vector_set_not_equal(V6, V0, V2)
         };
         let bytes = run_wide_program(
+            &config,
             &operands,
             &[
                 configure,
