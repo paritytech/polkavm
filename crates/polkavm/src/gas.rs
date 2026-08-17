@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use polkavm_common::program::{InstructionSet, InstructionVisitor, Instructions, Opcode, ParsingVisitor, RawReg};
+use polkavm_common::program::{InstructionSet, InstructionVisitor, Instructions, Opcode, ParsingVisitor, RawReg, RawWideReg};
 use polkavm_common::simulator::CacheModel;
 use polkavm_common::utils::GasVisitorT;
 
@@ -167,7 +167,7 @@ macro_rules! define_cost_model_struct {
 }
 
 define_cost_model_struct! {
-    version: 2,
+    version: 3,
 
     add_32,
     add_64,
@@ -306,6 +306,34 @@ define_cost_model_struct! {
     sub_64,
     trap,
     unlikely,
+    wide_add,
+    wide_add_mod,
+    wide_and,
+    wide_div_signed,
+    wide_div_unsigned,
+    wide_exp,
+    wide_from_reg_signed,
+    wide_from_reg_unsigned,
+    wide_load,
+    wide_move,
+    wide_mul,
+    wide_mul_mod,
+    wide_or,
+    wide_rem_signed,
+    wide_rem_unsigned,
+    wide_reverse_bytes,
+    wide_set_equal,
+    wide_set_less_than_signed,
+    wide_set_less_than_unsigned,
+    wide_set_not_equal,
+    wide_shift_arithmetic_right,
+    wide_shift_logical_left,
+    wide_shift_logical_right,
+    wide_sign_extend_byte,
+    wide_store,
+    wide_sub,
+    wide_to_reg,
+    wide_xor,
     xnor,
     xor,
     xor_imm,
@@ -1074,6 +1102,146 @@ impl InstructionVisitor for GasVisitor {
     #[inline(always)]
     fn load_imm64(&mut self, _dst: RawReg, _value: u64) -> Self::ReturnTy {
         self.cost += self.cost_model.load_imm64;
+    }
+
+    #[inline(always)]
+    fn wide_add(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_add;
+    }
+
+    #[inline(always)]
+    fn wide_sub(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_sub;
+    }
+
+    #[inline(always)]
+    fn wide_mul(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_mul;
+    }
+
+    #[inline(always)]
+    fn wide_and(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_and;
+    }
+
+    #[inline(always)]
+    fn wide_or(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_or;
+    }
+
+    #[inline(always)]
+    fn wide_xor(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_xor;
+    }
+
+    #[inline(always)]
+    fn wide_div_unsigned(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_div_unsigned;
+    }
+
+    #[inline(always)]
+    fn wide_div_signed(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_div_signed;
+    }
+
+    #[inline(always)]
+    fn wide_rem_unsigned(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_rem_unsigned;
+    }
+
+    #[inline(always)]
+    fn wide_rem_signed(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_rem_signed;
+    }
+
+    #[inline(always)]
+    fn wide_exp(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_exp;
+    }
+
+    #[inline(always)]
+    fn wide_sign_extend_byte(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_sign_extend_byte;
+    }
+
+    #[inline(always)]
+    fn wide_set_equal(&mut self, _d: RawReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_set_equal;
+    }
+
+    #[inline(always)]
+    fn wide_set_not_equal(&mut self, _d: RawReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_set_not_equal;
+    }
+
+    #[inline(always)]
+    fn wide_set_less_than_unsigned(&mut self, _d: RawReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_set_less_than_unsigned;
+    }
+
+    #[inline(always)]
+    fn wide_set_less_than_signed(&mut self, _d: RawReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_set_less_than_signed;
+    }
+
+    #[inline(always)]
+    fn wide_shift_logical_left(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_shift_logical_left;
+    }
+
+    #[inline(always)]
+    fn wide_shift_logical_right(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_shift_logical_right;
+    }
+
+    #[inline(always)]
+    fn wide_shift_arithmetic_right(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_shift_arithmetic_right;
+    }
+
+    #[inline(always)]
+    fn wide_move(&mut self, _d: RawWideReg, _s: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_move;
+    }
+
+    #[inline(always)]
+    fn wide_reverse_bytes(&mut self, _d: RawWideReg, _s: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_reverse_bytes;
+    }
+
+    #[inline(always)]
+    fn wide_to_reg(&mut self, _s: RawWideReg, _d: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_to_reg;
+    }
+
+    #[inline(always)]
+    fn wide_from_reg_unsigned(&mut self, _d: RawWideReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_from_reg_unsigned;
+    }
+
+    #[inline(always)]
+    fn wide_from_reg_signed(&mut self, _d: RawWideReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_from_reg_signed;
+    }
+
+    #[inline(always)]
+    fn wide_load(&mut self, _d: RawWideReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_load;
+    }
+
+    #[inline(always)]
+    fn wide_store(&mut self, _d: RawWideReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_store;
+    }
+
+    #[inline(always)]
+    fn wide_add_mod(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg, _s3: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_add_mod;
+    }
+
+    #[inline(always)]
+    fn wide_mul_mod(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg, _s3: RawWideReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_mul_mod;
     }
 
     #[inline(always)]

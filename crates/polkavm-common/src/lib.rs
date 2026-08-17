@@ -27,6 +27,7 @@ pub mod operation;
 pub mod program;
 pub mod utils;
 pub mod varint;
+pub mod wide;
 
 #[cfg(feature = "alloc")]
 pub mod writer;

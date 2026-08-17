@@ -19,10 +19,11 @@ use polkavm_common::abi::VM_ADDR_RETURN_TO_HOST;
 use polkavm_common::cast::cast;
 use polkavm_common::operation::*;
 use polkavm_common::program::{
-    asm, interpreter_calculate_cache_num_entries, InstructionVisitor, RawReg, Reg, INTERPRETER_CACHE_ENTRY_SIZE,
+    asm, interpreter_calculate_cache_num_entries, InstructionVisitor, RawReg, RawWideReg, Reg, WideReg, INTERPRETER_CACHE_ENTRY_SIZE,
     INTERPRETER_FLATMAP_ENTRY_SIZE,
 };
 use polkavm_common::utils::{align_to_next_page_usize, slice_assume_init_mut, ArcBytes, GasVisitorT};
+use polkavm_common::wide::U256;
 
 type Target = u32;
 
@@ -1433,6 +1434,7 @@ pub(crate) struct InterpretedInstance {
     standard_memory: StandardMemory,
     dynamic_memory: DynamicMemory,
     regs: [i64; Reg::ALL.len()],
+    wide_regs: [U256; WideReg::ALL.len()],
     program_counter: ProgramCounter,
     program_counter_valid: bool,
     charge_gas_on_entry: bool,
@@ -1464,6 +1466,7 @@ impl InterpretedInstance {
             standard_memory: StandardMemory::new(),
             dynamic_memory: DynamicMemory::new(),
             regs: [0; Reg::ALL.len()],
+            wide_regs: [U256::ZERO; WideReg::ALL.len()],
             program_counter: ProgramCounter(!0),
             program_counter_valid: false,
             charge_gas_on_entry: true,
@@ -2118,6 +2121,118 @@ impl InterpretedInstance {
     #[inline(always)]
     fn go_to_target(&mut self, target: Target) -> Target {
         target
+    }
+
+    #[inline(always)]
+    fn wide_reg(&self, reg: WideReg) -> U256 {
+        self.wide_regs[reg.to_usize()]
+    }
+
+    #[inline(always)]
+    fn set_wide_reg<const DEBUG: bool>(&mut self, dst: WideReg, value: U256) {
+        if DEBUG {
+            log::trace!(
+                "  {dst} = 0x{:016x}{:016x}{:016x}{:016x}",
+                value.0[3],
+                value.0[2],
+                value.0[1],
+                value.0[0]
+            );
+        }
+
+        self.wide_regs[dst.to_usize()] = value;
+    }
+
+    #[inline(always)]
+    fn set_wide3<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        dst: WideReg,
+        s1: WideReg,
+        s2: WideReg,
+        callback: impl Fn(U256, U256) -> U256,
+    ) -> Target {
+        let value = callback(self.wide_reg(s1), self.wide_reg(s2));
+        self.set_wide_reg::<DEBUG>(dst, value);
+        self.go_to_next_instruction(compiled_offset)
+    }
+
+    #[inline(always)]
+    fn set_wide_compare<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        dst: Reg,
+        s1: WideReg,
+        s2: WideReg,
+        callback: impl Fn(U256, U256) -> bool,
+    ) -> Target {
+        let value = u64::from(callback(self.wide_reg(s1), self.wide_reg(s2)));
+        self.set_u64::<DEBUG>(dst, value);
+        self.go_to_next_instruction(compiled_offset)
+    }
+
+    /// The address a wide load or store reaches, which is the base register plus a sign
+    /// extended offset, truncated to the address space.
+    #[inline(always)]
+    fn wide_address(&self, base: Reg, offset: i32) -> u32 {
+        let address = self.regs[base.to_usize()].wrapping_add(cast(offset).to_i64_sign_extend());
+        cast(cast(address).bitwise_as_u64()).truncate_to_u32()
+    }
+
+    fn wide_load<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        program_counter: ProgramCounter,
+        dst: WideReg,
+        base: Reg,
+        offset: i32,
+    ) -> Target {
+        self.program_counter = program_counter;
+
+        let address = self.wide_address(base, offset);
+        let mut buffer = [MaybeUninit::uninit(); U256::BYTES];
+        match self.read_memory_into(address, &mut buffer) {
+            Ok(bytes) => {
+                let mut value = [0; U256::BYTES];
+                value.copy_from_slice(bytes);
+                self.set_wide_reg::<DEBUG>(dst, U256::from_le_bytes(value));
+                self.go_to_next_instruction(compiled_offset)
+            }
+            Err(error) => self.on_wide_access_trap::<DEBUG>(address, error),
+        }
+    }
+
+    fn wide_store<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        program_counter: ProgramCounter,
+        src: WideReg,
+        base: Reg,
+        offset: i32,
+    ) -> Target {
+        self.program_counter = program_counter;
+
+        let address = self.wide_address(base, offset);
+        let value = self.wide_reg(src).to_le_bytes();
+        match self.write_memory(address, &value) {
+            Ok(()) => self.go_to_next_instruction(compiled_offset),
+            Err(error) => self.on_wide_access_trap::<DEBUG>(address, error),
+        }
+    }
+
+    #[must_use]
+    #[cold]
+    #[inline(never)]
+    fn on_wide_access_trap<const DEBUG: bool>(&mut self, address: u32, error: MemoryAccessError) -> Target {
+        if DEBUG {
+            log::debug!(
+                "Wide access at 0x{address:x} failed: {error} (pc = {program_counter}, cycle = {cycle})",
+                program_counter = self.program_counter,
+                cycle = self.cycle_counter
+            );
+        }
+
+        trap_impl::<DEBUG>(self, self.program_counter)
     }
 
     #[inline(always)]
@@ -3093,6 +3208,137 @@ macro_rules! define_interpreter {
         $body
     }};
 
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideReg, $a1:ident: WideReg, $a2:ident: WideReg) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<WideReg>, a1: impl Into<WideReg>, a2: impl Into<WideReg>) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    a2: a2.into().to_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_wide_reg(args.a0);
+        let $a1 = transmute_wide_reg(args.a1);
+        let $a2 = transmute_wide_reg(args.a2);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideReg, $a1:ident: WideReg, $a2:ident: WideReg, $a3:ident: WideReg) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<WideReg>, a1: impl Into<WideReg>, a2: impl Into<WideReg>, a3: impl Into<WideReg>) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    a2: a2.into().to_u32(),
+                    a3: a3.into().to_u32(),
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_wide_reg(args.a0);
+        let $a1 = transmute_wide_reg(args.a1);
+        let $a2 = transmute_wide_reg(args.a2);
+        let $a3 = transmute_wide_reg(args.a3);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: Reg, $a1:ident: WideReg, $a2:ident: WideReg) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<Reg>, a1: impl Into<WideReg>, a2: impl Into<WideReg>) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    a2: a2.into().to_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_reg(args.a0);
+        let $a1 = transmute_wide_reg(args.a1);
+        let $a2 = transmute_wide_reg(args.a2);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideReg, $a1:ident: WideReg, $a2:ident: Reg) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<WideReg>, a1: impl Into<WideReg>, a2: impl Into<Reg>) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    a2: a2.into().to_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_wide_reg(args.a0);
+        let $a1 = transmute_wide_reg(args.a1);
+        let $a2 = transmute_reg(args.a2);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideReg, $a1:ident: WideReg) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<WideReg>, a1: impl Into<WideReg>) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_wide_reg(args.a0);
+        let $a1 = transmute_wide_reg(args.a1);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideReg, $a1:ident: Reg) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<WideReg>, a1: impl Into<Reg>) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_wide_reg(args.a0);
+        let $a1 = transmute_reg(args.a1);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: ProgramCounter, $a1:ident: WideReg, $a2:ident: Reg, $a3:ident: i32) => {{
+        impl Args {
+            pub fn $handler_name(a0: ProgramCounter, a1: impl Into<WideReg>, a2: impl Into<Reg>, a3: i32) -> Args {
+                Args {
+                    a0: a0.0,
+                    a1: a1.into().to_u32(),
+                    a2: a2.into().to_u32(),
+                    a3: cast(a3).bitwise_as_u32(),
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = ProgramCounter(args.a0);
+        let $a1 = transmute_wide_reg(args.a1);
+        let $a2 = transmute_reg(args.a2);
+        let $a3 = cast(args.a3).bitwise_as_i32();
+        $body
+    }};
+
     (@arg_names $handler_name:ident, $a0:ident: $a0_ty:ty, $a1:ident: $a1_ty:ty, $a2:ident: $a2_ty:ty) => {
         asm::$handler_name($a0, $a1, $a2)
     };
@@ -3128,6 +3374,14 @@ macro_rules! define_interpreter {
             )+
         }
     };
+}
+
+#[inline(always)]
+fn transmute_wide_reg(value: u32) -> WideReg {
+    debug_assert!(WideReg::from_raw(value).is_some());
+
+    // SAFETY: The `value` passed in here is always constructed through `reg as u32` so this is always safe.
+    unsafe { core::mem::transmute(value) }
 }
 
 #[inline(always)]
@@ -3477,6 +3731,253 @@ define_interpreter! {
         }
 
         visitor.set3_u64::<DEBUG>(compiled_offset, d, s1, s2, u64::wrapping_add)
+    }
+
+    fn wide_add<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_add(d, s1, s2));
+        }
+
+        visitor.set_wide3::<DEBUG>(compiled_offset, d, s1, s2, U256::wrapping_add)
+    }
+
+    fn wide_sub<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_sub(d, s1, s2));
+        }
+
+        visitor.set_wide3::<DEBUG>(compiled_offset, d, s1, s2, U256::wrapping_sub)
+    }
+
+    fn wide_mul<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_mul(d, s1, s2));
+        }
+
+        visitor.set_wide3::<DEBUG>(compiled_offset, d, s1, s2, U256::wrapping_mul)
+    }
+
+    fn wide_and<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_and(d, s1, s2));
+        }
+
+        visitor.set_wide3::<DEBUG>(compiled_offset, d, s1, s2, U256::bitand)
+    }
+
+    fn wide_or<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_or(d, s1, s2));
+        }
+
+        visitor.set_wide3::<DEBUG>(compiled_offset, d, s1, s2, U256::bitor)
+    }
+
+    fn wide_xor<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_xor(d, s1, s2));
+        }
+
+        visitor.set_wide3::<DEBUG>(compiled_offset, d, s1, s2, U256::bitxor)
+    }
+
+    fn wide_div_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_div_signed(d, s1, s2));
+        }
+
+        visitor.set_wide3::<DEBUG>(compiled_offset, d, s1, s2, U256::div_signed)
+    }
+
+    fn wide_rem_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_rem_signed(d, s1, s2));
+        }
+
+        visitor.set_wide3::<DEBUG>(compiled_offset, d, s1, s2, U256::rem_signed)
+    }
+
+    fn wide_exp<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_exp(d, s1, s2));
+        }
+
+        visitor.set_wide3::<DEBUG>(compiled_offset, d, s1, s2, U256::exp)
+    }
+
+    fn wide_sign_extend_byte<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_sign_extend_byte(d, s1, s2));
+        }
+
+        visitor.set_wide3::<DEBUG>(compiled_offset, d, s1, s2, U256::sign_extend_byte)
+    }
+
+    fn wide_div_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_div_unsigned(d, s1, s2));
+        }
+
+        visitor.set_wide3::<DEBUG>(compiled_offset, d, s1, s2, |s1, s2| s1.div_rem(s2).0)
+    }
+
+    fn wide_rem_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_rem_unsigned(d, s1, s2));
+        }
+
+        visitor.set_wide3::<DEBUG>(compiled_offset, d, s1, s2, |s1, s2| s1.div_rem(s2).1)
+    }
+
+    fn wide_set_equal<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_set_equal(d, s1, s2));
+        }
+
+        visitor.set_wide_compare::<DEBUG>(compiled_offset, d, s1, s2, |s1, s2| s1 == s2)
+    }
+
+    fn wide_set_not_equal<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_set_not_equal(d, s1, s2));
+        }
+
+        visitor.set_wide_compare::<DEBUG>(compiled_offset, d, s1, s2, |s1, s2| s1 != s2)
+    }
+
+    fn wide_set_less_than_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_set_less_than_unsigned(d, s1, s2));
+        }
+
+        visitor.set_wide_compare::<DEBUG>(compiled_offset, d, s1, s2, |s1, s2| s1.less_than(s2))
+    }
+
+    fn wide_set_less_than_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_set_less_than_signed(d, s1, s2));
+        }
+
+        visitor.set_wide_compare::<DEBUG>(compiled_offset, d, s1, s2, |s1, s2| s1.less_than_signed(s2))
+    }
+
+    fn wide_shift_logical_left<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_shift_logical_left(d, s1, s2));
+        }
+
+        let amount = visitor.get_u64::<DEBUG>(s2);
+        let value = U256::shift_left(visitor.wide_reg(s1), amount);
+        visitor.set_wide_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_shift_logical_right<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_shift_logical_right(d, s1, s2));
+        }
+
+        let amount = visitor.get_u64::<DEBUG>(s2);
+        let value = U256::shift_right(visitor.wide_reg(s1), amount);
+        visitor.set_wide_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_shift_arithmetic_right<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_shift_arithmetic_right(d, s1, s2));
+        }
+
+        let amount = visitor.get_u64::<DEBUG>(s2);
+        let value = U256::shift_right_signed(visitor.wide_reg(s1), amount);
+        visitor.set_wide_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_move<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_move(d, s));
+        }
+
+        let value = visitor.wide_reg(s);
+        visitor.set_wide_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_reverse_bytes<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_reverse_bytes(d, s));
+        }
+
+        let value = visitor.wide_reg(s).swap_bytes();
+        visitor.set_wide_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_to_reg<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s: WideReg, d: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_to_reg(s, d));
+        }
+
+        let value = visitor.wide_reg(s).low_u64();
+        visitor.set_u64::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_from_reg_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_from_reg_unsigned(d, s));
+        }
+
+        let value = U256::from_u64(visitor.get_u64::<DEBUG>(s));
+        visitor.set_wide_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_from_reg_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_from_reg_signed(d, s));
+        }
+
+        let value = U256::from_i64(visitor.get_i64::<DEBUG>(s));
+        visitor.set_wide_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_load<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: WideReg, base: Reg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_load(d, base, offset));
+        }
+
+        visitor.wide_load::<DEBUG>(compiled_offset, program_counter, d, base, offset)
+    }
+
+    fn wide_store<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, s: WideReg, base: Reg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_store(s, base, offset));
+        }
+
+        visitor.wide_store::<DEBUG>(compiled_offset, program_counter, s, base, offset)
+    }
+
+    fn wide_add_mod<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg, s3: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_add_mod(d, s1, s2, s3));
+        }
+
+        let value = visitor.wide_reg(s1).add_mod(visitor.wide_reg(s2), visitor.wide_reg(s3));
+        visitor.set_wide_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_mul_mod<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg, s3: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_mul_mod(d, s1, s2, s3));
+        }
+
+        let value = visitor.wide_reg(s1).mul_mod(visitor.wide_reg(s2), visitor.wide_reg(s3));
+        visitor.set_wide_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
     }
 
     fn sub_32<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s1: Reg, s2: Reg) -> Target {
@@ -4876,6 +5377,118 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
 
     fn add_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         emit!(self, add_64(d, s1, s2));
+    }
+
+    fn wide_add(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_add(d, s1, s2));
+    }
+
+    fn wide_sub(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_sub(d, s1, s2));
+    }
+
+    fn wide_mul(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_mul(d, s1, s2));
+    }
+
+    fn wide_and(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_and(d, s1, s2));
+    }
+
+    fn wide_or(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_or(d, s1, s2));
+    }
+
+    fn wide_xor(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_xor(d, s1, s2));
+    }
+
+    fn wide_div_unsigned(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_div_unsigned(d, s1, s2));
+    }
+
+    fn wide_div_signed(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_div_signed(d, s1, s2));
+    }
+
+    fn wide_rem_unsigned(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_rem_unsigned(d, s1, s2));
+    }
+
+    fn wide_rem_signed(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_rem_signed(d, s1, s2));
+    }
+
+    fn wide_exp(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_exp(d, s1, s2));
+    }
+
+    fn wide_sign_extend_byte(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_sign_extend_byte(d, s1, s2));
+    }
+
+    fn wide_set_equal(&mut self, d: RawReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_set_equal(d, s1, s2));
+    }
+
+    fn wide_set_not_equal(&mut self, d: RawReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_set_not_equal(d, s1, s2));
+    }
+
+    fn wide_set_less_than_unsigned(&mut self, d: RawReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_set_less_than_unsigned(d, s1, s2));
+    }
+
+    fn wide_set_less_than_signed(&mut self, d: RawReg, s1: RawWideReg, s2: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_set_less_than_signed(d, s1, s2));
+    }
+
+    fn wide_shift_logical_left(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_shift_logical_left(d, s1, s2));
+    }
+
+    fn wide_shift_logical_right(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_shift_logical_right(d, s1, s2));
+    }
+
+    fn wide_shift_arithmetic_right(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_shift_arithmetic_right(d, s1, s2));
+    }
+
+    fn wide_move(&mut self, d: RawWideReg, s: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_move(d, s));
+    }
+
+    fn wide_reverse_bytes(&mut self, d: RawWideReg, s: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_reverse_bytes(d, s));
+    }
+
+    fn wide_to_reg(&mut self, s: RawWideReg, d: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_to_reg(s, d));
+    }
+
+    fn wide_from_reg_unsigned(&mut self, d: RawWideReg, s: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_from_reg_unsigned(d, s));
+    }
+
+    fn wide_from_reg_signed(&mut self, d: RawWideReg, s: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_from_reg_signed(d, s));
+    }
+
+    fn wide_load(&mut self, d: RawWideReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, wide_load(self.program_counter, d, base, offset));
+    }
+
+    fn wide_store(&mut self, s: RawWideReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, wide_store(self.program_counter, s, base, offset));
+    }
+
+    fn wide_add_mod(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg, s3: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_add_mod(d, s1, s2, s3));
+    }
+
+    fn wide_mul_mod(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg, s3: RawWideReg) -> Self::ReturnTy {
+        emit!(self, wide_mul_mod(d, s1, s2, s3));
     }
 
     fn sub_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {

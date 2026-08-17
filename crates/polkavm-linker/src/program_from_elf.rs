@@ -19,7 +19,10 @@ use crate::elf::{Elf, Section, SectionIndex};
 use crate::fast_range_map::RangeMap;
 use crate::riscv::DecoderConfig;
 use crate::riscv::Reg as RReg;
-use crate::riscv::{AtomicKind, BranchKind, CmovKind, Inst, LoadKind, RegImmKind, StoreKind};
+use crate::riscv::{
+    AtomicKind, BranchKind, CmovKind, Inst, LoadKind, RegImmKind, StoreKind, WideCompareKind, WideFromRegKind, WideModularKind,
+    WideMoveKind, WideReg, WideRegRegKind, WideShiftKind,
+};
 
 static OVERFLOW: &str = "internal error: numerical overflow; this is a bug - please report it";
 
@@ -659,6 +662,123 @@ enum BasicInst<T> {
         stack_space: u32,
         regs: Vec<(u32, Reg)>,
     },
+    Wide(WideInst),
+}
+
+/// An instruction on the wide register file.
+///
+/// The general purpose operands are spelled out separately from the wide ones because only
+/// they take part in the register liveness the passes below run; the wide file is passed
+/// through as the compiler allocated it.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum WideInst {
+    RegReg {
+        kind: WideRegRegKind,
+        dst: WideReg,
+        src1: WideReg,
+        src2: WideReg,
+    },
+    Compare {
+        kind: WideCompareKind,
+        dst: Reg,
+        src1: WideReg,
+        src2: WideReg,
+    },
+    Shift {
+        kind: WideShiftKind,
+        dst: WideReg,
+        src: WideReg,
+        amount: Reg,
+    },
+    Modular {
+        kind: WideModularKind,
+        dst: WideReg,
+        src1: WideReg,
+        src2: WideReg,
+        src3: WideReg,
+    },
+    Move {
+        kind: WideMoveKind,
+        dst: WideReg,
+        src: WideReg,
+    },
+    ToReg {
+        dst: Reg,
+        src: WideReg,
+    },
+    FromReg {
+        kind: WideFromRegKind,
+        dst: WideReg,
+        src: Reg,
+    },
+    Load {
+        dst: WideReg,
+        base: Reg,
+        offset: i32,
+    },
+    Store {
+        src: WideReg,
+        base: Reg,
+        offset: i32,
+    },
+}
+
+impl WideInst {
+    /// The general purpose registers this reads.
+    fn src_mask(self) -> RegMask {
+        match self {
+            WideInst::Shift { amount, .. } => RegMask::from(amount),
+            WideInst::FromReg { src, .. } => RegMask::from(src),
+            WideInst::Load { base, .. } | WideInst::Store { base, .. } => RegMask::from(base),
+            WideInst::RegReg { .. } | WideInst::Compare { .. } | WideInst::Modular { .. } | WideInst::Move { .. } => RegMask::empty(),
+            WideInst::ToReg { .. } => RegMask::empty(),
+        }
+    }
+
+    /// The general purpose registers this writes.
+    fn dst_mask(self) -> RegMask {
+        match self {
+            WideInst::Compare { dst, .. } | WideInst::ToReg { dst, .. } => RegMask::from(dst),
+            _ => RegMask::empty(),
+        }
+    }
+
+    fn map_registers(self, mut map: impl FnMut(Reg, OpKind) -> Reg) -> Self {
+        match self {
+            WideInst::Shift { kind, dst, src, amount } => WideInst::Shift {
+                kind,
+                dst,
+                src,
+                amount: map(amount, OpKind::Read),
+            },
+            WideInst::FromReg { kind, dst, src } => WideInst::FromReg {
+                kind,
+                dst,
+                src: map(src, OpKind::Read),
+            },
+            WideInst::Load { dst, base, offset } => WideInst::Load {
+                dst,
+                base: map(base, OpKind::Read),
+                offset,
+            },
+            WideInst::Store { src, base, offset } => WideInst::Store {
+                src,
+                base: map(base, OpKind::Read),
+                offset,
+            },
+            WideInst::Compare { kind, dst, src1, src2 } => WideInst::Compare {
+                kind,
+                dst: map(dst, OpKind::Write),
+                src1,
+                src2,
+            },
+            WideInst::ToReg { dst, src } => WideInst::ToReg {
+                dst: map(dst, OpKind::Write),
+                src,
+            },
+            WideInst::RegReg { .. } | WideInst::Modular { .. } | WideInst::Move { .. } => self,
+        }
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -698,6 +818,7 @@ impl<T> BasicInst<T> {
             BasicInst::Memset => RegMask::from(Reg::A0) | RegMask::from(Reg::A1) | RegMask::from(Reg::A2),
             BasicInst::Prologue { ref regs, .. } => RegMask::from(Reg::SP) | RegMask::from_regs(regs.iter().map(|&(_, reg)| reg)),
             BasicInst::Epilogue { .. } => RegMask::from(Reg::SP),
+            BasicInst::Wide(instruction) => instruction.src_mask(),
         }
     }
 
@@ -721,6 +842,7 @@ impl<T> BasicInst<T> {
             BasicInst::Memset => RegMask::from(Reg::A0) | RegMask::from(Reg::A2),
             BasicInst::Prologue { .. } => RegMask::from(Reg::SP),
             BasicInst::Epilogue { ref regs, .. } => RegMask::from(Reg::SP) | RegMask::from_regs(regs.iter().map(|&(_, reg)| reg)),
+            BasicInst::Wide(instruction) => instruction.dst_mask(),
         }
     }
 
@@ -745,6 +867,9 @@ impl<T> BasicInst<T> {
             | BasicInst::RegReg { .. }
             | BasicInst::Cmov { .. }
             | BasicInst::AnyAny { .. } => false,
+            // Liveness here is over the general purpose registers only, so an instruction
+            // whose result lands in the wide file must not look dead.
+            BasicInst::Wide(..) => true,
         }
     }
 
@@ -849,6 +974,7 @@ impl<T> BasicInst<T> {
 
                 Some(output)
             }
+            BasicInst::Wide(instruction) => Some(BasicInst::Wide(instruction.map_registers(map))),
         }
     }
 
@@ -907,6 +1033,7 @@ impl<T> BasicInst<T> {
             BasicInst::LoadAbsolute { kind, dst, target } => BasicInst::LoadAbsolute { kind, dst, target },
             BasicInst::StoreAbsolute { kind, src, target } => BasicInst::StoreAbsolute { kind, src, target },
             BasicInst::LoadAddress { dst, target } => BasicInst::LoadAddress { dst, target: map(target)? },
+            BasicInst::Wide(instruction) => BasicInst::Wide(instruction),
             BasicInst::LoadAddressIndirect { dst, target } => BasicInst::LoadAddressIndirect { dst, target: map(target)? },
             BasicInst::LoadIndirect { kind, dst, base, offset } => BasicInst::LoadIndirect { kind, dst, base, offset },
             BasicInst::StoreIndirect { kind, src, base, offset } => BasicInst::StoreIndirect { kind, src, base, offset },
@@ -946,6 +1073,7 @@ impl<T> BasicInst<T> {
             | BasicInst::Cmov { .. }
             | BasicInst::Sbrk { .. }
             | BasicInst::Memset
+            | BasicInst::Wide(..)
             | BasicInst::Ecalli { .. } => (None, None),
         }
     }
@@ -1980,6 +2108,93 @@ fn convert_instruction(
     mut emit: impl FnMut(InstExt<SectionTarget, SectionTarget>),
 ) -> Result<(), ProgramFromElfError> {
     match instruction {
+        Inst::WideRegReg { kind, dst, src1, src2 } => {
+            emit(InstExt::Basic(BasicInst::Wide(WideInst::RegReg { kind, dst, src1, src2 })));
+            Ok(())
+        }
+        Inst::WideCompare { kind, dst, src1, src2 } => {
+            let Some(dst) = cast_reg_non_zero(dst)? else {
+                emit(InstExt::nop());
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Wide(WideInst::Compare { kind, dst, src1, src2 })));
+            Ok(())
+        }
+        Inst::WideShift { kind, dst, src, amount } => {
+            // A shift by `zero` is a shift by nothing, which is the same as a move.
+            let Some(amount) = cast_reg_non_zero(amount)? else {
+                emit(InstExt::Basic(BasicInst::Wide(WideInst::Move {
+                    kind: WideMoveKind::Move,
+                    dst,
+                    src,
+                })));
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Wide(WideInst::Shift { kind, dst, src, amount })));
+            Ok(())
+        }
+        Inst::WideModular {
+            kind,
+            dst,
+            src1,
+            src2,
+            src3,
+        } => {
+            emit(InstExt::Basic(BasicInst::Wide(WideInst::Modular {
+                kind,
+                dst,
+                src1,
+                src2,
+                src3,
+            })));
+            Ok(())
+        }
+        Inst::WideMove { kind, dst, src } => {
+            emit(InstExt::Basic(BasicInst::Wide(WideInst::Move { kind, dst, src })));
+            Ok(())
+        }
+        Inst::WideToReg { dst, src } => {
+            let Some(dst) = cast_reg_non_zero(dst)? else {
+                emit(InstExt::nop());
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Wide(WideInst::ToReg { dst, src })));
+            Ok(())
+        }
+        Inst::WideFromReg { kind, dst, src } => {
+            // Widening `zero` is a zero of either sign.
+            let Some(src) = cast_reg_non_zero(src)? else {
+                emit(InstExt::Basic(BasicInst::Wide(WideInst::RegReg {
+                    kind: WideRegRegKind::Xor,
+                    dst,
+                    src1: dst,
+                    src2: dst,
+                })));
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Wide(WideInst::FromReg { kind, dst, src })));
+            Ok(())
+        }
+        Inst::WideLoad { dst, base, offset } => {
+            let Some(base) = cast_reg_non_zero(base)? else {
+                return Err(ProgramFromElfError::other("found a wide load with no base register"));
+            };
+
+            emit(InstExt::Basic(BasicInst::Wide(WideInst::Load { dst, base, offset })));
+            Ok(())
+        }
+        Inst::WideStore { src, base, offset } => {
+            let Some(base) = cast_reg_non_zero(base)? else {
+                return Err(ProgramFromElfError::other("found a wide store with no base register"));
+            };
+
+            emit(InstExt::Basic(BasicInst::Wide(WideInst::Store { src, base, offset })));
+            Ok(())
+        }
         Inst::LoadUpperImmediate { dst, value } => {
             let Some(dst) = cast_reg_non_zero(dst)? else {
                 emit(InstExt::nop());
@@ -8748,6 +8963,84 @@ fn emit_code(
                 }
                 BasicInst::Sbrk { dst, size } => Instruction::sbrk(conv_reg(dst), conv_reg(size)),
                 BasicInst::Memset => Instruction::memset,
+                BasicInst::Wide(instruction) => {
+                    use polkavm_common::program::WideReg as PWideReg;
+
+                    fn conv_wide(reg: WideReg) -> polkavm_common::program::RawWideReg {
+                        // The two files are declared in the same order, so the index carries over.
+                        let Some(reg) = PWideReg::from_raw(reg as u32) else {
+                            unreachable!("internal error: unknown wide register")
+                        };
+                        reg.raw()
+                    }
+
+                    match instruction {
+                        WideInst::RegReg { kind, dst, src1, src2 } => {
+                            let (dst, src1, src2) = (conv_wide(dst), conv_wide(src1), conv_wide(src2));
+                            match kind {
+                                WideRegRegKind::Add => Instruction::wide_add(dst, src1, src2),
+                                WideRegRegKind::Sub => Instruction::wide_sub(dst, src1, src2),
+                                WideRegRegKind::Mul => Instruction::wide_mul(dst, src1, src2),
+                                WideRegRegKind::And => Instruction::wide_and(dst, src1, src2),
+                                WideRegRegKind::Or => Instruction::wide_or(dst, src1, src2),
+                                WideRegRegKind::Xor => Instruction::wide_xor(dst, src1, src2),
+                                WideRegRegKind::DivUnsigned => Instruction::wide_div_unsigned(dst, src1, src2),
+                                WideRegRegKind::DivSigned => Instruction::wide_div_signed(dst, src1, src2),
+                                WideRegRegKind::RemUnsigned => Instruction::wide_rem_unsigned(dst, src1, src2),
+                                WideRegRegKind::RemSigned => Instruction::wide_rem_signed(dst, src1, src2),
+                                WideRegRegKind::Exp => Instruction::wide_exp(dst, src1, src2),
+                                WideRegRegKind::SignExtendByte => Instruction::wide_sign_extend_byte(dst, src1, src2),
+                            }
+                        }
+                        WideInst::Compare { kind, dst, src1, src2 } => {
+                            let (dst, src1, src2) = (conv_reg(dst), conv_wide(src1), conv_wide(src2));
+                            match kind {
+                                WideCompareKind::Equal => Instruction::wide_set_equal(dst, src1, src2),
+                                WideCompareKind::NotEqual => Instruction::wide_set_not_equal(dst, src1, src2),
+                                WideCompareKind::LessUnsigned => Instruction::wide_set_less_than_unsigned(dst, src1, src2),
+                                WideCompareKind::LessSigned => Instruction::wide_set_less_than_signed(dst, src1, src2),
+                            }
+                        }
+                        WideInst::Shift { kind, dst, src, amount } => {
+                            let (dst, src, amount) = (conv_wide(dst), conv_wide(src), conv_reg(amount));
+                            match kind {
+                                WideShiftKind::LogicalLeft => Instruction::wide_shift_logical_left(dst, src, amount),
+                                WideShiftKind::LogicalRight => Instruction::wide_shift_logical_right(dst, src, amount),
+                                WideShiftKind::ArithmeticRight => Instruction::wide_shift_arithmetic_right(dst, src, amount),
+                            }
+                        }
+                        WideInst::Modular {
+                            kind,
+                            dst,
+                            src1,
+                            src2,
+                            src3,
+                        } => {
+                            let (dst, src1, src2, src3) = (conv_wide(dst), conv_wide(src1), conv_wide(src2), conv_wide(src3));
+                            match kind {
+                                WideModularKind::AddMod => Instruction::wide_add_mod(dst, src1, src2, src3),
+                                WideModularKind::MulMod => Instruction::wide_mul_mod(dst, src1, src2, src3),
+                            }
+                        }
+                        WideInst::Move { kind, dst, src } => {
+                            let (dst, src) = (conv_wide(dst), conv_wide(src));
+                            match kind {
+                                WideMoveKind::Move => Instruction::wide_move(dst, src),
+                                WideMoveKind::ReverseBytes => Instruction::wide_reverse_bytes(dst, src),
+                            }
+                        }
+                        WideInst::ToReg { dst, src } => Instruction::wide_to_reg(conv_wide(src), conv_reg(dst)),
+                        WideInst::FromReg { kind, dst, src } => {
+                            let (dst, src) = (conv_wide(dst), conv_reg(src));
+                            match kind {
+                                WideFromRegKind::Unsigned => Instruction::wide_from_reg_unsigned(dst, src),
+                                WideFromRegKind::Signed => Instruction::wide_from_reg_signed(dst, src),
+                            }
+                        }
+                        WideInst::Load { dst, base, offset } => Instruction::wide_load(conv_wide(dst), conv_reg(base), offset),
+                        WideInst::Store { src, base, offset } => Instruction::wide_store(conv_wide(src), conv_reg(base), offset),
+                    }
+                }
                 BasicInst::Nop => unreachable!("internal error: a nop instruction was not removed"),
                 BasicInst::Prologue { .. } => unreachable!("internal error: a prologue instruction was not removed"),
                 BasicInst::Epilogue { .. } => unreachable!("internal error: an epilogue instruction was not removed"),

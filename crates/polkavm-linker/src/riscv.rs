@@ -37,6 +37,150 @@ pub enum Reg {
     T6,
 }
 
+/// One of the sixteen 256-bit registers, as encoded in a register field.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+#[repr(u32)]
+pub enum WideReg {
+    W0 = 0,
+    W1,
+    W2,
+    W3,
+    W4,
+    W5,
+    W6,
+    W7,
+    W8,
+    W9,
+    W10,
+    W11,
+    W12,
+    W13,
+    W14,
+    W15,
+}
+
+impl WideReg {
+    /// Decodes a register field. Only the low sixteen encodings name a register; the rest
+    /// belong to the vector file this extension does not use.
+    const fn decode(value: u32) -> Option<Self> {
+        use WideReg::*;
+        Some(match value & 0b11111 {
+            0 => W0,
+            1 => W1,
+            2 => W2,
+            3 => W3,
+            4 => W4,
+            5 => W5,
+            6 => W6,
+            7 => W7,
+            8 => W8,
+            9 => W9,
+            10 => W10,
+            11 => W11,
+            12 => W12,
+            13 => W13,
+            14 => W14,
+            15 => W15,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum WideRegRegKind {
+    Add,
+    Sub,
+    Mul,
+    And,
+    Or,
+    Xor,
+    DivUnsigned,
+    DivSigned,
+    RemUnsigned,
+    RemSigned,
+    Exp,
+    SignExtendByte,
+}
+
+impl WideRegRegKind {
+    const fn decode(value: u32) -> Option<Self> {
+        use WideRegRegKind::*;
+        Some(match value {
+            0 => Add,
+            1 => Sub,
+            2 => Mul,
+            3 => And,
+            4 => Or,
+            5 => Xor,
+            6 => DivUnsigned,
+            7 => DivSigned,
+            8 => RemUnsigned,
+            9 => RemSigned,
+            10 => Exp,
+            11 => SignExtendByte,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum WideCompareKind {
+    Equal,
+    NotEqual,
+    LessUnsigned,
+    LessSigned,
+}
+
+impl WideCompareKind {
+    const fn decode(value: u32) -> Option<Self> {
+        use WideCompareKind::*;
+        Some(match value {
+            0 => Equal,
+            1 => NotEqual,
+            2 => LessUnsigned,
+            3 => LessSigned,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum WideShiftKind {
+    LogicalLeft,
+    LogicalRight,
+    ArithmeticRight,
+}
+
+impl WideShiftKind {
+    const fn decode(value: u32) -> Option<Self> {
+        use WideShiftKind::*;
+        Some(match value {
+            0 => LogicalLeft,
+            1 => LogicalRight,
+            2 => ArithmeticRight,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum WideModularKind {
+    AddMod,
+    MulMod,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum WideMoveKind {
+    Move,
+    ReverseBytes,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum WideFromRegKind {
+    Unsigned,
+    Signed,
+}
+
 pub struct DecoderConfig {
     pub(crate) rv64: bool,
 }
@@ -508,6 +652,55 @@ pub enum Inst {
         src_true: Reg,
         src_false: Reg,
         cond: Reg,
+    },
+    WideRegReg {
+        kind: WideRegRegKind,
+        dst: WideReg,
+        src1: WideReg,
+        src2: WideReg,
+    },
+    WideCompare {
+        kind: WideCompareKind,
+        dst: Reg,
+        src1: WideReg,
+        src2: WideReg,
+    },
+    WideShift {
+        kind: WideShiftKind,
+        dst: WideReg,
+        src: WideReg,
+        amount: Reg,
+    },
+    WideModular {
+        kind: WideModularKind,
+        dst: WideReg,
+        src1: WideReg,
+        src2: WideReg,
+        src3: WideReg,
+    },
+    WideMove {
+        kind: WideMoveKind,
+        dst: WideReg,
+        src: WideReg,
+    },
+    WideToReg {
+        dst: Reg,
+        src: WideReg,
+    },
+    WideFromReg {
+        kind: WideFromRegKind,
+        dst: WideReg,
+        src: Reg,
+    },
+    WideLoad {
+        dst: WideReg,
+        base: Reg,
+        offset: i32,
+    },
+    WideStore {
+        src: WideReg,
+        base: Reg,
+        offset: i32,
     },
 }
 
@@ -1494,6 +1687,80 @@ impl Inst {
                     src_false: src3,
                     cond: src2,
                 })
+            }
+            0b1011011 => {
+                // OPCODE_CUSTOM_2, the wide integer instructions. `funct3` picks the operand
+                // shape and `funct7` the operation within it.
+                let funct3 = (op >> 12) & 0b111;
+                let funct7 = op >> 25;
+                match funct3 {
+                    0b000 => Some(Inst::WideRegReg {
+                        kind: WideRegRegKind::decode(funct7)?,
+                        dst: WideReg::decode(op >> 7)?,
+                        src1: WideReg::decode(op >> 15)?,
+                        src2: WideReg::decode(op >> 20)?,
+                    }),
+                    0b001 => Some(Inst::WideCompare {
+                        kind: WideCompareKind::decode(funct7)?,
+                        dst: Reg::decode(op >> 7),
+                        src1: WideReg::decode(op >> 15)?,
+                        src2: WideReg::decode(op >> 20)?,
+                    }),
+                    0b010 => Some(Inst::WideShift {
+                        kind: WideShiftKind::decode(funct7)?,
+                        dst: WideReg::decode(op >> 7)?,
+                        src: WideReg::decode(op >> 15)?,
+                        amount: Reg::decode(op >> 20),
+                    }),
+                    0b011 => Some(Inst::WideModular {
+                        kind: match (op >> 25) & 0b11 {
+                            0 => WideModularKind::AddMod,
+                            1 => WideModularKind::MulMod,
+                            _ => return None,
+                        },
+                        dst: WideReg::decode(op >> 7)?,
+                        src1: WideReg::decode(op >> 15)?,
+                        src2: WideReg::decode(op >> 20)?,
+                        src3: WideReg::decode(op >> 27)?,
+                    }),
+                    0b100 => Some(Inst::WideLoad {
+                        dst: WideReg::decode(op >> 7)?,
+                        base: Reg::decode(op >> 15),
+                        offset: sign_ext(bits(0, 11, op, 20), 12),
+                    }),
+                    0b101 => Some(Inst::WideStore {
+                        src: WideReg::decode(op >> 20)?,
+                        base: Reg::decode(op >> 15),
+                        offset: sign_ext(bits(0, 4, op, 7) | bits(5, 11, op, 25), 12),
+                    }),
+                    0b110 => match funct7 {
+                        0 => Some(Inst::WideMove {
+                            kind: WideMoveKind::Move,
+                            dst: WideReg::decode(op >> 7)?,
+                            src: WideReg::decode(op >> 15)?,
+                        }),
+                        1 => Some(Inst::WideToReg {
+                            dst: Reg::decode(op >> 7),
+                            src: WideReg::decode(op >> 15)?,
+                        }),
+                        2 => Some(Inst::WideMove {
+                            kind: WideMoveKind::ReverseBytes,
+                            dst: WideReg::decode(op >> 7)?,
+                            src: WideReg::decode(op >> 15)?,
+                        }),
+                        _ => None,
+                    },
+                    0b111 => Some(Inst::WideFromReg {
+                        kind: match funct7 {
+                            0 => WideFromRegKind::Unsigned,
+                            1 => WideFromRegKind::Signed,
+                            _ => return None,
+                        },
+                        dst: WideReg::decode(op >> 7)?,
+                        src: Reg::decode(op >> 15),
+                    }),
+                    _ => None,
+                }
             }
             0b0001011 => {
                 // OPCODE_CUSTOM_0

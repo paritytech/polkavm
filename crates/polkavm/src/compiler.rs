@@ -5,7 +5,7 @@ use std::sync::Arc;
 use polkavm_assembler::{Assembler, Label};
 use polkavm_common::abi::VM_CODE_ADDRESS_ALIGNMENT;
 use polkavm_common::cast::cast;
-use polkavm_common::program::{is_jump_target_valid, InstructionSetKind, JumpTable, ProgramCounter, ProgramExport, RawReg};
+use polkavm_common::program::{is_jump_target_valid, InstructionSetKind, JumpTable, ProgramCounter, ProgramExport, RawReg, RawWideReg};
 use polkavm_common::utils::{Bitness, BitnessT, GasVisitorT};
 use polkavm_common::zygote::VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH;
 
@@ -112,6 +112,7 @@ where
     memset_trampoline_end: usize,
     custom_codegen: Option<Arc<dyn CustomCodegen>>,
     first_invalid_offset: Option<ProgramCounter>,
+    first_wide_offset: Option<ProgramCounter>,
 
     _phantom: PhantomData<(S, B)>,
 }
@@ -277,6 +278,7 @@ where
             memset_trampoline_end: 0,
             custom_codegen: config.custom_codegen.clone(),
             first_invalid_offset: None,
+            first_wide_offset: None,
             _phantom: PhantomData,
         };
 
@@ -308,6 +310,18 @@ where
         is_jump_target_valid(self.instruction_set, self.code, self.bitmask, offset)
     }
 
+    /// Records that the recompiler met an instruction it cannot emit, so that compilation
+    /// fails rather than producing a module that traps at run time.
+    #[inline(never)]
+    #[cold]
+    fn unsupported_wide_instruction(&mut self, code_offset: u32, args_length: u32) {
+        if self.first_wide_offset.is_none() {
+            self.first_wide_offset = Some(ProgramCounter(code_offset));
+        }
+
+        polkavm_common::program::ParsingVisitor::invalid(self, code_offset, args_length);
+    }
+
     pub(crate) fn finish_compilation(
         mut self,
         global: &S::GlobalState,
@@ -321,6 +335,12 @@ where
             if let Some(pc) = self.first_invalid_offset {
                 return Err(CompileError::ValidationFailed(format!("validation failed at offset {pc}")));
             }
+        }
+
+        if let Some(pc) = self.first_wide_offset {
+            return Err(CompileError::ValidationFailed(format!(
+                "the recompiler does not implement the wide integer instructions; the one at offset {pc} needs the interpreter"
+            )));
         }
 
         log::trace!("Finishing compilation...");
@@ -643,6 +663,190 @@ where
 
     fn and_inverted(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, and_inverted(d, s1, s2));
+    }
+
+    fn wide_add(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_sub(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_mul(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_and(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_or(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_xor(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_div_unsigned(
+        &mut self,
+        code_offset: u32,
+        args_length: u32,
+        _d: RawWideReg,
+        _s1: RawWideReg,
+        _s2: RawWideReg,
+    ) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_div_signed(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_rem_unsigned(
+        &mut self,
+        code_offset: u32,
+        args_length: u32,
+        _d: RawWideReg,
+        _s1: RawWideReg,
+        _s2: RawWideReg,
+    ) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_rem_signed(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_exp(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_sign_extend_byte(
+        &mut self,
+        code_offset: u32,
+        args_length: u32,
+        _d: RawWideReg,
+        _s1: RawWideReg,
+        _s2: RawWideReg,
+    ) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_set_equal(&mut self, code_offset: u32, args_length: u32, _d: RawReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_set_not_equal(&mut self, code_offset: u32, args_length: u32, _d: RawReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_set_less_than_unsigned(
+        &mut self,
+        code_offset: u32,
+        args_length: u32,
+        _d: RawReg,
+        _s1: RawWideReg,
+        _s2: RawWideReg,
+    ) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_set_less_than_signed(
+        &mut self,
+        code_offset: u32,
+        args_length: u32,
+        _d: RawReg,
+        _s1: RawWideReg,
+        _s2: RawWideReg,
+    ) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_shift_logical_left(
+        &mut self,
+        code_offset: u32,
+        args_length: u32,
+        _d: RawWideReg,
+        _s1: RawWideReg,
+        _s2: RawReg,
+    ) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_shift_logical_right(
+        &mut self,
+        code_offset: u32,
+        args_length: u32,
+        _d: RawWideReg,
+        _s1: RawWideReg,
+        _s2: RawReg,
+    ) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_shift_arithmetic_right(
+        &mut self,
+        code_offset: u32,
+        args_length: u32,
+        _d: RawWideReg,
+        _s1: RawWideReg,
+        _s2: RawReg,
+    ) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_move(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s: RawWideReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_reverse_bytes(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s: RawWideReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_to_reg(&mut self, code_offset: u32, args_length: u32, _s: RawWideReg, _d: RawReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_from_reg_unsigned(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s: RawReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_from_reg_signed(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s: RawReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_load(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_store(&mut self, code_offset: u32, args_length: u32, _s: RawWideReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_add_mod(
+        &mut self,
+        code_offset: u32,
+        args_length: u32,
+        _d: RawWideReg,
+        _s1: RawWideReg,
+        _s2: RawWideReg,
+        _s3: RawWideReg,
+    ) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_mul_mod(
+        &mut self,
+        code_offset: u32,
+        args_length: u32,
+        _d: RawWideReg,
+        _s1: RawWideReg,
+        _s2: RawWideReg,
+        _s3: RawWideReg,
+    ) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
     }
 
     fn or_inverted(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
