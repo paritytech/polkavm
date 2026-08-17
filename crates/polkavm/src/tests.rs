@@ -5734,3 +5734,229 @@ assert_send_sync! {
     crate::ModuleConfig,
     crate::ProgramBlob,
 }
+
+/// Runs one wide instruction in the interpreter and returns what it left in memory.
+///
+/// The program reads its two operands from the start of the read-write data, runs `body`,
+/// and the caller reads the result back from the third slot.
+#[cfg(feature = "std")]
+fn run_wide_program(operands: &[polkavm_common::wide::U256], body: &[polkavm_common::program::Instruction]) -> [u8; 32] {
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    const DATA_SIZE: u32 = 0x4000;
+    const RESULT_OFFSET: i32 = 96;
+
+    let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(DATA_SIZE).build().unwrap();
+    let base = memory_map.rw_data_address();
+
+    let mut code = vec![asm::load_imm(A0, cast(base).bitwise_as_i32())];
+    for (index, register) in [W0, W1, W2].iter().enumerate().take(operands.len()) {
+        code.push(asm::wide_load(*register, A0, cast(index as u32 * 32).bitwise_as_i32()));
+    }
+    code.extend_from_slice(body);
+    code.push(asm::ret());
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::ReviveV1);
+    builder.set_rw_data_size(DATA_SIZE);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&code, &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+    let mut config = Config::default();
+    config.set_backend(Some(BackendKind::Interpreter));
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
+    let mut instance = module.instantiate().unwrap();
+
+    for (index, operand) in operands.iter().enumerate() {
+        instance.write_memory(base + index as u32 * 32, &operand.to_le_bytes()).unwrap();
+    }
+
+    let result_address = base + cast(RESULT_OFFSET).bitwise_as_u32();
+    instance.write_memory(result_address, &U256::ZERO.to_le_bytes()).unwrap();
+
+    let entry_point = module.exports().find(|export| export == "main").unwrap().program_counter();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(entry_point);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+
+    let mut result = [0; 32];
+    instance.read_memory_into(result_address, &mut result[..]).unwrap();
+    result
+}
+
+/// Runs `body` and returns the 256-bit value it stored.
+#[cfg(feature = "std")]
+fn run_wide(operands: &[polkavm_common::wide::U256], body: &[polkavm_common::program::Instruction]) -> polkavm_common::wide::U256 {
+    polkavm_common::wide::U256::from_le_bytes(run_wide_program(operands, body))
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn wide_arithmetic_follows_evm_semantics() {
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    let seven = U256::from_u64(7);
+    let three = U256::from_u64(3);
+    let max = U256([u64::MAX; 4]);
+    let store = asm::wide_store(W3, A0, 96);
+
+    for (name, body, operands, expected) in [
+        ("add", asm::wide_add(W3, W0, W1), [seven, three], U256::from_u64(10)),
+        ("sub", asm::wide_sub(W3, W0, W1), [seven, three], U256::from_u64(4)),
+        ("mul", asm::wide_mul(W3, W0, W1), [seven, three], U256::from_u64(21)),
+        ("and", asm::wide_and(W3, W0, W1), [seven, three], U256::from_u64(3)),
+        ("or", asm::wide_or(W3, W0, W1), [seven, three], U256::from_u64(7)),
+        ("xor", asm::wide_xor(W3, W0, W1), [seven, three], U256::from_u64(4)),
+        ("divu", asm::wide_div_unsigned(W3, W0, W1), [seven, three], U256::from_u64(2)),
+        ("remu", asm::wide_rem_unsigned(W3, W0, W1), [seven, three], U256::ONE),
+        ("divu by zero", asm::wide_div_unsigned(W3, W0, W1), [seven, U256::ZERO], U256::ZERO),
+        ("remu by zero", asm::wide_rem_unsigned(W3, W0, W1), [seven, U256::ZERO], U256::ZERO),
+        ("add wraps", asm::wide_add(W3, W0, W1), [max, U256::ONE], U256::ZERO),
+        ("exp", asm::wide_exp(W3, W0, W1), [three, U256::from_u64(5)], U256::from_u64(243)),
+        (
+            "signextend",
+            asm::wide_sign_extend_byte(W3, W0, W1),
+            [U256::from_u64(0xff), U256::ZERO],
+            max,
+        ),
+    ] {
+        assert_eq!(run_wide(&operands, &[body, store]), expected, "{name}");
+    }
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn wide_signed_division_takes_the_sign_of_the_dividend() {
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    let minus_seven = U256::from_u64(7).wrapping_neg();
+    let two = U256::from_u64(2);
+    let store = asm::wide_store(W3, A0, 96);
+
+    assert_eq!(
+        run_wide(&[minus_seven, two], &[asm::wide_div_signed(W3, W0, W1), store]),
+        U256::from_u64(3).wrapping_neg()
+    );
+    assert_eq!(
+        run_wide(&[minus_seven, two], &[asm::wide_rem_signed(W3, W0, W1), store]),
+        U256::ONE.wrapping_neg()
+    );
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn wide_modular_operations_use_the_untruncated_result() {
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    let max = U256([u64::MAX; 4]);
+    let store = asm::wide_store(W3, A0, 96);
+
+    // 2^256 mod 7 is 2, which a truncating add would have lost.
+    assert_eq!(
+        run_wide(&[max, U256::ONE, U256::from_u64(7)], &[asm::wide_add_mod(W3, W0, W1, W2), store]),
+        U256::from_u64(2)
+    );
+    assert_eq!(
+        run_wide(
+            &[U256::from_u64(5), U256::from_u64(6), U256::from_u64(7)],
+            &[asm::wide_mul_mod(W3, W0, W1, W2), store]
+        ),
+        U256::from_u64(30 % 7)
+    );
+    assert_eq!(
+        run_wide(&[max, U256::ONE, U256::ZERO], &[asm::wide_add_mod(W3, W0, W1, W2), store]),
+        U256::ZERO
+    );
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn wide_shifts_past_the_width_clear_the_value() {
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    let max = U256([u64::MAX; 4]);
+    let store = asm::wide_store(W3, A0, 96);
+
+    assert_eq!(
+        run_wide(
+            &[U256::ONE],
+            &[asm::load_imm(A1, 8), asm::wide_shift_logical_left(W3, W0, A1), store]
+        ),
+        U256::from_u64(256)
+    );
+    assert_eq!(
+        run_wide(&[max], &[asm::load_imm(A1, 256), asm::wide_shift_logical_left(W3, W0, A1), store]),
+        U256::ZERO
+    );
+    assert_eq!(
+        run_wide(
+            &[max],
+            &[asm::load_imm(A1, 256), asm::wide_shift_arithmetic_right(W3, W0, A1), store]
+        ),
+        max
+    );
+    assert_eq!(
+        run_wide(
+            &[U256::ONE],
+            &[asm::load_imm(A1, 256), asm::wide_shift_arithmetic_right(W3, W0, A1), store]
+        ),
+        U256::ZERO
+    );
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn wide_moves_and_conversions_round_trip() {
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    let value = U256([0x0123_4567_89ab_cdef, 2, 3, 4]);
+    let store = asm::wide_store(W3, A0, 96);
+
+    assert_eq!(run_wide(&[value], &[asm::wide_move(W3, W0), store]), value);
+    assert_eq!(run_wide(&[value], &[asm::wide_reverse_bytes(W3, W0), store]), value.swap_bytes());
+    assert_eq!(
+        run_wide(&[value], &[asm::wide_to_reg(W0, A1), asm::wide_from_reg_unsigned(W3, A1), store]),
+        U256::from_u64(value.low_u64())
+    );
+    assert_eq!(
+        run_wide(
+            &[],
+            &[
+                asm::load_imm(A1, -1),
+                asm::wide_from_reg_signed(W3, A1),
+                asm::wide_store(W3, A0, 96)
+            ]
+        ),
+        U256([u64::MAX; 4])
+    );
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn wide_comparisons_write_a_general_purpose_register() {
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    let minus_one = U256([u64::MAX; 4]);
+    let one = U256::ONE;
+
+    let compare = |body: polkavm_common::program::Instruction, operands: [U256; 2]| -> u64 {
+        let bytes = run_wide_program(&operands, &[body, asm::store_indirect_u64(A1, A0, 96)]);
+        u64::from_le_bytes(bytes[..8].try_into().unwrap())
+    };
+
+    assert_eq!(compare(asm::wide_set_equal(A1, W0, W1), [one, one]), 1);
+    assert_eq!(compare(asm::wide_set_equal(A1, W0, W1), [one, minus_one]), 0);
+    assert_eq!(compare(asm::wide_set_not_equal(A1, W0, W1), [one, minus_one]), 1);
+    // Unsigned, `minus_one` is the largest value there is; signed, it is the smallest.
+    assert_eq!(compare(asm::wide_set_less_than_unsigned(A1, W0, W1), [one, minus_one]), 1);
+    assert_eq!(compare(asm::wide_set_less_than_signed(A1, W0, W1), [one, minus_one]), 0);
+    assert_eq!(compare(asm::wide_set_less_than_signed(A1, W0, W1), [minus_one, one]), 1);
+}

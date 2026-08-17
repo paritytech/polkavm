@@ -183,9 +183,23 @@ impl core::fmt::Display for Reg {
 /// A 256-bit register, as encoded in an instruction's argument nibble.
 ///
 /// Every one of the sixteen nibble values names a register, so unlike [`RawReg`] there is
-/// nothing to clamp.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+/// nothing to clamp. The field keeps whatever bits the instruction was parsed out of, so
+/// two of these are equal when they name the same register, not when their bits match.
+#[derive(Copy, Clone)]
 pub struct RawWideReg(u32);
+
+impl Eq for RawWideReg {}
+impl PartialEq for RawWideReg {
+    fn eq(&self, rhs: &Self) -> bool {
+        self.get() == rhs.get()
+    }
+}
+
+impl core::fmt::Debug for RawWideReg {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(fmt, "{} (0x{:x})", self.get(), self.0)
+    }
+}
 
 impl RawWideReg {
     #[inline]
