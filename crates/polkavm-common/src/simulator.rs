@@ -1647,6 +1647,16 @@ where
     }
 
     #[inline(always)]
+    fn wide_load_imm_unsigned(&mut self, _offset: u32, _args_length: u32, _d: RawWideReg, _imm: i32) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(1))
+    }
+
+    #[inline(always)]
+    fn wide_load_imm_signed(&mut self, _offset: u32, _args_length: u32, _d: RawWideReg, _imm: i32) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(1))
+    }
+
+    #[inline(always)]
     fn wide_move(&mut self, _offset: u32, _args_length: u32, _d: RawWideReg, _s: RawWideReg) -> Self::ReturnTy {
         self.dispatch_wide(None, None, self.wide_alu_cost(4))
     }

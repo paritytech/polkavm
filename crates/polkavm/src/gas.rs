@@ -318,6 +318,8 @@ define_cost_model_struct! {
     wide_from_reg_signed,
     wide_from_reg_unsigned,
     wide_load,
+    wide_load_imm_signed,
+    wide_load_imm_unsigned,
     wide_move,
     wide_mul,
     wide_mul_mod,
@@ -1200,6 +1202,16 @@ impl InstructionVisitor for GasVisitor {
     #[inline(always)]
     fn wide_shift_arithmetic_right(&mut self, _d: RawWideReg, _s1: RawWideReg, _s2: RawReg) -> Self::ReturnTy {
         self.cost += self.cost_model.wide_shift_arithmetic_right;
+    }
+
+    #[inline(always)]
+    fn wide_load_imm_unsigned(&mut self, _d: RawWideReg, _imm: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_load_imm_unsigned;
+    }
+
+    #[inline(always)]
+    fn wide_load_imm_signed(&mut self, _d: RawWideReg, _imm: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_load_imm_signed;
     }
 
     #[inline(always)]

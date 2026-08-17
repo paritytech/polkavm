@@ -716,6 +716,14 @@ enum WideInst {
         dst: WideReg,
         src: Reg,
     },
+    /// Widening a value the general purpose register was only loaded with, folded into one
+    /// instruction. The immediate stands for the register's contents, so it is sign extended
+    /// to the register width before `kind` decides how it reaches the full width.
+    LoadImm {
+        kind: WideFromRegKind,
+        dst: WideReg,
+        imm: i32,
+    },
     Load {
         dst: WideReg,
         base: Reg,
@@ -736,7 +744,7 @@ impl WideInst {
             WideInst::FromReg { src, .. } => RegMask::from(src),
             WideInst::Load { base, .. } | WideInst::Store { base, .. } => RegMask::from(base),
             WideInst::RegReg { .. } | WideInst::Compare { .. } | WideInst::Modular { .. } | WideInst::Move { .. } => RegMask::empty(),
-            WideInst::ToReg { .. } | WideInst::Count { .. } => RegMask::empty(),
+            WideInst::ToReg { .. } | WideInst::Count { .. } | WideInst::LoadImm { .. } => RegMask::empty(),
         }
     }
 
@@ -786,7 +794,7 @@ impl WideInst {
                 dst: map(dst, OpKind::Write),
                 src,
             },
-            WideInst::RegReg { .. } | WideInst::Modular { .. } | WideInst::Move { .. } => self,
+            WideInst::RegReg { .. } | WideInst::Modular { .. } | WideInst::Move { .. } | WideInst::LoadImm { .. } => self,
         }
     }
 }
@@ -5480,6 +5488,15 @@ impl BlockRegs {
         let is_rv64 = self.bitness == Bitness::B64;
 
         match instruction {
+            BasicInst::Wide(WideInst::FromReg { kind, dst, src }) => {
+                if let RegValue::Constant(value) = self.get_reg(src) {
+                    // Only what fits the immediate field; anything wider keeps loading a
+                    // register first, which is still two instructions but encodable.
+                    if let Ok(imm) = i32::try_from(value) {
+                        return Some(BasicInst::Wide(WideInst::LoadImm { kind, dst, imm }));
+                    }
+                }
+            }
             BasicInst::RegReg { kind, dst, src1, src2 } => {
                 let src1_value = self.get_reg(src1);
                 let src2_value = self.get_reg(src2);
@@ -9055,6 +9072,13 @@ fn emit_code(
                                 WideCountKind::SetBits => Instruction::wide_count_set_bits(src, dst),
                                 WideCountKind::LeadingZeroBits => Instruction::wide_count_leading_zero_bits(src, dst),
                                 WideCountKind::TrailingZeroBits => Instruction::wide_count_trailing_zero_bits(src, dst),
+                            }
+                        }
+                        WideInst::LoadImm { kind, dst, imm } => {
+                            let dst = conv_wide(dst);
+                            match kind {
+                                WideFromRegKind::Unsigned => Instruction::wide_load_imm_unsigned(dst, imm),
+                                WideFromRegKind::Signed => Instruction::wide_load_imm_signed(dst, imm),
                             }
                         }
                         WideInst::FromReg { kind, dst, src } => {

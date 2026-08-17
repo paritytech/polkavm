@@ -3302,6 +3302,23 @@ macro_rules! define_interpreter {
         $body
     }};
 
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideReg, $a1:ident: i32) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<WideReg>, a1: i32) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: cast(a1).bitwise_as_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_wide_reg(args.a0);
+        let $a1 = cast(args.a1).bitwise_as_i32();
+        $body
+    }};
+
     (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideReg, $a1:ident: Reg) => {{
         impl Args {
             pub fn $handler_name(a0: impl Into<WideReg>, a1: impl Into<Reg>) -> Args {
@@ -3890,6 +3907,29 @@ define_interpreter! {
 
         let amount = visitor.get_u64::<DEBUG>(s2);
         let value = U256::shift_right_signed(visitor.wide_reg(s1), amount);
+        visitor.set_wide_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_load_imm_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, imm: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_load_imm_unsigned(d, imm));
+        }
+
+        // The immediate stands in for a general purpose register the caller would have loaded
+        // it into, so it is widened the same way: sign extended to the register width first,
+        // then taken as unsigned.
+        let value = U256::from_u64(cast(cast(imm).to_i64_sign_extend()).bitwise_as_u64());
+        visitor.set_wide_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_load_imm_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, imm: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_load_imm_signed(d, imm));
+        }
+
+        let value = U256::from_i64(cast(imm).to_i64_sign_extend());
         visitor.set_wide_reg::<DEBUG>(d, value);
         visitor.go_to_next_instruction(compiled_offset)
     }
@@ -5483,6 +5523,14 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
 
     fn wide_shift_arithmetic_right(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawReg) -> Self::ReturnTy {
         emit!(self, wide_shift_arithmetic_right(d, s1, s2));
+    }
+
+    fn wide_load_imm_unsigned(&mut self, d: RawWideReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, wide_load_imm_unsigned(d, imm));
+    }
+
+    fn wide_load_imm_signed(&mut self, d: RawWideReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, wide_load_imm_signed(d, imm));
     }
 
     fn wide_move(&mut self, d: RawWideReg, s: RawWideReg) -> Self::ReturnTy {

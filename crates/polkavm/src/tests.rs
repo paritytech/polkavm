@@ -5940,6 +5940,38 @@ fn wide_moves_and_conversions_round_trip() {
 
 #[cfg(feature = "std")]
 #[test]
+fn wide_load_imm_widens_like_the_register_form() {
+    use polkavm_common::program::Reg::*;
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    let store = asm::wide_store(W3, A0, 96);
+
+    // The immediate stands for a general purpose register the caller would have loaded, so
+    // it is sign extended to the register width before the widening kind applies.
+    assert_eq!(run_wide(&[], &[asm::wide_load_imm_unsigned(W3, 255), store]), U256::from_u64(255));
+    assert_eq!(run_wide(&[], &[asm::wide_load_imm_signed(W3, 255), store]), U256::from_u64(255));
+    assert_eq!(
+        run_wide(&[], &[asm::wide_load_imm_unsigned(W3, -1), store]),
+        U256::from_u64(u64::MAX)
+    );
+    assert_eq!(run_wide(&[], &[asm::wide_load_imm_signed(W3, -1), store]), U256([u64::MAX; 4]));
+
+    // And it agrees with loading the same value into a register and widening that.
+    for value in [0, 1, -1, i32::MIN, i32::MAX] {
+        assert_eq!(
+            run_wide(&[], &[asm::wide_load_imm_unsigned(W3, value), store]),
+            run_wide(&[], &[asm::load_imm(A1, value), asm::wide_from_reg_unsigned(W3, A1), store])
+        );
+        assert_eq!(
+            run_wide(&[], &[asm::wide_load_imm_signed(W3, value), store]),
+            run_wide(&[], &[asm::load_imm(A1, value), asm::wide_from_reg_signed(W3, A1), store])
+        );
+    }
+}
+
+#[cfg(feature = "std")]
+#[test]
 fn wide_bit_counts_write_a_general_purpose_register() {
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
