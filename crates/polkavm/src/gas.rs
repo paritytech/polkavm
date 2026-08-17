@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use polkavm_common::program::{InstructionSet, InstructionVisitor, Instructions, Opcode, ParsingVisitor, RawReg, RawWideReg};
+use polkavm_common::program::{InstructionSet, InstructionVisitor, Instructions, Opcode, ParsingVisitor, RawReg, RawVecReg, RawWideReg};
 use polkavm_common::simulator::CacheModel;
 use polkavm_common::utils::GasVisitorT;
 
@@ -167,7 +167,7 @@ macro_rules! define_cost_model_struct {
 }
 
 define_cost_model_struct! {
-    version: 3,
+    version: 4,
 
     add_32,
     add_64,
@@ -306,6 +306,43 @@ define_cost_model_struct! {
     sub_64,
     trap,
     unlikely,
+    vector_arithmetic,
+    vector_config,
+    vector_config_dynamic_discard,
+    vector_count_mask_masked,
+    vector_extract,
+    vector_first_mask,
+    vector_first_mask_masked,
+    vector_load_u16,
+    vector_load_u32,
+    vector_load_u64,
+    vector_load_u8,
+    vector_mask_and,
+    vector_mask_and_not,
+    vector_mask_nand,
+    vector_mask_nor,
+    vector_mask_or,
+    vector_mask_or_not,
+    vector_mask_xnor,
+    vector_mask_xor,
+    vector_store_u16,
+    vector_store_u32,
+    vector_store_u64,
+    vector_store_u8,
+    vector_config_dynamic,
+    vector_count_mask,
+    vector_load,
+    vector_move,
+    vector_set_equal,
+    vector_set_not_equal,
+    vector_element_index,
+    vector_insert,
+    vector_insert_imm,
+    vector_set_equal_imm,
+    vector_set_not_equal_imm,
+    vector_splat,
+    vector_splat_imm,
+    vector_store,
     wide_add,
     wide_add_mod,
     wide_and,
@@ -1286,6 +1323,191 @@ impl InstructionVisitor for GasVisitor {
     #[inline(always)]
     fn wide_store(&mut self, _d: RawWideReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
         self.cost += self.cost_model.wide_store;
+    }
+
+    #[inline(always)]
+    fn vector_arithmetic(&mut self, _packed: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_arithmetic;
+    }
+
+    #[inline(always)]
+    fn vector_config(&mut self, _packed: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_config;
+    }
+
+    #[inline(always)]
+    fn vector_config_dynamic(&mut self, _d: RawReg, _s: RawReg, _vtype: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_config_dynamic;
+    }
+
+    #[inline(always)]
+    fn vector_move(&mut self, _d: RawVecReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_move;
+    }
+
+    #[inline(always)]
+    fn vector_load(&mut self, _d: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_load;
+    }
+
+    #[inline(always)]
+    fn vector_store(&mut self, _s: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_store;
+    }
+
+    #[inline(always)]
+    fn vector_set_equal(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_set_equal;
+    }
+
+    #[inline(always)]
+    fn vector_set_not_equal(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_set_not_equal;
+    }
+
+    #[inline(always)]
+    fn vector_count_mask(&mut self, _d: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_count_mask;
+    }
+
+    #[inline(always)]
+    fn vector_mask_and(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_mask_and;
+    }
+
+    #[inline(always)]
+    fn vector_mask_and_not(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_mask_and_not;
+    }
+
+    #[inline(always)]
+    fn vector_mask_or(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_mask_or;
+    }
+
+    #[inline(always)]
+    fn vector_mask_xor(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_mask_xor;
+    }
+
+    #[inline(always)]
+    fn vector_mask_nand(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_mask_nand;
+    }
+
+    #[inline(always)]
+    fn vector_mask_nor(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_mask_nor;
+    }
+
+    #[inline(always)]
+    fn vector_mask_or_not(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_mask_or_not;
+    }
+
+    #[inline(always)]
+    fn vector_mask_xnor(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_mask_xnor;
+    }
+
+    #[inline(always)]
+    fn vector_load_u8(&mut self, _d: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_load_u8;
+    }
+
+    #[inline(always)]
+    fn vector_store_u8(&mut self, _s: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_store_u8;
+    }
+
+    #[inline(always)]
+    fn vector_load_u16(&mut self, _d: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_load_u16;
+    }
+
+    #[inline(always)]
+    fn vector_store_u16(&mut self, _s: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_store_u16;
+    }
+
+    #[inline(always)]
+    fn vector_load_u32(&mut self, _d: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_load_u32;
+    }
+
+    #[inline(always)]
+    fn vector_store_u32(&mut self, _s: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_store_u32;
+    }
+
+    #[inline(always)]
+    fn vector_load_u64(&mut self, _d: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_load_u64;
+    }
+
+    #[inline(always)]
+    fn vector_store_u64(&mut self, _s: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_store_u64;
+    }
+
+    #[inline(always)]
+    fn vector_insert(&mut self, _d: RawVecReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_insert;
+    }
+
+    #[inline(always)]
+    fn vector_insert_imm(&mut self, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_insert_imm;
+    }
+
+    #[inline(always)]
+    fn vector_element_index(&mut self, _d: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_element_index;
+    }
+
+    #[inline(always)]
+    fn vector_set_equal_imm(&mut self, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_set_equal_imm;
+    }
+
+    #[inline(always)]
+    fn vector_set_not_equal_imm(&mut self, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_set_not_equal_imm;
+    }
+
+    #[inline(always)]
+    fn vector_splat_imm(&mut self, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_splat_imm;
+    }
+
+    #[inline(always)]
+    fn vector_splat(&mut self, _d: RawVecReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_splat;
+    }
+
+    #[inline(always)]
+    fn vector_extract(&mut self, _d: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_extract;
+    }
+
+    #[inline(always)]
+    fn vector_first_mask(&mut self, _d: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_first_mask;
+    }
+
+    #[inline(always)]
+    fn vector_first_mask_masked(&mut self, _d: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_first_mask_masked;
+    }
+
+    #[inline(always)]
+    fn vector_count_mask_masked(&mut self, _d: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_count_mask_masked;
+    }
+
+    #[inline(always)]
+    fn vector_config_dynamic_discard(&mut self, _s: RawReg, _vtype: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.vector_config_dynamic_discard;
     }
 
     #[inline(always)]

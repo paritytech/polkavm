@@ -3,7 +3,7 @@
 
 use crate::cast::cast;
 use crate::program::{
-    InstructionFormat, InstructionSet, InstructionSetKind, Opcode, ParsingVisitor, RawReg, RawWideReg, UNUSED_RAW_OPCODE,
+    InstructionFormat, InstructionSet, InstructionSetKind, Opcode, ParsingVisitor, RawReg, RawVecReg, RawWideReg, UNUSED_RAW_OPCODE,
 };
 use crate::utils::{Bitness, BitnessT, GasVisitorT, B64};
 use alloc::string::String;
@@ -1762,6 +1762,240 @@ where
         self.dispatch_wide(None, Some(base), cost)
     }
 
+    #[inline(always)]
+    fn vector_arithmetic(&mut self, _offset: u32, _args_length: u32, _packed: i32) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
+    fn vector_config(&mut self, _offset: u32, _args_length: u32, _imm: i32) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(1))
+    }
+
+    #[inline(always)]
+    fn vector_config_dynamic(&mut self, _offset: u32, _args_length: u32, dst: RawReg, src: RawReg, _vtype: i32) -> Self::ReturnTy {
+        self.dispatch_2op(dst, src, self.wide_alu_cost(1))
+    }
+
+    #[inline(always)]
+    fn vector_move(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_load(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, base: RawReg, _imm: i32) -> Self::ReturnTy {
+        let cost = InstCost {
+            load_slots: MAX_LOAD_SLOTS,
+            decode_slots: MAX_DECODE_PER_CYCLE,
+            ..self.load_cost()
+        };
+        self.dispatch_wide(None, Some(base), cost)
+    }
+
+    #[inline(always)]
+    fn vector_store(&mut self, _offset: u32, _args_length: u32, _s: RawVecReg, base: RawReg, _imm: i32) -> Self::ReturnTy {
+        let cost = InstCost {
+            store_slots: MAX_STORE_SLOTS,
+            decode_slots: MAX_DECODE_PER_CYCLE,
+            ..self.store_cost()
+        };
+        self.dispatch_wide(None, Some(base), cost)
+    }
+
+    #[inline(always)]
+    fn vector_set_equal(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
+    fn vector_set_not_equal(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
+    fn vector_count_mask(&mut self, _offset: u32, _args_length: u32, dst: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_1op_dst(dst, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
+    fn vector_mask_and(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_mask_and_not(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_mask_or(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_mask_xor(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_mask_nand(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_mask_nor(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_mask_or_not(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_mask_xnor(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_load_u8(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, base: RawReg, _imm: i32) -> Self::ReturnTy {
+        let cost = InstCost {
+            load_slots: MAX_LOAD_SLOTS,
+            decode_slots: MAX_DECODE_PER_CYCLE,
+            ..self.load_cost()
+        };
+        self.dispatch_wide(None, Some(base), cost)
+    }
+
+    #[inline(always)]
+    fn vector_store_u8(&mut self, _offset: u32, _args_length: u32, _s: RawVecReg, base: RawReg, _imm: i32) -> Self::ReturnTy {
+        let cost = InstCost {
+            store_slots: MAX_STORE_SLOTS,
+            decode_slots: MAX_DECODE_PER_CYCLE,
+            ..self.store_cost()
+        };
+        self.dispatch_wide(None, Some(base), cost)
+    }
+
+    #[inline(always)]
+    fn vector_load_u16(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, base: RawReg, _imm: i32) -> Self::ReturnTy {
+        let cost = InstCost {
+            load_slots: MAX_LOAD_SLOTS,
+            decode_slots: MAX_DECODE_PER_CYCLE,
+            ..self.load_cost()
+        };
+        self.dispatch_wide(None, Some(base), cost)
+    }
+
+    #[inline(always)]
+    fn vector_store_u16(&mut self, _offset: u32, _args_length: u32, _s: RawVecReg, base: RawReg, _imm: i32) -> Self::ReturnTy {
+        let cost = InstCost {
+            store_slots: MAX_STORE_SLOTS,
+            decode_slots: MAX_DECODE_PER_CYCLE,
+            ..self.store_cost()
+        };
+        self.dispatch_wide(None, Some(base), cost)
+    }
+
+    #[inline(always)]
+    fn vector_load_u32(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, base: RawReg, _imm: i32) -> Self::ReturnTy {
+        let cost = InstCost {
+            load_slots: MAX_LOAD_SLOTS,
+            decode_slots: MAX_DECODE_PER_CYCLE,
+            ..self.load_cost()
+        };
+        self.dispatch_wide(None, Some(base), cost)
+    }
+
+    #[inline(always)]
+    fn vector_store_u32(&mut self, _offset: u32, _args_length: u32, _s: RawVecReg, base: RawReg, _imm: i32) -> Self::ReturnTy {
+        let cost = InstCost {
+            store_slots: MAX_STORE_SLOTS,
+            decode_slots: MAX_DECODE_PER_CYCLE,
+            ..self.store_cost()
+        };
+        self.dispatch_wide(None, Some(base), cost)
+    }
+
+    #[inline(always)]
+    fn vector_load_u64(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, base: RawReg, _imm: i32) -> Self::ReturnTy {
+        let cost = InstCost {
+            load_slots: MAX_LOAD_SLOTS,
+            decode_slots: MAX_DECODE_PER_CYCLE,
+            ..self.load_cost()
+        };
+        self.dispatch_wide(None, Some(base), cost)
+    }
+
+    #[inline(always)]
+    fn vector_store_u64(&mut self, _offset: u32, _args_length: u32, _s: RawVecReg, base: RawReg, _imm: i32) -> Self::ReturnTy {
+        let cost = InstCost {
+            store_slots: MAX_STORE_SLOTS,
+            decode_slots: MAX_DECODE_PER_CYCLE,
+            ..self.store_cost()
+        };
+        self.dispatch_wide(None, Some(base), cost)
+    }
+
+    #[inline(always)]
+    fn vector_insert(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, src: RawReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, Some(src), self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_insert_imm(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_element_index(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_set_equal_imm(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
+    fn vector_set_not_equal_imm(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
+    fn vector_splat_imm(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_splat(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, src: RawReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, Some(src), self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_extract(&mut self, _offset: u32, _args_length: u32, dst: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_1op_dst(dst, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn vector_first_mask(&mut self, _offset: u32, _args_length: u32, dst: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_1op_dst(dst, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
+    fn vector_first_mask_masked(&mut self, _offset: u32, _args_length: u32, dst: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_1op_dst(dst, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
+    fn vector_count_mask_masked(&mut self, _offset: u32, _args_length: u32, dst: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_1op_dst(dst, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
+    fn vector_config_dynamic_discard(&mut self, _offset: u32, _args_length: u32, src: RawReg, _vtype: i32) -> Self::ReturnTy {
+        self.dispatch_wide(None, Some(src), self.wide_alu_cost(1))
+    }
     #[inline(always)]
     fn wide_add_mod(
         &mut self,

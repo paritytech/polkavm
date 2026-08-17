@@ -19,10 +19,11 @@ use polkavm_common::abi::VM_ADDR_RETURN_TO_HOST;
 use polkavm_common::cast::cast;
 use polkavm_common::operation::*;
 use polkavm_common::program::{
-    asm, interpreter_calculate_cache_num_entries, InstructionVisitor, RawReg, RawWideReg, Reg, WideReg, INTERPRETER_CACHE_ENTRY_SIZE,
-    INTERPRETER_FLATMAP_ENTRY_SIZE,
+    asm, interpreter_calculate_cache_num_entries, InstructionVisitor, RawReg, RawVecReg, RawWideReg, Reg, VecReg, WideReg,
+    INTERPRETER_CACHE_ENTRY_SIZE, INTERPRETER_FLATMAP_ENTRY_SIZE, VECTOR_LENGTH_WORDS,
 };
 use polkavm_common::utils::{align_to_next_page_usize, slice_assume_init_mut, ArcBytes, GasVisitorT};
+use polkavm_common::vector::VectorConfig;
 use polkavm_common::wide::U256;
 
 type Target = u32;
@@ -1429,12 +1430,26 @@ macro_rules! access_memory_mut {
     };
 }
 
+/// How many 64-bit words one vector register holds.
+const VECTOR_WORDS_PER_REG: usize = VECTOR_LENGTH_WORDS;
+
+/// How many 64-bit words one wide register holds, which is a pair of vector registers.
+const WIDE_WORDS_PER_REG: usize = VECTOR_WORDS_PER_REG * 2;
+
+/// How many bytes one vector register holds.
+const VECTOR_BYTES_PER_REG: usize = VECTOR_WORDS_PER_REG * 8;
+
 pub(crate) struct InterpretedInstance {
     module: Module,
     standard_memory: StandardMemory,
     dynamic_memory: DynamicMemory,
     regs: [i64; Reg::ALL.len()],
-    wide_regs: [U256; WideReg::ALL.len()],
+    /// The vector register file, two words to a register.
+    ///
+    /// A wide register is a pair of these, so the two files are one: wide register `n` is
+    /// the four words starting at `n * 4`, which is vector registers `2n` and `2n + 1`.
+    vector_regs: [u64; VecReg::ALL.len() * VECTOR_WORDS_PER_REG],
+    vector_config: VectorConfig,
     program_counter: ProgramCounter,
     program_counter_valid: bool,
     charge_gas_on_entry: bool,
@@ -1466,7 +1481,8 @@ impl InterpretedInstance {
             standard_memory: StandardMemory::new(),
             dynamic_memory: DynamicMemory::new(),
             regs: [0; Reg::ALL.len()],
-            wide_regs: [U256::ZERO; WideReg::ALL.len()],
+            vector_regs: [0; VecReg::ALL.len() * VECTOR_WORDS_PER_REG],
+            vector_config: VectorConfig::default(),
             program_counter: ProgramCounter(!0),
             program_counter_valid: false,
             charge_gas_on_entry: true,
@@ -2125,7 +2141,51 @@ impl InterpretedInstance {
 
     #[inline(always)]
     fn wide_reg(&self, reg: WideReg) -> U256 {
-        self.wide_regs[reg.to_usize()]
+        let base = reg.to_usize() * WIDE_WORDS_PER_REG;
+        U256([
+            self.vector_regs[base],
+            self.vector_regs[base + 1],
+            self.vector_regs[base + 2],
+            self.vector_regs[base + 3],
+        ])
+    }
+
+    #[inline(always)]
+    fn vector_reg(&self, reg: VecReg) -> [u64; VECTOR_WORDS_PER_REG] {
+        let base = reg.to_usize() * VECTOR_WORDS_PER_REG;
+        [self.vector_regs[base], self.vector_regs[base + 1]]
+    }
+
+    #[inline(always)]
+    fn set_vector_reg<const DEBUG: bool>(&mut self, dst: VecReg, value: [u64; VECTOR_WORDS_PER_REG]) {
+        if DEBUG {
+            log::trace!("  {dst} = 0x{:016x}{:016x}", value[1], value[0]);
+        }
+
+        let base = dst.to_usize() * VECTOR_WORDS_PER_REG;
+        self.vector_regs[base] = value[0];
+        self.vector_regs[base + 1] = value[1];
+    }
+
+    /// One element of a register group, as the current configuration divides it up.
+    ///
+    /// Elements never straddle a word because their width divides it, so this is a shift
+    /// rather than an unaligned read. A group that runs past the end of the file cannot be
+    /// produced by a well formed program, and reads zero rather than trapping.
+    #[inline(always)]
+    fn vector_element(&self, group: VecReg, index: u32, bits: u32) -> u64 {
+        let byte = index * (bits / 8);
+        let word = group.to_usize() * VECTOR_WORDS_PER_REG + cast(byte / 8).to_usize();
+        let Some(&word) = self.vector_regs.get(word) else {
+            return 0;
+        };
+
+        let value = word >> ((byte % 8) * 8);
+        if bits == 64 {
+            value
+        } else {
+            value & ((1 << bits) - 1)
+        }
     }
 
     #[inline(always)]
@@ -2140,7 +2200,11 @@ impl InterpretedInstance {
             );
         }
 
-        self.wide_regs[dst.to_usize()] = value;
+        let base = dst.to_usize() * WIDE_WORDS_PER_REG;
+        self.vector_regs[base] = value.0[0];
+        self.vector_regs[base + 1] = value.0[1];
+        self.vector_regs[base + 2] = value.0[2];
+        self.vector_regs[base + 3] = value.0[3];
     }
 
     #[inline(always)]
@@ -2220,6 +2284,440 @@ impl InterpretedInstance {
             Ok(()) => self.go_to_next_instruction(compiled_offset),
             Err(error) => self.on_wide_access_trap::<DEBUG>(address, error),
         }
+    }
+
+    fn vector_load<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        program_counter: ProgramCounter,
+        dst: VecReg,
+        base: Reg,
+        offset: i32,
+    ) -> Target {
+        self.program_counter = program_counter;
+
+        let address = self.wide_address(Some(base), offset);
+        let mut buffer = [MaybeUninit::uninit(); VECTOR_BYTES_PER_REG];
+        match self.read_memory_into(address, &mut buffer) {
+            Ok(bytes) => {
+                let mut value = [0; VECTOR_WORDS_PER_REG];
+                for (word, chunk) in value.iter_mut().zip(bytes.chunks_exact(8)) {
+                    *word = u64::from_le_bytes(chunk.try_into().unwrap());
+                }
+                self.set_vector_reg::<DEBUG>(dst, value);
+                self.go_to_next_instruction(compiled_offset)
+            }
+            Err(error) => self.on_wide_access_trap::<DEBUG>(address, error),
+        }
+    }
+
+    fn vector_store<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        program_counter: ProgramCounter,
+        src: VecReg,
+        base: Reg,
+        offset: i32,
+    ) -> Target {
+        self.program_counter = program_counter;
+
+        let address = self.wide_address(Some(base), offset);
+        let mut value = [0; VECTOR_BYTES_PER_REG];
+        for (word, chunk) in self.vector_reg(src).iter().zip(value.chunks_exact_mut(8)) {
+            chunk.copy_from_slice(&word.to_le_bytes());
+        }
+
+        match self.write_memory(address, &value) {
+            Ok(()) => self.go_to_next_instruction(compiled_offset),
+            Err(error) => self.on_wide_access_trap::<DEBUG>(address, error),
+        }
+    }
+
+    /// An element-wise comparison, whose result is one bit per element rather than a value.
+    ///
+    /// The bits past `vl` are cleared. The specification lets a mask destination leave them
+    /// at anything, and clearing them keeps the machine deterministic.
+    #[inline(always)]
+    fn vector_compare<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        dst: VecReg,
+        src1: VecReg,
+        src2: VecReg,
+        equal: bool,
+    ) -> Target {
+        let bits = self.vector_config.element_bits();
+        self.write_mask::<DEBUG>(compiled_offset, dst, |this, index| {
+            (this.vector_element(src1, index, bits) == this.vector_element(src2, index, bits)) == equal
+        })
+    }
+
+    /// A comparison against one value repeated across every element.
+    ///
+    /// The immediate stands for a value in a register, so it reaches the element width sign
+    /// extended and is then compared at that width.
+    #[inline(always)]
+    fn vector_compare_imm<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        dst: VecReg,
+        src: VecReg,
+        imm: i32,
+        equal: bool,
+    ) -> Target {
+        let bits = self.vector_config.element_bits();
+        let mask = if bits == 64 { u64::MAX } else { (1_u64 << bits).wrapping_sub(1) };
+        let value = cast(cast(imm).to_i64_sign_extend()).bitwise_as_u64() & mask;
+        self.write_mask::<DEBUG>(compiled_offset, dst, |this, index| {
+            (this.vector_element(src, index, bits) == value) == equal
+        })
+    }
+
+    /// Writes one bit per active element, clearing what is above them.
+    ///
+    /// The specification lets a mask destination leave those at anything, and clearing them
+    /// keeps the machine deterministic.
+    #[inline(always)]
+    fn write_mask<const DEBUG: bool>(&mut self, compiled_offset: Target, dst: VecReg, callback: impl Fn(&Self, u32) -> bool) -> Target {
+        let mut mask = [0; VECTOR_WORDS_PER_REG];
+        for index in 0..self.vector_config.vl() {
+            if callback(self, index) {
+                let index = cast(index).to_usize();
+                mask[index.wrapping_div(64)] |= 1_u64 << index.wrapping_rem(64);
+            }
+        }
+
+        self.set_vector_reg::<DEBUG>(dst, mask);
+        self.go_to_next_instruction(compiled_offset)
+    }
+
+    /// A bitwise operation over the active bits of two mask registers.
+    ///
+    /// A mask holds one bit per element, so the operation reaches the low `vl` bits of the
+    /// register. What is above them is left alone, which the specification permits.
+    #[inline(always)]
+    fn vector_mask<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        dst: VecReg,
+        src1: VecReg,
+        src2: VecReg,
+        callback: impl Fn(u64, u64) -> u64,
+    ) -> Target {
+        let (first, second, mut result) = (self.vector_reg(src1), self.vector_reg(src2), self.vector_reg(dst));
+        let mut counted = 0;
+        for index in 0..VECTOR_WORDS_PER_REG {
+            let bits = self.vector_config.vl().saturating_sub(counted).min(64);
+            let mask = if bits >= 64 { u64::MAX } else { (1_u64 << bits).wrapping_sub(1) };
+            result[index] = (result[index] & !mask) | (callback(first[index], second[index]) & mask);
+            counted = counted.wrapping_add(64);
+        }
+
+        self.set_vector_reg::<DEBUG>(dst, result);
+        self.go_to_next_instruction(compiled_offset)
+    }
+
+    /// The bytes a unit-stride access moves, which is one element per active element.
+    ///
+    /// The element width is the instruction's rather than the configuration's, so the two
+    /// can differ; the count is still `vl`. It is capped at what the register file holds so
+    /// that a program whose configuration does not match its instruction cannot reach past
+    /// the end of it.
+    #[inline(always)]
+    fn vector_element_bytes(&self, register: VecReg, element_bytes: u32) -> usize {
+        let requested = self.vector_config.vl().saturating_mul(element_bytes);
+        let available = (VecReg::ALL.len().wrapping_sub(register.to_usize())).wrapping_mul(VECTOR_BYTES_PER_REG);
+        core::cmp::min(cast(requested).to_usize(), available)
+    }
+
+    fn vector_load_elements<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        program_counter: ProgramCounter,
+        dst: VecReg,
+        base: Reg,
+        offset: i32,
+        element_bytes: u32,
+    ) -> Target {
+        self.program_counter = program_counter;
+
+        let length = self.vector_element_bytes(dst, element_bytes);
+        let address = self.wide_address(Some(base), offset);
+        let mut buffer = [MaybeUninit::uninit(); VecReg::ALL.len() * VECTOR_BYTES_PER_REG];
+        match self.read_memory_into(address, &mut buffer[..length]) {
+            Ok(bytes) => {
+                let start = dst.to_usize().wrapping_mul(VECTOR_BYTES_PER_REG);
+                for (index, byte) in bytes.iter().enumerate() {
+                    self.set_vector_byte(start.wrapping_add(index), *byte);
+                }
+                if DEBUG {
+                    log::trace!("  {dst} = {length} bytes from 0x{address:x}");
+                }
+                self.go_to_next_instruction(compiled_offset)
+            }
+            Err(error) => self.on_wide_access_trap::<DEBUG>(address, error),
+        }
+    }
+
+    fn vector_store_elements<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        program_counter: ProgramCounter,
+        src: VecReg,
+        base: Reg,
+        offset: i32,
+        element_bytes: u32,
+    ) -> Target {
+        self.program_counter = program_counter;
+
+        let length = self.vector_element_bytes(src, element_bytes);
+        let address = self.wide_address(Some(base), offset);
+        let start = src.to_usize().wrapping_mul(VECTOR_BYTES_PER_REG);
+        let mut buffer = [0; VecReg::ALL.len() * VECTOR_BYTES_PER_REG];
+        for (index, byte) in buffer[..length].iter_mut().enumerate() {
+            *byte = self.vector_byte(start.wrapping_add(index));
+        }
+
+        match self.write_memory(address, &buffer[..length]) {
+            Ok(()) => self.go_to_next_instruction(compiled_offset),
+            Err(error) => self.on_wide_access_trap::<DEBUG>(address, error),
+        }
+    }
+
+    /// Runs one element-wise operation across the active elements.
+    ///
+    /// Elements are held zero extended, so the signed operations sign extend from the
+    /// element width first and the result is truncated back to it on the way out.
+    fn vector_arithmetic<const DEBUG: bool>(&mut self, compiled_offset: Target, packed: u32) -> Target {
+        use polkavm_common::vector::{VectorArithmetic, VectorOperand, VectorOperation};
+
+        let instruction = VectorArithmetic::from_packed(packed);
+        let (Some(dst), Some(src)) = (VecReg::from_raw(instruction.dst), VecReg::from_raw(instruction.src)) else {
+            unreachable!("ICE: a vector register field wider than the file")
+        };
+
+        let bits = self.vector_config.element_bits();
+        let selector = if instruction.operation == VectorOperation::Merge {
+            self.vector_reg(VecReg::V0)
+        } else {
+            [0; VECTOR_WORDS_PER_REG]
+        };
+        let operand = match instruction.operand {
+            VectorOperand::Vector(reg) => {
+                let Some(reg) = VecReg::from_raw(reg) else {
+                    unreachable!("ICE: a vector register field wider than the file")
+                };
+                Err(reg)
+            }
+            VectorOperand::Register(reg) => {
+                let Some(reg) = Reg::from_raw(reg) else {
+                    unreachable!("ICE: a general purpose register field wider than the file")
+                };
+                Ok(cast(self.regs[reg.to_usize()]).bitwise_as_u64())
+            }
+            VectorOperand::Immediate(value) => Ok(cast(cast(value).to_i64_sign_extend()).bitwise_as_u64()),
+        };
+
+        // The slides are the two operations that do not line their elements up, so they
+        // read their source at an offset rather than at the index being written.
+        if matches!(instruction.operation, VectorOperation::SlideUp | VectorOperation::SlideDown) {
+            // The immediate form's offset is a count rather than a value, so the five bits
+            // it was encoded in are read unsigned.
+            let offset = match operand {
+                Ok(value) => value & 0b11111,
+                Err(_) => unreachable!("ICE: a slide by a vector register"),
+            };
+            let offset = cast(offset).truncate_to_u32();
+            let length = self.vector_config.vl();
+            let up = instruction.operation == VectorOperation::SlideUp;
+            for index in 0..length {
+                let value = if up {
+                    if index < offset {
+                        continue;
+                    }
+                    self.vector_element(src, index.wrapping_sub(offset), bits)
+                } else {
+                    let source = index.wrapping_add(offset);
+                    if source >= self.vector_config.max_element_count() {
+                        0
+                    } else {
+                        self.vector_element(src, source, bits)
+                    }
+                };
+
+                self.set_vector_element(dst, index, bits, value);
+            }
+
+            return self.go_to_next_instruction(compiled_offset);
+        }
+
+        for index in 0..self.vector_config.vl() {
+            let first = self.vector_element(src, index, bits);
+            let second = match operand {
+                Ok(value) => value & element_mask(bits),
+                Err(reg) => self.vector_element(reg, index, bits),
+            };
+
+            let result = match instruction.operation {
+                VectorOperation::Add => first.wrapping_add(second),
+                VectorOperation::Subtract => first.wrapping_sub(second),
+                VectorOperation::SubtractFrom => second.wrapping_sub(first),
+                VectorOperation::MinimumUnsigned => core::cmp::min(first, second),
+                VectorOperation::MaximumUnsigned => core::cmp::max(first, second),
+                VectorOperation::MinimumSigned => {
+                    cast(core::cmp::min(sign_extend_element(first, bits), sign_extend_element(second, bits))).bitwise_as_u64()
+                }
+                VectorOperation::MaximumSigned => {
+                    cast(core::cmp::max(sign_extend_element(first, bits), sign_extend_element(second, bits))).bitwise_as_u64()
+                }
+                VectorOperation::And => first & second,
+                VectorOperation::Or => first | second,
+                VectorOperation::Xor => first ^ second,
+                // Only as many bits of the shift amount as the element width can use.
+                VectorOperation::ShiftLeft => first.wrapping_shl(cast(second).truncate_to_u32()),
+                VectorOperation::ShiftRight => (first & element_mask(bits)).wrapping_shr(cast(second).truncate_to_u32() % bits),
+                VectorOperation::ShiftRightSigned => {
+                    cast(sign_extend_element(first, bits).wrapping_shr(cast(second).truncate_to_u32() % bits)).bitwise_as_u64()
+                }
+                VectorOperation::Multiply => first.wrapping_mul(second),
+                VectorOperation::MultiplyHighUnsigned => truncate_u128(u128::from(first).wrapping_mul(u128::from(second)) >> bits),
+                VectorOperation::MultiplyHighSigned => {
+                    let first = i128::from(sign_extend_element(first, bits));
+                    let second = i128::from(sign_extend_element(second, bits));
+                    truncate_i128(first.wrapping_mul(second) >> bits)
+                }
+                // Division by zero has the result the scalar instructions give it.
+                VectorOperation::DivideUnsigned => {
+                    if second == 0 {
+                        u64::MAX
+                    } else {
+                        first.wrapping_div(second)
+                    }
+                }
+                VectorOperation::RemainderUnsigned => {
+                    if second == 0 {
+                        first
+                    } else {
+                        first.wrapping_rem(second)
+                    }
+                }
+                VectorOperation::DivideSigned => {
+                    let (first, second) = (sign_extend_element(first, bits), sign_extend_element(second, bits));
+                    if second == 0 {
+                        u64::MAX
+                    } else {
+                        cast(first.wrapping_div(second)).bitwise_as_u64()
+                    }
+                }
+                VectorOperation::RemainderSigned => {
+                    let (first, second) = (sign_extend_element(first, bits), sign_extend_element(second, bits));
+                    if second == 0 {
+                        cast(first).bitwise_as_u64()
+                    } else {
+                        cast(first.wrapping_rem(second)).bitwise_as_u64()
+                    }
+                }
+                // The accumulating forms read the destination as a third operand.
+                VectorOperation::MultiplyAdd => self.vector_element(dst, index, bits).wrapping_add(first.wrapping_mul(second)),
+                VectorOperation::MultiplySubtract => self.vector_element(dst, index, bits).wrapping_sub(first.wrapping_mul(second)),
+                VectorOperation::MultiplyAddToSource => self.vector_element(dst, index, bits).wrapping_mul(second).wrapping_add(first),
+                VectorOperation::MultiplySubtractFromSource => {
+                    first.wrapping_sub(self.vector_element(dst, index, bits).wrapping_mul(second))
+                }
+                VectorOperation::SlideUp | VectorOperation::SlideDown => {
+                    unreachable!("ICE: a slide reached the element-wise loop")
+                }
+                VectorOperation::Merge => {
+                    let index = cast(index).to_usize();
+                    let selected = selector[index.wrapping_div(64)] >> index.wrapping_rem(64) & 1 != 0;
+                    if selected {
+                        second
+                    } else {
+                        first
+                    }
+                }
+            };
+
+            self.set_vector_element(dst, index, bits, result);
+        }
+
+        if DEBUG {
+            log::trace!("  {}", instruction);
+        }
+
+        self.go_to_next_instruction(compiled_offset)
+    }
+
+    /// The index of the first selected element, or minus one when there is none.
+    #[inline(always)]
+    fn vector_first<const DEBUG: bool>(&mut self, compiled_offset: Target, dst: Reg, src: VecReg, masked: bool) -> Target {
+        let selector = self.vector_reg(VecReg::V0);
+        let value = self.vector_reg(src);
+        let mut found = -1_i64;
+        for index in 0..cast(self.vector_config.vl()).to_usize() {
+            let word = index.wrapping_div(64);
+            let bit = index.wrapping_rem(64);
+            if masked && selector[word] >> bit & 1 == 0 {
+                continue;
+            }
+
+            if value[word] >> bit & 1 != 0 {
+                let Ok(index) = i64::try_from(index) else {
+                    unreachable!("ICE: an element index that does not fit in a register")
+                };
+                found = index;
+                break;
+            }
+        }
+
+        self.set_u64::<DEBUG>(dst, cast(found).bitwise_as_u64());
+        self.go_to_next_instruction(compiled_offset)
+    }
+
+    /// Writes the same value to every active element of a register group.
+    #[inline(always)]
+    fn vector_splat<const DEBUG: bool>(&mut self, compiled_offset: Target, dst: VecReg, value: u64) -> Target {
+        let bits = self.vector_config.element_bits();
+        for index in 0..self.vector_config.vl() {
+            self.set_vector_element(dst, index, bits, value);
+        }
+
+        if DEBUG {
+            log::trace!("  {dst} = {} elements of 0x{value:x}", self.vector_config.vl());
+        }
+
+        self.go_to_next_instruction(compiled_offset)
+    }
+
+    /// The counterpart of [`Self::vector_element`], which the same bounds apply to.
+    #[inline(always)]
+    fn set_vector_element(&mut self, group: VecReg, index: u32, bits: u32, value: u64) {
+        let byte = index.wrapping_mul(bits / 8);
+        let word = group
+            .to_usize()
+            .wrapping_mul(VECTOR_WORDS_PER_REG)
+            .wrapping_add(cast(byte / 8).to_usize());
+        let Some(word) = self.vector_regs.get_mut(word) else {
+            return;
+        };
+
+        let shift = byte.wrapping_rem(8).wrapping_mul(8);
+        let mask = if bits == 64 { u64::MAX } else { (1_u64 << bits).wrapping_sub(1) };
+        *word = (*word & !(mask << shift)) | ((value & mask) << shift);
+    }
+
+    /// One byte of the register file, counted from the start of register zero.
+    #[inline(always)]
+    fn vector_byte(&self, index: usize) -> u8 {
+        let word = self.vector_regs[index.wrapping_div(8)];
+        cast(word >> (index.wrapping_rem(8).wrapping_mul(8))).truncate_to_u8()
+    }
+
+    #[inline(always)]
+    fn set_vector_byte(&mut self, index: usize, value: u8) {
+        let shift = index.wrapping_rem(8).wrapping_mul(8);
+        let word = &mut self.vector_regs[index.wrapping_div(8)];
+        *word = (*word & !(0xff_u64 << shift)) | (u64::from(value) << shift);
     }
 
     #[must_use]
@@ -3229,6 +3727,146 @@ macro_rules! define_interpreter {
         $body
     }};
 
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: VecReg, $a1:ident: VecReg) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<VecReg>, a1: impl Into<VecReg>) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_vec_reg(args.a0);
+        let $a1 = transmute_vec_reg(args.a1);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: VecReg, $a1:ident: VecReg, $a2:ident: VecReg) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<VecReg>, a1: impl Into<VecReg>, a2: impl Into<VecReg>) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    a2: a2.into().to_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_vec_reg(args.a0);
+        let $a1 = transmute_vec_reg(args.a1);
+        let $a2 = transmute_vec_reg(args.a2);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: VecReg, $a1:ident: Reg, $a2:ident: i32) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<VecReg>, a1: impl Into<Reg>, a2: i32) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    a2: cast(a2).bitwise_as_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_vec_reg(args.a0);
+        let $a1 = transmute_reg(args.a1);
+        let $a2 = cast(args.a2).bitwise_as_i32();
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: VecReg) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<VecReg>) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_vec_reg(args.a0);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: VecReg, $a1:ident: VecReg, $a2:ident: i32) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<VecReg>, a1: impl Into<VecReg>, a2: i32) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    a2: cast(a2).bitwise_as_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_vec_reg(args.a0);
+        let $a1 = transmute_vec_reg(args.a1);
+        let $a2 = cast(args.a2).bitwise_as_i32();
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: VecReg, $a1:ident: i32) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<VecReg>, a1: i32) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: cast(a1).bitwise_as_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_vec_reg(args.a0);
+        let $a1 = cast(args.a1).bitwise_as_i32();
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: VecReg, $a1:ident: Reg) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<VecReg>, a1: impl Into<Reg>) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_vec_reg(args.a0);
+        let $a1 = transmute_reg(args.a1);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: Reg, $a1:ident: VecReg) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<Reg>, a1: impl Into<VecReg>) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_reg(args.a0);
+        let $a1 = transmute_vec_reg(args.a1);
+        $body
+    }};
+
     (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideReg, $a1:ident: WideReg, $a2:ident: WideReg, $a3:ident: WideReg) => {{
         impl Args {
             pub fn $handler_name(a0: impl Into<WideReg>, a1: impl Into<WideReg>, a2: impl Into<WideReg>, a3: impl Into<WideReg>) -> Args {
@@ -3396,6 +4034,26 @@ macro_rules! define_interpreter {
         $body
     }};
 
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: ProgramCounter, $a1:ident: VecReg, $a2:ident: Reg, $a3:ident: i32) => {{
+        impl Args {
+            pub fn $handler_name(a0: ProgramCounter, a1: impl Into<VecReg>, a2: impl Into<Reg>, a3: i32) -> Args {
+                Args {
+                    a0: a0.0,
+                    a1: a1.into().to_u32(),
+                    a2: a2.into().to_u32(),
+                    a3: cast(a3).bitwise_as_u32(),
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = ProgramCounter(args.a0);
+        let $a1 = transmute_vec_reg(args.a1);
+        let $a2 = transmute_reg(args.a2);
+        let $a3 = cast(args.a3).bitwise_as_i32();
+        $body
+    }};
+
     (@arg_names $handler_name:ident, $a0:ident: $a0_ty:ty, $a1:ident: $a1_ty:ty, $a2:ident: $a2_ty:ty) => {
         asm::$handler_name($a0, $a1, $a2)
     };
@@ -3431,6 +4089,50 @@ macro_rules! define_interpreter {
             )+
         }
     };
+}
+
+#[inline(always)]
+/// The low 64 bits of a double width product.
+#[inline(always)]
+fn truncate_u128(value: u128) -> u64 {
+    let Ok(value) = u64::try_from(value & 0xffff_ffff_ffff_ffff) else {
+        unreachable!("ICE: the low 64 bits of a value do not fit in 64 bits")
+    };
+    value
+}
+
+/// As above, for a product that was computed as signed.
+#[inline(always)]
+fn truncate_i128(value: i128) -> u64 {
+    let Ok(value) = u64::try_from(value & 0xffff_ffff_ffff_ffff) else {
+        unreachable!("ICE: the low 64 bits of a value do not fit in 64 bits")
+    };
+    value
+}
+
+/// The bits an element of the given width occupies.
+#[inline(always)]
+fn element_mask(bits: u32) -> u64 {
+    if bits >= 64 {
+        u64::MAX
+    } else {
+        (1_u64 << bits).wrapping_sub(1)
+    }
+}
+
+/// An element held zero extended, read as a signed value of its own width.
+#[inline(always)]
+fn sign_extend_element(value: u64, bits: u32) -> i64 {
+    let shift = 64_u32.wrapping_sub(bits);
+    cast(value.wrapping_shl(shift)).bitwise_as_i64() >> shift
+}
+
+#[inline(always)]
+fn transmute_vec_reg(value: u32) -> VecReg {
+    debug_assert!(VecReg::from_raw(value).is_some());
+
+    // SAFETY: The `value` passed in here is always constructed through `reg as u32` so this is always safe.
+    unsafe { core::mem::transmute(value) }
 }
 
 #[inline(always)]
@@ -4115,6 +4817,370 @@ define_interpreter! {
         }
 
         visitor.wide_store::<DEBUG>(compiled_offset, program_counter, s, Some(base), offset)
+    }
+
+    fn vector_arithmetic<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, packed: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_arithmetic(cast(packed).bitwise_as_i32()));
+        }
+
+        visitor.vector_arithmetic::<DEBUG>(compiled_offset, packed)
+    }
+
+    fn vector_config<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, packed: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_config(cast(packed).bitwise_as_i32()));
+        }
+
+        visitor.vector_config = VectorConfig::from_packed(packed);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn vector_config_dynamic<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s: Reg, vtype: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_config_dynamic(d, s, vtype));
+        }
+
+        // The requested length is capped by what the configuration holds, and the length
+        // that was settled on is what the instruction returns.
+        let vtype = cast(vtype).bitwise_as_u32();
+        let requested = cast(visitor.regs[s.to_usize()]).bitwise_as_u64();
+        let length = core::cmp::min(requested, u64::from(VectorConfig::new(vtype, 0).max_element_count()));
+        visitor.vector_config = VectorConfig::new(vtype, cast(length).truncate_to_u32());
+        visitor.set_u64::<DEBUG>(d, length);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn vector_move<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_move(d, s));
+        }
+
+        let value = visitor.vector_reg(s);
+        visitor.set_vector_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn vector_load<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: VecReg, base: Reg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_load(d, base, offset));
+        }
+
+        visitor.vector_load::<DEBUG>(compiled_offset, program_counter, d, base, offset)
+    }
+
+    fn vector_store<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, s: VecReg, base: Reg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_store(s, base, offset));
+        }
+
+        visitor.vector_store::<DEBUG>(compiled_offset, program_counter, s, base, offset)
+    }
+
+    fn vector_set_equal<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_set_equal(d, s1, s2));
+        }
+
+        visitor.vector_compare::<DEBUG>(compiled_offset, d, s1, s2, true)
+    }
+
+    fn vector_set_not_equal<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_set_not_equal(d, s1, s2));
+        }
+
+        visitor.vector_compare::<DEBUG>(compiled_offset, d, s1, s2, false)
+    }
+
+    fn vector_count_mask<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_count_mask(d, s));
+        }
+
+        // Only the bits standing for an active element are counted; what is above `vl` is
+        // not part of the mask.
+        let length = visitor.vector_config.vl();
+        let value = visitor.vector_reg(s);
+        let mut count = 0;
+        let mut counted = 0;
+        for word in value {
+            let bits = length.saturating_sub(counted).min(64);
+            let mask = if bits >= 64 { u64::MAX } else { (1_u64 << bits).wrapping_sub(1) };
+            count += u64::from((word & mask).count_ones());
+            counted = counted.wrapping_add(64);
+        }
+
+        visitor.set_u64::<DEBUG>(d, count);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn vector_mask_and<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_mask_and(d, s1, s2));
+        }
+
+        visitor.vector_mask::<DEBUG>(compiled_offset, d, s1, s2, |a, b| a & b)
+    }
+
+    fn vector_mask_and_not<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_mask_and_not(d, s1, s2));
+        }
+
+        visitor.vector_mask::<DEBUG>(compiled_offset, d, s1, s2, |a, b| a & !b)
+    }
+
+    fn vector_mask_or<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_mask_or(d, s1, s2));
+        }
+
+        visitor.vector_mask::<DEBUG>(compiled_offset, d, s1, s2, |a, b| a | b)
+    }
+
+    fn vector_mask_xor<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_mask_xor(d, s1, s2));
+        }
+
+        visitor.vector_mask::<DEBUG>(compiled_offset, d, s1, s2, |a, b| a ^ b)
+    }
+
+    fn vector_mask_nand<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_mask_nand(d, s1, s2));
+        }
+
+        visitor.vector_mask::<DEBUG>(compiled_offset, d, s1, s2, |a, b| !(a & b))
+    }
+
+    fn vector_mask_nor<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_mask_nor(d, s1, s2));
+        }
+
+        visitor.vector_mask::<DEBUG>(compiled_offset, d, s1, s2, |a, b| !(a | b))
+    }
+
+    fn vector_mask_or_not<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_mask_or_not(d, s1, s2));
+        }
+
+        visitor.vector_mask::<DEBUG>(compiled_offset, d, s1, s2, |a, b| a | !b)
+    }
+
+    fn vector_mask_xnor<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_mask_xnor(d, s1, s2));
+        }
+
+        visitor.vector_mask::<DEBUG>(compiled_offset, d, s1, s2, |a, b| !(a ^ b))
+    }
+
+    fn vector_load_u8<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: VecReg, base: Reg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_load_u8(d, base, offset));
+        }
+
+        visitor.vector_load_elements::<DEBUG>(compiled_offset, program_counter, d, base, offset, 1)
+    }
+
+    fn vector_store_u8<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, s: VecReg, base: Reg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_store_u8(s, base, offset));
+        }
+
+        visitor.vector_store_elements::<DEBUG>(compiled_offset, program_counter, s, base, offset, 1)
+    }
+
+    fn vector_load_u16<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: VecReg, base: Reg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_load_u16(d, base, offset));
+        }
+
+        visitor.vector_load_elements::<DEBUG>(compiled_offset, program_counter, d, base, offset, 2)
+    }
+
+    fn vector_store_u16<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, s: VecReg, base: Reg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_store_u16(s, base, offset));
+        }
+
+        visitor.vector_store_elements::<DEBUG>(compiled_offset, program_counter, s, base, offset, 2)
+    }
+
+    fn vector_load_u32<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: VecReg, base: Reg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_load_u32(d, base, offset));
+        }
+
+        visitor.vector_load_elements::<DEBUG>(compiled_offset, program_counter, d, base, offset, 4)
+    }
+
+    fn vector_store_u32<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, s: VecReg, base: Reg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_store_u32(s, base, offset));
+        }
+
+        visitor.vector_store_elements::<DEBUG>(compiled_offset, program_counter, s, base, offset, 4)
+    }
+
+    fn vector_load_u64<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: VecReg, base: Reg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_load_u64(d, base, offset));
+        }
+
+        visitor.vector_load_elements::<DEBUG>(compiled_offset, program_counter, d, base, offset, 8)
+    }
+
+    fn vector_store_u64<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, s: VecReg, base: Reg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_store_u64(s, base, offset));
+        }
+
+        visitor.vector_store_elements::<DEBUG>(compiled_offset, program_counter, s, base, offset, 8)
+    }
+
+    fn vector_splat_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, imm: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_splat_imm(d, imm));
+        }
+
+        // The immediate stands for a value in a register, so it reaches the element width
+        // sign extended, as the register form's contents would be.
+        let value = cast(cast(imm).to_i64_sign_extend()).bitwise_as_u64();
+        visitor.vector_splat::<DEBUG>(compiled_offset, d, value)
+    }
+
+    fn vector_splat<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_splat(d, s));
+        }
+
+        let value = cast(visitor.regs[s.to_usize()]).bitwise_as_u64();
+        visitor.vector_splat::<DEBUG>(compiled_offset, d, value)
+    }
+
+    fn vector_insert<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_insert(d, s));
+        }
+
+        // Only the first element is written, and nothing else in the group changes.
+        let value = cast(visitor.regs[s.to_usize()]).bitwise_as_u64();
+        let bits = visitor.vector_config.element_bits();
+        if visitor.vector_config.vl() > 0 {
+            visitor.set_vector_element(d, 0, bits, value);
+        }
+
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn vector_insert_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, imm: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_insert_imm(d, imm));
+        }
+
+        let value = cast(cast(imm).to_i64_sign_extend()).bitwise_as_u64();
+        let bits = visitor.vector_config.element_bits();
+        if visitor.vector_config.vl() > 0 {
+            visitor.set_vector_element(d, 0, bits, value);
+        }
+
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn vector_element_index<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_element_index(d));
+        }
+
+        let bits = visitor.vector_config.element_bits();
+        for index in 0..visitor.vector_config.vl() {
+            visitor.set_vector_element(d, index, bits, u64::from(index));
+        }
+
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn vector_set_equal_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s: VecReg, imm: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_set_equal_imm(d, s, imm));
+        }
+
+        visitor.vector_compare_imm::<DEBUG>(compiled_offset, d, s, imm, true)
+    }
+
+    fn vector_set_not_equal_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s: VecReg, imm: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_set_not_equal_imm(d, s, imm));
+        }
+
+        visitor.vector_compare_imm::<DEBUG>(compiled_offset, d, s, imm, false)
+    }
+
+    fn vector_extract<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_extract(d, s));
+        }
+
+        // The element reaches the register sign extended, whatever the element width is.
+        let bits = visitor.vector_config.element_bits();
+        let value = sign_extend_element(visitor.vector_element(s, 0, bits), bits);
+        visitor.set_u64::<DEBUG>(d, cast(value).bitwise_as_u64());
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn vector_first_mask<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_first_mask(d, s));
+        }
+
+        visitor.vector_first::<DEBUG>(compiled_offset, d, s, false)
+    }
+
+    fn vector_first_mask_masked<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_first_mask_masked(d, s));
+        }
+
+        visitor.vector_first::<DEBUG>(compiled_offset, d, s, true)
+    }
+
+    fn vector_count_mask_masked<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_count_mask_masked(d, s));
+        }
+
+        // Only the elements the mask in `v0` selects are counted.
+        let selector = visitor.vector_reg(VecReg::V0);
+        let length = visitor.vector_config.vl();
+        let value = visitor.vector_reg(s);
+        let mut count = 0;
+        let mut counted = 0;
+        for index in 0..VECTOR_WORDS_PER_REG {
+            let bits = length.saturating_sub(counted).min(64);
+            let mask = if bits >= 64 { u64::MAX } else { (1_u64 << bits).wrapping_sub(1) };
+            count += u64::from((value[index] & selector[index] & mask).count_ones());
+            counted = counted.wrapping_add(64);
+        }
+
+        visitor.set_u64::<DEBUG>(d, count);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn vector_config_dynamic_discard<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s: Reg, vtype: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::vector_config_dynamic_discard(s, vtype));
+        }
+
+        let vtype = cast(vtype).bitwise_as_u32();
+        let requested = cast(visitor.regs[s.to_usize()]).bitwise_as_u64();
+        let length = core::cmp::min(requested, u64::from(VectorConfig::new(vtype, 0).max_element_count()));
+        visitor.vector_config = VectorConfig::new(vtype, cast(length).truncate_to_u32());
+        visitor.go_to_next_instruction(compiled_offset)
     }
 
     fn wide_add_mod<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg, s3: WideReg) -> Target {
@@ -5674,6 +6740,154 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
 
     fn wide_store(&mut self, s: RawWideReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         emit!(self, wide_store(self.program_counter, s, base, offset));
+    }
+
+    fn vector_arithmetic(&mut self, packed: i32) -> Self::ReturnTy {
+        emit!(self, vector_arithmetic(packed));
+    }
+
+    fn vector_config(&mut self, packed: i32) -> Self::ReturnTy {
+        emit!(self, vector_config(packed));
+    }
+
+    fn vector_config_dynamic(&mut self, d: RawReg, s: RawReg, vtype: i32) -> Self::ReturnTy {
+        emit!(self, vector_config_dynamic(d, s, vtype));
+    }
+
+    fn vector_move(&mut self, d: RawVecReg, s: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_move(d, s));
+    }
+
+    fn vector_load(&mut self, d: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, vector_load(self.program_counter, d, base, offset));
+    }
+
+    fn vector_store(&mut self, s: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, vector_store(self.program_counter, s, base, offset));
+    }
+
+    fn vector_set_equal(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_set_equal(d, s1, s2));
+    }
+
+    fn vector_set_not_equal(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_set_not_equal(d, s1, s2));
+    }
+
+    fn vector_count_mask(&mut self, d: RawReg, s: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_count_mask(d, s));
+    }
+
+    fn vector_mask_and(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_mask_and(d, s1, s2));
+    }
+
+    fn vector_mask_and_not(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_mask_and_not(d, s1, s2));
+    }
+
+    fn vector_mask_or(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_mask_or(d, s1, s2));
+    }
+
+    fn vector_mask_xor(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_mask_xor(d, s1, s2));
+    }
+
+    fn vector_mask_nand(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_mask_nand(d, s1, s2));
+    }
+
+    fn vector_mask_nor(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_mask_nor(d, s1, s2));
+    }
+
+    fn vector_mask_or_not(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_mask_or_not(d, s1, s2));
+    }
+
+    fn vector_mask_xnor(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_mask_xnor(d, s1, s2));
+    }
+
+    fn vector_load_u8(&mut self, d: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, vector_load_u8(self.program_counter, d, base, offset));
+    }
+
+    fn vector_store_u8(&mut self, s: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, vector_store_u8(self.program_counter, s, base, offset));
+    }
+
+    fn vector_load_u16(&mut self, d: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, vector_load_u16(self.program_counter, d, base, offset));
+    }
+
+    fn vector_store_u16(&mut self, s: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, vector_store_u16(self.program_counter, s, base, offset));
+    }
+
+    fn vector_load_u32(&mut self, d: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, vector_load_u32(self.program_counter, d, base, offset));
+    }
+
+    fn vector_store_u32(&mut self, s: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, vector_store_u32(self.program_counter, s, base, offset));
+    }
+
+    fn vector_load_u64(&mut self, d: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, vector_load_u64(self.program_counter, d, base, offset));
+    }
+
+    fn vector_store_u64(&mut self, s: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, vector_store_u64(self.program_counter, s, base, offset));
+    }
+
+    fn vector_splat_imm(&mut self, d: RawVecReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, vector_splat_imm(d, imm));
+    }
+
+    fn vector_splat(&mut self, d: RawVecReg, s: RawReg) -> Self::ReturnTy {
+        emit!(self, vector_splat(d, s));
+    }
+
+    fn vector_insert(&mut self, d: RawVecReg, s: RawReg) -> Self::ReturnTy {
+        emit!(self, vector_insert(d, s));
+    }
+
+    fn vector_insert_imm(&mut self, d: RawVecReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, vector_insert_imm(d, imm));
+    }
+
+    fn vector_element_index(&mut self, d: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_element_index(d));
+    }
+
+    fn vector_set_equal_imm(&mut self, d: RawVecReg, s: RawVecReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, vector_set_equal_imm(d, s, imm));
+    }
+
+    fn vector_set_not_equal_imm(&mut self, d: RawVecReg, s: RawVecReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, vector_set_not_equal_imm(d, s, imm));
+    }
+
+    fn vector_extract(&mut self, d: RawReg, s: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_extract(d, s));
+    }
+
+    fn vector_first_mask(&mut self, d: RawReg, s: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_first_mask(d, s));
+    }
+
+    fn vector_first_mask_masked(&mut self, d: RawReg, s: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_first_mask_masked(d, s));
+    }
+
+    fn vector_count_mask_masked(&mut self, d: RawReg, s: RawVecReg) -> Self::ReturnTy {
+        emit!(self, vector_count_mask_masked(d, s));
+    }
+
+    fn vector_config_dynamic_discard(&mut self, s: RawReg, vtype: i32) -> Self::ReturnTy {
+        emit!(self, vector_config_dynamic_discard(s, vtype));
     }
 
     fn wide_add_mod(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg, s3: RawWideReg) -> Self::ReturnTy {

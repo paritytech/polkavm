@@ -6065,3 +6065,103 @@ fn wide_comparisons_write_a_general_purpose_register() {
     assert_eq!(compare(asm::wide_set_less_than_signed(A1, W0, W1), [one, minus_one]), 0);
     assert_eq!(compare(asm::wide_set_less_than_signed(A1, W0, W1), [minus_one, one]), 1);
 }
+
+#[cfg(feature = "std")]
+#[test]
+fn vector_whole_register_moves_reach_the_halves_of_a_wide_one() {
+    use polkavm_common::program::VecReg::*;
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    // The two files are one, so a wide register is the pair of vector registers whose
+    // lower half it starts at: moving both halves of `w0` into those of `w3` one at a
+    // time has to leave `w3` holding what `w0` did.
+    let value = U256([1, 2, 3, 4]);
+    let store = asm::wide_store(W3, A0, 96);
+    assert_eq!(
+        run_wide(&[value], &[asm::vector_move(V6, V0), asm::vector_move(V7, V1), store]),
+        value
+    );
+
+    // Only the named register moves, so moving the low half alone leaves the high half of
+    // the destination as it was.
+    assert_eq!(
+        run_wide(&[value, U256::ZERO], &[asm::wide_move(W3, W1), asm::vector_move(V6, V0), store]),
+        U256([1, 2, 0, 0])
+    );
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn vector_loads_and_stores_reach_one_register() {
+    use polkavm_common::program::VecReg::*;
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    // A vector store writes half of what a wide store does, so storing the high half of
+    // `w0` over the low half of the result leaves the rest of the result untouched.
+    let value = U256([1, 2, 3, 4]);
+    assert_eq!(
+        run_wide(
+            &[value],
+            &[
+                asm::wide_store(W0, A0, 96),
+                asm::vector_store(V1, A0, 96),
+                asm::wide_store(W3, A0, 128),
+            ]
+        ),
+        U256([3, 4, 3, 4])
+    );
+
+    // And a vector load fills only the register it names.
+    assert_eq!(
+        run_wide(
+            &[value, U256::ZERO],
+            &[asm::wide_move(W3, W1), asm::vector_load(V7, A0, 0), asm::wide_store(W3, A0, 96),]
+        ),
+        U256([0, 0, 1, 2])
+    );
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn vector_compares_produce_a_mask_the_population_count_reads() {
+    use polkavm_common::program::VecReg::*;
+    use polkavm_common::vector::VectorConfig;
+    use polkavm_common::wide::U256;
+
+    // Thirty-two byte-wide elements across a pair of registers, which is the shape a
+    // comparison of two 256-bit values in memory takes.
+    let config = VectorConfig::new(0b11_000_001, 32);
+    assert_eq!(config.element_bits(), 8);
+    assert_eq!(config.max_element_count(), 32);
+    let configure = asm::vector_config(cast(config.to_packed()).bitwise_as_i32());
+
+    let count = |operands: [U256; 2], equal: bool| -> u64 {
+        let compare = if equal {
+            asm::vector_set_equal(V6, V0, V2)
+        } else {
+            asm::vector_set_not_equal(V6, V0, V2)
+        };
+        let bytes = run_wide_program(
+            &operands,
+            &[
+                configure,
+                compare,
+                asm::vector_count_mask(A1, V6),
+                asm::store_indirect_u64(A1, A0, 96),
+            ],
+        );
+        u64::from_le_bytes(bytes[..8].try_into().unwrap())
+    };
+
+    let value = U256([0x0807060504030201, 2, 3, 4]);
+    assert_eq!(count([value, value], true), 32);
+    assert_eq!(count([value, value], false), 0);
+
+    // One differing byte in the low limb leaves thirty-one equal and one not.
+    let mut other = value;
+    other.0[0] ^= 0xff;
+    assert_eq!(count([value, other], true), 31);
+    assert_eq!(count([value, other], false), 1);
+}

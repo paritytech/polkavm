@@ -180,6 +180,182 @@ impl core::fmt::Display for Reg {
     }
 }
 
+/// A vector register, as encoded in an instruction's argument byte.
+///
+/// Five of the byte's bits name a register and the rest are ignored, so two of these are
+/// equal when they name the same register rather than when their bits match.
+#[derive(Copy, Clone)]
+pub struct RawVecReg(u32);
+
+impl Eq for RawVecReg {}
+impl PartialEq for RawVecReg {
+    fn eq(&self, rhs: &Self) -> bool {
+        self.get() == rhs.get()
+    }
+}
+
+impl core::fmt::Debug for RawVecReg {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(fmt, "{} (0x{:x})", self.get(), self.0)
+    }
+}
+
+impl RawVecReg {
+    #[inline]
+    pub const fn get(self) -> VecReg {
+        let Some(reg) = VecReg::from_raw(self.0 & 0b11111) else {
+            unreachable!()
+        };
+        reg
+    }
+
+    #[inline]
+    pub const fn raw_unparsed(self) -> u32 {
+        self.0
+    }
+}
+
+impl From<VecReg> for RawVecReg {
+    fn from(reg: VecReg) -> Self {
+        Self(reg as u32)
+    }
+}
+
+impl From<RawVecReg> for VecReg {
+    fn from(reg: RawVecReg) -> Self {
+        reg.get()
+    }
+}
+
+impl core::fmt::Display for RawVecReg {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        self.get().fmt(fmt)
+    }
+}
+
+/// One of the VM's thirty-two vector registers.
+///
+/// Each holds [`VECTOR_LENGTH_BITS`] bits. The file is the one the vector extensions
+/// specify, and it is also where the wide registers live: [`WideReg`] number `n` is the
+/// pair `v(2n)`, `v(2n + 1)`, which is what a vector register group of two registers is.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[repr(u32)]
+pub enum VecReg {
+    V0 = 0,
+    V1 = 1,
+    V2 = 2,
+    V3 = 3,
+    V4 = 4,
+    V5 = 5,
+    V6 = 6,
+    V7 = 7,
+    V8 = 8,
+    V9 = 9,
+    V10 = 10,
+    V11 = 11,
+    V12 = 12,
+    V13 = 13,
+    V14 = 14,
+    V15 = 15,
+    V16 = 16,
+    V17 = 17,
+    V18 = 18,
+    V19 = 19,
+    V20 = 20,
+    V21 = 21,
+    V22 = 22,
+    V23 = 23,
+    V24 = 24,
+    V25 = 25,
+    V26 = 26,
+    V27 = 27,
+    V28 = 28,
+    V29 = 29,
+    V30 = 30,
+    V31 = 31,
+}
+
+impl VecReg {
+    #[inline]
+    pub const fn to_usize(self) -> usize {
+        self as usize
+    }
+
+    #[inline]
+    pub const fn to_u32(self) -> u32 {
+        self as u32
+    }
+
+    #[inline]
+    pub const fn raw(self) -> RawVecReg {
+        RawVecReg(self as u32)
+    }
+
+    #[inline]
+    pub const fn from_raw(value: u32) -> Option<VecReg> {
+        if value < 32 {
+            #[allow(unsafe_code)]
+            // SAFETY: The enum is `repr(u32)` with a variant for every value below 32.
+            Some(unsafe { core::mem::transmute::<u32, VecReg>(value) })
+        } else {
+            None
+        }
+    }
+
+    /// The lower numbered register of the pair that makes up a wide register.
+    #[inline]
+    pub const fn from_wide(reg: WideReg) -> VecReg {
+        let Some(reg) = VecReg::from_raw(reg.to_u32() * 2) else {
+            unreachable!()
+        };
+        reg
+    }
+
+    /// The wide register this one is the lower half of, if it is a lower half.
+    #[inline]
+    pub const fn to_wide(self) -> Option<WideReg> {
+        if self.to_u32() % 2 == 0 {
+            WideReg::from_raw(self.to_u32() / 2)
+        } else {
+            None
+        }
+    }
+
+    /// List of all of the VM's vector registers.
+    pub const ALL: [VecReg; 32] = {
+        let mut all = [VecReg::V0; 32];
+        let mut index = 0;
+        while index < 32 {
+            let Some(reg) = VecReg::from_raw(index as u32) else {
+                unreachable!()
+            };
+            all[index] = reg;
+            index += 1;
+        }
+        all
+    };
+}
+
+impl core::fmt::Display for VecReg {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(fmt, "v{}", self.to_u32())
+    }
+}
+
+/// The width of a vector register.
+///
+/// The vector extensions leave this to the implementation and generated code asks for it at
+/// run time. PolkaVM fixes it instead, so that the element count of every vector instruction
+/// is known when the program is compiled rather than when it runs.
+pub const VECTOR_LENGTH_BITS: u32 = 128;
+
+/// The width of a vector register in bytes.
+pub const VECTOR_LENGTH_BYTES: u32 = VECTOR_LENGTH_BITS / 8;
+
+/// The width of a vector register in 64-bit words.
+pub const VECTOR_LENGTH_WORDS: usize = (VECTOR_LENGTH_BITS / 64) as usize;
+
 /// A 256-bit register, as encoded in an instruction's argument nibble.
 ///
 /// Every one of the sixteen nibble values names a register, so unlike [`RawReg`] there is
@@ -792,6 +968,65 @@ pub fn read_args_wregs4(chunk: u128) -> (RawWideReg, RawWideReg, RawWideReg, Raw
 }
 
 #[inline(always)]
+pub fn read_args_vregs2(chunk: u128) -> (RawVecReg, RawVecReg) {
+    let chunk = chunk as u32;
+    (RawVecReg(chunk), RawVecReg(chunk >> 8))
+}
+
+#[inline(always)]
+pub fn read_args_vregs3(chunk: u128) -> (RawVecReg, RawVecReg, RawVecReg) {
+    let chunk = chunk as u32;
+    (RawVecReg(chunk), RawVecReg(chunk >> 8), RawVecReg(chunk >> 16))
+}
+
+#[inline(always)]
+pub fn read_args_vreg_reg_imm(chunk: u128, skip: u32) -> (RawVecReg, RawReg, i32) {
+    let chunk = chunk as u64;
+    let (reg1, reg2) = (RawVecReg(chunk as u32), RawReg((chunk >> 8) as u32));
+    let chunk = chunk >> 16;
+    let (_, _, imm_bits) = TABLE_2.get(skip, 0);
+    let imm = sign_extend_at(chunk as u32, imm_bits);
+    (reg1, reg2, cast(imm).bitwise_as_i32())
+}
+
+#[inline(always)]
+pub fn read_args_reg_vreg(chunk: u128) -> (RawReg, RawVecReg) {
+    let chunk = chunk as u32;
+    (RawReg(chunk), RawVecReg(chunk >> 8))
+}
+
+#[inline(always)]
+pub fn read_args_vreg_imm(chunk: u128, skip: u32) -> (RawVecReg, i32) {
+    let chunk = chunk as u64;
+    let reg = RawVecReg(chunk as u32);
+    let chunk = chunk >> 8;
+    let (_, _, imm_bits) = TABLE_1.get(skip, 0);
+    let imm = sign_extend_at(chunk as u32, imm_bits);
+    (reg, cast(imm).bitwise_as_i32())
+}
+
+#[inline(always)]
+pub fn read_args_vreg_reg(chunk: u128) -> (RawVecReg, RawReg) {
+    let chunk = chunk as u32;
+    (RawVecReg(chunk), RawReg(chunk >> 8))
+}
+
+#[inline(always)]
+pub fn read_args_vreg(chunk: u128) -> RawVecReg {
+    RawVecReg(chunk as u32)
+}
+
+#[inline(always)]
+pub fn read_args_vregs2_imm(chunk: u128, skip: u32) -> (RawVecReg, RawVecReg, i32) {
+    let chunk = chunk as u64;
+    let (reg1, reg2) = (RawVecReg(chunk as u32), RawVecReg((chunk >> 8) as u32));
+    let chunk = chunk >> 16;
+    let (_, _, imm_bits) = TABLE_2.get(skip, 0);
+    let imm = sign_extend_at(chunk as u32, imm_bits);
+    (reg1, reg2, cast(imm).bitwise_as_i32())
+}
+
+#[inline(always)]
 pub fn read_args_wregs2(chunk: u128) -> (RawWideReg, RawWideReg) {
     let chunk = chunk as u32;
     let (reg1, reg2) = (RawWideReg(chunk), RawWideReg(chunk >> 4));
@@ -1137,6 +1372,14 @@ macro_rules! define_all_instructions {
         [$($name_wreg_wreg_wreg_wreg:ident,)+]
         [$($name_wreg_imm:ident,)+]
         [$($name_wregs2_imm:ident,)+]
+        [$($name_vregs2:ident,)+]
+        [$($name_vregs3:ident,)+]
+        [$($name_vreg_reg_imm:ident,)+]
+        [$($name_reg_vreg:ident,)+]
+        [$($name_vreg_imm:ident,)+]
+        [$($name_vreg_reg:ident,)+]
+        [$($name_vreg:ident,)+]
+        [$($name_vregs2_imm:ident,)+]
     ) => {
         define_all_instructions!(
             @impl_shared
@@ -1162,6 +1405,14 @@ macro_rules! define_all_instructions {
             $($name_wreg_wreg_wreg_wreg,)+
             $($name_wreg_imm,)+
             $($name_wregs2_imm,)+
+            $($name_vregs2,)+
+            $($name_vregs3,)+
+            $($name_vreg_reg_imm,)+
+            $($name_reg_vreg,)+
+            $($name_vreg_imm,)+
+            $($name_vreg_reg,)+
+            $($name_vreg,)+
+            $($name_vregs2_imm,)+
         );
 
         #[macro_export]
@@ -1192,6 +1443,14 @@ macro_rules! define_all_instructions {
                     $(fn $name_wreg_wreg_wreg_wreg(&mut self, _offset: u32, _args_length: u32, reg1: RawWideReg, reg2: RawWideReg, reg3: RawWideReg, reg4: RawWideReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_wreg_wreg_wreg_wreg(self, reg1, reg2, reg3, reg4) })+
                     $(fn $name_wreg_imm(&mut self, _offset: u32, _args_length: u32, reg: RawWideReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_wreg_imm(self, reg, imm) })+
                     $(fn $name_wregs2_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawWideReg, reg2: RawWideReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_wregs2_imm(self, reg1, reg2, imm) })+
+                    $(fn $name_vregs2(&mut self, _offset: u32, _args_length: u32, reg1: RawVecReg, reg2: RawVecReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_vregs2(self, reg1, reg2) })+
+                    $(fn $name_vregs3(&mut self, _offset: u32, _args_length: u32, reg1: RawVecReg, reg2: RawVecReg, reg3: RawVecReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_vregs3(self, reg1, reg2, reg3) })+
+                    $(fn $name_vreg_reg_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawVecReg, reg2: RawReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_vreg_reg_imm(self, reg1, reg2, imm) })+
+                    $(fn $name_reg_vreg(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawVecReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_vreg(self, reg1, reg2) })+
+                    $(fn $name_vreg_imm(&mut self, _offset: u32, _args_length: u32, reg: RawVecReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_vreg_imm(self, reg, imm) })+
+                    $(fn $name_vreg_reg(&mut self, _offset: u32, _args_length: u32, reg1: RawVecReg, reg2: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_vreg_reg(self, reg1, reg2) })+
+                    $(fn $name_vreg(&mut self, _offset: u32, _args_length: u32, reg: RawVecReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_vreg(self, reg) })+
+                    $(fn $name_vregs2_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawVecReg, reg2: RawVecReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_vregs2_imm(self, reg1, reg2, imm) })+
 
                     fn invalid(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::invalid(self) }
                 }
@@ -1223,6 +1482,14 @@ macro_rules! define_all_instructions {
             $(fn $name_wreg_wreg_wreg_wreg(&mut self, offset: u32, args_length: u32, reg1: RawWideReg, reg2: RawWideReg, reg3: RawWideReg, reg4: RawWideReg) -> Self::ReturnTy;)+
             $(fn $name_wreg_imm(&mut self, offset: u32, args_length: u32, reg: RawWideReg, imm: i32) -> Self::ReturnTy;)+
             $(fn $name_wregs2_imm(&mut self, offset: u32, args_length: u32, reg1: RawWideReg, reg2: RawWideReg, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_vregs2(&mut self, offset: u32, args_length: u32, reg1: RawVecReg, reg2: RawVecReg) -> Self::ReturnTy;)+
+            $(fn $name_vregs3(&mut self, offset: u32, args_length: u32, reg1: RawVecReg, reg2: RawVecReg, reg3: RawVecReg) -> Self::ReturnTy;)+
+            $(fn $name_vreg_reg_imm(&mut self, offset: u32, args_length: u32, reg1: RawVecReg, reg2: RawReg, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_reg_vreg(&mut self, offset: u32, args_length: u32, reg1: RawReg, reg2: RawVecReg) -> Self::ReturnTy;)+
+            $(fn $name_vreg_imm(&mut self, offset: u32, args_length: u32, reg: RawVecReg, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_vreg_reg(&mut self, offset: u32, args_length: u32, reg1: RawVecReg, reg2: RawReg) -> Self::ReturnTy;)+
+            $(fn $name_vreg(&mut self, offset: u32, args_length: u32, reg: RawVecReg) -> Self::ReturnTy;)+
+            $(fn $name_vregs2_imm(&mut self, offset: u32, args_length: u32, reg1: RawVecReg, reg2: RawVecReg, imm: i32) -> Self::ReturnTy;)+
 
             fn invalid(&mut self, offset: u32, args_length: u32) -> Self::ReturnTy;
         }
@@ -1252,6 +1519,14 @@ macro_rules! define_all_instructions {
             $(fn $name_wreg_wreg_wreg_wreg(&mut self, reg1: RawWideReg, reg2: RawWideReg, reg3: RawWideReg, reg4: RawWideReg) -> Self::ReturnTy;)+
             $(fn $name_wreg_imm(&mut self, reg: RawWideReg, imm: i32) -> Self::ReturnTy;)+
             $(fn $name_wregs2_imm(&mut self, reg1: RawWideReg, reg2: RawWideReg, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_vregs2(&mut self, reg1: RawVecReg, reg2: RawVecReg) -> Self::ReturnTy;)+
+            $(fn $name_vregs3(&mut self, reg1: RawVecReg, reg2: RawVecReg, reg3: RawVecReg) -> Self::ReturnTy;)+
+            $(fn $name_vreg_reg_imm(&mut self, reg1: RawVecReg, reg2: RawReg, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_reg_vreg(&mut self, reg1: RawReg, reg2: RawVecReg) -> Self::ReturnTy;)+
+            $(fn $name_vreg_imm(&mut self, reg: RawVecReg, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_vreg_reg(&mut self, reg1: RawVecReg, reg2: RawReg) -> Self::ReturnTy;)+
+            $(fn $name_vreg(&mut self, reg: RawVecReg) -> Self::ReturnTy;)+
+            $(fn $name_vregs2_imm(&mut self, reg1: RawVecReg, reg2: RawVecReg, imm: i32) -> Self::ReturnTy;)+
 
             fn invalid(&mut self) -> Self::ReturnTy;
         }
@@ -1283,6 +1558,14 @@ macro_rules! define_all_instructions {
             $($name_wreg_wreg_wreg_wreg(RawWideReg, RawWideReg, RawWideReg, RawWideReg),)+
             $($name_wreg_imm(RawWideReg, i32),)+
             $($name_wregs2_imm(RawWideReg, RawWideReg, i32),)+
+            $($name_vregs2(RawVecReg, RawVecReg),)+
+            $($name_vregs3(RawVecReg, RawVecReg, RawVecReg),)+
+            $($name_vreg_reg_imm(RawVecReg, RawReg, i32),)+
+            $($name_reg_vreg(RawReg, RawVecReg),)+
+            $($name_vreg_imm(RawVecReg, i32),)+
+            $($name_vreg_reg(RawVecReg, RawReg),)+
+            $($name_vreg(RawVecReg),)+
+            $($name_vregs2_imm(RawVecReg, RawVecReg, i32),)+
             invalid = INVALID_INSTRUCTION_INDEX as u32,
         }
 
@@ -1311,6 +1594,14 @@ macro_rules! define_all_instructions {
                     $(Self::$name_wreg_wreg_wreg_wreg(reg1, reg2, reg3, reg4) => visitor.$name_wreg_wreg_wreg_wreg(reg1, reg2, reg3, reg4),)+
                     $(Self::$name_wreg_imm(reg, imm) => visitor.$name_wreg_imm(reg, imm),)+
                     $(Self::$name_wregs2_imm(reg1, reg2, imm) => visitor.$name_wregs2_imm(reg1, reg2, imm),)+
+                    $(Self::$name_vregs2(reg1, reg2) => visitor.$name_vregs2(reg1, reg2),)+
+                    $(Self::$name_vregs3(reg1, reg2, reg3) => visitor.$name_vregs3(reg1, reg2, reg3),)+
+                    $(Self::$name_vreg_reg_imm(reg1, reg2, imm) => visitor.$name_vreg_reg_imm(reg1, reg2, imm),)+
+                    $(Self::$name_reg_vreg(reg1, reg2) => visitor.$name_reg_vreg(reg1, reg2),)+
+                    $(Self::$name_vreg_imm(reg, imm) => visitor.$name_vreg_imm(reg, imm),)+
+                    $(Self::$name_vreg_reg(reg1, reg2) => visitor.$name_vreg_reg(reg1, reg2),)+
+                    $(Self::$name_vreg(reg) => visitor.$name_vreg(reg),)+
+                    $(Self::$name_vregs2_imm(reg1, reg2, imm) => visitor.$name_vregs2_imm(reg1, reg2, imm),)+
                     Self::invalid => visitor.invalid(),
                 }
             }
@@ -1339,6 +1630,14 @@ macro_rules! define_all_instructions {
                     $(Self::$name_wreg_wreg_wreg_wreg(reg1, reg2, reg3, reg4) => visitor.$name_wreg_wreg_wreg_wreg(offset, args_length, reg1, reg2, reg3, reg4),)+
                     $(Self::$name_wreg_imm(reg, imm) => visitor.$name_wreg_imm(offset, args_length, reg, imm),)+
                     $(Self::$name_wregs2_imm(reg1, reg2, imm) => visitor.$name_wregs2_imm(offset, args_length, reg1, reg2, imm),)+
+                    $(Self::$name_vregs2(reg1, reg2) => visitor.$name_vregs2(offset, args_length, reg1, reg2),)+
+                    $(Self::$name_vregs3(reg1, reg2, reg3) => visitor.$name_vregs3(offset, args_length, reg1, reg2, reg3),)+
+                    $(Self::$name_vreg_reg_imm(reg1, reg2, imm) => visitor.$name_vreg_reg_imm(offset, args_length, reg1, reg2, imm),)+
+                    $(Self::$name_reg_vreg(reg1, reg2) => visitor.$name_reg_vreg(offset, args_length, reg1, reg2),)+
+                    $(Self::$name_vreg_imm(reg, imm) => visitor.$name_vreg_imm(offset, args_length, reg, imm),)+
+                    $(Self::$name_vreg_reg(reg1, reg2) => visitor.$name_vreg_reg(offset, args_length, reg1, reg2),)+
+                    $(Self::$name_vreg(reg) => visitor.$name_vreg(offset, args_length, reg),)+
+                    $(Self::$name_vregs2_imm(reg1, reg2, imm) => visitor.$name_vregs2_imm(offset, args_length, reg1, reg2, imm),)+
                     Self::invalid => visitor.invalid(offset, args_length),
                 }
             }
@@ -1367,6 +1666,14 @@ macro_rules! define_all_instructions {
                     $(Self::$name_wreg_wreg_wreg_wreg(reg1, reg2, reg3, reg4) => Self::serialize_wreg_wreg_wreg_wreg(buffer, isa.opcode_to_u8(Opcode::$name_wreg_wreg_wreg_wreg).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, reg3, reg4),)+
                     $(Self::$name_wreg_imm(reg, imm) => Self::serialize_wreg_imm(buffer, isa.opcode_to_u8(Opcode::$name_wreg_imm).unwrap_or(UNUSED_RAW_OPCODE), reg, imm),)+
                     $(Self::$name_wregs2_imm(reg1, reg2, imm) => Self::serialize_wregs2_imm(buffer, isa.opcode_to_u8(Opcode::$name_wregs2_imm).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, imm),)+
+                    $(Self::$name_vregs2(reg1, reg2) => Self::serialize_vregs2(buffer, isa.opcode_to_u8(Opcode::$name_vregs2).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2),)+
+                    $(Self::$name_vregs3(reg1, reg2, reg3) => Self::serialize_vregs3(buffer, isa.opcode_to_u8(Opcode::$name_vregs3).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, reg3),)+
+                    $(Self::$name_vreg_reg_imm(reg1, reg2, imm) => Self::serialize_vreg_reg_imm(buffer, isa.opcode_to_u8(Opcode::$name_vreg_reg_imm).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, imm),)+
+                    $(Self::$name_reg_vreg(reg1, reg2) => Self::serialize_reg_vreg(buffer, isa.opcode_to_u8(Opcode::$name_reg_vreg).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2),)+
+                    $(Self::$name_vreg_imm(reg, imm) => Self::serialize_vreg_imm(buffer, isa.opcode_to_u8(Opcode::$name_vreg_imm).unwrap_or(UNUSED_RAW_OPCODE), reg, imm),)+
+                    $(Self::$name_vreg_reg(reg1, reg2) => Self::serialize_vreg_reg(buffer, isa.opcode_to_u8(Opcode::$name_vreg_reg).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2),)+
+                    $(Self::$name_vreg(reg) => Self::serialize_vreg(buffer, isa.opcode_to_u8(Opcode::$name_vreg).unwrap_or(UNUSED_RAW_OPCODE), reg),)+
+                    $(Self::$name_vregs2_imm(reg1, reg2, imm) => Self::serialize_vregs2_imm(buffer, isa.opcode_to_u8(Opcode::$name_vregs2_imm).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, imm),)+
                     Self::invalid => Self::serialize_argless(buffer, isa.opcode_to_u8(Opcode::trap).unwrap_or(UNUSED_RAW_OPCODE)),
 
                 }
@@ -1396,13 +1703,21 @@ macro_rules! define_all_instructions {
                     $(Self::$name_wreg_wreg_wreg_wreg(..) => Opcode::$name_wreg_wreg_wreg_wreg,)+
                     $(Self::$name_wreg_imm(..) => Opcode::$name_wreg_imm,)+
                     $(Self::$name_wregs2_imm(..) => Opcode::$name_wregs2_imm,)+
+                    $(Self::$name_vregs2(..) => Opcode::$name_vregs2,)+
+                    $(Self::$name_vregs3(..) => Opcode::$name_vregs3,)+
+                    $(Self::$name_vreg_reg_imm(..) => Opcode::$name_vreg_reg_imm,)+
+                    $(Self::$name_reg_vreg(..) => Opcode::$name_reg_vreg,)+
+                    $(Self::$name_vreg_imm(..) => Opcode::$name_vreg_imm,)+
+                    $(Self::$name_vreg_reg(..) => Opcode::$name_vreg_reg,)+
+                    $(Self::$name_vreg(..) => Opcode::$name_vreg,)+
+                    $(Self::$name_vregs2_imm(..) => Opcode::$name_vregs2_imm,)+
                     Self::invalid => Opcode::trap,
                 }
             }
         }
 
         pub mod asm {
-            use super::{Instruction, Reg, WideReg};
+            use super::{Instruction, Reg, VecReg, WideReg};
 
             $(
                 pub fn $name_argless() -> Instruction {
@@ -1529,6 +1844,54 @@ macro_rules! define_all_instructions {
                 }
             )+
 
+            $(
+                pub fn $name_vregs2(reg1: VecReg, reg2: VecReg) -> Instruction {
+                    Instruction::$name_vregs2(reg1.into(), reg2.into())
+                }
+            )+
+
+            $(
+                pub fn $name_vregs3(reg1: VecReg, reg2: VecReg, reg3: VecReg) -> Instruction {
+                    Instruction::$name_vregs3(reg1.into(), reg2.into(), reg3.into())
+                }
+            )+
+
+            $(
+                pub fn $name_vreg_reg_imm(reg1: VecReg, reg2: Reg, imm: i32) -> Instruction {
+                    Instruction::$name_vreg_reg_imm(reg1.into(), reg2.into(), imm)
+                }
+            )+
+
+            $(
+                pub fn $name_reg_vreg(reg1: Reg, reg2: VecReg) -> Instruction {
+                    Instruction::$name_reg_vreg(reg1.into(), reg2.into())
+                }
+            )+
+
+            $(
+                pub fn $name_vreg_imm(reg: VecReg, imm: i32) -> Instruction {
+                    Instruction::$name_vreg_imm(reg.into(), imm)
+                }
+            )+
+
+            $(
+                pub fn $name_vreg_reg(reg1: VecReg, reg2: Reg) -> Instruction {
+                    Instruction::$name_vreg_reg(reg1.into(), reg2.into())
+                }
+            )+
+
+            $(
+                pub fn $name_vreg(reg: VecReg) -> Instruction {
+                    Instruction::$name_vreg(reg.into())
+                }
+            )+
+
+            $(
+                pub fn $name_vregs2_imm(reg1: VecReg, reg2: VecReg, imm: i32) -> Instruction {
+                    Instruction::$name_vregs2_imm(reg1.into(), reg2.into(), imm)
+                }
+            )+
+
             pub fn ret() -> Instruction {
                 jump_indirect(Reg::RA, 0)
             }
@@ -1614,6 +1977,14 @@ macro_rules! define_instruction_set {
         [$($name_wreg_wreg_wreg_wreg:ident = $value_wreg_wreg_wreg_wreg:expr,)*]
         [$($name_wreg_imm:ident = $value_wreg_imm:expr,)*]
         [$($name_wregs2_imm:ident = $value_wregs2_imm:expr,)*]
+        [$($name_vregs2:ident = $value_vregs2:expr,)*]
+        [$($name_vregs3:ident = $value_vregs3:expr,)*]
+        [$($name_vreg_reg_imm:ident = $value_vreg_reg_imm:expr,)*]
+        [$($name_reg_vreg:ident = $value_reg_vreg:expr,)*]
+        [$($name_vreg_imm:ident = $value_vreg_imm:expr,)*]
+        [$($name_vreg_reg:ident = $value_vreg_reg:expr,)*]
+        [$($name_vreg:ident = $value_vreg:expr,)*]
+        [$($name_vregs2_imm:ident = $value_vregs2_imm:expr,)*]
     ) => {
         define_instruction_set!(
             @impl_shared
@@ -1640,6 +2011,14 @@ macro_rules! define_instruction_set {
             $($name_wreg_wreg_wreg_wreg = $value_wreg_wreg_wreg_wreg,)*
             $($name_wreg_imm = $value_wreg_imm,)*
             $($name_wregs2_imm = $value_wregs2_imm,)*
+            $($name_vregs2 = $value_vregs2,)*
+            $($name_vregs3 = $value_vregs3,)*
+            $($name_vreg_reg_imm = $value_vreg_reg_imm,)*
+            $($name_reg_vreg = $value_reg_vreg,)*
+            $($name_vreg_imm = $value_vreg_imm,)*
+            $($name_vreg_reg = $value_vreg_reg,)*
+            $($name_vreg = $value_vreg,)*
+            $($name_vregs2_imm = $value_vregs2_imm,)*
         );
 
         impl InstructionSet for $isa_name {
@@ -1684,6 +2063,14 @@ macro_rules! define_instruction_set {
                     $(Opcode::$name_wreg_wreg_wreg_wreg => true,)*
                     $(Opcode::$name_wreg_imm => true,)*
                     $(Opcode::$name_wregs2_imm => true,)*
+                    $(Opcode::$name_vregs2 => true,)*
+                    $(Opcode::$name_vregs3 => true,)*
+                    $(Opcode::$name_vreg_reg_imm => true,)*
+                    $(Opcode::$name_reg_vreg => true,)*
+                    $(Opcode::$name_vreg_imm => true,)*
+                    $(Opcode::$name_vreg_reg => true,)*
+                    $(Opcode::$name_vreg => true,)*
+                    $(Opcode::$name_vregs2_imm => true,)*
                     #[allow(unreachable_patterns)]
                     _ => false,
                 }
@@ -1818,6 +2205,54 @@ macro_rules! define_instruction_set {
                         $value_wregs2_imm => {
                             let (reg1, reg2, imm) = $crate::program::read_args_wregs2_imm(chunk, skip);
                             Instruction::$name_wregs2_imm(reg1, reg2, imm)
+                        }
+                    )*
+                    $(
+                        $value_vregs2 => {
+                            let (reg1, reg2) = $crate::program::read_args_vregs2(chunk);
+                            Instruction::$name_vregs2(reg1, reg2)
+                        }
+                    )*
+                    $(
+                        $value_vregs3 => {
+                            let (reg1, reg2, reg3) = $crate::program::read_args_vregs3(chunk);
+                            Instruction::$name_vregs3(reg1, reg2, reg3)
+                        }
+                    )*
+                    $(
+                        $value_vreg_reg_imm => {
+                            let (reg1, reg2, imm) = $crate::program::read_args_vreg_reg_imm(chunk, skip);
+                            Instruction::$name_vreg_reg_imm(reg1, reg2, imm)
+                        }
+                    )*
+                    $(
+                        $value_reg_vreg => {
+                            let (reg1, reg2) = $crate::program::read_args_reg_vreg(chunk);
+                            Instruction::$name_reg_vreg(reg1, reg2)
+                        }
+                    )*
+                    $(
+                        $value_vreg_imm => {
+                            let (reg, imm) = $crate::program::read_args_vreg_imm(chunk, skip);
+                            Instruction::$name_vreg_imm(reg, imm)
+                        }
+                    )*
+                    $(
+                        $value_vreg_reg => {
+                            let (reg1, reg2) = $crate::program::read_args_vreg_reg(chunk);
+                            Instruction::$name_vreg_reg(reg1, reg2)
+                        }
+                    )*
+                    $(
+                        $value_vreg => {
+                            let reg = $crate::program::read_args_vreg(chunk);
+                            Instruction::$name_vreg(reg)
+                        }
+                    )*
+                    $(
+                        $value_vregs2_imm => {
+                            let (reg1, reg2, imm) = $crate::program::read_args_vregs2_imm(chunk, skip);
+                            Instruction::$name_vregs2_imm(reg1, reg2, imm)
                         }
                     )*
                     _ => Instruction::invalid,
@@ -2117,6 +2552,102 @@ macro_rules! define_instruction_set {
                         }
                     })*
 
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_vregs2<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2) = $crate::program::read_args_vregs2(chunk);
+                            state.$name_vregs2(instruction_offset, skip, reg1, reg2)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_vregs2].is_some() {
+                            table[$value_vregs2] = $name_vregs2;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_vregs3<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, reg3) = $crate::program::read_args_vregs3(chunk);
+                            state.$name_vregs3(instruction_offset, skip, reg1, reg2, reg3)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_vregs3].is_some() {
+                            table[$value_vregs3] = $name_vregs3;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_vreg_reg_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, imm) = $crate::program::read_args_vreg_reg_imm(chunk, skip);
+                            state.$name_vreg_reg_imm(instruction_offset, skip, reg1, reg2, imm)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_vreg_reg_imm].is_some() {
+                            table[$value_vreg_reg_imm] = $name_vreg_reg_imm;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_vreg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2) = $crate::program::read_args_reg_vreg(chunk);
+                            state.$name_reg_vreg(instruction_offset, skip, reg1, reg2)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_vreg].is_some() {
+                            table[$value_reg_vreg] = $name_reg_vreg;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_vreg_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg, imm) = $crate::program::read_args_vreg_imm(chunk, skip);
+                            state.$name_vreg_imm(instruction_offset, skip, reg, imm)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_vreg_imm].is_some() {
+                            table[$value_vreg_imm] = $name_vreg_imm;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_vreg_reg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2) = $crate::program::read_args_vreg_reg(chunk);
+                            state.$name_vreg_reg(instruction_offset, skip, reg1, reg2)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_vreg_reg].is_some() {
+                            table[$value_vreg_reg] = $name_vreg_reg;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_vreg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let reg = $crate::program::read_args_vreg(chunk);
+                            state.$name_vreg(instruction_offset, skip, reg)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_vreg].is_some() {
+                            table[$value_vreg] = $name_vreg;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_vregs2_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, imm) = $crate::program::read_args_vregs2_imm(chunk, skip);
+                            state.$name_vregs2_imm(instruction_offset, skip, reg1, reg2, imm)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_vregs2_imm].is_some() {
+                            table[$value_vregs2_imm] = $name_vregs2_imm;
+                        }
+                    })*
+
                     #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
                     #[cold]
                     fn invalid_instruction<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, _chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
@@ -2167,6 +2698,7 @@ define_all_instructions! {
 
     // Instructions with args: reg, imm
     [
+        vector_config_dynamic_discard,
         jump_indirect,
         load_imm,
         load_u8,
@@ -2207,6 +2739,7 @@ define_all_instructions! {
 
     // Instructions with args: reg, reg, imm
     [
+        vector_config_dynamic,
         store_indirect_u8,
         store_indirect_u16,
         store_indirect_u32,
@@ -2318,6 +2851,8 @@ define_all_instructions! {
     // Instructions with args: imm
     [
         ecalli,
+        vector_config,
+        vector_arithmetic,
     ]
 
     // Instructions with args: imm, imm
@@ -2426,6 +2961,71 @@ define_all_instructions! {
         wide_shift_logical_right_imm,
         wide_shift_arithmetic_right_imm,
     ]
+
+    // Instructions with args: vreg, vreg
+    [
+        vector_move,
+    ]
+
+    // Instructions with args: vreg, vreg, vreg
+    [
+        vector_set_equal,
+        vector_set_not_equal,
+        vector_mask_and,
+        vector_mask_and_not,
+        vector_mask_or,
+        vector_mask_xor,
+        vector_mask_nand,
+        vector_mask_nor,
+        vector_mask_or_not,
+        vector_mask_xnor,
+    ]
+
+    // Instructions with args: vreg, reg, imm
+    [
+        vector_load,
+        vector_store,
+        vector_load_u8,
+        vector_load_u16,
+        vector_load_u32,
+        vector_load_u64,
+        vector_store_u8,
+        vector_store_u16,
+        vector_store_u32,
+        vector_store_u64,
+    ]
+
+    // Instructions with args: reg, vreg
+    [
+        vector_count_mask,
+        vector_count_mask_masked,
+        vector_first_mask,
+        vector_first_mask_masked,
+        vector_extract,
+    ]
+
+    // Instructions with args: vreg, imm
+    [
+        vector_splat_imm,
+        vector_insert_imm,
+    ]
+
+    // Instructions with args: vreg, reg
+    [
+        vector_splat,
+        vector_insert,
+    ]
+
+    // Instructions with args: vreg
+    [
+        vector_element_index,
+    ]
+
+    // Instructions with args: vreg, vreg, imm
+    [
+        vector_set_equal_imm,
+        vector_set_not_equal_imm,
+    ]
 }
 
 define_instruction_set! {
@@ -2441,6 +3041,7 @@ define_instruction_set! {
         // MISSING: unlikely
     ]
     [
+        vector_config_dynamic_discard            = 12,
         jump_indirect                            = 50,
         load_imm                                 = 51,
         load_u8                                  = 52,
@@ -2475,6 +3076,7 @@ define_instruction_set! {
         store_imm_indirect_u64                   = 73,
     ]
     [
+        vector_config_dynamic                    = 182,
         store_indirect_u8                        = 120,
         store_indirect_u16                       = 121,
         store_indirect_u32                       = 122,
@@ -2574,6 +3176,8 @@ define_instruction_set! {
     ]
     [
         ecalli                                   = 10,
+        vector_config                            = 181,
+        vector_arithmetic                        = 21,
     ]
     [
         store_imm_u8                             = 30,
@@ -2654,6 +3258,55 @@ define_instruction_set! {
         wide_shift_logical_left_imm              = 165,
         wide_shift_logical_right_imm             = 166,
         wide_shift_arithmetic_right_imm          = 167,
+    ]
+    [
+        vector_move                              = 168,
+    ]
+    [
+        vector_set_equal                         = 169,
+        vector_set_not_equal                     = 176,
+        vector_mask_and                          = 2,
+        vector_mask_and_not                      = 3,
+        vector_mask_or                           = 4,
+        vector_mask_xor                          = 5,
+        vector_mask_nand                         = 6,
+        vector_mask_nor                          = 7,
+        vector_mask_or_not                       = 8,
+        vector_mask_xnor                         = 9,
+    ]
+    [
+        vector_load                              = 177,
+        vector_store                             = 178,
+        vector_load_u8                           = 183,
+        vector_load_u16                          = 184,
+        vector_load_u32                          = 185,
+        vector_load_u64                          = 186,
+        vector_store_u8                          = 187,
+        vector_store_u16                         = 188,
+        vector_store_u32                         = 189,
+        vector_store_u64                         = 119,
+    ]
+    [
+        vector_count_mask                        = 179,
+        vector_count_mask_masked                 = 11,
+        vector_first_mask                        = 22,
+        vector_first_mask_masked                 = 23,
+        vector_extract                           = 24,
+    ]
+    [
+        vector_splat_imm                         = 13,
+        vector_insert_imm                        = 19,
+    ]
+    [
+        vector_splat                             = 14,
+        vector_insert                            = 15,
+    ]
+    [
+        vector_element_index                     = 16,
+    ]
+    [
+        vector_set_equal_imm                     = 17,
+        vector_set_not_equal_imm                 = 18,
     ]
 }
 
@@ -2792,6 +3445,22 @@ define_instruction_set! {
     ]
     [
         load_imm_and_jump_indirect               = 180,
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
     ]
     [
     ]
@@ -3006,6 +3675,22 @@ define_instruction_set! {
     ]
     [
     ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
 }
 
 define_instruction_set! {
@@ -3178,6 +3863,22 @@ define_instruction_set! {
     ]
     [
         load_imm64                               = 20,
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
+    ]
+    [
     ]
     [
     ]
@@ -3527,6 +4228,64 @@ impl Instruction {
         buffer[0] = opcode;
         buffer[1] = reg1.0 as u8 | (reg2.0 as u8) << 4;
         write_simple_varint(imm, &mut buffer[2..]) + 2
+    }
+
+    fn serialize_vregs2(buffer: &mut [u8], opcode: u8, reg1: RawVecReg, reg2: RawVecReg) -> usize {
+        buffer[0] = opcode;
+        buffer[1] = reg1.0 as u8;
+        buffer[2] = reg2.0 as u8;
+        3
+    }
+
+    fn serialize_vregs3(buffer: &mut [u8], opcode: u8, reg1: RawVecReg, reg2: RawVecReg, reg3: RawVecReg) -> usize {
+        buffer[0] = opcode;
+        buffer[1] = reg1.0 as u8;
+        buffer[2] = reg2.0 as u8;
+        buffer[3] = reg3.0 as u8;
+        4
+    }
+
+    fn serialize_vreg_reg_imm(buffer: &mut [u8], opcode: u8, reg1: RawVecReg, reg2: RawReg, imm: i32) -> usize {
+        let imm = cast(imm).bitwise_as_u32();
+        buffer[0] = opcode;
+        buffer[1] = reg1.0 as u8;
+        buffer[2] = reg2.0 as u8;
+        write_simple_varint(imm, &mut buffer[3..]) + 3
+    }
+
+    fn serialize_reg_vreg(buffer: &mut [u8], opcode: u8, reg1: RawReg, reg2: RawVecReg) -> usize {
+        buffer[0] = opcode;
+        buffer[1] = reg1.0 as u8;
+        buffer[2] = reg2.0 as u8;
+        3
+    }
+
+    fn serialize_vreg_imm(buffer: &mut [u8], opcode: u8, reg: RawVecReg, imm: i32) -> usize {
+        let imm = cast(imm).bitwise_as_u32();
+        buffer[0] = opcode;
+        buffer[1] = reg.0 as u8;
+        write_simple_varint(imm, &mut buffer[2..]) + 2
+    }
+
+    fn serialize_vreg_reg(buffer: &mut [u8], opcode: u8, reg1: RawVecReg, reg2: RawReg) -> usize {
+        buffer[0] = opcode;
+        buffer[1] = reg1.0 as u8;
+        buffer[2] = reg2.0 as u8;
+        3
+    }
+
+    fn serialize_vreg(buffer: &mut [u8], opcode: u8, reg: RawVecReg) -> usize {
+        buffer[0] = opcode;
+        buffer[1] = reg.0 as u8;
+        2
+    }
+
+    fn serialize_vregs2_imm(buffer: &mut [u8], opcode: u8, reg1: RawVecReg, reg2: RawVecReg, imm: i32) -> usize {
+        let imm = cast(imm).bitwise_as_u32();
+        buffer[0] = opcode;
+        buffer[1] = reg1.0 as u8;
+        buffer[2] = reg2.0 as u8;
+        write_simple_varint(imm, &mut buffer[3..]) + 3
     }
 }
 
@@ -4884,6 +5643,170 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
 
     fn wide_mul_mod(&mut self, d: RawWideReg, s1: RawWideReg, s2: RawWideReg, s3: RawWideReg) -> Self::ReturnTy {
         write!(self, "{d} = ({s1} *w {s2}) %uw {s3}")
+    }
+
+    fn vector_arithmetic(&mut self, packed: i32) -> Self::ReturnTy {
+        let operation = crate::vector::VectorArithmetic::from_packed(cast(packed).bitwise_as_u32());
+        write!(self, "{}", operation)
+    }
+
+    fn vector_config(&mut self, imm: i32) -> Self::ReturnTy {
+        let config = crate::vector::VectorConfig::from_packed(cast(imm).bitwise_as_u32());
+        write!(self, "vsetvl vtype = 0x{:x}, vl = {}", config.vtype(), config.vl())
+    }
+
+    fn vector_config_dynamic(&mut self, d: RawReg, s: RawReg, vtype: i32) -> Self::ReturnTy {
+        write!(self, "{d} = vsetvl {s}, vtype = 0x{:x}", cast(vtype).bitwise_as_u32())
+    }
+
+    fn vector_move(&mut self, d: RawVecReg, s: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = {s}")
+    }
+
+    fn vector_load(&mut self, d: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        let offset = self.format_imm(offset);
+        write!(self, "{d} = v[{base} + {offset}]")
+    }
+
+    fn vector_store(&mut self, s: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        let offset = self.format_imm(offset);
+        write!(self, "v[{base} + {offset}] = {s}")
+    }
+
+    fn vector_set_equal(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = {s1} ==v {s2}")
+    }
+
+    fn vector_set_not_equal(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = {s1} !=v {s2}")
+    }
+
+    fn vector_count_mask(&mut self, d: RawReg, s: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = cpop.m {s}")
+    }
+
+    fn vector_count_mask_masked(&mut self, d: RawReg, s: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = cpop.m {s}, v0.t")
+    }
+
+    fn vector_first_mask(&mut self, d: RawReg, s: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = first.m {s}")
+    }
+
+    fn vector_extract(&mut self, d: RawReg, s: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = {s}[0]")
+    }
+
+    fn vector_first_mask_masked(&mut self, d: RawReg, s: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = first.m {s}, v0.t")
+    }
+
+    fn vector_config_dynamic_discard(&mut self, s: RawReg, vtype: i32) -> Self::ReturnTy {
+        write!(self, "vsetvl {s}, vtype = 0x{:x}", cast(vtype).bitwise_as_u32())
+    }
+
+    fn vector_splat_imm(&mut self, d: RawVecReg, imm: i32) -> Self::ReturnTy {
+        let imm = self.format_imm(imm);
+        write!(self, "{d} = splat {imm}")
+    }
+
+    fn vector_splat(&mut self, d: RawVecReg, s: RawReg) -> Self::ReturnTy {
+        write!(self, "{d} = splat {s}")
+    }
+
+    fn vector_insert(&mut self, d: RawVecReg, s: RawReg) -> Self::ReturnTy {
+        write!(self, "{d}[0] = {s}")
+    }
+
+    fn vector_insert_imm(&mut self, d: RawVecReg, imm: i32) -> Self::ReturnTy {
+        let imm = self.format_imm(imm);
+        write!(self, "{d}[0] = {imm}")
+    }
+
+    fn vector_element_index(&mut self, d: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = element index")
+    }
+
+    fn vector_set_equal_imm(&mut self, d: RawVecReg, s: RawVecReg, imm: i32) -> Self::ReturnTy {
+        let imm = self.format_imm(imm);
+        write!(self, "{d} = {s} ==v {imm}")
+    }
+
+    fn vector_set_not_equal_imm(&mut self, d: RawVecReg, s: RawVecReg, imm: i32) -> Self::ReturnTy {
+        let imm = self.format_imm(imm);
+        write!(self, "{d} = {s} !=v {imm}")
+    }
+
+    fn vector_mask_and(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = {s1} &m {s2}")
+    }
+
+    fn vector_mask_and_not(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = {s1} &!m {s2}")
+    }
+
+    fn vector_mask_or(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = {s1} |m {s2}")
+    }
+
+    fn vector_mask_xor(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = {s1} ^m {s2}")
+    }
+
+    fn vector_mask_nand(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = {s1} !&m {s2}")
+    }
+
+    fn vector_mask_nor(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = {s1} !|m {s2}")
+    }
+
+    fn vector_mask_or_not(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = {s1} |!m {s2}")
+    }
+
+    fn vector_mask_xnor(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        write!(self, "{d} = {s1} !^m {s2}")
+    }
+
+    fn vector_load_u8(&mut self, d: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        let offset = self.format_imm(offset);
+        write!(self, "{d} = v8[{base} + {offset}]")
+    }
+
+    fn vector_store_u8(&mut self, s: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        let offset = self.format_imm(offset);
+        write!(self, "v8[{base} + {offset}] = {s}")
+    }
+
+    fn vector_load_u16(&mut self, d: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        let offset = self.format_imm(offset);
+        write!(self, "{d} = v16[{base} + {offset}]")
+    }
+
+    fn vector_store_u16(&mut self, s: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        let offset = self.format_imm(offset);
+        write!(self, "v16[{base} + {offset}] = {s}")
+    }
+
+    fn vector_load_u32(&mut self, d: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        let offset = self.format_imm(offset);
+        write!(self, "{d} = v32[{base} + {offset}]")
+    }
+
+    fn vector_store_u32(&mut self, s: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        let offset = self.format_imm(offset);
+        write!(self, "v32[{base} + {offset}] = {s}")
+    }
+
+    fn vector_load_u64(&mut self, d: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        let offset = self.format_imm(offset);
+        write!(self, "{d} = v64[{base} + {offset}]")
+    }
+
+    fn vector_store_u64(&mut self, s: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        let offset = self.format_imm(offset);
+        write!(self, "v64[{base} + {offset}] = {s}")
     }
 
     fn invalid(&mut self) -> Self::ReturnTy {

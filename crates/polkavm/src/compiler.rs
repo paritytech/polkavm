@@ -5,7 +5,9 @@ use std::sync::Arc;
 use polkavm_assembler::{Assembler, Label};
 use polkavm_common::abi::VM_CODE_ADDRESS_ALIGNMENT;
 use polkavm_common::cast::cast;
-use polkavm_common::program::{is_jump_target_valid, InstructionSetKind, JumpTable, ProgramCounter, ProgramExport, RawReg, RawWideReg};
+use polkavm_common::program::{
+    is_jump_target_valid, InstructionSetKind, JumpTable, ProgramCounter, ProgramExport, RawReg, RawVecReg, RawWideReg,
+};
 use polkavm_common::utils::{Bitness, BitnessT, GasVisitorT};
 use polkavm_common::zygote::VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH;
 
@@ -312,6 +314,9 @@ where
 
     /// Records that the recompiler met an instruction it cannot emit, so that compilation
     /// fails rather than producing a module that traps at run time.
+    ///
+    /// The wide and vector instructions are both in this position: the interpreter runs
+    /// them and the recompiler does not.
     #[inline(never)]
     #[cold]
     fn unsupported_wide_instruction(&mut self, code_offset: u32, args_length: u32) {
@@ -663,6 +668,161 @@ where
 
     fn and_inverted(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, and_inverted(d, s1, s2));
+    }
+
+    fn vector_arithmetic(&mut self, code_offset: u32, args_length: u32, _packed: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_config(&mut self, code_offset: u32, args_length: u32, _packed: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_config_dynamic(&mut self, code_offset: u32, args_length: u32, _d: RawReg, _s: RawReg, _vtype: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_move(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_load(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_store(&mut self, code_offset: u32, args_length: u32, _s: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_set_equal(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_set_not_equal(
+        &mut self,
+        code_offset: u32,
+        args_length: u32,
+        _d: RawVecReg,
+        _s1: RawVecReg,
+        _s2: RawVecReg,
+    ) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_count_mask(&mut self, code_offset: u32, args_length: u32, _d: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_mask_and(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_mask_and_not(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_mask_or(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_mask_xor(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_mask_nand(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_mask_nor(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_mask_or_not(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_mask_xnor(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_load_u8(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_store_u8(&mut self, code_offset: u32, args_length: u32, _s: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_load_u16(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_store_u16(&mut self, code_offset: u32, args_length: u32, _s: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_load_u32(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_store_u32(&mut self, code_offset: u32, args_length: u32, _s: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_load_u64(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_store_u64(&mut self, code_offset: u32, args_length: u32, _s: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_insert(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _s: RawReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_insert_imm(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_element_index(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_set_equal_imm(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_set_not_equal_imm(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_splat_imm(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_splat(&mut self, code_offset: u32, args_length: u32, _d: RawVecReg, _s: RawReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_extract(&mut self, code_offset: u32, args_length: u32, _d: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_first_mask(&mut self, code_offset: u32, args_length: u32, _d: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_first_mask_masked(&mut self, code_offset: u32, args_length: u32, _d: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_count_mask_masked(&mut self, code_offset: u32, args_length: u32, _d: RawReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn vector_config_dynamic_discard(&mut self, code_offset: u32, args_length: u32, _s: RawReg, _vtype: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
     }
 
     fn wide_add(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _s1: RawWideReg, _s2: RawWideReg) -> Self::ReturnTy {

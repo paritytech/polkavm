@@ -1,5 +1,7 @@
 #![allow(clippy::unusual_byte_groupings)]
 
+use polkavm_common::vector::VectorOperation;
+
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 #[repr(u8)]
 pub enum Reg {
@@ -60,30 +62,139 @@ pub enum WideReg {
 }
 
 impl WideReg {
-    /// Decodes a register field. Only the low sixteen encodings name a register; the rest
-    /// belong to the vector file this extension does not use.
+    /// Decodes a register field naming a vector register.
+    ///
+    /// A wide value occupies a pair of vector registers, which the vector extensions require
+    /// to be named by the lower of the two, so only the even encodings are valid.
     const fn decode(value: u32) -> Option<Self> {
+        use polkavm_common::vector::VectorOperation;
         use WideReg::*;
         Some(match value & 0b11111 {
             0 => W0,
-            1 => W1,
-            2 => W2,
-            3 => W3,
-            4 => W4,
-            5 => W5,
-            6 => W6,
-            7 => W7,
-            8 => W8,
-            9 => W9,
-            10 => W10,
-            11 => W11,
-            12 => W12,
-            13 => W13,
-            14 => W14,
-            15 => W15,
+            2 => W1,
+            4 => W2,
+            6 => W3,
+            8 => W4,
+            10 => W5,
+            12 => W6,
+            14 => W7,
+            16 => W8,
+            18 => W9,
+            20 => W10,
+            22 => W11,
+            24 => W12,
+            26 => W13,
+            28 => W14,
+            30 => W15,
             _ => return None,
         })
     }
+}
+
+/// One of the thirty-two vector registers, as encoded in a register field.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub struct VecReg(u8);
+
+impl VecReg {
+    const fn decode(value: u32) -> Self {
+        VecReg((value & 0b11111) as u8)
+    }
+
+    pub const fn index(self) -> u8 {
+        self.0
+    }
+
+    /// A later register of the same group. Groups never run past the end of the file.
+    pub const fn offset(self, by: u32) -> Self {
+        VecReg((self.0 as u32 + by) as u8 & 0b11111)
+    }
+
+    /// Whether this can name a group of the given size.
+    ///
+    /// The vector extensions require the specifier of a register group to be a multiple of
+    /// the group's size, so that a group never straddles one of the larger groupings.
+    pub const fn can_start_group(self, registers: u32) -> bool {
+        self.0 as u32 % registers == 0
+    }
+
+    /// The wide register this one starts, if a register group beginning here is a wide value.
+    pub const fn to_wide(self) -> Option<WideReg> {
+        WideReg::decode(self.0 as u32)
+    }
+}
+
+/// Where the second operand of an element-wise operation comes from.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum VectorArithmeticOperand {
+    Vector(VecReg),
+    Register(Reg),
+    Immediate(i32),
+}
+
+/// The bitwise operations on a mask register.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum VectorMaskKind {
+    And,
+    AndNot,
+    Or,
+    Xor,
+    Nand,
+    Nor,
+    OrNot,
+    Xnor,
+}
+
+impl VectorMaskKind {
+    const fn decode(funct6: u32) -> Option<Self> {
+        use VectorMaskKind::*;
+        Some(match funct6 {
+            0b011001 => And,
+            0b011000 => AndNot,
+            0b011010 => Or,
+            0b011011 => Xor,
+            0b011101 => Nand,
+            0b011110 => Nor,
+            0b011100 => OrNot,
+            0b011111 => Xnor,
+            _ => return None,
+        })
+    }
+}
+
+/// The width of the elements a unit-stride load or store moves.
+///
+/// This comes from the instruction rather than from `vtype`, which is why the same
+/// configuration can be read at one width and written at another.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum VectorElementWidth {
+    U8,
+    U16,
+    U32,
+    U64,
+}
+
+impl VectorElementWidth {
+    const fn decode(width: u32) -> Option<Self> {
+        use VectorElementWidth::*;
+        Some(match width {
+            0b000 => U8,
+            0b101 => U16,
+            0b110 => U32,
+            0b111 => U64,
+            _ => return None,
+        })
+    }
+}
+
+/// What the configuration instructions set `vl` from.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum VectorLength {
+    /// An immediate, from `vsetivli`.
+    Immediate(u32),
+    /// The largest count the configuration holds, from an `x0` source register.
+    Maximum,
+    /// A general purpose register, from `vsetvli` or `vsetvl`.
+    Register(Reg),
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
@@ -713,6 +824,100 @@ pub enum Inst {
         src: WideReg,
         base: Reg,
         offset: i32,
+    },
+    VectorConfig {
+        dst: Reg,
+        length: VectorLength,
+        vtype: u32,
+    },
+    /// A whole register group moved, loaded or stored, from `vmv<n>r.v`, `vl<n>r.v` and
+    /// `vs<n>r.v`. These read neither `vtype` nor `vl`: the group's size is in the encoding.
+    VectorMoveGroup {
+        registers: u32,
+        dst: VecReg,
+        src: VecReg,
+    },
+    VectorLoadGroup {
+        registers: u32,
+        dst: VecReg,
+        base: Reg,
+    },
+    VectorStoreGroup {
+        registers: u32,
+        src: VecReg,
+        base: Reg,
+    },
+    VectorCompare {
+        equal: bool,
+        dst: VecReg,
+        src1: VecReg,
+        src2: VecReg,
+    },
+    VectorCountMask {
+        dst: Reg,
+        src: VecReg,
+        masked: bool,
+    },
+    VectorMask {
+        kind: VectorMaskKind,
+        dst: VecReg,
+        src1: VecReg,
+        src2: VecReg,
+    },
+    /// A unit-stride load or store, which moves `vl` elements starting at the address in
+    /// `base` rather than a whole number of registers.
+    VectorLoadElements {
+        width: VectorElementWidth,
+        dst: VecReg,
+        base: Reg,
+    },
+    VectorStoreElements {
+        width: VectorElementWidth,
+        src: VecReg,
+        base: Reg,
+    },
+    /// One element-wise operation, whichever shape its second operand takes.
+    VectorArithmetic {
+        operation: VectorOperation,
+        dst: VecReg,
+        src: VecReg,
+        operand: VectorArithmeticOperand,
+    },
+    /// The first element moved into a general purpose register, from `vmv.x.s`.
+    VectorExtract {
+        dst: Reg,
+        src: VecReg,
+    },
+    /// The index of the first selected element of a mask, from `vfirst.m`.
+    VectorFirstMask {
+        dst: Reg,
+        src: VecReg,
+        masked: bool,
+    },
+    /// One value written to the first element only, from `vmv.s.x`.
+    VectorInsert {
+        dst: VecReg,
+        src: Reg,
+    },
+    /// Each element set to its own index, from `vid.v`.
+    VectorElementIndex {
+        dst: VecReg,
+    },
+    /// A comparison against one value repeated across the elements.
+    VectorCompareImm {
+        equal: bool,
+        dst: VecReg,
+        src: VecReg,
+        imm: i32,
+    },
+    /// One value written to every active element, from `vmv.v.x` and `vmv.v.i`.
+    VectorSplat {
+        dst: VecReg,
+        src: Reg,
+    },
+    VectorSplatImm {
+        dst: VecReg,
+        imm: i32,
     },
 }
 
@@ -1698,6 +1903,207 @@ impl Inst {
                     src_true: src1,
                     src_false: src3,
                     cond: src2,
+                })
+            }
+            0b1010111 => {
+                // OPCODE_OP_V, the vector instructions that are not loads or stores. Only
+                // the unmasked forms are accepted: a masked one names `v0` implicitly, which
+                // nothing here implements.
+                let funct3 = (op >> 12) & 0b111;
+                let funct6 = op >> 26;
+                let unmasked = (op >> 25) & 1 == 1;
+                match funct3 {
+                    // Configuration. The three forms differ in where the two operands come
+                    // from, and `funct6` is part of `vtype` rather than an opcode here.
+                    0b111 => {
+                        let dst = Reg::decode(op >> 7);
+                        if op >> 31 == 0 {
+                            Some(Inst::VectorConfig {
+                                dst,
+                                length: match Reg::decode(op >> 15) {
+                                    Reg::Zero => VectorLength::Maximum,
+                                    reg => VectorLength::Register(reg),
+                                },
+                                vtype: bits(0, 10, op, 20),
+                            })
+                        } else if op >> 30 == 0b11 {
+                            Some(Inst::VectorConfig {
+                                dst,
+                                length: VectorLength::Immediate(bits(0, 4, op, 15)),
+                                vtype: bits(0, 9, op, 20),
+                            })
+                        } else {
+                            // `vsetvl`, which takes `vtype` from a register. The value is not
+                            // known when the program is translated, so it has no instruction.
+                            None
+                        }
+                    }
+                    // One value written to every active element. The immediate form's
+                    // operand is five bits wide and signed, like an ordinary one.
+                    0b011 if funct6 == 0b010111 && unmasked => Some(Inst::VectorSplatImm {
+                        dst: VecReg::decode(op >> 7),
+                        imm: sign_ext(bits(0, 4, op, 15), 5),
+                    }),
+                    0b100 if funct6 == 0b010111 && unmasked => Some(Inst::VectorSplat {
+                        dst: VecReg::decode(op >> 7),
+                        src: Reg::decode(op >> 15),
+                    }),
+                    // Whole register group move, whose immediate carries the group's size.
+                    0b011 if funct6 == 0b100111 && unmasked => {
+                        let registers = bits(0, 4, op, 15) + 1;
+                        if !matches!(registers, 1 | 2 | 4 | 8) {
+                            return None;
+                        }
+
+                        let dst = VecReg::decode(op >> 7);
+                        let src = VecReg::decode(op >> 20);
+                        if !dst.can_start_group(registers) || !src.can_start_group(registers) {
+                            return None;
+                        }
+
+                        Some(Inst::VectorMoveGroup { registers, dst, src })
+                    }
+                    // Integer compares producing a mask, against a vector or against one
+                    // value repeated across the elements.
+                    0b000 if matches!(funct6, 0b011000 | 0b011001) && unmasked => Some(Inst::VectorCompare {
+                        equal: funct6 == 0b011000,
+                        dst: VecReg::decode(op >> 7),
+                        src1: VecReg::decode(op >> 15),
+                        src2: VecReg::decode(op >> 20),
+                    }),
+                    0b011 if matches!(funct6, 0b011000 | 0b011001) && unmasked => Some(Inst::VectorCompareImm {
+                        equal: funct6 == 0b011000,
+                        dst: VecReg::decode(op >> 7),
+                        src: VecReg::decode(op >> 20),
+                        imm: sign_ext(bits(0, 4, op, 15), 5),
+                    }),
+                    // A scalar into the first element, and the element indices.
+                    0b110 if funct6 == 0b010000 && unmasked && bits(0, 4, op, 20) == 0 => Some(Inst::VectorInsert {
+                        dst: VecReg::decode(op >> 7),
+                        src: Reg::decode(op >> 15),
+                    }),
+                    0b010 if funct6 == 0b010100 && unmasked && bits(0, 4, op, 15) == 0b10001 => Some(Inst::VectorElementIndex {
+                        dst: VecReg::decode(op >> 7),
+                    }),
+                    // The first element into a general purpose register.
+                    0b010 if funct6 == 0b010000 && unmasked && bits(0, 4, op, 15) == 0 => Some(Inst::VectorExtract {
+                        dst: Reg::decode(op >> 7),
+                        src: VecReg::decode(op >> 20),
+                    }),
+                    // The index of the first selected element, or minus one.
+                    0b010 if funct6 == 0b010000 && bits(0, 4, op, 15) == 0b10001 => Some(Inst::VectorFirstMask {
+                        dst: Reg::decode(op >> 7),
+                        src: VecReg::decode(op >> 20),
+                        masked: !unmasked,
+                    }),
+                    // Mask population count, one of the reductions that write a scalar.
+                    0b010 if funct6 == 0b010000 && bits(0, 4, op, 15) == 0b10000 => Some(Inst::VectorCountMask {
+                        dst: Reg::decode(op >> 7),
+                        src: VecReg::decode(op >> 20),
+                        masked: !unmasked,
+                    }),
+                    // The bitwise operations on mask registers, which are never masked
+                    // themselves.
+                    0b010 if unmasked => Some(Inst::VectorMask {
+                        kind: VectorMaskKind::decode(funct6)?,
+                        dst: VecReg::decode(op >> 7),
+                        src1: VecReg::decode(op >> 15),
+                        src2: VecReg::decode(op >> 20),
+                    }),
+                    // The merge is the masked spelling of the shape the splats take when
+                    // they are not, and it is the one element-wise form that reads `v0`.
+                    0b000 if funct6 == 0b010111 && !unmasked => Some(Inst::VectorArithmetic {
+                        operation: VectorOperation::Merge,
+                        dst: VecReg::decode(op >> 7),
+                        src: VecReg::decode(op >> 20),
+                        operand: VectorArithmeticOperand::Vector(VecReg::decode(op >> 15)),
+                    }),
+                    0b100 if funct6 == 0b010111 && !unmasked => Some(Inst::VectorArithmetic {
+                        operation: VectorOperation::Merge,
+                        dst: VecReg::decode(op >> 7),
+                        src: VecReg::decode(op >> 20),
+                        operand: VectorArithmeticOperand::Register(Reg::decode(op >> 15)),
+                    }),
+                    0b011 if funct6 == 0b010111 && !unmasked => Some(Inst::VectorArithmetic {
+                        operation: VectorOperation::Merge,
+                        dst: VecReg::decode(op >> 7),
+                        src: VecReg::decode(op >> 20),
+                        operand: VectorArithmeticOperand::Immediate(sign_ext(bits(0, 4, op, 15), 5)),
+                    }),
+                    // Everything left in these encoding spaces is element-wise, and the
+                    // shapes differ only in where the second operand comes from.
+                    0b000 | 0b010 if unmasked => Some(Inst::VectorArithmetic {
+                        operation: VectorOperation::decode(funct3, funct6)?,
+                        dst: VecReg::decode(op >> 7),
+                        src: VecReg::decode(op >> 20),
+                        operand: VectorArithmeticOperand::Vector(VecReg::decode(op >> 15)),
+                    }),
+                    0b100 | 0b110 if unmasked => Some(Inst::VectorArithmetic {
+                        operation: VectorOperation::decode(funct3, funct6)?,
+                        dst: VecReg::decode(op >> 7),
+                        src: VecReg::decode(op >> 20),
+                        operand: VectorArithmeticOperand::Register(Reg::decode(op >> 15)),
+                    }),
+                    0b011 if unmasked => Some(Inst::VectorArithmetic {
+                        operation: VectorOperation::decode(funct3, funct6)?,
+                        dst: VecReg::decode(op >> 7),
+                        src: VecReg::decode(op >> 20),
+                        operand: VectorArithmeticOperand::Immediate(sign_ext(bits(0, 4, op, 15), 5)),
+                    }),
+                    _ => None,
+                }
+            }
+            0b0000111 | 0b0100111 => {
+                // OPCODE_LOAD_FP and OPCODE_STORE_FP, which the vector extensions share for
+                // their loads and stores. Only the whole register group forms are accepted:
+                // the element-wise ones depend on `vtype` and `vl`, which nothing here reads.
+                let is_load = op & 0b1111111 == 0b0000111;
+                let width = (op >> 12) & 0b111;
+                let mop = (op >> 26) & 0b11;
+                let unmasked = (op >> 25) & 1 == 1;
+                let umop = bits(0, 4, op, 20);
+                if mop != 0 || !unmasked {
+                    return None;
+                }
+
+                // The unit-stride forms move `vl` elements rather than whole registers.
+                if umop == 0 && (op >> 29) == 0 {
+                    let width = VectorElementWidth::decode(width)?;
+                    let base = Reg::decode(op >> 15);
+                    let reg = VecReg::decode(op >> 7);
+                    return Some(if is_load {
+                        Inst::VectorLoadElements { width, dst: reg, base }
+                    } else {
+                        Inst::VectorStoreElements { width, src: reg, base }
+                    });
+                }
+
+                // The whole register forms move a fixed number of registers whatever the
+                // configuration says. A load states an element width all the same, which
+                // changes nothing here; a store has none.
+                if umop != 0b01000 || (!is_load && width != 0b000) {
+                    return None;
+                }
+
+                if is_load && VectorElementWidth::decode(width).is_none() {
+                    return None;
+                }
+
+                let registers = (op >> 29) + 1;
+                if !matches!(registers, 1 | 2 | 4 | 8) {
+                    return None;
+                }
+
+                let base = Reg::decode(op >> 15);
+                let reg = VecReg::decode(op >> 7);
+                if !reg.can_start_group(registers) {
+                    return None;
+                }
+
+                Some(if is_load {
+                    Inst::VectorLoadGroup { registers, dst: reg, base }
+                } else {
+                    Inst::VectorStoreGroup { registers, src: reg, base }
                 })
             }
             0b1011011 => {

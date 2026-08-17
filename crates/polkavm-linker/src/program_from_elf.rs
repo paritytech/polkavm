@@ -20,9 +20,12 @@ use crate::fast_range_map::RangeMap;
 use crate::riscv::DecoderConfig;
 use crate::riscv::Reg as RReg;
 use crate::riscv::{
-    AtomicKind, BranchKind, CmovKind, Inst, LoadKind, RegImmKind, StoreKind, WideCompareKind, WideCountKind, WideFromRegKind,
-    WideModularKind, WideMoveKind, WideReg, WideRegRegKind, WideShiftKind,
+    AtomicKind, BranchKind, CmovKind, Inst, LoadKind, RegImmKind, StoreKind, VecReg, VectorArithmeticOperand, VectorElementWidth,
+    VectorLength, VectorMaskKind, WideCompareKind, WideCountKind, WideFromRegKind, WideModularKind, WideMoveKind, WideReg, WideRegRegKind,
+    WideShiftKind,
 };
+use polkavm_common::program::VECTOR_LENGTH_BYTES;
+use polkavm_common::vector::{VectorConfig, VectorOperation};
 
 static OVERFLOW: &str = "internal error: numerical overflow; this is a bug - please report it";
 
@@ -668,6 +671,7 @@ enum BasicInst<T> {
         dst: WideReg,
         target: SectionTarget,
     },
+    Vector(VectorInst),
 }
 
 /// An instruction on the wide register file.
@@ -748,6 +752,120 @@ enum WideInst {
     },
 }
 
+/// Where the second operand of an element-wise instruction comes from.
+///
+/// This is [`crate::riscv::VectorArithmeticOperand`] once its general purpose register has
+/// been mapped to one the machine has.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum VectorSource {
+    Vector(VecReg),
+    Register(Reg),
+    Immediate(i32),
+}
+
+/// An instruction on a single vector register.
+///
+/// The wide instructions above cover a register group of two, which is what a 256-bit value
+/// occupies and what almost all generated code asks for. These are what is left: the group
+/// of one, which no wide register names, and the operations that read `vtype` and `vl`.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum VectorInst {
+    /// A configuration whose resulting element count is known here.
+    Config {
+        config: VectorConfig,
+    },
+    /// A configuration taking its element count from a register at run time.
+    ///
+    /// The count it settled on is returned, unless the instruction discarded it by naming
+    /// the zero register, which has no counterpart here.
+    ConfigDynamic {
+        dst: Option<Reg>,
+        src: Reg,
+        vtype: u32,
+    },
+    Move {
+        dst: VecReg,
+        src: VecReg,
+    },
+    Load {
+        dst: VecReg,
+        base: Reg,
+        offset: i32,
+    },
+    Store {
+        src: VecReg,
+        base: Reg,
+        offset: i32,
+    },
+    Compare {
+        equal: bool,
+        dst: VecReg,
+        src1: VecReg,
+        src2: VecReg,
+    },
+    CountMask {
+        dst: Reg,
+        src: VecReg,
+        masked: bool,
+    },
+    FirstMask {
+        dst: Reg,
+        src: VecReg,
+        masked: bool,
+    },
+    Extract {
+        dst: Reg,
+        src: VecReg,
+    },
+    Mask {
+        kind: VectorMaskKind,
+        dst: VecReg,
+        src1: VecReg,
+        src2: VecReg,
+    },
+    LoadElements {
+        width: VectorElementWidth,
+        dst: VecReg,
+        base: Reg,
+    },
+    StoreElements {
+        width: VectorElementWidth,
+        src: VecReg,
+        base: Reg,
+    },
+    Splat {
+        dst: VecReg,
+        src: Reg,
+    },
+    Insert {
+        dst: VecReg,
+        src: Reg,
+    },
+    Arithmetic {
+        operation: VectorOperation,
+        dst: VecReg,
+        src: VecReg,
+        operand: VectorSource,
+    },
+    InsertImm {
+        dst: VecReg,
+        imm: i32,
+    },
+    ElementIndex {
+        dst: VecReg,
+    },
+    CompareImm {
+        equal: bool,
+        dst: VecReg,
+        src: VecReg,
+        imm: i32,
+    },
+    SplatImm {
+        dst: VecReg,
+        imm: i32,
+    },
+}
+
 impl WideInst {
     /// The general purpose registers this reads.
     fn src_mask(self) -> RegMask {
@@ -815,6 +933,121 @@ impl WideInst {
     }
 }
 
+impl VectorInst {
+    /// The general purpose registers this reads.
+    fn src_mask(self) -> RegMask {
+        match self {
+            VectorInst::ConfigDynamic { src, .. } => RegMask::from(src),
+            VectorInst::Load { base, .. }
+            | VectorInst::Store { base, .. }
+            | VectorInst::LoadElements { base, .. }
+            | VectorInst::StoreElements { base, .. } => RegMask::from(base),
+            VectorInst::Splat { src, .. } | VectorInst::Insert { src, .. } => RegMask::from(src),
+            // Only the general purpose shape reads one; the others read vector registers,
+            // which liveness here does not track.
+            VectorInst::Arithmetic {
+                operand: VectorSource::Register(reg),
+                ..
+            } => RegMask::from(reg),
+            VectorInst::Arithmetic { .. } => RegMask::empty(),
+            VectorInst::Config { .. }
+            | VectorInst::Move { .. }
+            | VectorInst::Compare { .. }
+            | VectorInst::Mask { .. }
+            | VectorInst::SplatImm { .. }
+            | VectorInst::ElementIndex { .. }
+            | VectorInst::CompareImm { .. }
+            | VectorInst::InsertImm { .. }
+            | VectorInst::CountMask { .. }
+            | VectorInst::FirstMask { .. }
+            | VectorInst::Extract { .. } => RegMask::empty(),
+        }
+    }
+
+    /// The general purpose registers this writes.
+    fn dst_mask(self) -> RegMask {
+        match self {
+            VectorInst::ConfigDynamic { dst: Some(dst), .. }
+            | VectorInst::CountMask { dst, .. }
+            | VectorInst::FirstMask { dst, .. }
+            | VectorInst::Extract { dst, .. } => RegMask::from(dst),
+            _ => RegMask::empty(),
+        }
+    }
+
+    fn map_registers(self, mut map: impl FnMut(Reg, OpKind) -> Reg) -> Self {
+        match self {
+            VectorInst::ConfigDynamic { dst, src, vtype } => VectorInst::ConfigDynamic {
+                src: map(src, OpKind::Read),
+                dst: dst.map(|dst| map(dst, OpKind::Write)),
+                vtype,
+            },
+            VectorInst::Load { dst, base, offset } => VectorInst::Load {
+                dst,
+                base: map(base, OpKind::Read),
+                offset,
+            },
+            VectorInst::Store { src, base, offset } => VectorInst::Store {
+                src,
+                base: map(base, OpKind::Read),
+                offset,
+            },
+            VectorInst::CountMask { dst, src, masked } => VectorInst::CountMask {
+                dst: map(dst, OpKind::Write),
+                src,
+                masked,
+            },
+            VectorInst::FirstMask { dst, src, masked } => VectorInst::FirstMask {
+                dst: map(dst, OpKind::Write),
+                src,
+                masked,
+            },
+            VectorInst::Extract { dst, src } => VectorInst::Extract {
+                dst: map(dst, OpKind::Write),
+                src,
+            },
+            VectorInst::LoadElements { width, dst, base } => VectorInst::LoadElements {
+                width,
+                dst,
+                base: map(base, OpKind::Read),
+            },
+            VectorInst::StoreElements { width, src, base } => VectorInst::StoreElements {
+                width,
+                src,
+                base: map(base, OpKind::Read),
+            },
+            VectorInst::Splat { dst, src } => VectorInst::Splat {
+                dst,
+                src: map(src, OpKind::Read),
+            },
+            VectorInst::Insert { dst, src } => VectorInst::Insert {
+                dst,
+                src: map(src, OpKind::Read),
+            },
+            VectorInst::Arithmetic {
+                operation,
+                dst,
+                src,
+                operand: VectorSource::Register(reg),
+            } => VectorInst::Arithmetic {
+                operation,
+                dst,
+                src,
+                operand: VectorSource::Register(map(reg, OpKind::Read)),
+            },
+            VectorInst::Arithmetic { .. } => self,
+            VectorInst::Config { .. }
+            | VectorInst::Move { .. }
+            | VectorInst::Compare { .. }
+            | VectorInst::Mask { .. }
+            | VectorInst::SplatImm { .. }
+            | VectorInst::ElementIndex { .. }
+            | VectorInst::CompareImm { .. }
+            | VectorInst::InsertImm { .. } => self,
+        }
+    }
+}
+
 #[derive(Copy, Clone)]
 enum OpKind {
     Read,
@@ -853,6 +1086,7 @@ impl<T> BasicInst<T> {
             BasicInst::Prologue { ref regs, .. } => RegMask::from(Reg::SP) | RegMask::from_regs(regs.iter().map(|&(_, reg)| reg)),
             BasicInst::Epilogue { .. } => RegMask::from(Reg::SP),
             BasicInst::Wide(instruction) => instruction.src_mask(),
+            BasicInst::Vector(instruction) => instruction.src_mask(),
             BasicInst::WideLoadAbsolute { .. } => RegMask::empty(),
         }
     }
@@ -878,6 +1112,7 @@ impl<T> BasicInst<T> {
             BasicInst::Prologue { .. } => RegMask::from(Reg::SP),
             BasicInst::Epilogue { ref regs, .. } => RegMask::from(Reg::SP) | RegMask::from_regs(regs.iter().map(|&(_, reg)| reg)),
             BasicInst::Wide(instruction) => instruction.dst_mask(),
+            BasicInst::Vector(instruction) => instruction.dst_mask(),
             BasicInst::WideLoadAbsolute { .. } => RegMask::empty(),
         }
     }
@@ -904,8 +1139,9 @@ impl<T> BasicInst<T> {
             | BasicInst::Cmov { .. }
             | BasicInst::AnyAny { .. } => false,
             // Liveness here is over the general purpose registers only, so an instruction
-            // whose result lands in the wide file must not look dead.
-            BasicInst::Wide(..) | BasicInst::WideLoadAbsolute { .. } => true,
+            // whose result lands in the vector file must not look dead. The configuration
+            // instructions are kept for the same reason: what they write is `vtype`.
+            BasicInst::Wide(..) | BasicInst::Vector(..) | BasicInst::WideLoadAbsolute { .. } => true,
         }
     }
 
@@ -1011,6 +1247,7 @@ impl<T> BasicInst<T> {
                 Some(output)
             }
             BasicInst::Wide(instruction) => Some(BasicInst::Wide(instruction.map_registers(map))),
+            BasicInst::Vector(instruction) => Some(BasicInst::Vector(instruction.map_registers(map))),
             BasicInst::WideLoadAbsolute { dst, target } => Some(BasicInst::WideLoadAbsolute { dst, target }),
         }
     }
@@ -1071,6 +1308,7 @@ impl<T> BasicInst<T> {
             BasicInst::StoreAbsolute { kind, src, target } => BasicInst::StoreAbsolute { kind, src, target },
             BasicInst::LoadAddress { dst, target } => BasicInst::LoadAddress { dst, target: map(target)? },
             BasicInst::Wide(instruction) => BasicInst::Wide(instruction),
+            BasicInst::Vector(instruction) => BasicInst::Vector(instruction),
             BasicInst::WideLoadAbsolute { dst, target } => BasicInst::WideLoadAbsolute { dst, target },
             BasicInst::LoadAddressIndirect { dst, target } => BasicInst::LoadAddressIndirect { dst, target: map(target)? },
             BasicInst::LoadIndirect { kind, dst, base, offset } => BasicInst::LoadIndirect { kind, dst, base, offset },
@@ -1096,6 +1334,7 @@ impl<T> BasicInst<T> {
         match self {
             BasicInst::LoadAbsolute { target, .. } | BasicInst::StoreAbsolute { target, .. } => (Some(*target), None),
             BasicInst::WideLoadAbsolute { target, .. } => (Some(*target), None),
+            BasicInst::Vector(..) => (None, None),
             BasicInst::LoadAddress { target, .. } | BasicInst::LoadAddressIndirect { target, .. } => (None, Some(*target)),
             BasicInst::Nop
             | BasicInst::Prologue { .. }
@@ -2241,6 +2480,202 @@ fn convert_instruction(
             };
 
             emit(InstExt::Basic(BasicInst::Wide(WideInst::Store { src, base, offset })));
+            Ok(())
+        }
+        Inst::VectorConfig { dst, length, vtype } => {
+            let element_count = match length {
+                VectorLength::Register(source) => {
+                    let Some(source) = cast_reg_non_zero(source)? else {
+                        unreachable!("a zero source register decodes as the maximum length")
+                    };
+
+                    emit(InstExt::Basic(BasicInst::Vector(VectorInst::ConfigDynamic {
+                        dst: cast_reg_non_zero(dst)?,
+                        src: source,
+                        vtype,
+                    })));
+                    return Ok(());
+                }
+                VectorLength::Maximum => VectorConfig::new(vtype, 0).max_element_count(),
+                VectorLength::Immediate(requested) => requested.min(VectorConfig::new(vtype, 0).max_element_count()),
+            };
+
+            let config = VectorConfig::new(vtype, element_count);
+            if !config.is_valid() {
+                return Err(ProgramFromElfError::other(
+                    "found a vector configuration this machine does not support",
+                ));
+            }
+
+            emit(InstExt::Basic(BasicInst::Vector(VectorInst::Config { config })));
+
+            // The instruction also returns the element count it settled on, which is a
+            // constant now that the vector length is.
+            if let Some(dst) = cast_reg_non_zero(dst)? {
+                emit(InstExt::Basic(BasicInst::LoadImmediate {
+                    dst,
+                    imm: element_count as i32,
+                }));
+            }
+
+            Ok(())
+        }
+        // A register group of two is a wide register, so a whole group instruction on one is
+        // the wide instruction of the same name and there is no reason to encode it twice.
+        // Groups of four and eight are that instruction repeated, and the alignment the
+        // vector extensions require of the register specifier guarantees the halves line up.
+        Inst::VectorMoveGroup { registers, dst, src } => {
+            for index in (0..registers).step_by(if registers == 1 { 1 } else { 2 }) {
+                let dst = dst.offset(index);
+                let src = src.offset(index);
+                emit(InstExt::Basic(match (dst.to_wide(), src.to_wide()) {
+                    (Some(dst), Some(src)) if registers > 1 => BasicInst::Wide(WideInst::Move {
+                        kind: WideMoveKind::Move,
+                        dst,
+                        src,
+                    }),
+                    _ => BasicInst::Vector(VectorInst::Move { dst, src }),
+                }));
+            }
+            Ok(())
+        }
+        Inst::VectorLoadGroup { registers, dst, base } => {
+            let Some(base) = cast_reg_non_zero(base)? else {
+                return Err(ProgramFromElfError::other("found a vector load with no base register"));
+            };
+
+            for index in (0..registers).step_by(if registers == 1 { 1 } else { 2 }) {
+                let dst = dst.offset(index);
+                let offset = cast(index.wrapping_mul(VECTOR_LENGTH_BYTES)).bitwise_as_i32();
+                emit(InstExt::Basic(match dst.to_wide() {
+                    Some(dst) if registers > 1 => BasicInst::Wide(WideInst::Load { dst, base, offset }),
+                    _ => BasicInst::Vector(VectorInst::Load { dst, base, offset }),
+                }));
+            }
+            Ok(())
+        }
+        Inst::VectorStoreGroup { registers, src, base } => {
+            let Some(base) = cast_reg_non_zero(base)? else {
+                return Err(ProgramFromElfError::other("found a vector store with no base register"));
+            };
+
+            for index in (0..registers).step_by(if registers == 1 { 1 } else { 2 }) {
+                let src = src.offset(index);
+                let offset = cast(index.wrapping_mul(VECTOR_LENGTH_BYTES)).bitwise_as_i32();
+                emit(InstExt::Basic(match src.to_wide() {
+                    Some(src) if registers > 1 => BasicInst::Wide(WideInst::Store { src, base, offset }),
+                    _ => BasicInst::Vector(VectorInst::Store { src, base, offset }),
+                }));
+            }
+            Ok(())
+        }
+        Inst::VectorCompare { equal, dst, src1, src2 } => {
+            emit(InstExt::Basic(BasicInst::Vector(VectorInst::Compare { equal, dst, src1, src2 })));
+            Ok(())
+        }
+        Inst::VectorCountMask { dst, src, masked } => {
+            let Some(dst) = cast_reg_non_zero(dst)? else {
+                emit(InstExt::nop());
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Vector(VectorInst::CountMask { dst, src, masked })));
+            Ok(())
+        }
+        Inst::VectorSplat { dst, src } => {
+            // Splatting `zero` is a splat of nothing at all, which the immediate form says
+            // in one instruction.
+            let Some(src) = cast_reg_non_zero(src)? else {
+                emit(InstExt::Basic(BasicInst::Vector(VectorInst::SplatImm { dst, imm: 0 })));
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Vector(VectorInst::Splat { dst, src })));
+            Ok(())
+        }
+        Inst::VectorArithmetic {
+            operation,
+            dst,
+            src,
+            operand,
+        } => {
+            let operand = match operand {
+                VectorArithmeticOperand::Vector(reg) => VectorSource::Vector(reg),
+                VectorArithmeticOperand::Immediate(value) => VectorSource::Immediate(value),
+                VectorArithmeticOperand::Register(reg) => match cast_reg_non_zero(reg)? {
+                    Some(reg) => VectorSource::Register(reg),
+                    // Reading `zero` is reading a zero, which the immediate shape says.
+                    None => VectorSource::Immediate(0),
+                },
+            };
+
+            emit(InstExt::Basic(BasicInst::Vector(VectorInst::Arithmetic {
+                operation,
+                dst,
+                src,
+                operand,
+            })));
+            Ok(())
+        }
+        Inst::VectorInsert { dst, src } => {
+            // Inserting `zero` is inserting nothing, and a splat of one element is the same
+            // thing when the length is one, so it is spelled out rather than special cased.
+            let Some(src) = cast_reg_non_zero(src)? else {
+                emit(InstExt::Basic(BasicInst::Vector(VectorInst::InsertImm { dst, imm: 0 })));
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Vector(VectorInst::Insert { dst, src })));
+            Ok(())
+        }
+        Inst::VectorElementIndex { dst } => {
+            emit(InstExt::Basic(BasicInst::Vector(VectorInst::ElementIndex { dst })));
+            Ok(())
+        }
+        Inst::VectorCompareImm { equal, dst, src, imm } => {
+            emit(InstExt::Basic(BasicInst::Vector(VectorInst::CompareImm { equal, dst, src, imm })));
+            Ok(())
+        }
+        Inst::VectorSplatImm { dst, imm } => {
+            emit(InstExt::Basic(BasicInst::Vector(VectorInst::SplatImm { dst, imm })));
+            Ok(())
+        }
+        Inst::VectorExtract { dst, src } => {
+            let Some(dst) = cast_reg_non_zero(dst)? else {
+                emit(InstExt::nop());
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Vector(VectorInst::Extract { dst, src })));
+            Ok(())
+        }
+        Inst::VectorFirstMask { dst, src, masked } => {
+            let Some(dst) = cast_reg_non_zero(dst)? else {
+                emit(InstExt::nop());
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Vector(VectorInst::FirstMask { dst, src, masked })));
+            Ok(())
+        }
+        Inst::VectorMask { kind, dst, src1, src2 } => {
+            emit(InstExt::Basic(BasicInst::Vector(VectorInst::Mask { kind, dst, src1, src2 })));
+            Ok(())
+        }
+        Inst::VectorLoadElements { width, dst, base } => {
+            let Some(base) = cast_reg_non_zero(base)? else {
+                return Err(ProgramFromElfError::other("found a vector load with no base register"));
+            };
+
+            emit(InstExt::Basic(BasicInst::Vector(VectorInst::LoadElements { width, dst, base })));
+            Ok(())
+        }
+        Inst::VectorStoreElements { width, src, base } => {
+            let Some(base) = cast_reg_non_zero(base)? else {
+                return Err(ProgramFromElfError::other("found a vector store with no base register"));
+            };
+
+            emit(InstExt::Basic(BasicInst::Vector(VectorInst::StoreElements { width, src, base })));
             Ok(())
         }
         Inst::LoadUpperImmediate { dst, value } => {
@@ -6831,13 +7266,14 @@ mod test {
             let next_offset = self.next_offset_for_section.get(&self.current_section).copied().unwrap_or(0);
             Source {
                 section_index: self.current_section,
-                offset_range: (next_offset..next_offset + 4).into(),
+                offset_range: (next_offset..next_offset.wrapping_add(4)).into(),
             }
         }
 
         fn push(&mut self, inst: impl Into<InstExt<SectionTarget, SectionTarget>>) -> SectionTarget {
             let source = self.current_source();
-            *self.next_offset_for_section.get_mut(&self.current_section).unwrap() += 4;
+            let offset = self.next_offset_for_section.get_mut(&self.current_section).unwrap();
+            *offset = offset.wrapping_add(4);
             self.instructions.push((source, inst.into()));
             source.begin()
         }
@@ -9143,6 +9579,119 @@ fn emit_code(
                         }
                         WideInst::Load { dst, base, offset } => Instruction::wide_load(conv_wide(dst), conv_reg(base), offset),
                         WideInst::Store { src, base, offset } => Instruction::wide_store(conv_wide(src), conv_reg(base), offset),
+                    }
+                }
+                BasicInst::Vector(instruction) => {
+                    use polkavm_common::program::VecReg as PVecReg;
+
+                    fn conv_vec(reg: VecReg) -> polkavm_common::program::RawVecReg {
+                        let Some(reg) = PVecReg::from_raw(u32::from(reg.index())) else {
+                            unreachable!("internal error: unknown vector register")
+                        };
+                        reg.raw()
+                    }
+
+                    match instruction {
+                        VectorInst::Config { config } => Instruction::vector_config(cast(config.to_packed()).bitwise_as_i32()),
+                        VectorInst::ConfigDynamic { dst, src, vtype } => {
+                            let (src, vtype) = (conv_reg(src), cast(vtype).bitwise_as_i32());
+                            match dst {
+                                Some(dst) => Instruction::vector_config_dynamic(conv_reg(dst), src, vtype),
+                                None => Instruction::vector_config_dynamic_discard(src, vtype),
+                            }
+                        }
+                        VectorInst::Move { dst, src } => Instruction::vector_move(conv_vec(dst), conv_vec(src)),
+                        VectorInst::Load { dst, base, offset } => Instruction::vector_load(conv_vec(dst), conv_reg(base), offset),
+                        VectorInst::Store { src, base, offset } => Instruction::vector_store(conv_vec(src), conv_reg(base), offset),
+                        VectorInst::Compare { equal, dst, src1, src2 } => {
+                            let (dst, src1, src2) = (conv_vec(dst), conv_vec(src1), conv_vec(src2));
+                            if equal {
+                                Instruction::vector_set_equal(dst, src1, src2)
+                            } else {
+                                Instruction::vector_set_not_equal(dst, src1, src2)
+                            }
+                        }
+                        VectorInst::Splat { dst, src } => Instruction::vector_splat(conv_vec(dst), conv_reg(src)),
+                        VectorInst::SplatImm { dst, imm } => Instruction::vector_splat_imm(conv_vec(dst), imm),
+                        VectorInst::Insert { dst, src } => Instruction::vector_insert(conv_vec(dst), conv_reg(src)),
+                        VectorInst::Arithmetic {
+                            operation,
+                            dst,
+                            src,
+                            operand,
+                        } => {
+                            use polkavm_common::vector::{VectorArithmetic, VectorOperand};
+
+                            let packed = VectorArithmetic {
+                                operation,
+                                dst: u32::from(dst.index()),
+                                src: u32::from(src.index()),
+                                operand: match operand {
+                                    VectorSource::Vector(reg) => VectorOperand::Vector(u32::from(reg.index())),
+                                    VectorSource::Register(reg) => VectorOperand::Register(conv_reg(reg).get().to_u32()),
+                                    VectorSource::Immediate(value) => VectorOperand::Immediate(value),
+                                },
+                            };
+                            Instruction::vector_arithmetic(cast(packed.to_packed()).bitwise_as_i32())
+                        }
+                        VectorInst::InsertImm { dst, imm } => Instruction::vector_insert_imm(conv_vec(dst), imm),
+                        VectorInst::ElementIndex { dst } => Instruction::vector_element_index(conv_vec(dst)),
+                        VectorInst::CompareImm { equal, dst, src, imm } => {
+                            let (dst, src) = (conv_vec(dst), conv_vec(src));
+                            if equal {
+                                Instruction::vector_set_equal_imm(dst, src, imm)
+                            } else {
+                                Instruction::vector_set_not_equal_imm(dst, src, imm)
+                            }
+                        }
+                        VectorInst::CountMask { dst, src, masked } => {
+                            let (dst, src) = (conv_reg(dst), conv_vec(src));
+                            if masked {
+                                Instruction::vector_count_mask_masked(dst, src)
+                            } else {
+                                Instruction::vector_count_mask(dst, src)
+                            }
+                        }
+                        VectorInst::Extract { dst, src } => Instruction::vector_extract(conv_reg(dst), conv_vec(src)),
+                        VectorInst::FirstMask { dst, src, masked } => {
+                            let (dst, src) = (conv_reg(dst), conv_vec(src));
+                            if masked {
+                                Instruction::vector_first_mask_masked(dst, src)
+                            } else {
+                                Instruction::vector_first_mask(dst, src)
+                            }
+                        }
+                        VectorInst::Mask { kind, dst, src1, src2 } => {
+                            let (dst, src1, src2) = (conv_vec(dst), conv_vec(src1), conv_vec(src2));
+                            match kind {
+                                VectorMaskKind::And => Instruction::vector_mask_and(dst, src1, src2),
+                                VectorMaskKind::AndNot => Instruction::vector_mask_and_not(dst, src1, src2),
+                                VectorMaskKind::Or => Instruction::vector_mask_or(dst, src1, src2),
+                                VectorMaskKind::Xor => Instruction::vector_mask_xor(dst, src1, src2),
+                                VectorMaskKind::Nand => Instruction::vector_mask_nand(dst, src1, src2),
+                                VectorMaskKind::Nor => Instruction::vector_mask_nor(dst, src1, src2),
+                                VectorMaskKind::OrNot => Instruction::vector_mask_or_not(dst, src1, src2),
+                                VectorMaskKind::Xnor => Instruction::vector_mask_xnor(dst, src1, src2),
+                            }
+                        }
+                        VectorInst::LoadElements { width, dst, base } => {
+                            let (dst, base) = (conv_vec(dst), conv_reg(base));
+                            match width {
+                                VectorElementWidth::U8 => Instruction::vector_load_u8(dst, base, 0),
+                                VectorElementWidth::U16 => Instruction::vector_load_u16(dst, base, 0),
+                                VectorElementWidth::U32 => Instruction::vector_load_u32(dst, base, 0),
+                                VectorElementWidth::U64 => Instruction::vector_load_u64(dst, base, 0),
+                            }
+                        }
+                        VectorInst::StoreElements { width, src, base } => {
+                            let (src, base) = (conv_vec(src), conv_reg(base));
+                            match width {
+                                VectorElementWidth::U8 => Instruction::vector_store_u8(src, base, 0),
+                                VectorElementWidth::U16 => Instruction::vector_store_u16(src, base, 0),
+                                VectorElementWidth::U32 => Instruction::vector_store_u32(src, base, 0),
+                                VectorElementWidth::U64 => Instruction::vector_store_u64(src, base, 0),
+                            }
+                        }
                     }
                 }
                 BasicInst::Nop => unreachable!("internal error: a nop instruction was not removed"),
