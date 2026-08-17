@@ -87,8 +87,16 @@ impl VectorState {
         self.config
     }
 
+    /// Applies a configuration, capping the element count at what the configuration holds.
+    ///
+    /// The configuration instructions on real hardware cannot produce a count above `VLMAX`,
+    /// and the linker refuses a static configuration that carries one, but an instruction in
+    /// a handcrafted blob still can: its immediate holds the count in sixteen bits. Without
+    /// the cap, every element loop would run tens of thousands of clamped iterations against
+    /// the flat price of one instruction.
     pub fn set_config(&mut self, config: VectorConfig) {
-        self.config = config;
+        let capped = core::cmp::min(config.vl(), config.max_element_count());
+        self.config = VectorConfig::new(config.vtype(), capped);
     }
 
     /// Applies a dynamic configuration request and returns the element count settled on.
@@ -1004,6 +1012,16 @@ mod tests {
         let copy = state.dispatch(operation, |_| unreachable!(), |_, _| unreachable!());
         assert_eq!(copy, None);
         assert_eq!(state.wide_reg(WideReg::W0), U256::from_u64(2));
+    }
+
+    #[test]
+    fn set_config_caps_the_element_count_at_what_the_configuration_holds() {
+        let mut state = VectorState::new();
+        state.set_config(VectorConfig::new(0b011_001, u16::MAX.into()));
+        assert_eq!(state.config().vl(), 4);
+
+        state.set_config(VectorConfig::new(0b011_001, 3));
+        assert_eq!(state.config().vl(), 3);
     }
 
     #[test]
