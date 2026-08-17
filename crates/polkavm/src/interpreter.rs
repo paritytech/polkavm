@@ -2174,8 +2174,10 @@ impl InterpretedInstance {
     /// The address a wide load or store reaches, which is the base register plus a sign
     /// extended offset, truncated to the address space.
     #[inline(always)]
-    fn wide_address(&self, base: Reg, offset: i32) -> u32 {
-        let address = self.regs[base.to_usize()].wrapping_add(cast(offset).to_i64_sign_extend());
+    fn wide_address(&self, base: Option<Reg>, offset: i32) -> u32 {
+        let address = base
+            .map_or(0, |base| self.regs[base.to_usize()])
+            .wrapping_add(cast(offset).to_i64_sign_extend());
         cast(cast(address).bitwise_as_u64()).truncate_to_u32()
     }
 
@@ -2184,7 +2186,7 @@ impl InterpretedInstance {
         compiled_offset: Target,
         program_counter: ProgramCounter,
         dst: WideReg,
-        base: Reg,
+        base: Option<Reg>,
         offset: i32,
     ) -> Target {
         self.program_counter = program_counter;
@@ -2207,7 +2209,7 @@ impl InterpretedInstance {
         compiled_offset: Target,
         program_counter: ProgramCounter,
         src: WideReg,
-        base: Reg,
+        base: Option<Reg>,
         offset: i32,
     ) -> Target {
         self.program_counter = program_counter;
@@ -3302,6 +3304,25 @@ macro_rules! define_interpreter {
         $body
     }};
 
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideReg, $a1:ident: WideReg, $a2:ident: i32) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<WideReg>, a1: impl Into<WideReg>, a2: i32) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    a2: cast(a2).bitwise_as_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_wide_reg(args.a0);
+        let $a1 = transmute_wide_reg(args.a1);
+        let $a2 = cast(args.a2).bitwise_as_i32();
+        $body
+    }};
+
     (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideReg, $a1:ident: i32) => {{
         impl Args {
             pub fn $handler_name(a0: impl Into<WideReg>, a1: i32) -> Args {
@@ -3333,6 +3354,25 @@ macro_rules! define_interpreter {
         let args = $self.compiled_args[cast($compiled_offset).to_usize()];
         let $a0 = transmute_wide_reg(args.a0);
         let $a1 = transmute_reg(args.a1);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: ProgramCounter, $a1:ident: WideReg, $a2:ident: i32) => {{
+        impl Args {
+            pub fn $handler_name(a0: ProgramCounter, a1: impl Into<WideReg>, a2: i32) -> Args {
+                Args {
+                    a0: a0.0,
+                    a1: a1.into().to_u32(),
+                    a2: cast(a2).bitwise_as_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = ProgramCounter(args.a0);
+        let $a1 = transmute_wide_reg(args.a1);
+        let $a2 = cast(args.a2).bitwise_as_i32();
         $body
     }};
 
@@ -4014,12 +4054,59 @@ define_interpreter! {
         visitor.go_to_next_instruction(compiled_offset)
     }
 
+    fn wide_shift_logical_left_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s: WideReg, imm: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_shift_logical_left_imm(d, s, imm));
+        }
+
+        // The immediate stands for a general purpose register the caller would have loaded,
+        // so it is sign extended to the register width the shift would have read.
+        let amount = cast(cast(imm).to_i64_sign_extend()).bitwise_as_u64();
+        let value = visitor.wide_reg(s).shift_left(amount);
+        visitor.set_wide_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_shift_logical_right_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s: WideReg, imm: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_shift_logical_right_imm(d, s, imm));
+        }
+
+        // The immediate stands for a general purpose register the caller would have loaded,
+        // so it is sign extended to the register width the shift would have read.
+        let amount = cast(cast(imm).to_i64_sign_extend()).bitwise_as_u64();
+        let value = visitor.wide_reg(s).shift_right(amount);
+        visitor.set_wide_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_shift_arithmetic_right_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s: WideReg, imm: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_shift_arithmetic_right_imm(d, s, imm));
+        }
+
+        // The immediate stands for a general purpose register the caller would have loaded,
+        // so it is sign extended to the register width the shift would have read.
+        let amount = cast(cast(imm).to_i64_sign_extend()).bitwise_as_u64();
+        let value = visitor.wide_reg(s).shift_right_signed(amount);
+        visitor.set_wide_reg::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_load_absolute<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: WideReg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_load_absolute(d, offset));
+        }
+
+        visitor.wide_load::<DEBUG>(compiled_offset, program_counter, d, None, offset)
+    }
+
     fn wide_load<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: WideReg, base: Reg, offset: i32) -> Target {
         if DEBUG {
             log::trace!("[{}]: {}", compiled_offset, asm::wide_load(d, base, offset));
         }
 
-        visitor.wide_load::<DEBUG>(compiled_offset, program_counter, d, base, offset)
+        visitor.wide_load::<DEBUG>(compiled_offset, program_counter, d, Some(base), offset)
     }
 
     fn wide_store<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, s: WideReg, base: Reg, offset: i32) -> Target {
@@ -4027,7 +4114,7 @@ define_interpreter! {
             log::trace!("[{}]: {}", compiled_offset, asm::wide_store(s, base, offset));
         }
 
-        visitor.wide_store::<DEBUG>(compiled_offset, program_counter, s, base, offset)
+        visitor.wide_store::<DEBUG>(compiled_offset, program_counter, s, Some(base), offset)
     }
 
     fn wide_add_mod<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: WideReg, s1: WideReg, s2: WideReg, s3: WideReg) -> Target {
@@ -5563,6 +5650,22 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
 
     fn wide_from_reg_signed(&mut self, d: RawWideReg, s: RawReg) -> Self::ReturnTy {
         emit!(self, wide_from_reg_signed(d, s));
+    }
+
+    fn wide_shift_logical_left_imm(&mut self, d: RawWideReg, s: RawWideReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, wide_shift_logical_left_imm(d, s, imm));
+    }
+
+    fn wide_shift_logical_right_imm(&mut self, d: RawWideReg, s: RawWideReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, wide_shift_logical_right_imm(d, s, imm));
+    }
+
+    fn wide_shift_arithmetic_right_imm(&mut self, d: RawWideReg, s: RawWideReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, wide_shift_arithmetic_right_imm(d, s, imm));
+    }
+
+    fn wide_load_absolute(&mut self, d: RawWideReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, wide_load_absolute(self.program_counter, d, offset));
     }
 
     fn wide_load(&mut self, d: RawWideReg, base: RawReg, offset: i32) -> Self::ReturnTy {

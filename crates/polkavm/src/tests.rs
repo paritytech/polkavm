@@ -5972,6 +5972,59 @@ fn wide_load_imm_widens_like_the_register_form() {
 
 #[cfg(feature = "std")]
 #[test]
+fn wide_load_absolute_reads_without_a_base_register() {
+    use polkavm_common::program::Reg::*;
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    // The harness writes the first operand at the start of the read-write data, which is
+    // where the absolute form reads from here.
+    let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(0x4000).build().unwrap();
+    let address = cast(memory_map.rw_data_address()).bitwise_as_i32();
+    let value = U256([0x0123_4567_89ab_cdef, 2, 3, 4]);
+
+    assert_eq!(
+        run_wide(&[value], &[asm::wide_load_absolute(W3, address), asm::wide_store(W3, A0, 96)]),
+        value
+    );
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn wide_shift_imm_matches_the_register_form() {
+    use polkavm_common::program::Reg::*;
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    let value = U256([0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, 7, 1 << 63]);
+    let store = asm::wide_store(W3, A0, 96);
+
+    for amount in [0, 1, 63, 64, 65, 127, 255, 256, 1000] {
+        for (with_imm, with_reg) in [
+            (
+                asm::wide_shift_logical_left_imm(W3, W0, amount),
+                asm::wide_shift_logical_left(W3, W0, A1),
+            ),
+            (
+                asm::wide_shift_logical_right_imm(W3, W0, amount),
+                asm::wide_shift_logical_right(W3, W0, A1),
+            ),
+            (
+                asm::wide_shift_arithmetic_right_imm(W3, W0, amount),
+                asm::wide_shift_arithmetic_right(W3, W0, A1),
+            ),
+        ] {
+            assert_eq!(
+                run_wide(&[value], &[with_imm, store]),
+                run_wide(&[value], &[asm::load_imm(A1, amount), with_reg, store]),
+                "shift by {amount}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+#[test]
 fn wide_bit_counts_write_a_general_purpose_register() {
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;

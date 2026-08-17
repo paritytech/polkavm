@@ -663,6 +663,11 @@ enum BasicInst<T> {
         regs: Vec<(u32, Reg)>,
     },
     Wide(WideInst),
+    /// A wide load from an address that is known once the sections are laid out.
+    WideLoadAbsolute {
+        dst: WideReg,
+        target: SectionTarget,
+    },
 }
 
 /// An instruction on the wide register file.
@@ -729,6 +734,13 @@ enum WideInst {
         base: Reg,
         offset: i32,
     },
+    /// A shift by an amount the general purpose register was only loaded with.
+    ShiftImm {
+        kind: WideShiftKind,
+        dst: WideReg,
+        src: WideReg,
+        amount: i32,
+    },
     Store {
         src: WideReg,
         base: Reg,
@@ -744,7 +756,7 @@ impl WideInst {
             WideInst::FromReg { src, .. } => RegMask::from(src),
             WideInst::Load { base, .. } | WideInst::Store { base, .. } => RegMask::from(base),
             WideInst::RegReg { .. } | WideInst::Compare { .. } | WideInst::Modular { .. } | WideInst::Move { .. } => RegMask::empty(),
-            WideInst::ToReg { .. } | WideInst::Count { .. } | WideInst::LoadImm { .. } => RegMask::empty(),
+            WideInst::ToReg { .. } | WideInst::Count { .. } | WideInst::LoadImm { .. } | WideInst::ShiftImm { .. } => RegMask::empty(),
         }
     }
 
@@ -794,7 +806,11 @@ impl WideInst {
                 dst: map(dst, OpKind::Write),
                 src,
             },
-            WideInst::RegReg { .. } | WideInst::Modular { .. } | WideInst::Move { .. } | WideInst::LoadImm { .. } => self,
+            WideInst::RegReg { .. }
+            | WideInst::Modular { .. }
+            | WideInst::Move { .. }
+            | WideInst::LoadImm { .. }
+            | WideInst::ShiftImm { .. } => self,
         }
     }
 }
@@ -837,6 +853,7 @@ impl<T> BasicInst<T> {
             BasicInst::Prologue { ref regs, .. } => RegMask::from(Reg::SP) | RegMask::from_regs(regs.iter().map(|&(_, reg)| reg)),
             BasicInst::Epilogue { .. } => RegMask::from(Reg::SP),
             BasicInst::Wide(instruction) => instruction.src_mask(),
+            BasicInst::WideLoadAbsolute { .. } => RegMask::empty(),
         }
     }
 
@@ -861,6 +878,7 @@ impl<T> BasicInst<T> {
             BasicInst::Prologue { .. } => RegMask::from(Reg::SP),
             BasicInst::Epilogue { ref regs, .. } => RegMask::from(Reg::SP) | RegMask::from_regs(regs.iter().map(|&(_, reg)| reg)),
             BasicInst::Wide(instruction) => instruction.dst_mask(),
+            BasicInst::WideLoadAbsolute { .. } => RegMask::empty(),
         }
     }
 
@@ -887,7 +905,7 @@ impl<T> BasicInst<T> {
             | BasicInst::AnyAny { .. } => false,
             // Liveness here is over the general purpose registers only, so an instruction
             // whose result lands in the wide file must not look dead.
-            BasicInst::Wide(..) => true,
+            BasicInst::Wide(..) | BasicInst::WideLoadAbsolute { .. } => true,
         }
     }
 
@@ -993,6 +1011,7 @@ impl<T> BasicInst<T> {
                 Some(output)
             }
             BasicInst::Wide(instruction) => Some(BasicInst::Wide(instruction.map_registers(map))),
+            BasicInst::WideLoadAbsolute { dst, target } => Some(BasicInst::WideLoadAbsolute { dst, target }),
         }
     }
 
@@ -1052,6 +1071,7 @@ impl<T> BasicInst<T> {
             BasicInst::StoreAbsolute { kind, src, target } => BasicInst::StoreAbsolute { kind, src, target },
             BasicInst::LoadAddress { dst, target } => BasicInst::LoadAddress { dst, target: map(target)? },
             BasicInst::Wide(instruction) => BasicInst::Wide(instruction),
+            BasicInst::WideLoadAbsolute { dst, target } => BasicInst::WideLoadAbsolute { dst, target },
             BasicInst::LoadAddressIndirect { dst, target } => BasicInst::LoadAddressIndirect { dst, target: map(target)? },
             BasicInst::LoadIndirect { kind, dst, base, offset } => BasicInst::LoadIndirect { kind, dst, base, offset },
             BasicInst::StoreIndirect { kind, src, base, offset } => BasicInst::StoreIndirect { kind, src, base, offset },
@@ -1075,6 +1095,7 @@ impl<T> BasicInst<T> {
     {
         match self {
             BasicInst::LoadAbsolute { target, .. } | BasicInst::StoreAbsolute { target, .. } => (Some(*target), None),
+            BasicInst::WideLoadAbsolute { target, .. } => (Some(*target), None),
             BasicInst::LoadAddress { target, .. } | BasicInst::LoadAddressIndirect { target, .. } => (None, Some(*target)),
             BasicInst::Nop
             | BasicInst::Prologue { .. }
@@ -5488,6 +5509,22 @@ impl BlockRegs {
         let is_rv64 = self.bitness == Bitness::B64;
 
         match instruction {
+            BasicInst::Wide(WideInst::Shift { kind, dst, src, amount }) => {
+                if let RegValue::Constant(value) = self.get_reg(amount) {
+                    if let Ok(amount) = i32::try_from(value) {
+                        return Some(BasicInst::Wide(WideInst::ShiftImm { kind, dst, src, amount }));
+                    }
+                }
+            }
+            BasicInst::Wide(WideInst::Load { dst, base, offset }) => {
+                if let RegValue::DataAddress(base) = self.get_reg(base) {
+                    // The whole address is known, so the base register goes away with it.
+                    return Some(BasicInst::WideLoadAbsolute {
+                        dst,
+                        target: base.map_offset_i64(|base| base.wrapping_add(cast(offset).to_i64_sign_extend())),
+                    });
+                }
+            }
             BasicInst::Wide(WideInst::FromReg { kind, dst, src }) => {
                 if let RegValue::Constant(value) = self.get_reg(src) {
                     // Only what fits the immediate field; anything wider keeps loading a
@@ -8631,6 +8668,14 @@ fn emit_code(
 
         for (source, op) in &block.ops {
             let op = match *op {
+                BasicInst::WideLoadAbsolute { dst, target } => {
+                    use polkavm_common::program::WideReg as PWideReg;
+
+                    let Some(dst) = PWideReg::from_raw(dst as u32) else {
+                        unreachable!("internal error: unknown wide register")
+                    };
+                    Instruction::wide_load_absolute(dst.raw(), get_data_address(source, target)?)
+                }
                 BasicInst::LoadImmediate { dst, imm } => Instruction::load_imm(conv_reg(dst), imm),
                 BasicInst::LoadImmediate64 { dst, imm } => {
                     if !is_rv64 {
@@ -9086,6 +9131,14 @@ fn emit_code(
                             match kind {
                                 WideFromRegKind::Unsigned => Instruction::wide_from_reg_unsigned(dst, src),
                                 WideFromRegKind::Signed => Instruction::wide_from_reg_signed(dst, src),
+                            }
+                        }
+                        WideInst::ShiftImm { kind, dst, src, amount } => {
+                            let (dst, src) = (conv_wide(dst), conv_wide(src));
+                            match kind {
+                                WideShiftKind::LogicalLeft => Instruction::wide_shift_logical_left_imm(dst, src, amount),
+                                WideShiftKind::LogicalRight => Instruction::wide_shift_logical_right_imm(dst, src, amount),
+                                WideShiftKind::ArithmeticRight => Instruction::wide_shift_arithmetic_right_imm(dst, src, amount),
                             }
                         }
                         WideInst::Load { dst, base, offset } => Instruction::wide_load(conv_wide(dst), conv_reg(base), offset),

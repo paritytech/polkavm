@@ -806,6 +806,19 @@ pub fn read_args_wreg_reg(chunk: u128) -> (RawWideReg, RawReg) {
 }
 
 #[inline(always)]
+pub fn read_args_wregs2_imm(chunk: u128, skip: u32) -> (RawWideReg, RawWideReg, i32) {
+    let chunk = chunk as u64;
+    let (reg1, reg2) = {
+        let value = chunk as u32;
+        (RawWideReg(value), RawWideReg(value >> 4))
+    };
+    let chunk = chunk >> 8;
+    let (_, _, imm_bits) = TABLE_1.get(skip, 0);
+    let imm = sign_extend_at(chunk as u32, imm_bits);
+    (reg1, reg2, cast(imm).bitwise_as_i32())
+}
+
+#[inline(always)]
 pub fn read_args_wreg_reg_imm(chunk: u128, skip: u32) -> (RawWideReg, RawReg, i32) {
     let chunk = chunk as u64;
     let (reg1, reg2) = {
@@ -1123,6 +1136,7 @@ macro_rules! define_all_instructions {
         [$($name_wreg_reg_imm:ident,)+]
         [$($name_wreg_wreg_wreg_wreg:ident,)+]
         [$($name_wreg_imm:ident,)+]
+        [$($name_wregs2_imm:ident,)+]
     ) => {
         define_all_instructions!(
             @impl_shared
@@ -1147,6 +1161,7 @@ macro_rules! define_all_instructions {
             $($name_wreg_reg_imm,)+
             $($name_wreg_wreg_wreg_wreg,)+
             $($name_wreg_imm,)+
+            $($name_wregs2_imm,)+
         );
 
         #[macro_export]
@@ -1176,6 +1191,7 @@ macro_rules! define_all_instructions {
                     $(fn $name_wreg_reg_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawWideReg, reg2: RawReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_wreg_reg_imm(self, reg1, reg2, imm) })+
                     $(fn $name_wreg_wreg_wreg_wreg(&mut self, _offset: u32, _args_length: u32, reg1: RawWideReg, reg2: RawWideReg, reg3: RawWideReg, reg4: RawWideReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_wreg_wreg_wreg_wreg(self, reg1, reg2, reg3, reg4) })+
                     $(fn $name_wreg_imm(&mut self, _offset: u32, _args_length: u32, reg: RawWideReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_wreg_imm(self, reg, imm) })+
+                    $(fn $name_wregs2_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawWideReg, reg2: RawWideReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_wregs2_imm(self, reg1, reg2, imm) })+
 
                     fn invalid(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::invalid(self) }
                 }
@@ -1206,6 +1222,7 @@ macro_rules! define_all_instructions {
             $(fn $name_wreg_reg_imm(&mut self, offset: u32, args_length: u32, reg1: RawWideReg, reg2: RawReg, imm: i32) -> Self::ReturnTy;)+
             $(fn $name_wreg_wreg_wreg_wreg(&mut self, offset: u32, args_length: u32, reg1: RawWideReg, reg2: RawWideReg, reg3: RawWideReg, reg4: RawWideReg) -> Self::ReturnTy;)+
             $(fn $name_wreg_imm(&mut self, offset: u32, args_length: u32, reg: RawWideReg, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_wregs2_imm(&mut self, offset: u32, args_length: u32, reg1: RawWideReg, reg2: RawWideReg, imm: i32) -> Self::ReturnTy;)+
 
             fn invalid(&mut self, offset: u32, args_length: u32) -> Self::ReturnTy;
         }
@@ -1234,6 +1251,7 @@ macro_rules! define_all_instructions {
             $(fn $name_wreg_reg_imm(&mut self, reg1: RawWideReg, reg2: RawReg, imm: i32) -> Self::ReturnTy;)+
             $(fn $name_wreg_wreg_wreg_wreg(&mut self, reg1: RawWideReg, reg2: RawWideReg, reg3: RawWideReg, reg4: RawWideReg) -> Self::ReturnTy;)+
             $(fn $name_wreg_imm(&mut self, reg: RawWideReg, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_wregs2_imm(&mut self, reg1: RawWideReg, reg2: RawWideReg, imm: i32) -> Self::ReturnTy;)+
 
             fn invalid(&mut self) -> Self::ReturnTy;
         }
@@ -1264,6 +1282,7 @@ macro_rules! define_all_instructions {
             $($name_wreg_reg_imm(RawWideReg, RawReg, i32),)+
             $($name_wreg_wreg_wreg_wreg(RawWideReg, RawWideReg, RawWideReg, RawWideReg),)+
             $($name_wreg_imm(RawWideReg, i32),)+
+            $($name_wregs2_imm(RawWideReg, RawWideReg, i32),)+
             invalid = INVALID_INSTRUCTION_INDEX as u32,
         }
 
@@ -1291,6 +1310,7 @@ macro_rules! define_all_instructions {
                     $(Self::$name_wreg_reg_imm(reg1, reg2, imm) => visitor.$name_wreg_reg_imm(reg1, reg2, imm),)+
                     $(Self::$name_wreg_wreg_wreg_wreg(reg1, reg2, reg3, reg4) => visitor.$name_wreg_wreg_wreg_wreg(reg1, reg2, reg3, reg4),)+
                     $(Self::$name_wreg_imm(reg, imm) => visitor.$name_wreg_imm(reg, imm),)+
+                    $(Self::$name_wregs2_imm(reg1, reg2, imm) => visitor.$name_wregs2_imm(reg1, reg2, imm),)+
                     Self::invalid => visitor.invalid(),
                 }
             }
@@ -1318,6 +1338,7 @@ macro_rules! define_all_instructions {
                     $(Self::$name_wreg_reg_imm(reg1, reg2, imm) => visitor.$name_wreg_reg_imm(offset, args_length, reg1, reg2, imm),)+
                     $(Self::$name_wreg_wreg_wreg_wreg(reg1, reg2, reg3, reg4) => visitor.$name_wreg_wreg_wreg_wreg(offset, args_length, reg1, reg2, reg3, reg4),)+
                     $(Self::$name_wreg_imm(reg, imm) => visitor.$name_wreg_imm(offset, args_length, reg, imm),)+
+                    $(Self::$name_wregs2_imm(reg1, reg2, imm) => visitor.$name_wregs2_imm(offset, args_length, reg1, reg2, imm),)+
                     Self::invalid => visitor.invalid(offset, args_length),
                 }
             }
@@ -1345,6 +1366,7 @@ macro_rules! define_all_instructions {
                     $(Self::$name_wreg_reg_imm(reg1, reg2, imm) => Self::serialize_wreg_reg_imm(buffer, isa.opcode_to_u8(Opcode::$name_wreg_reg_imm).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, imm),)+
                     $(Self::$name_wreg_wreg_wreg_wreg(reg1, reg2, reg3, reg4) => Self::serialize_wreg_wreg_wreg_wreg(buffer, isa.opcode_to_u8(Opcode::$name_wreg_wreg_wreg_wreg).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, reg3, reg4),)+
                     $(Self::$name_wreg_imm(reg, imm) => Self::serialize_wreg_imm(buffer, isa.opcode_to_u8(Opcode::$name_wreg_imm).unwrap_or(UNUSED_RAW_OPCODE), reg, imm),)+
+                    $(Self::$name_wregs2_imm(reg1, reg2, imm) => Self::serialize_wregs2_imm(buffer, isa.opcode_to_u8(Opcode::$name_wregs2_imm).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, imm),)+
                     Self::invalid => Self::serialize_argless(buffer, isa.opcode_to_u8(Opcode::trap).unwrap_or(UNUSED_RAW_OPCODE)),
 
                 }
@@ -1373,6 +1395,7 @@ macro_rules! define_all_instructions {
                     $(Self::$name_wreg_reg_imm(..) => Opcode::$name_wreg_reg_imm,)+
                     $(Self::$name_wreg_wreg_wreg_wreg(..) => Opcode::$name_wreg_wreg_wreg_wreg,)+
                     $(Self::$name_wreg_imm(..) => Opcode::$name_wreg_imm,)+
+                    $(Self::$name_wregs2_imm(..) => Opcode::$name_wregs2_imm,)+
                     Self::invalid => Opcode::trap,
                 }
             }
@@ -1500,6 +1523,12 @@ macro_rules! define_all_instructions {
                 }
             )+
 
+            $(
+                pub fn $name_wregs2_imm(reg1: WideReg, reg2: WideReg, imm: i32) -> Instruction {
+                    Instruction::$name_wregs2_imm(reg1.into(), reg2.into(), imm)
+                }
+            )+
+
             pub fn ret() -> Instruction {
                 jump_indirect(Reg::RA, 0)
             }
@@ -1584,6 +1613,7 @@ macro_rules! define_instruction_set {
         [$($name_wreg_reg_imm:ident = $value_wreg_reg_imm:expr,)*]
         [$($name_wreg_wreg_wreg_wreg:ident = $value_wreg_wreg_wreg_wreg:expr,)*]
         [$($name_wreg_imm:ident = $value_wreg_imm:expr,)*]
+        [$($name_wregs2_imm:ident = $value_wregs2_imm:expr,)*]
     ) => {
         define_instruction_set!(
             @impl_shared
@@ -1609,6 +1639,7 @@ macro_rules! define_instruction_set {
             $($name_wreg_reg_imm = $value_wreg_reg_imm,)*
             $($name_wreg_wreg_wreg_wreg = $value_wreg_wreg_wreg_wreg,)*
             $($name_wreg_imm = $value_wreg_imm,)*
+            $($name_wregs2_imm = $value_wregs2_imm,)*
         );
 
         impl InstructionSet for $isa_name {
@@ -1652,6 +1683,7 @@ macro_rules! define_instruction_set {
                     $(Opcode::$name_wreg_reg_imm => true,)*
                     $(Opcode::$name_wreg_wreg_wreg_wreg => true,)*
                     $(Opcode::$name_wreg_imm => true,)*
+                    $(Opcode::$name_wregs2_imm => true,)*
                     #[allow(unreachable_patterns)]
                     _ => false,
                 }
@@ -1780,6 +1812,12 @@ macro_rules! define_instruction_set {
                         $value_wreg_imm => {
                             let (reg, imm) = $crate::program::read_args_wreg_imm(chunk, skip);
                             Instruction::$name_wreg_imm(reg, imm)
+                        }
+                    )*
+                    $(
+                        $value_wregs2_imm => {
+                            let (reg1, reg2, imm) = $crate::program::read_args_wregs2_imm(chunk, skip);
+                            Instruction::$name_wregs2_imm(reg1, reg2, imm)
                         }
                     )*
                     _ => Instruction::invalid,
@@ -2064,6 +2102,18 @@ macro_rules! define_instruction_set {
 
                         if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_wreg_imm].is_some() {
                             table[$value_wreg_imm] = $name_wreg_imm;
+                        }
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wregs2_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, imm) = $crate::program::read_args_wregs2_imm(chunk, skip);
+                            state.$name_wregs2_imm(instruction_offset, skip, reg1, reg2, imm)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_wregs2_imm].is_some() {
+                            table[$value_wregs2_imm] = $name_wregs2_imm;
                         }
                     })*
 
@@ -2367,6 +2417,14 @@ define_all_instructions! {
     [
         wide_load_imm_unsigned,
         wide_load_imm_signed,
+        wide_load_absolute,
+    ]
+
+    // Instructions with args: wreg, wreg, imm
+    [
+        wide_shift_logical_left_imm,
+        wide_shift_logical_right_imm,
+        wide_shift_arithmetic_right_imm,
     ]
 }
 
@@ -2590,6 +2648,12 @@ define_instruction_set! {
     [
         wide_load_imm_unsigned                   = 162,
         wide_load_imm_signed                     = 163,
+        wide_load_absolute                       = 164,
+    ]
+    [
+        wide_shift_logical_left_imm              = 165,
+        wide_shift_logical_right_imm             = 166,
+        wide_shift_arithmetic_right_imm          = 167,
     ]
 }
 
@@ -2728,6 +2792,8 @@ define_instruction_set! {
     ]
     [
         load_imm_and_jump_indirect               = 180,
+    ]
+    [
     ]
     [
     ]
@@ -2938,6 +3004,8 @@ define_instruction_set! {
     ]
     [
     ]
+    [
+    ]
 }
 
 define_instruction_set! {
@@ -3110,6 +3178,8 @@ define_instruction_set! {
     ]
     [
         load_imm64                               = 20,
+    ]
+    [
     ]
     [
     ]
@@ -3442,6 +3512,13 @@ impl Instruction {
         let imm = cast(imm).bitwise_as_u32();
         buffer[0] = opcode;
         buffer[1] = reg.0 as u8;
+        write_simple_varint(imm, &mut buffer[2..]) + 2
+    }
+
+    fn serialize_wregs2_imm(buffer: &mut [u8], opcode: u8, reg1: RawWideReg, reg2: RawWideReg, imm: i32) -> usize {
+        let imm = cast(imm).bitwise_as_u32();
+        buffer[0] = opcode;
+        buffer[1] = reg1.0 as u8 | (reg2.0 as u8) << 4;
         write_simple_varint(imm, &mut buffer[2..]) + 2
     }
 
@@ -4769,6 +4846,26 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let base = self.format_reg(base);
         let offset = self.format_imm(offset);
         write!(self, "u256 [{base} + {offset}] = {src}")
+    }
+
+    fn wide_shift_logical_left_imm(&mut self, d: RawWideReg, s: RawWideReg, imm: i32) -> Self::ReturnTy {
+        let imm = self.format_imm(imm);
+        write!(self, "{d} = {s} <<w {imm}")
+    }
+
+    fn wide_shift_logical_right_imm(&mut self, d: RawWideReg, s: RawWideReg, imm: i32) -> Self::ReturnTy {
+        let imm = self.format_imm(imm);
+        write!(self, "{d} = {s} >>w {imm}")
+    }
+
+    fn wide_shift_arithmetic_right_imm(&mut self, d: RawWideReg, s: RawWideReg, imm: i32) -> Self::ReturnTy {
+        let imm = self.format_imm(imm);
+        write!(self, "{d} = {s} >>aw {imm}")
+    }
+
+    fn wide_load_absolute(&mut self, d: RawWideReg, offset: i32) -> Self::ReturnTy {
+        let offset = self.format_imm(offset);
+        write!(self, "{d} = u256 [{offset}]")
     }
 
     fn wide_load_imm_unsigned(&mut self, d: RawWideReg, imm: i32) -> Self::ReturnTy {

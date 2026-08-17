@@ -1647,6 +1647,52 @@ where
     }
 
     #[inline(always)]
+    fn wide_shift_logical_left_imm(
+        &mut self,
+        _offset: u32,
+        _args_length: u32,
+        _d: RawWideReg,
+        _s: RawWideReg,
+        _imm: i32,
+    ) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
+    fn wide_shift_logical_right_imm(
+        &mut self,
+        _offset: u32,
+        _args_length: u32,
+        _d: RawWideReg,
+        _s: RawWideReg,
+        _imm: i32,
+    ) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
+    fn wide_shift_arithmetic_right_imm(
+        &mut self,
+        _offset: u32,
+        _args_length: u32,
+        _d: RawWideReg,
+        _s: RawWideReg,
+        _imm: i32,
+    ) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(4))
+    }
+
+    #[inline(always)]
+    fn wide_load_absolute(&mut self, _offset: u32, _args_length: u32, _d: RawWideReg, _imm: i32) -> Self::ReturnTy {
+        let cost = InstCost {
+            load_slots: MAX_LOAD_SLOTS,
+            decode_slots: MAX_DECODE_PER_CYCLE,
+            ..self.load_cost()
+        };
+        self.dispatch_wide(None, None, cost)
+    }
+
+    #[inline(always)]
     fn wide_load_imm_unsigned(&mut self, _offset: u32, _args_length: u32, _d: RawWideReg, _imm: i32) -> Self::ReturnTy {
         self.dispatch_wide(None, None, self.wide_alu_cost(1))
     }

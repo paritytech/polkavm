@@ -797,6 +797,43 @@ where
         self.unsupported_wide_instruction(code_offset, args_length);
     }
 
+    fn wide_shift_logical_left_imm(
+        &mut self,
+        code_offset: u32,
+        args_length: u32,
+        _d: RawWideReg,
+        _s: RawWideReg,
+        _imm: i32,
+    ) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_shift_logical_right_imm(
+        &mut self,
+        code_offset: u32,
+        args_length: u32,
+        _d: RawWideReg,
+        _s: RawWideReg,
+        _imm: i32,
+    ) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_shift_arithmetic_right_imm(
+        &mut self,
+        code_offset: u32,
+        args_length: u32,
+        _d: RawWideReg,
+        _s: RawWideReg,
+        _imm: i32,
+    ) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
+    fn wide_load_absolute(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _imm: i32) -> Self::ReturnTy {
+        self.unsupported_wide_instruction(code_offset, args_length);
+    }
+
     fn wide_load_imm_unsigned(&mut self, code_offset: u32, args_length: u32, _d: RawWideReg, _imm: i32) -> Self::ReturnTy {
         self.unsupported_wide_instruction(code_offset, args_length);
     }
