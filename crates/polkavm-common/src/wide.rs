@@ -312,20 +312,17 @@ impl U256 {
             return (Self::ZERO, self);
         }
 
+        // Doubling the running remainder cannot carry out of the top here, unlike in
+        // `mul_mod` where the numerator is twice as wide: after s steps the remainder is
+        // below 2^s, so it only reaches 2^255 on the last one, and the loop ends there.
         let mut quotient = Self::ZERO;
         let mut remainder = Self::ZERO;
         for index in (0..256).rev() {
-            // Shifting the running remainder can carry a bit out of the top, and it does
-            // whenever the divisor is at least 2^255. The remainder is below the divisor at
-            // the start of every step, so doubling it stays below twice the divisor and one
-            // subtraction always brings it back into range; the bit that left has to be part
-            // of that decision or the step keeps a remainder it should have reduced.
-            let carry = remainder.0[3] >> 63 != 0;
             remainder = remainder.shift_left(1);
             if self.bit(index) {
                 remainder.0[0] |= 1;
             }
-            if carry || !remainder.less_than(divisor) {
+            if !remainder.less_than(divisor) {
                 remainder = remainder.wrapping_sub(divisor);
                 quotient.set_bit(index);
             }
@@ -564,9 +561,9 @@ mod tests {
     }
 
     #[test]
-    fn division_keeps_the_bit_shifted_off_the_top() {
-        // A divisor at or above 2^255 makes the running remainder overflow when it is
-        // doubled, which a 256-bit accumulator drops unless the carry is kept.
+    fn division_by_a_high_divisor() {
+        // Divisors at or above 2^255 are where a wider numerator would overflow the running
+        // remainder, so they are worth pinning down even though this one cannot.
         let high = U256([0, 0, 0, 1 << 63]);
         let (quotient, remainder) = U256([u64::MAX; 4]).div_rem(high);
         assert_eq!(quotient, U256::ONE);
@@ -579,25 +576,84 @@ mod tests {
     }
 
     #[test]
-    fn mul_mod_reduces_against_a_high_modulus() {
-        let modulus = U256([1, 2, 3, 1 << 63]);
-        let a = U256([0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, 7, 11]);
-        let b = U256([0xdead_beef_cafe_babe, 3, 0, 1 << 62]);
+    fn division_agrees_with_multiplication() {
+        // `a == quotient * b + remainder` with `remainder < b` pins the result without a
+        // second implementation to compare against. The values are the ones a 256-bit
+        // division is most likely to get wrong: the limb boundaries and the top of the range.
+        let one = U256::ONE;
+        let interesting = [
+            U256::ZERO,
+            one,
+            U256::from_u64(7),
+            U256([u64::MAX; 4]),
+            U256([u64::MAX; 4]).wrapping_sub(one),
+            one.shift_left(255),
+            one.shift_left(255).wrapping_add(one),
+            one.shift_left(255).wrapping_sub(one),
+            one.shift_left(64),
+            one.shift_left(128),
+            one.shift_left(192),
+            U256([0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, 7, 1 << 63]),
+        ];
 
-        // Cross checked against repeated shift-and-add modular multiplication, which never
-        // needs more than the modulus in range.
-        let mut expected = U256::ZERO;
-        let (_, mut base) = a.div_rem(modulus);
-        let mut exponent = b;
-        while !exponent.is_zero() {
-            if exponent.0[0] & 1 != 0 {
-                expected = expected.add_mod(base, modulus);
+        for a in interesting {
+            for b in interesting {
+                let (quotient, remainder) = a.div_rem(b);
+                if b.is_zero() {
+                    assert_eq!((quotient, remainder), (U256::ZERO, U256::ZERO));
+                    continue;
+                }
+
+                assert!(remainder.less_than(b), "{a:?} / {b:?}");
+                assert_eq!(quotient.wrapping_mul(b).wrapping_add(remainder), a, "{a:?} / {b:?}");
             }
-            base = base.add_mod(base, modulus);
-            exponent = exponent.shift_right(1);
+        }
+    }
+
+    #[test]
+    fn mul_mod_reduces_against_a_high_modulus() {
+        // Reducing the 512-bit product walks twice as many steps as a division does, so the
+        // running remainder does reach 2^255 and doubling it carries out of the top. Cross
+        // checked against shift-and-add modular multiplication, which never holds more than
+        // the modulus in range and so cannot make the same mistake.
+        fn reference(a: U256, b: U256, modulus: U256) -> U256 {
+            let mut result = U256::ZERO;
+            let (_, mut base) = a.div_rem(modulus);
+            let mut remaining = b;
+            while !remaining.is_zero() {
+                if remaining.0[0] & 1 != 0 {
+                    result = result.add_mod(base, modulus);
+                }
+                base = base.add_mod(base, modulus);
+                remaining = remaining.shift_right(1);
+            }
+            result
         }
 
-        assert_eq!(a.mul_mod(b, modulus), expected);
+        let one = U256::ONE;
+        let moduli = [
+            one.shift_left(255),
+            one.shift_left(255).wrapping_add(one),
+            U256([1, 2, 3, 1 << 63]),
+            U256([u64::MAX; 4]),
+            U256([u64::MAX; 4]).wrapping_sub(one),
+        ];
+        let operands = [
+            U256([u64::MAX; 4]),
+            one.shift_left(255),
+            one.shift_left(255).wrapping_sub(one),
+            U256([0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, 7, 11]),
+            U256([0xdead_beef_cafe_babe, 3, 0, 1 << 62]),
+            U256::from_u64(3),
+        ];
+
+        for modulus in moduli {
+            for a in operands {
+                for b in operands {
+                    assert_eq!(a.mul_mod(b, modulus), reference(a, b, modulus), "{a:?} * {b:?} mod {modulus:?}");
+                }
+            }
+        }
     }
 
     #[test]
