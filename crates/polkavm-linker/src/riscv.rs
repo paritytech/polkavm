@@ -67,7 +67,6 @@ impl WideReg {
     /// A wide value occupies a pair of vector registers, which the vector extensions require
     /// to be named by the lower of the two, so only the even encodings are valid.
     const fn decode(value: u32) -> Option<Self> {
-        use polkavm_common::vector::VectorOperation;
         use WideReg::*;
         Some(match value & 0b11111 {
             0 => W0,

@@ -3903,7 +3903,9 @@ define_instruction_set! {
 #[test]
 fn test_opcode_from_u8() {
     assert_eq!(ISA_Latest64.opcode_from_u8(3), Some(Opcode::unlikely));
-    assert_eq!(ISA_ReviveV1.opcode_from_u8(3), None);
+    assert_eq!(ISA_ReviveV1.opcode_from_u8(3), Some(Opcode::vector_mask_and_not));
+    assert_eq!(ISA_Latest64.opcode_from_u8(231), None);
+    assert_eq!(ISA_ReviveV1.opcode_from_u8(231), Some(Opcode::wide_add));
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]

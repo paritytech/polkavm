@@ -244,6 +244,31 @@ const GAS_COST_GENERIC_SANDBOX_OFFSET: usize = 7;
 const REP_STOSB_MACHINE_CODE: &[u8] = &[0xf3, 0xaa];
 const REP_MOVSB_MACHINE_CODE: &[u8] = &[0xf3, 0xa4];
 
+// The raw pieces the inline wide instruction code generation is built from. The assembler
+// has no SSE support and no carry instructions, so these are emitted as bytes; the REX.B
+// belongs to the context register every memory operand is based on.
+const REX_B: u8 = 0x41;
+const MOVDQU_LOAD: u8 = 0x6f;
+const MOVDQU_STORE: u8 = 0x7f;
+const PCMPEQB: u8 = 0x74;
+const PAND: u8 = 0xdb;
+const POR: u8 = 0xeb;
+const PXOR: u8 = 0xef;
+const SCALAR_LOAD: u8 = 0x8b;
+const SCALAR_STORE: u8 = 0x89;
+const SCALAR_ADD_TO_STATE: u8 = 0x01;
+const SCALAR_ADC_TO_STATE: u8 = 0x11;
+const SCALAR_SUB_TO_STATE: u8 = 0x29;
+const SCALAR_SBB_TO_STATE: u8 = 0x19;
+const SCALAR_SUB_FROM_STATE: u8 = 0x2b;
+const SCALAR_SBB_FROM_STATE: u8 = 0x1b;
+const SET_BELOW: u8 = 0x92;
+const SET_EQUAL: u8 = 0x94;
+const SET_NOT_EQUAL: u8 = 0x95;
+const SET_LESS: u8 = 0x9c;
+const SHIFT_RIGHT_SIGN_63: &[u8] = &[0x48, 0xc1, 0xf9, 0x3f];
+const MOVBE_LOAD: &[u8] = &[0x0f, 0x38, 0xf0];
+
 fn wide_field(reg: RawWideReg) -> u8 {
     reg.get() as u8
 }
@@ -776,28 +801,173 @@ where
         self.call_to_label(label);
     }
 
+    /// The displacement of one 64-bit word of the wide register file, from the register
+    /// generated code addresses the VM context through.
+    fn wide_word_displacement(register_field: u8, word: usize) -> i32 {
+        let offset = S::offset_table().vector_state + usize::from(register_field) * 32 + word * 8;
+        match S::KIND {
+            SandboxKind::Linux => offset as i32,
+            SandboxKind::Generic => {
+                #[cfg(feature = "generic-sandbox")]
+                {
+                    crate::sandbox::generic::GUEST_MEMORY_TO_VMCTX_OFFSET as i32 + offset as i32
+                }
+
+                #[cfg(not(feature = "generic-sandbox"))]
+                {
+                    unreachable!();
+                }
+            }
+        }
+    }
+
+    /// One SSE instruction whose memory operand is a 16-byte half of the register file.
+    /// `word` is 0 for the low half and 2 for the high one.
+    fn push_wide_sse_state(&mut self, mandatory_prefix: u8, opcode: u8, xmm: u8, register_field: u8, word: usize) {
+        let disp = Self::wide_word_displacement(register_field, word).to_le_bytes();
+        self.asm.push_raw(&[
+            mandatory_prefix,
+            REX_B,
+            0x0f,
+            opcode,
+            0x85 | (xmm << 3),
+            disp[0],
+            disp[1],
+            disp[2],
+            disp[3],
+        ]);
+    }
+
+    /// One `movdqu` against the guest byte the temporary register points at.
+    fn push_wide_sse_guest(&mut self, opcode: u8, xmm: u8) {
+        match S::KIND {
+            SandboxKind::Linux => {
+                self.asm.push_raw(&[0xf3, 0x0f, opcode, 0x01 | (xmm << 3)]);
+            }
+            SandboxKind::Generic => {
+                self.asm.push_raw(&[0xf3, REX_B, 0x0f, opcode, 0x44 | (xmm << 3), 0x0d, 0x00]);
+            }
+        }
+    }
+
+    /// One scalar instruction of the `op reg, [file word]` or `op [file word], reg` shape;
+    /// which of the two it is lives in the opcode.
+    fn push_wide_scalar(&mut self, opcode: &[u8], gpr: NativeReg, register_field: u8, word: usize) {
+        let disp = Self::wide_word_displacement(register_field, word).to_le_bytes();
+        let mut buffer = [0; 16];
+        buffer[0] = 0x48 | 0x01 | if gpr as u8 >= 8 { 0x04 } else { 0 };
+        buffer[1..1 + opcode.len()].copy_from_slice(opcode);
+        let length = 1 + opcode.len();
+        buffer[length] = 0x85 | ((gpr as u8 & 7) << 3);
+        buffer[length + 1..length + 5].copy_from_slice(&disp);
+        self.asm.push_raw(&buffer[..length + 5]);
+    }
+
+    /// `mov qword ptr [file word], immediate`, sign extending the immediate.
+    fn push_wide_store_immediate(&mut self, register_field: u8, word: usize, immediate: i32) {
+        let disp = Self::wide_word_displacement(register_field, word).to_le_bytes();
+        let imm = immediate.to_le_bytes();
+        self.asm
+            .push_raw(&[0x49, 0xc7, 0x85, disp[0], disp[1], disp[2], disp[3], imm[0], imm[1], imm[2], imm[3]]);
+    }
+
+    /// Materializes the flag the preceding comparison left into a register: a `setcc`
+    /// through the low byte of the temporary register, zero extended into the destination.
+    fn push_wide_set_condition(&mut self, condition_opcode: u8, dst: NativeReg) {
+        self.asm.push_raw(&[0x0f, condition_opcode, 0xc1]);
+        let rex_prefix = 0x48 | if dst as u8 >= 8 { 0x04 } else { 0 };
+        self.asm.push_raw(&[rex_prefix, 0x0f, 0xb6, 0xc0 | ((dst as u8 & 7) << 3) | 0x01]);
+    }
+
+    /// A carry or borrow chain into the destination's own words: `first` on word zero and
+    /// `rest` on the ones above it, with the other operand's words passing through the
+    /// temporary register, which does not disturb the flags.
+    fn wide_chain_in_place(&mut self, first_opcode: u8, rest_opcode: u8, destination: u8, source: u8) {
+        for word in 0..4 {
+            self.push_wide_scalar(&[SCALAR_LOAD], TMP_REG, source, word);
+            let opcode = if word == 0 { first_opcode } else { rest_opcode };
+            self.push_wide_scalar(&[opcode], TMP_REG, destination, word);
+        }
+    }
+
+    /// A full-width subtraction whose only product is the final flags, consumed by `setcc`.
+    fn wide_borrow_compare(&mut self, condition_opcode: u8, dst: RawReg, s1: u8, s2: u8) {
+        self.push_wide_scalar(&[SCALAR_LOAD], TMP_REG, s1, 0);
+        self.push_wide_scalar(&[SCALAR_SUB_FROM_STATE], TMP_REG, s2, 0);
+        for word in 1..4 {
+            self.push_wide_scalar(&[SCALAR_LOAD], TMP_REG, s1, word);
+            self.push_wide_scalar(&[SCALAR_SBB_FROM_STATE], TMP_REG, s2, word);
+        }
+        self.push_wide_set_condition(condition_opcode, conv_reg(dst));
+    }
+
+    /// Byte-wise equality over both halves, folded to one bit.
+    fn wide_equality(&mut self, condition_opcode: u8, dst: RawReg, s1: u8, s2: u8) {
+        self.push_wide_sse_state(0xf3, MOVDQU_LOAD, 0, s1, 0);
+        self.push_wide_sse_state(0x66, PCMPEQB, 0, s2, 0);
+        self.push_wide_sse_state(0xf3, MOVDQU_LOAD, 1, s1, 2);
+        self.push_wide_sse_state(0x66, PCMPEQB, 1, s2, 2);
+        self.asm.push_raw(&[0x66, 0x0f, 0xdb, 0xc1]);
+        self.asm.push_raw(&[0x66, 0x0f, 0xd7, 0xc8]);
+        self.push(cmp((TMP_REG, imm32(0xffff))));
+        self.push_wide_set_condition(condition_opcode, conv_reg(dst));
+    }
+
+    /// One bitwise operation, a half at a time through an SSE register.
+    fn wide_bitwise(&mut self, opcode: u8, d: u8, s1: u8, s2: u8) {
+        for word in [0, 2] {
+            self.push_wide_sse_state(0xf3, MOVDQU_LOAD, 0, s1, word);
+            self.push_wide_sse_state(0x66, opcode, 0, s2, word);
+            self.push_wide_sse_state(0xf3, MOVDQU_STORE, 0, d, word);
+        }
+    }
+
+    /// Thirty-two bytes between guest memory and the register file, a half at a time.
+    ///
+    /// The guest address wraps at the top of the address space per half, by recomputing it
+    /// with a 32-bit lea: an access that would cross the top must land on the never-mapped
+    /// zero page and trap, not walk into whatever the host maps above four gigabytes.
+    fn wide_transfer(&mut self, into_state: bool, register_field: u8, base: Option<RawReg>, offset: i32) {
+        match base {
+            Some(base) => self.push(lea(RegSize::R32, TMP_REG, reg_indirect(RegSize::R32, conv_reg(base) + offset))),
+            None => self.push(mov_imm(TMP_REG, imm32(cast(offset).bitwise_as_u32()))),
+        }
+
+        for (half, word) in [(0, 0), (1, 2)] {
+            if half == 1 {
+                self.push(lea(RegSize::R32, TMP_REG, reg_indirect(RegSize::R32, TMP_REG + 16)));
+            }
+
+            if into_state {
+                self.push_wide_sse_guest(MOVDQU_LOAD, 0);
+                self.push_wide_sse_state(0xf3, MOVDQU_STORE, 0, register_field, word);
+            } else {
+                self.push_wide_sse_state(0xf3, MOVDQU_LOAD, 0, register_field, word);
+                self.push_wide_sse_guest(MOVDQU_STORE, 0);
+            }
+        }
+    }
+
     #[inline(always)]
     pub fn wide_add(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideAdd,
-            wide_field(d),
-            wide_field(s1),
-            wide_field(s2),
-            0,
-        );
+        let (d, s1, s2) = (wide_field(d), wide_field(s1), wide_field(s2));
+        if d == s1 {
+            self.wide_chain_in_place(SCALAR_ADD_TO_STATE, SCALAR_ADC_TO_STATE, d, s2);
+        } else if d == s2 {
+            self.wide_chain_in_place(SCALAR_ADD_TO_STATE, SCALAR_ADC_TO_STATE, d, s1);
+        } else {
+            self.wide_operation(code_offset, WideOperationKind::WideAdd, d, s1, s2, 0);
+        }
     }
 
     #[inline(always)]
     pub fn wide_sub(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideSubtract,
-            wide_field(d),
-            wide_field(s1),
-            wide_field(s2),
-            0,
-        );
+        let (d, s1, s2) = (wide_field(d), wide_field(s1), wide_field(s2));
+        if d == s1 {
+            self.wide_chain_in_place(SCALAR_SUB_TO_STATE, SCALAR_SBB_TO_STATE, d, s2);
+        } else {
+            self.wide_operation(code_offset, WideOperationKind::WideSubtract, d, s1, s2, 0);
+        }
     }
 
     #[inline(always)]
@@ -814,38 +984,20 @@ where
 
     #[inline(always)]
     pub fn wide_and(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideAnd,
-            wide_field(d),
-            wide_field(s1),
-            wide_field(s2),
-            0,
-        );
+        let _ = code_offset;
+        self.wide_bitwise(PAND, wide_field(d), wide_field(s1), wide_field(s2));
     }
 
     #[inline(always)]
     pub fn wide_or(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideOr,
-            wide_field(d),
-            wide_field(s1),
-            wide_field(s2),
-            0,
-        );
+        let _ = code_offset;
+        self.wide_bitwise(POR, wide_field(d), wide_field(s1), wide_field(s2));
     }
 
     #[inline(always)]
     pub fn wide_xor(&mut self, code_offset: u32, d: RawWideReg, s1: RawWideReg, s2: RawWideReg) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideXor,
-            wide_field(d),
-            wide_field(s1),
-            wide_field(s2),
-            0,
-        );
+        let _ = code_offset;
+        self.wide_bitwise(PXOR, wide_field(d), wide_field(s1), wide_field(s2));
     }
 
     #[inline(always)]
@@ -922,50 +1074,26 @@ where
 
     #[inline(always)]
     pub fn wide_set_equal(&mut self, code_offset: u32, d: RawReg, s1: RawWideReg, s2: RawWideReg) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideSetEqual,
-            register_field(d),
-            wide_field(s1),
-            wide_field(s2),
-            0,
-        );
+        let _ = code_offset;
+        self.wide_equality(SET_EQUAL, d, wide_field(s1), wide_field(s2));
     }
 
     #[inline(always)]
     pub fn wide_set_not_equal(&mut self, code_offset: u32, d: RawReg, s1: RawWideReg, s2: RawWideReg) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideSetNotEqual,
-            register_field(d),
-            wide_field(s1),
-            wide_field(s2),
-            0,
-        );
+        let _ = code_offset;
+        self.wide_equality(SET_NOT_EQUAL, d, wide_field(s1), wide_field(s2));
     }
 
     #[inline(always)]
     pub fn wide_set_less_than_unsigned(&mut self, code_offset: u32, d: RawReg, s1: RawWideReg, s2: RawWideReg) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideSetLessThanUnsigned,
-            register_field(d),
-            wide_field(s1),
-            wide_field(s2),
-            0,
-        );
+        let _ = code_offset;
+        self.wide_borrow_compare(SET_BELOW, d, wide_field(s1), wide_field(s2));
     }
 
     #[inline(always)]
     pub fn wide_set_less_than_signed(&mut self, code_offset: u32, d: RawReg, s1: RawWideReg, s2: RawWideReg) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideSetLessThanSigned,
-            register_field(d),
-            wide_field(s1),
-            wide_field(s2),
-            0,
-        );
+        let _ = code_offset;
+        self.wide_borrow_compare(SET_LESS, d, wide_field(s1), wide_field(s2));
     }
 
     #[inline(always)]
@@ -1030,24 +1158,31 @@ where
 
     #[inline(always)]
     pub fn wide_move(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg) {
-        self.wide_operation(code_offset, WideOperationKind::WideMove, wide_field(d), wide_field(s), 0, 0);
+        let _ = code_offset;
+        let (d, s) = (wide_field(d), wide_field(s));
+        for word in [0, 2] {
+            self.push_wide_sse_state(0xf3, MOVDQU_LOAD, 0, s, word);
+            self.push_wide_sse_state(0xf3, MOVDQU_STORE, 0, d, word);
+        }
     }
 
     #[inline(always)]
     pub fn wide_reverse_bytes(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg) {
-        self.wide_operation(code_offset, WideOperationKind::WideReverseBytes, wide_field(d), wide_field(s), 0, 0);
+        let (d, s) = (wide_field(d), wide_field(s));
+        if d != s && crate::cpuid::is_movbe_supported() {
+            for word in 0..4 {
+                self.push_wide_scalar(MOVBE_LOAD, TMP_REG, s, word);
+                self.push_wide_scalar(&[SCALAR_STORE], TMP_REG, d, 3 - word);
+            }
+        } else {
+            self.wide_operation(code_offset, WideOperationKind::WideReverseBytes, d, s, 0, 0);
+        }
     }
 
     #[inline(always)]
     pub fn wide_to_reg(&mut self, code_offset: u32, s: RawWideReg, d: RawReg) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideToRegister,
-            register_field(d),
-            wide_field(s),
-            0,
-            0,
-        );
+        let _ = code_offset;
+        self.push_wide_scalar(&[SCALAR_LOAD], conv_reg(d), wide_field(s), 0);
     }
 
     #[inline(always)]
@@ -1088,65 +1223,63 @@ where
 
     #[inline(always)]
     pub fn wide_from_reg_unsigned(&mut self, code_offset: u32, d: RawWideReg, s: RawReg) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideFromRegisterUnsigned,
-            wide_field(d),
-            0,
-            register_field(s),
-            0,
-        );
+        let _ = code_offset;
+        let d = wide_field(d);
+        self.push_wide_scalar(&[SCALAR_STORE], conv_reg(s), d, 0);
+        for word in 1..4 {
+            self.push_wide_store_immediate(d, word, 0);
+        }
     }
 
     #[inline(always)]
     pub fn wide_from_reg_signed(&mut self, code_offset: u32, d: RawWideReg, s: RawReg) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideFromRegisterSigned,
-            wide_field(d),
-            0,
-            register_field(s),
-            0,
-        );
+        let _ = code_offset;
+        let d = wide_field(d);
+        self.push_wide_scalar(&[SCALAR_STORE], conv_reg(s), d, 0);
+        self.push(mov(RegSize::R64, TMP_REG, conv_reg(s)));
+        self.asm.push_raw(SHIFT_RIGHT_SIGN_63);
+        for word in 1..4 {
+            self.push_wide_scalar(&[SCALAR_STORE], TMP_REG, d, word);
+        }
     }
 
     #[inline(always)]
     pub fn wide_load(&mut self, code_offset: u32, d: RawWideReg, base: RawReg, offset: i32) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideLoad,
-            wide_field(d),
-            0,
-            register_field(base),
-            offset,
-        );
+        let _ = code_offset;
+        self.wide_transfer(true, wide_field(d), Some(base), offset);
     }
 
     #[inline(always)]
     pub fn wide_store(&mut self, code_offset: u32, s: RawWideReg, base: RawReg, offset: i32) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideStore,
-            wide_field(s),
-            0,
-            register_field(base),
-            offset,
-        );
+        let _ = code_offset;
+        self.wide_transfer(false, wide_field(s), Some(base), offset);
     }
 
     #[inline(always)]
     pub fn wide_load_imm_unsigned(&mut self, code_offset: u32, d: RawWideReg, imm: i32) {
-        self.wide_operation(code_offset, WideOperationKind::WideLoadImmediateUnsigned, wide_field(d), 0, 0, imm);
+        let _ = code_offset;
+        let d = wide_field(d);
+        self.push_wide_store_immediate(d, 0, imm);
+        for word in 1..4 {
+            self.push_wide_store_immediate(d, word, 0);
+        }
     }
 
     #[inline(always)]
     pub fn wide_load_imm_signed(&mut self, code_offset: u32, d: RawWideReg, imm: i32) {
-        self.wide_operation(code_offset, WideOperationKind::WideLoadImmediateSigned, wide_field(d), 0, 0, imm);
+        let _ = code_offset;
+        let d = wide_field(d);
+        self.push_wide_store_immediate(d, 0, imm);
+        let upper = if imm < 0 { -1 } else { 0 };
+        for word in 1..4 {
+            self.push_wide_store_immediate(d, word, upper);
+        }
     }
 
     #[inline(always)]
     pub fn wide_load_absolute(&mut self, code_offset: u32, d: RawWideReg, imm: i32) {
-        self.wide_operation(code_offset, WideOperationKind::WideLoadAbsolute, wide_field(d), 0, 0, imm);
+        let _ = code_offset;
+        self.wide_transfer(true, wide_field(d), None, imm);
     }
 
     #[inline(always)]

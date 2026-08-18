@@ -60,8 +60,9 @@ const fn truncate_i128(value: i128) -> u64 {
 /// The layout is one flat array of words: a vector register is two of them, and a wide
 /// register is the four words of the vector register pair it names, so the two files are
 /// one. The layout is fixed so that the recompiler can address the words from generated
-/// code.
-#[repr(C)]
+/// code, and it is 16-byte aligned because the recompiler reaches the halves of a wide
+/// value with SSE instructions whose memory operands fault unless they are.
+#[repr(C, align(16))]
 pub struct VectorState {
     words: [u64; VECTOR_FILE_WORDS],
     config: VectorConfig,

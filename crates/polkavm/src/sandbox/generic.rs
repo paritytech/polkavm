@@ -783,13 +783,11 @@ unsafe extern "C" fn syscall_wide_op(packed: u64) {
     // SAFETY: Only recompiled code reaches the register file while the guest runs, and it
     // is not running while it waits for this call.
     let vector_state = unsafe { &mut *vmctx.vector_state.get() };
-    let registers = vmctx.regs.0.as_mut_ptr();
-    // SAFETY: Every register index is in bounds by construction, and recompiled code does
-    // not touch the registers while it waits for this call.
+    let registers = core::cell::Cell::from_mut(&mut vmctx.regs.0[..]).as_slice_of_cells();
     let copy = vector_state.dispatch(
         operation,
-        |register| unsafe { *registers.add(register.to_usize()) },
-        |register, value| unsafe { *registers.add(register.to_usize()) = value },
+        |register| registers[register.to_usize()].get(),
+        |register, value| registers[register.to_usize()].set(value),
     );
 
     let (source, destination, length) = match copy {
@@ -2032,7 +2030,7 @@ impl super::Sandbox for Sandbox {
         let Some(slice) = self.get_memory_slice_mut(address, length as u32) else {
             return Err(MemoryAccessError::OutOfRangeAccess {
                 address,
-                length: length as u64,
+                length: u64::from(length),
             });
         };
 
@@ -2148,6 +2146,7 @@ impl super::Sandbox for Sandbox {
             program_counter: get_field_offset!(VmCtx::new(), |base| base.program_counter.as_ptr()),
             regs: get_field_offset!(VmCtx::new(), |base| &base.regs),
             futex: usize::MAX,
+            vector_state: get_field_offset!(VmCtx::new(), |base| base.vector_state.get()),
             wide_copy_source: get_field_offset!(VmCtx::new(), |base| base.wide_copy_source.as_ptr()),
             wide_copy_destination: get_field_offset!(VmCtx::new(), |base| base.wide_copy_destination.as_ptr()),
             wide_copy_length: get_field_offset!(VmCtx::new(), |base| base.wide_copy_length.as_ptr()),

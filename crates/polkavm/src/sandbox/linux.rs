@@ -2608,6 +2608,7 @@ impl super::Sandbox for Sandbox {
             program_counter: get_field_offset!(VmCtx::new(), |base| base.program_counter.as_ptr()),
             regs: get_field_offset!(VmCtx::new(), |base| base.regs.as_ptr()),
             futex: get_field_offset!(VmCtx::new(), |base| base.futex.as_ptr()),
+            vector_state: get_field_offset!(VmCtx::new(), |base| base.vector_state.get()),
             wide_copy_source: get_field_offset!(VmCtx::new(), |base| base.wide_copy_source.as_ptr()),
             wide_copy_destination: get_field_offset!(VmCtx::new(), |base| base.wide_copy_destination.as_ptr()),
             wide_copy_length: get_field_offset!(VmCtx::new(), |base| base.wide_copy_length.as_ptr()),

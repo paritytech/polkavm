@@ -14,6 +14,12 @@ fn structured_extended_feature_flags_ebx() -> u32 {
     unsafe { __cpuid_count(7, 0) }.ebx
 }
 
+pub fn is_movbe_supported() -> bool {
+    // CPUID.(EAX=1, ECX=0):ECX.MOVBE[bit 22]
+    // SAFETY: CPUID is always available on x86-64; leaf 1 always exists.
+    (unsafe { __cpuid_count(1, 0) }.ecx) & (1 << 22) != 0
+}
+
 pub fn is_bmi2_supported() -> bool {
     // CPUID.(EAX=7, ECX=0):EBX.BMI2[bit 8]
     structured_extended_feature_flags_ebx() & (1 << 8) != 0
