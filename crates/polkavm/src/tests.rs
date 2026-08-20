@@ -117,6 +117,24 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
     }
 }
 
+/// Opt-in: needs `POLKAVM_TEST_HYPERVISOR` and an entitled binary.
+#[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "hypervisor-sandbox"))]
+fn hypervisor_matrix_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("POLKAVM_TEST_HYPERVISOR").is_ok() && crate::sandbox::hypervisor::Vm::new().is_ok())
+}
+
+/// One VM per process, vCPU bound to its creating thread: tests needing several live instances, or
+/// one on another thread, can't run in that lane.
+fn skip_if_single_instance_sandbox(config: &Config) -> bool {
+    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "hypervisor-sandbox"))]
+    if config.sandbox() == Some(crate::SandboxKind::Hypervisor) {
+        return true;
+    }
+    let _ = config;
+    false
+}
+
 fn get_native_page_size() -> usize {
     if_compiler_is_supported! {
         {
@@ -183,6 +201,21 @@ macro_rules! run_tests_on_isa {
                         config.set_sandbox(Some(crate::SandboxKind::Generic));
                         config.set_allow_experimental(true);
                         config.set_crosscheck(true);
+                        $test_name(config, $isa);
+                    }
+
+                    // The only 4K-granule lane on a 16K host; opt-in because it needs an entitled
+                    // binary and serializes on the single per-process VM.
+                    #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "hypervisor-sandbox"))]
+                    #[test]
+                    fn [<compiler_hypervisor_ $isa_suffix _ $test_name>]() {
+                        if !crate::tests::hypervisor_matrix_enabled() {
+                            return;
+                        }
+                        let mut config = crate::Config::default();
+                        config.set_backend(Some(crate::BackendKind::Compiler));
+                        config.set_sandbox(Some(crate::SandboxKind::Hypervisor));
+                        config.set_allow_experimental(true);
                         $test_name(config, $isa);
                     }
                 }
@@ -1945,6 +1978,9 @@ fn jump_to_an_injected_invalid_instruction(engine_config: Config, isa: Instructi
 }
 
 fn jump_indirect_simple(engine_config: Config, isa: InstructionSetKind) {
+    if skip_if_single_instance_sandbox(&engine_config) {
+        return;
+    }
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
     let mut builder = ProgramBlobBuilder::new(isa);
@@ -2279,6 +2315,9 @@ fn dynamic_paging_stress_test(_engine_config: Config, _: InstructionSetKind) {}
 
 #[cfg(feature = "std")]
 fn dynamic_paging_stress_test(mut engine_config: Config, isa: InstructionSetKind) {
+    if skip_if_single_instance_sandbox(&engine_config) {
+        return;
+    }
     let _lock = StressTestLock::new();
     let _ = env_logger::try_init();
     engine_config.set_allow_dynamic_paging(true);
@@ -2995,6 +3034,9 @@ fn dynamic_paging_receive_from_another_thread_and_run(_: Config, _: InstructionS
 
 #[cfg(feature = "std")]
 fn dynamic_paging_receive_from_another_thread_and_run(mut engine_config: Config, isa: InstructionSetKind) {
+    if skip_if_single_instance_sandbox(&engine_config) {
+        return;
+    }
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
@@ -3041,6 +3083,9 @@ fn dynamic_paging_instantiate_on_another_thread(_: Config, _: InstructionSetKind
 
 #[cfg(feature = "std")]
 fn dynamic_paging_instantiate_on_another_thread(mut engine_config: Config, isa: InstructionSetKind) {
+    if skip_if_single_instance_sandbox(&engine_config) {
+        return;
+    }
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
@@ -3109,6 +3154,9 @@ fn dynamic_paging_parallel_page_fault_stress_test(_: Config, _: InstructionSetKi
 
 #[cfg(feature = "std")]
 fn dynamic_paging_parallel_page_fault_stress_test(mut engine_config: Config, isa: InstructionSetKind) {
+    if skip_if_single_instance_sandbox(&engine_config) {
+        return;
+    }
     let _lock = StressTestLock::new();
     engine_config.set_allow_dynamic_paging(true);
 
@@ -3673,6 +3721,9 @@ fn invalid_instruction_after_fallthrough(engine_config: Config, isa: Instruction
 }
 
 fn invalid_branch_target(engine_config: Config, isa: InstructionSetKind) {
+    if skip_if_single_instance_sandbox(&engine_config) {
+        return;
+    }
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
     let mut builder = ProgramBlobBuilder::new(isa);
@@ -4044,6 +4095,9 @@ fn aux_data_accessible_area(config: Config, isa: InstructionSetKind) {
 }
 
 fn access_memory_from_host(config: Config, isa: InstructionSetKind) {
+    if skip_if_single_instance_sandbox(&config) {
+        return;
+    }
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
@@ -4169,6 +4223,9 @@ fn access_memory_from_host(config: Config, isa: InstructionSetKind) {
 }
 
 fn access_memory_from_within(config: Config, isa: InstructionSetKind) {
+    if skip_if_single_instance_sandbox(&config) {
+        return;
+    }
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
 
@@ -4485,6 +4542,9 @@ fn interpreter_guest_memory_limit() {
 }
 
 fn write_read_memory_from_host(config: Config, isa: InstructionSetKind) {
+    if skip_if_single_instance_sandbox(&config) {
+        return;
+    }
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
 
@@ -5745,6 +5805,9 @@ fn memset_basic(config: Config, isa: InstructionSetKind) {
 }
 
 fn memset_with_dynamic_paging(mut config: Config, isa: InstructionSetKind) {
+    if skip_if_single_instance_sandbox(&config) {
+        return;
+    }
     if !isa.supports_opcode(Opcode::memset) {
         return;
     }
@@ -6363,6 +6426,9 @@ fn spawn_stress_test(_config: Config, _: InstructionSetKind) {}
 
 #[cfg(feature = "std")]
 fn spawn_stress_test(mut config: Config, isa: InstructionSetKind) {
+    if skip_if_single_instance_sandbox(&config) {
+        return;
+    }
     let _lock = StressTestLock::new();
     let _ = env_logger::try_init();
 
@@ -6412,6 +6478,9 @@ fn spawn_stress_test(mut config: Config, isa: InstructionSetKind) {
 }
 
 fn spawn_inner_vm(config: Config, isa: InstructionSetKind) {
+    if skip_if_single_instance_sandbox(&config) {
+        return;
+    }
     let _ = env_logger::try_init();
 
     let mut builder = ProgramBlobBuilder::new(isa);
