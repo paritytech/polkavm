@@ -6,20 +6,21 @@ cd ../..
 
 cd fuzz
 
-echo ">> cargo fuzz run (fuzz_generic_allocator)"
-cargo fuzz run fuzz_generic_allocator -- -runs=1000000
+# Each of these is run as a separate CI job; keep this in sync with `.github/workflows/rust.yml`.
+ALL_TARGETS="fuzz_generic_allocator fuzz_shm_allocator fuzz_linker fuzz_polkavm fuzz_program_blob fuzz_extended_decode"
 
-echo ">> cargo fuzz run (fuzz_shm_allocator)"
-cargo fuzz run fuzz_shm_allocator -- -runs=1000000
+for target in ${@:-$ALL_TARGETS}; do
+    case "$target" in
+        fuzz_generic_allocator|fuzz_shm_allocator) runs=1000000 ;;
+        fuzz_linker|fuzz_polkavm|fuzz_program_blob) runs=10000 ;;
+        fuzz_extended_decode) runs=200000 ;;
+        *)
+            echo "unknown fuzz target: $target" >&2
+            exit 1
+        ;;
+    esac
 
-echo ">> cargo fuzz run (fuzz_linker)"
-cargo fuzz run fuzz_linker -- -runs=10000
+    echo ">> cargo fuzz run ($target)"
 
-echo ">> cargo fuzz run (fuzz_polkavm)"
-cargo fuzz run fuzz_polkavm -- -runs=10000
-
-echo ">> cargo fuzz run (fuzz_program_blob)"
-cargo fuzz run fuzz_program_blob -- -runs=10000
-
-echo ">> cargo fuzz run (fuzz_extended_decode)"
-cargo fuzz run fuzz_extended_decode -- -runs=1000000
+    cargo fuzz run "$target" -- -runs="$runs" -max_total_time=600
+done

@@ -165,6 +165,16 @@ jobs:
       run: ./ci/jobs/link-westend-runtime-blob.sh
   fuzz:
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_generic_allocator
+          - fuzz_shm_allocator
+          - fuzz_linker
+          - fuzz_polkavm
+          - fuzz_program_blob
+          - fuzz_extended_decode
     steps:
     - uses: actions/checkout@v4
     - name: Install toolchain
@@ -172,7 +182,7 @@ jobs:
     - name: Install cargo fuzz
       run: rustup run nightly-2024-07-10 cargo install --locked --version 0.12.0 cargo-fuzz
     - name: Fuzz
-      run: ./ci/jobs/fuzz.sh
+      run: ./ci/jobs/fuzz.sh ${{ matrix.target }}
   nightly-musttail:
     runs-on: ubuntu-22.04
     continue-on-error: true
