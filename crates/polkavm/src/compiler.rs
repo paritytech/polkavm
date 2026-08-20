@@ -32,6 +32,9 @@ mod aarch64;
 #[cfg(target_arch = "aarch64")]
 pub use crate::compiler::aarch64::{extract_gas_cost, on_page_fault, on_signal_trap, step_prelude_length};
 
+#[cfg(all(target_arch = "aarch64", feature = "generic-sandbox"))]
+pub(crate) use crate::compiler::aarch64::{are_we_executing_memset, MemsetKind};
+
 const CONTINUE_BASIC_BLOCK: usize = 0;
 const END_BASIC_BLOCK_UNCONDITIONAL: usize = 1;
 const END_BASIC_BLOCK_CONDITIONAL: usize = 2;

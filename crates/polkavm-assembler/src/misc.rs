@@ -36,6 +36,54 @@ pub trait InstructionT: Copy + core::fmt::Display {
 }
 
 #[derive(Copy, Clone)]
+pub struct Instruction<T> {
+    pub(crate) instruction: T,
+    pub(crate) bytes: InstBuf,
+    pub(crate) fixup: Option<(Label, FixupKind)>,
+}
+
+impl<T> core::fmt::Debug for Instruction<T>
+where
+    T: core::fmt::Debug,
+{
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        self.instruction.fmt(fmt)
+    }
+}
+
+impl<T> core::fmt::Display for Instruction<T>
+where
+    T: core::fmt::Display,
+{
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        self.instruction.fmt(fmt)
+    }
+}
+
+impl<T> Instruction<T> {
+    #[allow(clippy::len_without_is_empty)]
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+}
+
+impl<T> InstructionT for Instruction<T>
+where
+    T: Copy + core::fmt::Display,
+{
+    #[inline(always)]
+    fn encode(self, _flags: EncodeFlags) -> InstBuf {
+        self.bytes
+    }
+
+    #[inline(always)]
+    fn fixup(self, _flags: EncodeFlags) -> Option<(Label, FixupKind)> {
+        self.fixup
+    }
+}
+
+#[derive(Copy, Clone)]
 pub enum InstructionOrBuffer<T> {
     Instruction(T),
     Buffer(InstBuf),

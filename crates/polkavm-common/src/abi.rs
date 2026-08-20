@@ -315,10 +315,7 @@ fn test_memory_map() {
     }
 
     {
-        let map = MemoryMapBuilder::new(0x4000)
-            .max_heap_size(Some(0x20000))
-            .build()
-            .unwrap();
+        let map = MemoryMapBuilder::new(0x4000).max_heap_size(Some(0x20000)).build().unwrap();
         assert_eq!(map.max_heap_size(), 0x20000);
     }
 
