@@ -26,3 +26,9 @@ cargo test --target aarch64-apple-darwin --features generic-sandbox,hypervisor-s
 echo ">> cargo test (AArch64 backend corpus routed through the hypervisor)"
 POLKAVM_TEST_HYPERVISOR=1 cargo test --target aarch64-apple-darwin \
     --features generic-sandbox,hypervisor-sandbox -p polkavm -- tests::aarch64_backend
+
+# The whole matrix at a real 4K guest granule. Serial: one VM per process.
+echo ">> cargo test (full matrix through the hypervisor, 4K guest pages)"
+POLKAVM_TEST_HYPERVISOR=1 cargo test --target aarch64-apple-darwin \
+    --features generic-sandbox,hypervisor-sandbox -p polkavm --lib -- \
+    tests::compiler_hypervisor_ --test-threads=1

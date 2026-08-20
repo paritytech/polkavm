@@ -400,6 +400,10 @@ unsafe impl Send for Vm {}
 // owning instance's thread. Mirrors the generic sandbox's Send+Sync treatment of `Mmap`.
 unsafe impl Sync for Vm {}
 
+/// How long a `spawn` waits for a live instance to be dropped before giving up.
+#[cfg(target_os = "macos")]
+const VM_ACQUIRE_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(5);
+
 /// Serializes VM creation/teardown: Hypervisor.framework allows only one VM per process.
 #[cfg(target_os = "macos")]
 static VM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -416,15 +420,29 @@ impl Vm {
     pub fn new() -> Result<Self, Error> {
         #[cfg(target_os = "macos")]
         {
-            // Apple allows one VM per process and one vCPU per thread, so a thread cannot
-            // hold two live VMs. Detect that and fail cleanly instead of self-deadlocking
-            // on VM_LOCK; a different thread simply blocks until the VM is dropped.
+            // One VM per process, one vCPU per thread: fail cleanly instead of self-deadlocking.
+            let start = std::time::Instant::now();
             if VM_HELD.with(core::cell::Cell::get) {
                 return Err("hypervisor sandbox: this thread already owns the single per-process VM; \
                     drop the previous instance before creating another (nested/simultaneous instances are unsupported)"
                     .into());
             }
-            let guard = VM_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Bounded wait: the owner may be the caller's own live instance, which never yields.
+            let guard = loop {
+                match VM_LOCK.try_lock() {
+                    Ok(guard) => break guard,
+                    Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        if start.elapsed() >= VM_ACQUIRE_TIMEOUT {
+                            return Err("hypervisor sandbox: timed out waiting for the single per-process VM \
+                                (Hypervisor.framework allows one VM per process and one vCPU per thread, so \
+                                instances cannot overlap)"
+                                .into());
+                        }
+                        std::thread::sleep(core::time::Duration::from_millis(1));
+                    }
+                }
+            };
             VM_HELD.with(|h| h.set(true));
             let result = Self::new_macos(guard);
             if result.is_err() {
@@ -1155,6 +1173,8 @@ pub struct Sandbox {
     next_program_counter: Option<ProgramCounter>,
     next_program_counter_changed: bool,
     charge_gas_on_entry: bool,
+    /// Page size faults are reported at; descriptors stay 4K, so any `GUEST_PAGE_SIZE` multiple works.
+    page_size: u32,
     /// Aux data the guest may read, as set by `set_accessible_aux_size`.
     accessible_aux_size: u32,
     aux_data_address: u32,
@@ -1302,6 +1322,7 @@ impl super::Sandbox for Sandbox {
             next_program_counter: None,
             next_program_counter_changed: false,
             charge_gas_on_entry: true,
+            page_size: GUEST_PAGE_SIZE as u32,
             accessible_aux_size: 0,
             aux_data_address: 0,
             aux_data_full_length: 0,
@@ -1376,9 +1397,18 @@ impl super::Sandbox for Sandbox {
 
             self.heap_base = mmap.heap_base();
             self.heap_top = mmap.heap_base();
+            if mmap.page_size() as usize % GUEST_PAGE_SIZE != 0 {
+                return Err(alloc::format!(
+                    "module page size ({}) must be a multiple of the guest granule ({GUEST_PAGE_SIZE})",
+                    mmap.page_size()
+                )
+                .into());
+            }
+            self.page_size = mmap.page_size();
             self.aux_data_address = mmap.aux_data_address();
             self.aux_data_full_length = mmap.aux_data_size();
-            self.accessible_aux_size = 0;
+            // Fully accessible until the host narrows it.
+            self.accessible_aux_size = self.aux_data_full_length;
             self.gas_metering = module.gas_metering();
             self.program = Some(program);
             self.module = Some(module.clone());
@@ -1442,6 +1472,13 @@ impl super::Sandbox for Sandbox {
                     .next_program_counter
                     .ok_or_else(|| Error::from("next program counter not set"))?;
                 let Some(address) = compiled.lookup_native_code_address(pc) else {
+                    // `program_counter()` reads this back out of the VmCtx.
+                    // SAFETY: the VmCtx page is mapped and initialized.
+                    unsafe {
+                        (*self.vm.vmctx_ptr())
+                            .program_counter
+                            .store(pc.0, core::sync::atomic::Ordering::Relaxed);
+                    }
                     self.program_counter = Some(pc);
                     self.is_program_counter_valid = true;
                     return Ok(InterruptKind::Trap);
@@ -1529,10 +1566,19 @@ impl super::Sandbox for Sandbox {
     }
 
     fn program_counter(&self) -> Option<ProgramCounter> {
-        if self.is_program_counter_valid {
+        if !self.is_program_counter_valid {
+            return None;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // Written by the guest stubs and the fault paths.
+            // SAFETY: the VmCtx page is mapped and initialized.
+            let vmctx = unsafe { &*self.vm.vmctx_ptr() };
+            Some(ProgramCounter(vmctx.program_counter.load(core::sync::atomic::Ordering::Relaxed)))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
             self.program_counter
-        } else {
-            None
         }
     }
 
@@ -1607,9 +1653,7 @@ impl super::Sandbox for Sandbox {
             MemoryProtection::Read => PROT_READ,
             MemoryProtection::ReadWrite => PROT_READ_WRITE,
         };
-        let first = address as usize / GUEST_PAGE_SIZE;
-        let last = (address as usize + size as usize - 1) / GUEST_PAGE_SIZE;
-        self.page_prot[first..=last].iter().all(|&p| p >= required)
+        self.accessible_for(address, size, required)
     }
 
     fn reset_memory(&mut self) -> Result<(), Self::Error> {
@@ -1661,7 +1705,7 @@ impl super::Sandbox for Sandbox {
                 vmctx.heap_info.heap_top = u64::from(self.heap_base);
                 vmctx.heap_info.heap_threshold = u64::from(initial);
             }
-            return Ok(());
+            Ok(())
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -1794,6 +1838,13 @@ impl super::Sandbox for Sandbox {
         }
         #[cfg(target_os = "macos")]
         {
+            // Only present pages can be re-protected.
+            if !self.accessible_for(address, length, PROT_READ) {
+                return Err(MemoryAccessError::OutOfRangeAccess {
+                    address,
+                    length: u64::from(length),
+                });
+            }
             let (ap, state) = match protection {
                 MemoryProtection::Read => (PTE_AP_RO_EL1, PROT_READ),
                 MemoryProtection::ReadWrite => (PTE_AP_RW_EL1, PROT_READ_WRITE),
@@ -1878,11 +1929,24 @@ impl Sandbox {
     /// Host memory-access permission check. Only restricts under dynamic paging (where pages
     /// must be explicitly mapped in); static paging keeps the whole window accessible.
     fn accessible_for(&self, address: u32, length: u32, required: u8) -> bool {
-        if !self.dynamic_paging || length == 0 {
+        if length == 0 {
             return true;
         }
+        let Some(address_end) = address.checked_add(length) else {
+            return false;
+        };
+
+        // Aux data is bounded by what the host made accessible, not the region's full size.
+        if address >= self.aux_data_address
+            && self.aux_data_full_length != 0
+            && address_end < self.aux_data_address + self.aux_data_full_length
+        {
+            return address_end <= self.aux_data_address + self.accessible_aux_size;
+        }
+
+        // `page_prot` tracks what is mapped under either paging mode, including `sbrk` growth.
         let first = address as usize / GUEST_PAGE_SIZE;
-        let last = (address as usize + length as usize - 1) / GUEST_PAGE_SIZE;
+        let last = (address_end as usize - 1) / GUEST_PAGE_SIZE;
         self.page_prot[first..=last].iter().all(|&p| p >= required)
     }
 
@@ -1966,16 +2030,16 @@ impl Sandbox {
             if let Some(interrupt) = self.handle_gas_trap(elr)? {
                 return Ok(interrupt);
             }
-            return Ok(InterruptKind::Trap);
+            return self.trap_at(elr);
         }
         // Data abort (0x24/0x25) or instruction abort (0x20/0x21).
         if !matches!(ec, 0x20 | 0x21 | 0x24 | 0x25) {
-            return Ok(InterruptKind::Trap);
+            return self.trap_at(elr);
         }
         let guest_addr = far.wrapping_sub(GUEST_MEM_BASE);
-        let page_address = (guest_addr as u32) & !(GUEST_PAGE_SIZE as u32 - 1);
+        let page_address = (guest_addr as u32) & !(self.page_size - 1);
         if !(self.dynamic_paging && guest_addr < RAM_SIZE as u64 && page_address >= 0x10000) {
-            return Ok(InterruptKind::Trap);
+            return self.trap_at(elr);
         }
         // Like generic: `is_write_protected` means the page exists but is read-only (vs absent).
         let page_idx = page_address as usize / GUEST_PAGE_SIZE;
@@ -2002,13 +2066,13 @@ impl Sandbox {
         }
         self.program_counter = Some(pc);
         self.is_program_counter_valid = true;
-        self.next_program_counter = Some(pc);
+        self.next_program_counter = None;
         self.next_program_counter_changed = false;
         self.charge_gas_on_entry = false;
 
         Ok(InterruptKind::Segfault(Segfault {
             page_address,
-            page_size: GUEST_PAGE_SIZE as u32,
+            page_size: self.page_size,
             is_write_protected,
         }))
     }
@@ -2037,6 +2101,45 @@ impl Sandbox {
             unsafe { (*self.vm.vmctx_ptr()).regs.0[reg as usize] = value };
         }
         Ok(())
+    }
+
+    /// Plain `Trap`: the EL1 vector saved nothing, so recover regs and the PC from `elr`, else from
+    /// the jump site the indirect-jump codegen stashed.
+    #[cfg(target_os = "macos")]
+    fn trap_at(&mut self, elr: u64) -> Result<InterruptKind, Error> {
+        use core::sync::atomic::Ordering;
+
+        self.snapshot_regs()?;
+        let Some(module) = self.module.clone() else {
+            return Ok(InterruptKind::Trap);
+        };
+        let compiled = <Self as super::Sandbox>::downcast_module(&module);
+        // SAFETY: the VmCtx page is mapped and initialized.
+        let stashed = unsafe { (*self.vm.vmctx_ptr()).next_native_program_counter.load(Ordering::Relaxed) };
+        let code_len = compiled.machine_code().len() as u64;
+
+        for address in [elr, stashed] {
+            let Some(offset) = address.checked_sub(compiled.native_code_origin) else {
+                continue;
+            };
+            if offset >= code_len {
+                continue;
+            }
+            let Some(pc) = compiled.program_counter_by_native_code_offset(offset, false) else {
+                continue;
+            };
+            // SAFETY: the VmCtx page is mapped and initialized.
+            unsafe {
+                let vmctx = &mut *self.vm.vmctx_ptr();
+                vmctx.program_counter.store(pc.0, Ordering::Relaxed);
+                vmctx.next_native_program_counter.store(0, Ordering::Relaxed);
+            }
+            self.program_counter = Some(pc);
+            self.is_program_counter_valid = true;
+            return Ok(InterruptKind::Trap);
+        }
+
+        Ok(InterruptKind::Trap)
     }
 
     /// The sync metering stub's `udf` fired: refund the charged gas, snapshot registers and re-enter
@@ -2077,7 +2180,7 @@ impl Sandbox {
         }
         self.program_counter = Some(pc);
         self.is_program_counter_valid = true;
-        self.next_program_counter = Some(pc);
+        self.next_program_counter = None;
         self.next_program_counter_changed = false;
         self.charge_gas_on_entry = false;
 
