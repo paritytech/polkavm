@@ -13,13 +13,34 @@ use crate::misc::{FixupKind, InstBuf, Instruction, Label};
 #[repr(u8)]
 #[allow(non_camel_case_types)]
 pub enum Reg {
-    x0 = 0, x1 = 1, x2 = 2, x3 = 3,
-    x4 = 4, x5 = 5, x6 = 6, x7 = 7,
-    x8 = 8, x9 = 9, x10 = 10, x11 = 11,
-    x12 = 12, x13 = 13, x14 = 14, x15 = 15,
-    x16 = 16, x17 = 17, x18 = 18, x19 = 19,
-    x20 = 20, x21 = 21, x22 = 22, x23 = 23,
-    x24 = 24, x25 = 25, x26 = 26, x27 = 27,
+    x0 = 0,
+    x1 = 1,
+    x2 = 2,
+    x3 = 3,
+    x4 = 4,
+    x5 = 5,
+    x6 = 6,
+    x7 = 7,
+    x8 = 8,
+    x9 = 9,
+    x10 = 10,
+    x11 = 11,
+    x12 = 12,
+    x13 = 13,
+    x14 = 14,
+    x15 = 15,
+    x16 = 16,
+    x17 = 17,
+    x18 = 18,
+    x19 = 19,
+    x20 = 20,
+    x21 = 21,
+    x22 = 22,
+    x23 = 23,
+    x24 = 24,
+    x25 = 25,
+    x26 = 26,
+    x27 = 27,
     x28 = 28,
     /// Frame pointer
     fp = 29,
@@ -127,13 +148,20 @@ impl Condition {
 impl core::fmt::Display for Condition {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
         let name = match self {
-            Condition::EQ => "eq", Condition::NE => "ne",
-            Condition::HS => "hs", Condition::LO => "lo",
-            Condition::MI => "mi", Condition::PL => "pl",
-            Condition::VS => "vs", Condition::VC => "vc",
-            Condition::HI => "hi", Condition::LS => "ls",
-            Condition::GE => "ge", Condition::LT => "lt",
-            Condition::GT => "gt", Condition::LE => "le",
+            Condition::EQ => "eq",
+            Condition::NE => "ne",
+            Condition::HS => "hs",
+            Condition::LO => "lo",
+            Condition::MI => "mi",
+            Condition::PL => "pl",
+            Condition::VS => "vs",
+            Condition::VC => "vc",
+            Condition::HI => "hi",
+            Condition::LS => "ls",
+            Condition::GE => "ge",
+            Condition::LT => "lt",
+            Condition::GT => "gt",
+            Condition::LE => "le",
             Condition::AL => "al",
         };
         f.write_str(name)
@@ -319,14 +347,16 @@ pub fn mul(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst>
 /// MADD Rd, Rn, Rm, Ra  (Rd = Ra + Rn*Rm)
 #[inline(always)]
 pub fn madd(size: RegSize, rd: Reg, rn: Reg, rm: Reg, ra: Reg) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b00_11011_000 << 21) | (rm.index() << 16) | (0 << 15) | (ra.index() << 10) | (rn.index() << 5) | rd.index();
+    let bits =
+        (size.sf() << 31) | (0b00_11011_000 << 21) | (rm.index() << 16) | (0 << 15) | (ra.index() << 10) | (rn.index() << 5) | rd.index();
     inst("madd", bits)
 }
 
 /// MSUB Rd, Rn, Rm, Ra  (Rd = Ra - Rn*Rm)
 #[inline(always)]
 pub fn msub(size: RegSize, rd: Reg, rn: Reg, rm: Reg, ra: Reg) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b00_11011_000 << 21) | (rm.index() << 16) | (1 << 15) | (ra.index() << 10) | (rn.index() << 5) | rd.index();
+    let bits =
+        (size.sf() << 31) | (0b00_11011_000 << 21) | (rm.index() << 16) | (1 << 15) | (ra.index() << 10) | (rn.index() << 5) | rd.index();
     inst("msub", bits)
 }
 
@@ -457,11 +487,15 @@ pub fn encode_logical_imm(size: RegSize, value: u64) -> Option<(u32, u32, u32)> 
     let value = match size {
         RegSize::W32 => {
             let v = value as u32;
-            if v == 0 || v == !0 { return None; }
+            if v == 0 || v == !0 {
+                return None;
+            }
             (v as u64) | ((v as u64) << 32)
         }
         RegSize::X64 => {
-            if value == 0 || value == !0u64 { return None; }
+            if value == 0 || value == !0u64 {
+                return None;
+            }
             value
         }
     };
@@ -486,7 +520,10 @@ pub fn encode_logical_imm(size: RegSize, value: u64) -> Option<(u32, u32, u32)> 
         if valid {
             // The element must be a contiguous run of 1s, possibly rotated
             let ones = element.count_ones();
-            if ones == 0 || ones == element_size { element_size *= 2; continue; }
+            if ones == 0 || ones == element_size {
+                element_size *= 2;
+                continue;
+            }
 
             // Check contiguity within element_size bits:
             // Rotate away trailing ones to get all ones at the top,
@@ -517,9 +554,9 @@ pub fn encode_logical_imm(size: RegSize, value: u64) -> Option<(u32, u32, u32)> 
             };
             let imms = {
                 let len_encoding = match element_size {
-                    2 =>  0b111100,
-                    4 =>  0b111000,
-                    8 =>  0b110000,
+                    2 => 0b111100,
+                    4 => 0b111000,
+                    8 => 0b110000,
                     16 => 0b100000,
                     32 => 0b000000,
                     64 => 0b000000,
@@ -606,7 +643,10 @@ pub fn ror(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst>
 /// LSL Rd, Rn, #shift  (alias for UBFM)
 #[inline(always)]
 pub fn lsl_imm(size: RegSize, rd: Reg, rn: Reg, shift: u32) -> Instruction<AArch64Inst> {
-    let max = match size { RegSize::W32 => 31, RegSize::X64 => 63 };
+    let max = match size {
+        RegSize::W32 => 31,
+        RegSize::X64 => 63,
+    };
     let immr = (max + 1 - shift) & max;
     let imms = max - shift;
     ubfm(size, rd, rn, immr, imms)
@@ -615,14 +655,20 @@ pub fn lsl_imm(size: RegSize, rd: Reg, rn: Reg, shift: u32) -> Instruction<AArch
 /// LSR Rd, Rn, #shift  (alias for UBFM)
 #[inline(always)]
 pub fn lsr_imm(size: RegSize, rd: Reg, rn: Reg, shift: u32) -> Instruction<AArch64Inst> {
-    let imms = match size { RegSize::W32 => 31, RegSize::X64 => 63 };
+    let imms = match size {
+        RegSize::W32 => 31,
+        RegSize::X64 => 63,
+    };
     ubfm(size, rd, rn, shift, imms)
 }
 
 /// ASR Rd, Rn, #shift  (alias for SBFM)
 #[inline(always)]
 pub fn asr_imm(size: RegSize, rd: Reg, rn: Reg, shift: u32) -> Instruction<AArch64Inst> {
-    let imms = match size { RegSize::W32 => 31, RegSize::X64 => 63 };
+    let imms = match size {
+        RegSize::W32 => 31,
+        RegSize::X64 => 63,
+    };
     sbfm(size, rd, rn, shift, imms)
 }
 
@@ -662,7 +708,8 @@ pub fn bfm(size: RegSize, rd: Reg, rn: Reg, immr: u32, imms: u32) -> Instruction
 #[inline(always)]
 pub fn extr(size: RegSize, rd: Reg, rn: Reg, rm: Reg, lsb: u32) -> Instruction<AArch64Inst> {
     let n = size.sf();
-    let bits = (size.sf() << 31) | (0b00_100111 << 23) | (n << 22) | (0 << 21) | (rm.index() << 16) | (lsb << 10) | (rn.index() << 5) | rd.index();
+    let bits =
+        (size.sf() << 31) | (0b00_100111 << 23) | (n << 22) | (0 << 21) | (rm.index() << 16) | (lsb << 10) | (rn.index() << 5) | rd.index();
     inst("extr", bits)
 }
 
@@ -701,7 +748,10 @@ pub fn uxth(rd: Reg, rn: Reg) -> Instruction<AArch64Inst> {
 /// REV Rd, Rn  (byte-reverse)
 #[inline(always)]
 pub fn rev(size: RegSize, rd: Reg, rn: Reg) -> Instruction<AArch64Inst> {
-    let opc = match size { RegSize::W32 => 0b10, RegSize::X64 => 0b11 };
+    let opc = match size {
+        RegSize::W32 => 0b10,
+        RegSize::X64 => 0b11,
+    };
     let bits = (size.sf() << 31) | (0b10_11010110_00000_0000 << 12) | (opc << 10) | (rn.index() << 5) | rd.index();
     inst("rev", bits)
 }
@@ -766,28 +816,52 @@ pub fn movn(size: RegSize, rd: Reg, imm16: u16, shift: u32) -> Instruction<AArch
 /// CSEL Rd, Rn, Rm, cond  (Rd = cond ? Rn : Rm)
 #[inline(always)]
 pub fn csel(size: RegSize, rd: Reg, rn: Reg, rm: Reg, cond: Condition) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b00_11010100 << 21) | (rm.index() << 16) | (cond.code() << 12) | (0b00 << 10) | (rn.index() << 5) | rd.index();
+    let bits = (size.sf() << 31)
+        | (0b00_11010100 << 21)
+        | (rm.index() << 16)
+        | (cond.code() << 12)
+        | (0b00 << 10)
+        | (rn.index() << 5)
+        | rd.index();
     inst("csel", bits)
 }
 
 /// CSINC Rd, Rn, Rm, cond  (Rd = cond ? Rn : Rm+1)
 #[inline(always)]
 pub fn csinc(size: RegSize, rd: Reg, rn: Reg, rm: Reg, cond: Condition) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b00_11010100 << 21) | (rm.index() << 16) | (cond.code() << 12) | (0b01 << 10) | (rn.index() << 5) | rd.index();
+    let bits = (size.sf() << 31)
+        | (0b00_11010100 << 21)
+        | (rm.index() << 16)
+        | (cond.code() << 12)
+        | (0b01 << 10)
+        | (rn.index() << 5)
+        | rd.index();
     inst("csinc", bits)
 }
 
 /// CSINV Rd, Rn, Rm, cond  (Rd = cond ? Rn : ~Rm)
 #[inline(always)]
 pub fn csinv(size: RegSize, rd: Reg, rn: Reg, rm: Reg, cond: Condition) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b10_11010100 << 21) | (rm.index() << 16) | (cond.code() << 12) | (0b00 << 10) | (rn.index() << 5) | rd.index();
+    let bits = (size.sf() << 31)
+        | (0b10_11010100 << 21)
+        | (rm.index() << 16)
+        | (cond.code() << 12)
+        | (0b00 << 10)
+        | (rn.index() << 5)
+        | rd.index();
     inst("csinv", bits)
 }
 
 /// CSNEG Rd, Rn, Rm, cond  (Rd = cond ? Rn : -Rm)
 #[inline(always)]
 pub fn csneg(size: RegSize, rd: Reg, rn: Reg, rm: Reg, cond: Condition) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b10_11010100 << 21) | (rm.index() << 16) | (cond.code() << 12) | (0b01 << 10) | (rn.index() << 5) | rd.index();
+    let bits = (size.sf() << 31)
+        | (0b10_11010100 << 21)
+        | (rm.index() << 16)
+        | (cond.code() << 12)
+        | (0b01 << 10)
+        | (rn.index() << 5)
+        | rd.index();
     inst("csneg", bits)
 }
 
@@ -892,7 +966,10 @@ pub fn stur(size: MemSize, rt: Reg, rn: Reg, offset: i32) -> Instruction<AArch64
 #[inline(always)]
 pub fn ldrsb_reg(size: RegSize, rt: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
     // opc: 11=LDRSB to W, 10=LDRSB to X
-    let opc = match size { RegSize::W32 => 0b11, RegSize::X64 => 0b10 };
+    let opc = match size {
+        RegSize::W32 => 0b11,
+        RegSize::X64 => 0b10,
+    };
     let bits = (0b00_111000 << 24) | (opc << 22) | (1 << 21) | (rm.index() << 16) | (0b011_0_10 << 10) | (rn.index() << 5) | rt.index();
     inst("ldrsb", bits)
 }
@@ -900,7 +977,10 @@ pub fn ldrsb_reg(size: RegSize, rt: Reg, rn: Reg, rm: Reg) -> Instruction<AArch6
 /// LDRSH Rt, [Xn, Xm]
 #[inline(always)]
 pub fn ldrsh_reg(size: RegSize, rt: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
-    let opc = match size { RegSize::W32 => 0b11, RegSize::X64 => 0b10 };
+    let opc = match size {
+        RegSize::W32 => 0b11,
+        RegSize::X64 => 0b10,
+    };
     let bits = (0b01_111000 << 24) | (opc << 22) | (1 << 21) | (rm.index() << 16) | (0b011_0_10 << 10) | (rn.index() << 5) | rt.index();
     inst("ldrsh", bits)
 }
@@ -915,7 +995,10 @@ pub fn ldrsw_reg(rt: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
 /// LDRSB Rt, [Xn, Wm, UXTW]  (sign-extend byte, 32-bit offset zero-extended)
 #[inline(always)]
 pub fn ldrsb_reg_uxtw(size: RegSize, rt: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
-    let opc = match size { RegSize::W32 => 0b11, RegSize::X64 => 0b10 };
+    let opc = match size {
+        RegSize::W32 => 0b11,
+        RegSize::X64 => 0b10,
+    };
     let bits = (0b00_111000 << 24) | (opc << 22) | (1 << 21) | (rm.index() << 16) | (0b010_0_10 << 10) | (rn.index() << 5) | rt.index();
     inst("ldrsb", bits)
 }
@@ -923,7 +1006,10 @@ pub fn ldrsb_reg_uxtw(size: RegSize, rt: Reg, rn: Reg, rm: Reg) -> Instruction<A
 /// LDRSH Rt, [Xn, Wm, UXTW]
 #[inline(always)]
 pub fn ldrsh_reg_uxtw(size: RegSize, rt: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
-    let opc = match size { RegSize::W32 => 0b11, RegSize::X64 => 0b10 };
+    let opc = match size {
+        RegSize::W32 => 0b11,
+        RegSize::X64 => 0b10,
+    };
     let bits = (0b01_111000 << 24) | (opc << 22) | (1 << 21) | (rm.index() << 16) | (0b010_0_10 << 10) | (rn.index() << 5) | rt.index();
     inst("ldrsh", bits)
 }
@@ -939,7 +1025,10 @@ pub fn ldrsw_reg_uxtw(rt: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
 #[inline(always)]
 pub fn ldrsb_imm(size: RegSize, rt: Reg, rn: Reg, offset: u32) -> Instruction<AArch64Inst> {
     debug_assert!(offset < 4096, "ldrsb_imm: offset out of range");
-    let opc = match size { RegSize::W32 => 0b11, RegSize::X64 => 0b10 };
+    let opc = match size {
+        RegSize::W32 => 0b11,
+        RegSize::X64 => 0b10,
+    };
     let bits = (0b00_111001 << 24) | (opc << 22) | (offset << 10) | (rn.index() << 5) | rt.index();
     inst("ldrsb", bits)
 }
@@ -949,7 +1038,10 @@ pub fn ldrsb_imm(size: RegSize, rt: Reg, rn: Reg, offset: u32) -> Instruction<AA
 pub fn ldrsh_imm(size: RegSize, rt: Reg, rn: Reg, offset: u32) -> Instruction<AArch64Inst> {
     let scaled = offset >> 1;
     debug_assert!(offset == scaled << 1 && scaled < 4096, "ldrsh_imm: offset out of range");
-    let opc = match size { RegSize::W32 => 0b11, RegSize::X64 => 0b10 };
+    let opc = match size {
+        RegSize::W32 => 0b11,
+        RegSize::X64 => 0b10,
+    };
     let bits = (0b01_111001 << 24) | (opc << 22) | (scaled << 10) | (rn.index() << 5) | rt.index();
     inst("ldrsh", bits)
 }
@@ -966,7 +1058,11 @@ pub fn ldrsw_imm(rt: Reg, rn: Reg, offset: u32) -> Instruction<AArch64Inst> {
 /// LDP Xt1, Xt2, [Xn, #imm7]  (load pair, signed offset scaled by 8/4)
 #[inline(always)]
 pub fn ldp(size: MemSize, rt1: Reg, rt2: Reg, rn: Reg, offset: i32) -> Instruction<AArch64Inst> {
-    let (opc, scale) = match size { MemSize::B32 => (0b00u32, 4), MemSize::B64 => (0b10, 8), _ => panic!("ldp: unsupported size") };
+    let (opc, scale) = match size {
+        MemSize::B32 => (0b00u32, 4),
+        MemSize::B64 => (0b10, 8),
+        _ => panic!("ldp: unsupported size"),
+    };
     let scaled = offset / scale;
     debug_assert!(offset == scaled * scale);
     let imm7 = (scaled as u32) & 0x7F;
@@ -977,7 +1073,11 @@ pub fn ldp(size: MemSize, rt1: Reg, rt2: Reg, rn: Reg, offset: i32) -> Instructi
 /// STP Xt1, Xt2, [Xn, #imm7]  (store pair, signed offset scaled by 8/4)
 #[inline(always)]
 pub fn stp(size: MemSize, rt1: Reg, rt2: Reg, rn: Reg, offset: i32) -> Instruction<AArch64Inst> {
-    let (opc, scale) = match size { MemSize::B32 => (0b00u32, 4), MemSize::B64 => (0b10, 8), _ => panic!("stp: unsupported size") };
+    let (opc, scale) = match size {
+        MemSize::B32 => (0b00u32, 4),
+        MemSize::B64 => (0b10, 8),
+        _ => panic!("stp: unsupported size"),
+    };
     let scaled = offset / scale;
     debug_assert!(offset == scaled * scale);
     let imm7 = (scaled as u32) & 0x7F;
@@ -988,7 +1088,11 @@ pub fn stp(size: MemSize, rt1: Reg, rt2: Reg, rn: Reg, offset: i32) -> Instructi
 /// STP (pre-index): STP Xt1, Xt2, [Xn, #imm7]!
 #[inline(always)]
 pub fn stp_pre(size: MemSize, rt1: Reg, rt2: Reg, rn: Reg, offset: i32) -> Instruction<AArch64Inst> {
-    let (opc, scale) = match size { MemSize::B32 => (0b00u32, 4), MemSize::B64 => (0b10, 8), _ => panic!("stp_pre: unsupported size") };
+    let (opc, scale) = match size {
+        MemSize::B32 => (0b00u32, 4),
+        MemSize::B64 => (0b10, 8),
+        _ => panic!("stp_pre: unsupported size"),
+    };
     let scaled = offset / scale;
     debug_assert!(offset == scaled * scale);
     let imm7 = (scaled as u32) & 0x7F;
@@ -999,7 +1103,11 @@ pub fn stp_pre(size: MemSize, rt1: Reg, rt2: Reg, rn: Reg, offset: i32) -> Instr
 /// LDP (post-index): LDP Xt1, Xt2, [Xn], #imm7
 #[inline(always)]
 pub fn ldp_post(size: MemSize, rt1: Reg, rt2: Reg, rn: Reg, offset: i32) -> Instruction<AArch64Inst> {
-    let (opc, scale) = match size { MemSize::B32 => (0b00u32, 4), MemSize::B64 => (0b10, 8), _ => panic!("ldp_post: unsupported size") };
+    let (opc, scale) = match size {
+        MemSize::B32 => (0b00u32, 4),
+        MemSize::B64 => (0b10, 8),
+        _ => panic!("ldp_post: unsupported size"),
+    };
     let scaled = offset / scale;
     debug_assert!(offset == scaled * scale);
     let imm7 = (scaled as u32) & 0x7F;
@@ -1201,6 +1309,34 @@ pub fn adrp(rd: Reg, offset: i32) -> Instruction<AArch64Inst> {
     inst("adrp", bits)
 }
 
+/// ADRP Xd, label; ADD Xd, Xd, #page_offset.
+///
+/// Loads a label address across the full ±4 GiB ADRP range.
+#[inline(always)]
+pub fn adrp_add_label(rd: Reg, label: Label) -> Instruction<AArch64Inst> {
+    let adrp_bits = (1 << 31) | (0b10000 << 24) | rd.index();
+    let add_bits = (RegSize::X64.sf() << 31) | (0b0010001 << 24) | (rd.index() << 5) | rd.index();
+    let adrp_bytes = adrp_bits.to_le_bytes();
+    let add_bytes = add_bits.to_le_bytes();
+    Instruction {
+        instruction: AArch64Inst {
+            mnemonic: "adrp+add",
+            bits: adrp_bits,
+        },
+        bytes: InstBuf::from_array([
+            adrp_bytes[0],
+            adrp_bytes[1],
+            adrp_bytes[2],
+            adrp_bytes[3],
+            add_bytes[0],
+            add_bytes[1],
+            add_bytes[2],
+            add_bytes[3],
+        ]),
+        fixup: Some((label, fixup_aarch64())),
+    }
+}
+
 /// MOV Xd, Xn  (alias for ADD Xd, Xn, #0 — used for sp moves)
 /// Use this when one of the operands is sp, since ORR-based mov doesn't work with sp.
 #[inline(always)]
@@ -1219,7 +1355,9 @@ pub fn mov_sp(size: RegSize, rd: Reg, rn: Reg) -> Instruction<AArch64Inst> {
 
 /// Count of MOVZ/MOVK instructions needed for a 64-bit immediate.
 pub fn count_imm64_instructions(value: u64) -> u32 {
-    if value == 0 { return 1; }
+    if value == 0 {
+        return 1;
+    }
     let not_value = !value;
 
     // Check if it can be a single MOVZ
