@@ -7124,6 +7124,10 @@ impl ProgramBlob {
             blob.jump_table = reader.read_slice_as_bytes(jump_table_length as usize)?;
             blob.code = reader.read_slice_as_bytes(code_length as usize)?;
 
+            if blob.code.len() > (i32::MAX as usize) {
+                return Err(ProgramParseError(ProgramParseErrorKind::Other("the program blob is too large")));
+            }
+
             if !blob.isa.is_legacy() {
                 if reader.position - initial_position != parts.code_and_jump_table.len() {
                     return Err(ProgramParseError(ProgramParseErrorKind::Other(
