@@ -95,7 +95,7 @@ fn test_conv_reg() {
 
     // Register nibbles greater than the highest register index are clamped to `OUT_OF_BOUNDS_REG`.
     for nibble in 13..16 {
-        let reg = polkavm_common::program::read_args_regs2(u128::from(nibble)).0;
+        let reg = polkavm_common::program::read_args_regs2::<false>(u128::from(nibble) << 8).0;
         assert_eq!(reg.raw_unparsed(), nibble);
         assert_eq!(conv_reg(reg), conv_reg_const(OUT_OF_BOUNDS_REG));
     }
@@ -1364,7 +1364,7 @@ where
     }
 
     #[inline(always)]
-    pub fn ecalli(&mut self, code_offset: u32, args_length: u32, imm: i32) {
+    pub fn ecalli(&mut self, code_offset: u32, length: u32, imm: i32) {
         let imm = cast(imm).bitwise_as_u32();
         if let Some(ref custom_codegen) = self.0.custom_codegen {
             if !custom_codegen.should_emit_ecalli(imm, &mut self.0.asm) {
@@ -1373,12 +1373,13 @@ where
         }
 
         let ecall_label = self.ecall_label;
+        let next_program_counter = code_offset + length;
         let asm = self.asm.reserve::<U4>();
         let asm = asm.push(mov_imm(Self::vmctx_field(S::offset_table().arg), imm32(imm)));
         let asm = asm.push(mov_imm(Self::vmctx_field(S::offset_table().program_counter), imm32(code_offset)));
         let asm = asm.push(mov_imm(
             Self::vmctx_field(S::offset_table().next_program_counter),
-            imm32(code_offset + args_length + 1),
+            imm32(next_program_counter),
         ));
         let asm = asm.push(call_label32(ecall_label));
         asm.assert_reserved_exactly_as_needed();

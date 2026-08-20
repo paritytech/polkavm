@@ -2,7 +2,7 @@
 #![allow(unsafe_code)]
 
 use crate::cast::cast;
-use crate::program::{InstructionFormat, InstructionSet, InstructionSetKind, Opcode, ParsingVisitor, RawReg, UNUSED_RAW_OPCODE};
+use crate::program::{InstructionFormat, InstructionSet, InstructionSetKind, Opcode, ParsingVisitor, RawReg};
 use crate::utils::{Bitness, BitnessT, GasVisitorT, B64};
 use alloc::string::String;
 use alloc::vec;
@@ -416,7 +416,7 @@ pub struct Simulator<'a, B, T: Tracer = ()> {
     force_branch_is_cheap: Option<bool>,
 
     opcode_trap: u8,
-    opcode_unlikely: u8,
+    opcode_unlikely_or_trap: u8,
 
     tracer: T,
     _phantom: core::marker::PhantomData<B>,
@@ -484,6 +484,11 @@ where
     B: BitnessT,
 {
     pub fn new(code: &'a [u8], isa: InstructionSetKind, cache_model: CacheModel, tracer: T) -> Self {
+        let opcode_trap = isa
+            .opcode_to_raw(Opcode::trap, 0)
+            .and_then(|(opcode, _)| opcode.try_into().ok())
+            .expect("internal error: ISA doesn't have a single-opcode trap");
+
         unsafe_avx2! {
             let mut simulator = Simulator {
                 code,
@@ -506,8 +511,8 @@ where
                 force_branch_is_cheap: None,
                 instructions_in_flight: 0,
                 reorder_buffer_head: RobIndex::new(0),
-                opcode_trap: isa.opcode_to_u8(Opcode::trap).unwrap_or(UNUSED_RAW_OPCODE),
-                opcode_unlikely: isa.opcode_to_u8(Opcode::unlikely).unwrap_or(UNUSED_RAW_OPCODE),
+                opcode_trap,
+                opcode_unlikely_or_trap: isa.opcode_to_raw(Opcode::unlikely, 0).and_then(|(opcode, _)| opcode.try_into().ok()).unwrap_or(opcode_trap),
                 _phantom: core::marker::PhantomData,
             };
 
@@ -1115,7 +1120,7 @@ where
         self.dispatch_generic(None, Some(base), None, self.store_cost());
     }
 
-    fn get_branch_cost(&self, offset: u32, args_length: u32, jump_offset: u32) -> i8 {
+    fn get_branch_cost(&self, offset: u32, length: u32, jump_offset: u32) -> i8 {
         const BRANCH_PREDICTION_HIT_COST: i8 = 1;
         const BRANCH_PREDICTION_MISS_COST: i8 = 20;
 
@@ -1129,8 +1134,8 @@ where
 
         if self
             .code
-            .get(cast(offset).to_usize() + cast(args_length).to_usize() + 1)
-            .map(|&opcode| opcode == self.opcode_unlikely || opcode == self.opcode_trap)
+            .get(cast(offset).to_usize() + cast(length).to_usize())
+            .map(|&opcode| opcode == self.opcode_unlikely_or_trap || opcode == self.opcode_trap)
             .unwrap_or(true)
         {
             return BRANCH_PREDICTION_HIT_COST;
@@ -1139,7 +1144,7 @@ where
         if self
             .code
             .get(cast(jump_offset).to_usize())
-            .map(|&opcode| opcode == self.opcode_unlikely || opcode == self.opcode_trap)
+            .map(|&opcode| opcode == self.opcode_unlikely_or_trap || opcode == self.opcode_trap)
             .unwrap_or(true)
         {
             return BRANCH_PREDICTION_HIT_COST;
@@ -1149,13 +1154,13 @@ where
     }
 
     #[inline(always)]
-    fn dispatch_branch(&mut self, offset: u32, args_length: u32, s1: RawReg, s2: RawReg, jump_offset: u32) {
+    fn dispatch_branch(&mut self, offset: u32, length: u32, s1: RawReg, s2: RawReg, jump_offset: u32) {
         self.dispatch_generic(
             None,
             Some(s1),
             Some(s2),
             InstCost {
-                latency: self.get_branch_cost(offset, args_length, jump_offset),
+                latency: self.get_branch_cost(offset, length, jump_offset),
                 decode_slots: 1,
                 alu_slots: 1,
                 ..EMPTY_COST
@@ -1165,13 +1170,13 @@ where
     }
 
     #[inline(always)]
-    fn dispatch_branch_imm(&mut self, offset: u32, args_length: u32, s: RawReg, jump_offset: u32) {
+    fn dispatch_branch_imm(&mut self, offset: u32, length: u32, s: RawReg, jump_offset: u32) {
         self.dispatch_generic(
             None,
             Some(s),
             None,
             InstCost {
-                latency: self.get_branch_cost(offset, args_length, jump_offset),
+                latency: self.get_branch_cost(offset, length, jump_offset),
                 decode_slots: 1,
                 alu_slots: 1,
                 ..EMPTY_COST
@@ -1436,635 +1441,635 @@ where
     // Simple ALU instructions (3 op)
 
     #[inline(always)]
-    fn xor(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn xor(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_simple_alu_3op(d, s1, s2)
     }
 
     #[inline(always)]
-    fn and(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn and(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_simple_alu_3op(d, s1, s2)
     }
 
     #[inline(always)]
-    fn or(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn or(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_simple_alu_3op(d, s1, s2)
     }
 
     #[inline(always)]
-    fn add_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn add_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_simple_alu_3op(d, s1, s2)
     }
 
     #[inline(always)]
-    fn sub_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn sub_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_simple_alu_3op(d, s1, s2)
     }
 
     // Simple ALU instructions (3 op), 32-bit
 
     #[inline(always)]
-    fn add_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn add_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_simple_alu_3op_32(d, s1, s2)
     }
 
     #[inline(always)]
-    fn sub_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn sub_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_simple_alu_3op_32(d, s1, s2)
     }
 
     // Simple ALU instructions (2 op)
 
     #[inline(always)]
-    fn xor_imm(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg, _imm: i32) -> Self::ReturnTy {
+    fn xor_imm(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg, _imm: i32) -> Self::ReturnTy {
         self.dispatch_simple_alu_2op(d, s)
     }
 
     #[inline(always)]
-    fn and_imm(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg, _imm: i32) -> Self::ReturnTy {
+    fn and_imm(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg, _imm: i32) -> Self::ReturnTy {
         self.dispatch_simple_alu_2op(d, s)
     }
 
     #[inline(always)]
-    fn or_imm(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg, _imm: i32) -> Self::ReturnTy {
+    fn or_imm(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg, _imm: i32) -> Self::ReturnTy {
         self.dispatch_simple_alu_2op(d, s)
     }
 
     #[inline(always)]
-    fn add_imm_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg, _imm: i32) -> Self::ReturnTy {
+    fn add_imm_64(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg, _imm: i32) -> Self::ReturnTy {
         // TODO: in 'd != s' case we use a single `lea`, see if modeling that makes sense
         self.dispatch_simple_alu_2op(d, s)
     }
 
     #[inline(always)]
-    fn shift_logical_right_imm_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
         self.dispatch_simple_alu_2op(d, s1)
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_imm_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
         self.dispatch_simple_alu_2op(d, s1)
     }
 
     #[inline(always)]
-    fn shift_logical_left_imm_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
         self.dispatch_simple_alu_2op(d, s1)
     }
 
     #[inline(always)]
-    fn rotate_right_imm_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _c: i32) -> Self::ReturnTy {
+    fn rotate_right_imm_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _c: i32) -> Self::ReturnTy {
         self.dispatch_simple_alu_2op(d, s1)
     }
 
     #[inline(always)]
-    fn reverse_byte(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn reverse_byte(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.dispatch_simple_alu_2op(d, s)
     }
 
     // Simple ALU instructions (2 op), 32-bit
 
     #[inline(always)]
-    fn add_imm_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg, _imm: i32) -> Self::ReturnTy {
+    fn add_imm_32(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg, _imm: i32) -> Self::ReturnTy {
         // TODO: in 'd != s' case we use a single `lea`, see if modeling that makes sense
         self.dispatch_simple_alu_2op_32bit(d, s)
     }
 
     #[inline(always)]
-    fn shift_logical_right_imm_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
         self.dispatch_simple_alu_2op_32bit(d, s1)
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_imm_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
         self.dispatch_simple_alu_2op_32bit(d, s1)
     }
 
     #[inline(always)]
-    fn shift_logical_left_imm_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
         self.dispatch_simple_alu_2op_32bit(d, s1)
     }
 
     #[inline(always)]
-    fn rotate_right_imm_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _c: i32) -> Self::ReturnTy {
+    fn rotate_right_imm_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _c: i32) -> Self::ReturnTy {
         self.dispatch_simple_alu_2op_32bit(d, s1)
     }
 
     // Trivial (2 op, 1 cycle)
 
     #[inline(always)]
-    fn count_leading_zero_bits_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_leading_zero_bits_32(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.dispatch_trivial_2op_1c(d, s)
     }
 
     #[inline(always)]
-    fn count_leading_zero_bits_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_leading_zero_bits_64(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.dispatch_trivial_2op_1c(d, s)
     }
 
     #[inline(always)]
-    fn count_set_bits_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_set_bits_32(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.dispatch_trivial_2op_1c(d, s)
     }
 
     #[inline(always)]
-    fn count_set_bits_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_set_bits_64(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.dispatch_trivial_2op_1c(d, s)
     }
 
     #[inline(always)]
-    fn sign_extend_8(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn sign_extend_8(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.dispatch_trivial_2op_1c(d, s)
     }
 
     #[inline(always)]
-    fn sign_extend_16(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn sign_extend_16(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.dispatch_trivial_2op_1c(d, s)
     }
 
     #[inline(always)]
-    fn zero_extend_16(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn zero_extend_16(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.dispatch_trivial_2op_1c(d, s)
     }
 
     // Trivial (2 op, 2 cycles)
 
     #[inline(always)]
-    fn count_trailing_zero_bits_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_trailing_zero_bits_32(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.dispatch_trivial_2op_2c(d, s)
     }
 
     #[inline(always)]
-    fn count_trailing_zero_bits_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+    fn count_trailing_zero_bits_64(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
         self.dispatch_trivial_2op_2c(d, s)
     }
 
     // Shifts and rotates, 64-bit
 
     #[inline(always)]
-    fn shift_logical_right_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn shift_logical_right_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_shift(d, s1, s2)
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn shift_arithmetic_right_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_shift(d, s1, s2)
     }
 
     #[inline(always)]
-    fn shift_logical_left_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn shift_logical_left_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_shift(d, s1, s2)
     }
 
     #[inline(always)]
-    fn rotate_left_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rotate_left_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_shift(d, s1, s2)
     }
 
     #[inline(always)]
-    fn rotate_right_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rotate_right_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_shift(d, s1, s2)
     }
 
     // Shifts and rotates, 32-bit
 
     #[inline(always)]
-    fn shift_logical_right_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn shift_logical_right_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_shift_32(d, s1, s2)
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn shift_arithmetic_right_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_shift_32(d, s1, s2)
     }
 
     #[inline(always)]
-    fn shift_logical_left_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn shift_logical_left_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_shift_32(d, s1, s2)
     }
 
     #[inline(always)]
-    fn rotate_left_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rotate_left_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_shift_32(d, s1, s2)
     }
 
     #[inline(always)]
-    fn rotate_right_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rotate_right_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_shift_32(d, s1, s2)
     }
 
     // Shifts and rotates, alt
 
     #[inline(always)]
-    fn shift_logical_right_imm_alt_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s2: RawReg, _s1: i32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_alt_64(&mut self, _offset: u32, _length: u32, d: RawReg, s2: RawReg, _s1: i32) -> Self::ReturnTy {
         self.dispatch_shift_imm_alt(d, s2)
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_imm_alt_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s2: RawReg, _s1: i32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_alt_64(&mut self, _offset: u32, _length: u32, d: RawReg, s2: RawReg, _s1: i32) -> Self::ReturnTy {
         self.dispatch_shift_imm_alt(d, s2)
     }
 
     #[inline(always)]
-    fn shift_logical_left_imm_alt_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s2: RawReg, _s1: i32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_alt_64(&mut self, _offset: u32, _length: u32, d: RawReg, s2: RawReg, _s1: i32) -> Self::ReturnTy {
         self.dispatch_shift_imm_alt(d, s2)
     }
 
     #[inline(always)]
-    fn rotate_right_imm_alt_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg, _c: i32) -> Self::ReturnTy {
+    fn rotate_right_imm_alt_64(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg, _c: i32) -> Self::ReturnTy {
         self.dispatch_shift_imm_alt(d, s)
     }
 
     // Shifts and rotates, alt (32-bit)
 
     #[inline(always)]
-    fn shift_logical_right_imm_alt_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s2: RawReg, _s1: i32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_alt_32(&mut self, _offset: u32, _length: u32, d: RawReg, s2: RawReg, _s1: i32) -> Self::ReturnTy {
         self.dispatch_shift_imm_alt_32(d, s2)
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_imm_alt_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s2: RawReg, _s1: i32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_alt_32(&mut self, _offset: u32, _length: u32, d: RawReg, s2: RawReg, _s1: i32) -> Self::ReturnTy {
         self.dispatch_shift_imm_alt_32(d, s2)
     }
 
     #[inline(always)]
-    fn shift_logical_left_imm_alt_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s2: RawReg, _s1: i32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_alt_32(&mut self, _offset: u32, _length: u32, d: RawReg, s2: RawReg, _s1: i32) -> Self::ReturnTy {
         self.dispatch_shift_imm_alt_32(d, s2)
     }
 
     #[inline(always)]
-    fn rotate_right_imm_alt_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg, _c: i32) -> Self::ReturnTy {
+    fn rotate_right_imm_alt_32(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg, _c: i32) -> Self::ReturnTy {
         self.dispatch_shift_imm_alt_32(d, s)
     }
 
     // Register comparisons
 
     #[inline(always)]
-    fn set_less_than_unsigned(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn set_less_than_unsigned(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_compare(d, s1, s2)
     }
 
     #[inline(always)]
-    fn set_less_than_signed(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn set_less_than_signed(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_compare(d, s1, s2)
     }
 
     // Register comparisons (immediate)
 
     #[inline(always)]
-    fn set_less_than_unsigned_imm(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
+    fn set_less_than_unsigned_imm(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
         self.dispatch_compare_imm(d, s1)
     }
 
     #[inline(always)]
-    fn set_less_than_signed_imm(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
+    fn set_less_than_signed_imm(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
         self.dispatch_compare_imm(d, s1)
     }
 
     #[inline(always)]
-    fn set_greater_than_unsigned_imm(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
+    fn set_greater_than_unsigned_imm(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
         self.dispatch_compare_imm(d, s1)
     }
 
     #[inline(always)]
-    fn set_greater_than_signed_imm(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
+    fn set_greater_than_signed_imm(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
         self.dispatch_compare_imm(d, s1)
     }
 
     // Conditional moves
 
     #[inline(always)]
-    fn cmov_if_zero(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg, c: RawReg) -> Self::ReturnTy {
+    fn cmov_if_zero(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg, c: RawReg) -> Self::ReturnTy {
         self.dispatch_cmov(d, s, c)
     }
 
     #[inline(always)]
-    fn cmov_if_not_zero(&mut self, _offset: u32, _args_length: u32, d: RawReg, s: RawReg, c: RawReg) -> Self::ReturnTy {
+    fn cmov_if_not_zero(&mut self, _offset: u32, _length: u32, d: RawReg, s: RawReg, c: RawReg) -> Self::ReturnTy {
         self.dispatch_cmov(d, s, c)
     }
 
     #[inline(always)]
-    fn cmov_if_zero_imm(&mut self, _offset: u32, _args_length: u32, d: RawReg, c: RawReg, _s: i32) -> Self::ReturnTy {
+    fn cmov_if_zero_imm(&mut self, _offset: u32, _length: u32, d: RawReg, c: RawReg, _s: i32) -> Self::ReturnTy {
         self.dispatch_cmov_imm(d, c)
     }
 
     #[inline(always)]
-    fn cmov_if_not_zero_imm(&mut self, _offset: u32, _args_length: u32, d: RawReg, c: RawReg, _s: i32) -> Self::ReturnTy {
+    fn cmov_if_not_zero_imm(&mut self, _offset: u32, _length: u32, d: RawReg, c: RawReg, _s: i32) -> Self::ReturnTy {
         self.dispatch_cmov_imm(d, c)
     }
 
     // Minimum/maximum
 
     #[inline(always)]
-    fn maximum(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn maximum(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_min_max(d, s1, s2)
     }
 
     #[inline(always)]
-    fn maximum_unsigned(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn maximum_unsigned(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_min_max(d, s1, s2)
     }
 
     #[inline(always)]
-    fn minimum(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn minimum(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_min_max(d, s1, s2)
     }
 
     #[inline(always)]
-    fn minimum_unsigned(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn minimum_unsigned(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_min_max(d, s1, s2)
     }
 
     // Indirect loads
 
     #[inline(always)]
-    fn load_indirect_u8(&mut self, _offset: u32, _args_length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_indirect_u8(&mut self, _offset: u32, _length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_indirect_load(dst, base, offset, 1)
     }
 
     #[inline(always)]
-    fn load_indirect_i8(&mut self, _offset: u32, _args_length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_indirect_i8(&mut self, _offset: u32, _length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_indirect_load(dst, base, offset, 1)
     }
 
     #[inline(always)]
-    fn load_indirect_u16(&mut self, _offset: u32, _args_length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_indirect_u16(&mut self, _offset: u32, _length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_indirect_load(dst, base, offset, 2)
     }
 
     #[inline(always)]
-    fn load_indirect_i16(&mut self, _offset: u32, _args_length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_indirect_i16(&mut self, _offset: u32, _length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_indirect_load(dst, base, offset, 2)
     }
 
     #[inline(always)]
-    fn load_indirect_u32(&mut self, _offset: u32, _args_length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_indirect_u32(&mut self, _offset: u32, _length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_indirect_load(dst, base, offset, 4)
     }
 
     #[inline(always)]
-    fn load_indirect_i32(&mut self, _offset: u32, _args_length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_indirect_i32(&mut self, _offset: u32, _length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_indirect_load(dst, base, offset, 4)
     }
 
     #[inline(always)]
-    fn load_indirect_u64(&mut self, _offset: u32, _args_length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_indirect_u64(&mut self, _offset: u32, _length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_indirect_load(dst, base, offset, 8)
     }
 
     // Direct loads
 
     #[inline(always)]
-    fn load_u8(&mut self, _offset: u32, _args_length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_u8(&mut self, _offset: u32, _length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_load(dst, offset, 1)
     }
 
     #[inline(always)]
-    fn load_i8(&mut self, _offset: u32, _args_length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_i8(&mut self, _offset: u32, _length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_load(dst, offset, 1)
     }
 
     #[inline(always)]
-    fn load_u16(&mut self, _offset: u32, _args_length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_u16(&mut self, _offset: u32, _length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_load(dst, offset, 2)
     }
 
     #[inline(always)]
-    fn load_i16(&mut self, _offset: u32, _args_length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_i16(&mut self, _offset: u32, _length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_load(dst, offset, 2)
     }
 
     #[inline(always)]
-    fn load_u32(&mut self, _offset: u32, _args_length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_u32(&mut self, _offset: u32, _length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_load(dst, offset, 4)
     }
 
     #[inline(always)]
-    fn load_i32(&mut self, _offset: u32, _args_length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_i32(&mut self, _offset: u32, _length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_load(dst, offset, 4)
     }
 
     #[inline(always)]
-    fn load_u64(&mut self, _offset: u32, _args_length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_u64(&mut self, _offset: u32, _length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_load(dst, offset, 8)
     }
 
     // Indirect stores (imm)
 
     #[inline(always)]
-    fn store_imm_indirect_u8(&mut self, _offset: u32, _args_length: u32, base: RawReg, offset: i32, _value: i32) -> Self::ReturnTy {
+    fn store_imm_indirect_u8(&mut self, _offset: u32, _length: u32, base: RawReg, offset: i32, _value: i32) -> Self::ReturnTy {
         self.dispatch_store_imm_indirect(base, offset, 1)
     }
 
     #[inline(always)]
-    fn store_imm_indirect_u16(&mut self, _offset: u32, _args_length: u32, base: RawReg, offset: i32, _value: i32) -> Self::ReturnTy {
+    fn store_imm_indirect_u16(&mut self, _offset: u32, _length: u32, base: RawReg, offset: i32, _value: i32) -> Self::ReturnTy {
         self.dispatch_store_imm_indirect(base, offset, 2)
     }
 
     #[inline(always)]
-    fn store_imm_indirect_u32(&mut self, _offset: u32, _args_length: u32, base: RawReg, offset: i32, _value: i32) -> Self::ReturnTy {
+    fn store_imm_indirect_u32(&mut self, _offset: u32, _length: u32, base: RawReg, offset: i32, _value: i32) -> Self::ReturnTy {
         self.dispatch_store_imm_indirect(base, offset, 4)
     }
 
     #[inline(always)]
-    fn store_imm_indirect_u64(&mut self, _offset: u32, _args_length: u32, base: RawReg, offset: i32, _value: i32) -> Self::ReturnTy {
+    fn store_imm_indirect_u64(&mut self, _offset: u32, _length: u32, base: RawReg, offset: i32, _value: i32) -> Self::ReturnTy {
         self.dispatch_store_imm_indirect(base, offset, 8)
     }
 
     // Indirect stores
 
     #[inline(always)]
-    fn store_indirect_u8(&mut self, _offset: u32, _args_length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn store_indirect_u8(&mut self, _offset: u32, _length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_store_indirect(src, base, offset, 1)
     }
 
     #[inline(always)]
-    fn store_indirect_u16(&mut self, _offset: u32, _args_length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn store_indirect_u16(&mut self, _offset: u32, _length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_store_indirect(src, base, offset, 2)
     }
 
     #[inline(always)]
-    fn store_indirect_u32(&mut self, _offset: u32, _args_length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn store_indirect_u32(&mut self, _offset: u32, _length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_store_indirect(src, base, offset, 4)
     }
 
     #[inline(always)]
-    fn store_indirect_u64(&mut self, _offset: u32, _args_length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn store_indirect_u64(&mut self, _offset: u32, _length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_store_indirect(src, base, offset, 8)
     }
 
     // Stores (imm)
 
     #[inline(always)]
-    fn store_imm_u8(&mut self, _offset: u32, _args_length: u32, offset: i32, _value: i32) -> Self::ReturnTy {
+    fn store_imm_u8(&mut self, _offset: u32, _length: u32, offset: i32, _value: i32) -> Self::ReturnTy {
         self.dispatch_store_imm(offset, 1)
     }
 
     #[inline(always)]
-    fn store_imm_u16(&mut self, _offset: u32, _args_length: u32, offset: i32, _value: i32) -> Self::ReturnTy {
+    fn store_imm_u16(&mut self, _offset: u32, _length: u32, offset: i32, _value: i32) -> Self::ReturnTy {
         self.dispatch_store_imm(offset, 2)
     }
 
     #[inline(always)]
-    fn store_imm_u32(&mut self, _offset: u32, _args_length: u32, offset: i32, _value: i32) -> Self::ReturnTy {
+    fn store_imm_u32(&mut self, _offset: u32, _length: u32, offset: i32, _value: i32) -> Self::ReturnTy {
         self.dispatch_store_imm(offset, 4)
     }
 
     #[inline(always)]
-    fn store_imm_u64(&mut self, _offset: u32, _args_length: u32, offset: i32, _value: i32) -> Self::ReturnTy {
+    fn store_imm_u64(&mut self, _offset: u32, _length: u32, offset: i32, _value: i32) -> Self::ReturnTy {
         self.dispatch_store_imm(offset, 8)
     }
 
     // Stores
 
     #[inline(always)]
-    fn store_u8(&mut self, _offset: u32, _args_length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
+    fn store_u8(&mut self, _offset: u32, _length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_store(src, offset, 1)
     }
 
     #[inline(always)]
-    fn store_u16(&mut self, _offset: u32, _args_length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
+    fn store_u16(&mut self, _offset: u32, _length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_store(src, offset, 2)
     }
 
     #[inline(always)]
-    fn store_u32(&mut self, _offset: u32, _args_length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
+    fn store_u32(&mut self, _offset: u32, _length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_store(src, offset, 4)
     }
 
     #[inline(always)]
-    fn store_u64(&mut self, _offset: u32, _args_length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
+    fn store_u64(&mut self, _offset: u32, _length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
         self.dispatch_store(src, offset, 8)
     }
 
     // Branches
 
     #[inline(always)]
-    fn branch_less_unsigned(&mut self, offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch(offset, args_length, s1, s2, imm)
+    fn branch_less_unsigned(&mut self, offset: u32, length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch(offset, length, s1, s2, imm)
     }
 
     #[inline(always)]
-    fn branch_less_signed(&mut self, offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch(offset, args_length, s1, s2, imm)
+    fn branch_less_signed(&mut self, offset: u32, length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch(offset, length, s1, s2, imm)
     }
 
     #[inline(always)]
-    fn branch_greater_or_equal_unsigned(&mut self, offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch(offset, args_length, s1, s2, imm)
+    fn branch_greater_or_equal_unsigned(&mut self, offset: u32, length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch(offset, length, s1, s2, imm)
     }
 
     #[inline(always)]
-    fn branch_greater_or_equal_signed(&mut self, offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch(offset, args_length, s1, s2, imm)
+    fn branch_greater_or_equal_signed(&mut self, offset: u32, length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch(offset, length, s1, s2, imm)
     }
 
     #[inline(always)]
-    fn branch_eq(&mut self, offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch(offset, args_length, s1, s2, imm)
+    fn branch_eq(&mut self, offset: u32, length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch(offset, length, s1, s2, imm)
     }
 
     #[inline(always)]
-    fn branch_not_eq(&mut self, offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch(offset, args_length, s1, s2, imm)
+    fn branch_not_eq(&mut self, offset: u32, length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch(offset, length, s1, s2, imm)
     }
 
     // Branches (with immediate)
 
     #[inline(always)]
-    fn branch_eq_imm(&mut self, offset: u32, args_length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch_imm(offset, args_length, s1, imm);
+    fn branch_eq_imm(&mut self, offset: u32, length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch_imm(offset, length, s1, imm);
     }
 
     #[inline(always)]
-    fn branch_not_eq_imm(&mut self, offset: u32, args_length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch_imm(offset, args_length, s1, imm);
+    fn branch_not_eq_imm(&mut self, offset: u32, length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch_imm(offset, length, s1, imm);
     }
 
     #[inline(always)]
-    fn branch_less_unsigned_imm(&mut self, offset: u32, args_length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch_imm(offset, args_length, s1, imm);
+    fn branch_less_unsigned_imm(&mut self, offset: u32, length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch_imm(offset, length, s1, imm);
     }
 
     #[inline(always)]
-    fn branch_less_signed_imm(&mut self, offset: u32, args_length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch_imm(offset, args_length, s1, imm);
+    fn branch_less_signed_imm(&mut self, offset: u32, length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch_imm(offset, length, s1, imm);
     }
 
     #[inline(always)]
-    fn branch_greater_or_equal_unsigned_imm(&mut self, offset: u32, args_length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch_imm(offset, args_length, s1, imm);
+    fn branch_greater_or_equal_unsigned_imm(&mut self, offset: u32, length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch_imm(offset, length, s1, imm);
     }
 
     #[inline(always)]
-    fn branch_greater_or_equal_signed_imm(&mut self, offset: u32, args_length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch_imm(offset, args_length, s1, imm);
+    fn branch_greater_or_equal_signed_imm(&mut self, offset: u32, length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch_imm(offset, length, s1, imm);
     }
 
     #[inline(always)]
-    fn branch_less_or_equal_unsigned_imm(&mut self, offset: u32, args_length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch_imm(offset, args_length, s1, imm);
+    fn branch_less_or_equal_unsigned_imm(&mut self, offset: u32, length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch_imm(offset, length, s1, imm);
     }
 
     #[inline(always)]
-    fn branch_less_or_equal_signed_imm(&mut self, offset: u32, args_length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch_imm(offset, args_length, s1, imm);
+    fn branch_less_or_equal_signed_imm(&mut self, offset: u32, length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch_imm(offset, length, s1, imm);
     }
 
     #[inline(always)]
-    fn branch_greater_unsigned_imm(&mut self, offset: u32, args_length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch_imm(offset, args_length, s1, imm);
+    fn branch_greater_unsigned_imm(&mut self, offset: u32, length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch_imm(offset, length, s1, imm);
     }
 
     #[inline(always)]
-    fn branch_greater_signed_imm(&mut self, offset: u32, args_length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
-        self.dispatch_branch_imm(offset, args_length, s1, imm);
+    fn branch_greater_signed_imm(&mut self, offset: u32, length: u32, s1: RawReg, _s2: i32, imm: u32) -> Self::ReturnTy {
+        self.dispatch_branch_imm(offset, length, s1, imm);
     }
 
     // Division
 
     #[inline(always)]
-    fn div_unsigned_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn div_unsigned_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_division(d, s1, s2)
     }
 
     #[inline(always)]
-    fn div_signed_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn div_signed_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_division(d, s1, s2)
     }
 
     #[inline(always)]
-    fn rem_unsigned_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rem_unsigned_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_division(d, s1, s2)
     }
 
     #[inline(always)]
-    fn rem_signed_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rem_signed_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_division(d, s1, s2)
     }
 
     #[inline(always)]
-    fn div_unsigned_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn div_unsigned_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_division(d, s1, s2)
     }
 
     #[inline(always)]
-    fn div_signed_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn div_signed_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_division(d, s1, s2)
     }
 
     #[inline(always)]
-    fn rem_unsigned_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rem_unsigned_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_division(d, s1, s2)
     }
 
     #[inline(always)]
-    fn rem_signed_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rem_signed_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_division(d, s1, s2)
     }
 
     // Misc
 
     #[inline(always)]
-    fn and_inverted(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn and_inverted(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         // TODO: inaccurate
         self.dispatch_3op(
             d,
@@ -2080,7 +2085,7 @@ where
     }
 
     #[inline(always)]
-    fn or_inverted(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn or_inverted(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         // TODO: inaccurate
         self.dispatch_3op(
             d,
@@ -2096,7 +2101,7 @@ where
     }
 
     #[inline(always)]
-    fn xnor(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn xnor(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_3op(
             d,
             s1,
@@ -2111,7 +2116,7 @@ where
     }
 
     #[inline(always)]
-    fn negate_and_add_imm_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
+    fn negate_and_add_imm_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
         self.dispatch_2op(
             d,
             s1,
@@ -2125,7 +2130,7 @@ where
     }
 
     #[inline(always)]
-    fn negate_and_add_imm_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
+    fn negate_and_add_imm_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
         self.dispatch_2op(
             d,
             s1,
@@ -2139,12 +2144,12 @@ where
     }
 
     #[inline(always)]
-    fn move_reg(&mut self, _offset: u32, _args_length: u32, dst: RawReg, src: RawReg) -> Self::ReturnTy {
+    fn move_reg(&mut self, _offset: u32, _length: u32, dst: RawReg, src: RawReg) -> Self::ReturnTy {
         self.dispatch_move_reg_avx2(dst, src);
     }
 
     #[inline(always)]
-    fn load_imm(&mut self, _offset: u32, _args_length: u32, dst: RawReg, _value: i32) -> Self::ReturnTy {
+    fn load_imm(&mut self, _offset: u32, _length: u32, dst: RawReg, _value: i32) -> Self::ReturnTy {
         self.dispatch_1op_dst(
             dst,
             InstCost {
@@ -2156,7 +2161,7 @@ where
     }
 
     #[inline(always)]
-    fn load_imm64(&mut self, _offset: u32, _args_length: u32, dst: RawReg, _value: u64) -> Self::ReturnTy {
+    fn load_imm64(&mut self, _offset: u32, _length: u32, dst: RawReg, _value: u64) -> Self::ReturnTy {
         self.dispatch_1op_dst(
             dst,
             InstCost {
@@ -2168,7 +2173,7 @@ where
     }
 
     #[inline(always)]
-    fn mul_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn mul_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_3op(
             d,
             s1,
@@ -2184,7 +2189,7 @@ where
     }
 
     #[inline(always)]
-    fn mul_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn mul_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_3op(
             d,
             s1,
@@ -2200,7 +2205,7 @@ where
     }
 
     #[inline(always)]
-    fn mul_imm_32(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
+    fn mul_imm_32(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
         self.dispatch_2op(
             d,
             s1,
@@ -2215,7 +2220,7 @@ where
     }
 
     #[inline(always)]
-    fn mul_imm_64(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
+    fn mul_imm_64(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, _s2: i32) -> Self::ReturnTy {
         self.dispatch_2op(
             d,
             s1,
@@ -2230,7 +2235,7 @@ where
     }
 
     #[inline(always)]
-    fn mul_upper_signed_signed(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn mul_upper_signed_signed(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_3op(
             d,
             s1,
@@ -2246,7 +2251,7 @@ where
     }
 
     #[inline(always)]
-    fn mul_upper_unsigned_unsigned(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn mul_upper_unsigned_unsigned(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_3op(
             d,
             s1,
@@ -2262,7 +2267,7 @@ where
     }
 
     #[inline(always)]
-    fn mul_upper_signed_unsigned(&mut self, _offset: u32, _args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn mul_upper_signed_unsigned(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         self.dispatch_3op(
             d,
             s1,
@@ -2280,22 +2285,22 @@ where
     // End of block instructions
 
     #[cold]
-    fn invalid(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy {
+    fn invalid(&mut self, _offset: u32, _length: u32) -> Self::ReturnTy {
         self.dispatch_finish(2);
     }
 
     #[inline(always)]
-    fn trap(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy {
+    fn trap(&mut self, _offset: u32, _length: u32) -> Self::ReturnTy {
         self.dispatch_finish(2);
     }
 
     #[inline(always)]
-    fn fallthrough(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy {
+    fn fallthrough(&mut self, _offset: u32, _length: u32) -> Self::ReturnTy {
         self.dispatch_finish(2);
     }
 
     #[inline(always)]
-    fn unlikely(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy {
+    fn unlikely(&mut self, _offset: u32, _length: u32) -> Self::ReturnTy {
         self.dispatch_generic(
             None,
             None,
@@ -2309,17 +2314,17 @@ where
     }
 
     #[inline(always)]
-    fn jump(&mut self, _offset: u32, _args_length: u32, _target: u32) -> Self::ReturnTy {
+    fn jump(&mut self, _offset: u32, _length: u32, _target: u32) -> Self::ReturnTy {
         self.dispatch_finish(15);
     }
 
     #[inline(always)]
-    fn load_imm_and_jump(&mut self, _offset: u32, _args_length: u32, _ra: RawReg, _value: i32, _target: u32) -> Self::ReturnTy {
+    fn load_imm_and_jump(&mut self, _offset: u32, _length: u32, _ra: RawReg, _value: i32, _target: u32) -> Self::ReturnTy {
         self.dispatch_finish(15);
     }
 
     #[inline(always)]
-    fn jump_indirect(&mut self, _offset: u32, _args_length: u32, base: RawReg, _base_offset: i32) -> Self::ReturnTy {
+    fn jump_indirect(&mut self, _offset: u32, _length: u32, base: RawReg, _base_offset: i32) -> Self::ReturnTy {
         self.dispatch_generic(
             None,
             Some(base),
@@ -2337,7 +2342,7 @@ where
     fn load_imm_and_jump_indirect(
         &mut self,
         _offset: u32,
-        _args_length: u32,
+        _length: u32,
         _ra: RawReg,
         base: RawReg,
         _value: i32,
@@ -2359,7 +2364,7 @@ where
     // Special instructions
 
     #[inline(always)]
-    fn ecalli(&mut self, _offset: u32, _args_length: u32, _imm: i32) -> Self::ReturnTy {
+    fn ecalli(&mut self, _offset: u32, _length: u32, _imm: i32) -> Self::ReturnTy {
         self.dispatch_generic(
             None,
             None,
@@ -2374,7 +2379,7 @@ where
     }
 
     #[inline(always)]
-    fn sbrk(&mut self, _offset: u32, _args_length: u32, dst: RawReg, src: RawReg) -> Self::ReturnTy {
+    fn sbrk(&mut self, _offset: u32, _length: u32, dst: RawReg, src: RawReg) -> Self::ReturnTy {
         // TODO: YOLO assigned
         self.dispatch_2op(
             dst,
@@ -2389,7 +2394,7 @@ where
     }
 
     #[inline(always)]
-    fn memset(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy {
+    fn memset(&mut self, _offset: u32, _length: u32) -> Self::ReturnTy {
         // TODO: YOLO assigned
         self.dispatch_generic(
             None,
@@ -2824,10 +2829,6 @@ mod tests {
 
     #[test]
     fn test_branch_with_trap_on_fall_through() {
-        // The branch peeks at the opcode of the next instruction to decide the
-        // branch prediction cost; here the fall-through is a `trap`, so the branch
-        // must be rated as predicted (1 cycle latency, not 20). This is a regression
-        // test for the peek reading the wrong byte (off-by-one on `args_length`).
         assert_timeline(
             test_config(),
             "

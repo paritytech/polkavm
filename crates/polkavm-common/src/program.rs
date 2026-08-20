@@ -1,7 +1,7 @@
 use crate::abi::{VM_CODE_ADDRESS_ALIGNMENT, VM_MAXIMUM_CODE_SIZE, VM_MAXIMUM_IMPORT_COUNT, VM_MAXIMUM_JUMP_TABLE_ENTRIES};
 use crate::cast::cast;
 use crate::utils::ArcBytes;
-use crate::varint::{read_simple_varint, read_varint, write_simple_varint, MAX_VARINT_LENGTH};
+use crate::varint::{read_simple_varint, read_varint, simple_varint_length, write_simple_varint_with_length, MAX_VARINT_LENGTH};
 use core::fmt::Write;
 use core::ops::Range;
 
@@ -182,7 +182,7 @@ impl core::fmt::Display for Reg {
 
 #[inline(never)]
 #[cold]
-fn find_next_offset_unbounded(bitmask: &[u8], code_len: u32, mut offset: u32) -> u32 {
+fn find_next_offset_legacy_unbounded(bitmask: &[u8], code_len: u32, mut offset: u32) -> u32 {
     while let Some(&byte) = bitmask.get(offset as usize >> 3) {
         let shift = offset & 7;
         let mask = byte >> shift;
@@ -198,7 +198,7 @@ fn find_next_offset_unbounded(bitmask: &[u8], code_len: u32, mut offset: u32) ->
 }
 
 #[inline(never)]
-fn visitor_step_slow<T>(
+fn visitor_step_slow_legacy<T>(
     state: &mut <T as OpcodeVisitor>::State,
     code: &[u8],
     bitmask: &[u8],
@@ -209,7 +209,7 @@ where
     T: OpcodeVisitor,
 {
     if offset as usize >= code.len() {
-        return (offset + 1, visitor_step_invalid_instruction(state, offset, opcode_visitor), true);
+        return (offset + 1, visitor_step_invalid_instruction(state, offset, 1, opcode_visitor), true);
     }
 
     debug_assert!(code.len() <= u32::MAX as usize);
@@ -218,14 +218,14 @@ where
     debug_assert!(get_bit_for_offset(bitmask, code.len(), offset), "bit at {offset} is zero");
 
     let (skip, mut is_next_instruction_invalid) = parse_bitmask_slow(bitmask, code.len(), offset);
-    let chunk = &code[offset as usize..core::cmp::min(offset as usize + 17, code.len())];
-    let opcode = chunk[0];
+    let chunk = load_chunk(code, offset as usize);
+    let opcode = chunk as u8;
 
     if is_next_instruction_invalid && offset as usize + skip as usize + 1 >= code.len() {
         // This is the last instruction.
         if !opcode_visitor
             .instruction_set()
-            .opcode_from_u8(opcode)
+            .opcode_from_raw(u32::from(opcode))
             .unwrap_or(Opcode::trap)
             .can_fallthrough()
         {
@@ -234,26 +234,15 @@ where
         }
     }
 
-    let mut t: [u8; 16] = [0; 16];
-    t[..chunk.len() - 1].copy_from_slice(&chunk[1..]);
-    let chunk = u128::from_le_bytes([
-        t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], t[12], t[13], t[14], t[15],
-    ]);
-
-    debug_assert!(
-        opcode_visitor.instruction_set().opcode_from_u8(opcode).is_some()
-            || !is_jump_target_valid(opcode_visitor.instruction_set(), code, bitmask, offset + skip + 1)
-    );
-
     (
         offset + skip + 1,
-        opcode_visitor.dispatch(state, usize::from(opcode), chunk, offset, skip),
+        opcode_visitor.dispatch(state, usize::from(opcode), chunk, offset, skip + 1),
         is_next_instruction_invalid,
     )
 }
 
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn visitor_step_fast<T>(
+fn visitor_step_fast_legacy<T>(
     state: &mut <T as OpcodeVisitor>::State,
     code: &[u8],
     bitmask: &[u8],
@@ -267,29 +256,17 @@ where
     debug_assert_eq!(bitmask.len(), code.len().div_ceil(8));
     debug_assert!(offset as usize <= code.len());
     debug_assert!(get_bit_for_offset(bitmask, code.len(), offset), "bit at {offset} is zero");
-
     debug_assert!(offset as usize + 32 <= code.len());
 
-    let Some(chunk) = code.get(offset as usize..offset as usize + 32) else {
-        unreachable!()
-    };
     let Some(skip) = parse_bitmask_fast(bitmask, offset) else {
         unreachable!()
     };
-    let opcode = usize::from(chunk[0]);
 
-    // NOTE: This should produce the same assembly as the unsafe `read_unaligned`.
-    let chunk = u128::from_le_bytes([
-        chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7], chunk[8], chunk[9], chunk[10], chunk[11], chunk[12],
-        chunk[13], chunk[14], chunk[15], chunk[16],
-    ]);
+    let chunk = load_chunk(code, offset as usize);
+    let opcode = usize::from(chunk as u8);
 
     debug_assert!(skip <= BITMASK_MAX);
-    debug_assert!(
-        opcode_visitor.instruction_set().opcode_from_u8(opcode as u8).is_some()
-            || !is_jump_target_valid(opcode_visitor.instruction_set(), code, bitmask, offset + skip + 1)
-    );
-    let result = opcode_visitor.dispatch(state, opcode, chunk, offset, skip);
+    let result = opcode_visitor.dispatch(state, opcode, chunk, offset, skip + 1);
 
     let next_offset = offset + skip + 1;
     let is_next_instruction_invalid = skip == 24 && !get_bit_for_offset(bitmask, code.len(), next_offset);
@@ -298,15 +275,15 @@ where
 
 #[cfg_attr(not(debug_assertions), inline(always))]
 #[cold]
-fn visitor_step_invalid_instruction<T>(state: &mut <T as OpcodeVisitor>::State, offset: u32, opcode_visitor: T) -> T::ReturnTy
+fn visitor_step_invalid_instruction<T>(state: &mut <T as OpcodeVisitor>::State, offset: u32, length: u32, opcode_visitor: T) -> T::ReturnTy
 where
     T: OpcodeVisitor,
 {
-    opcode_visitor.dispatch(state, INVALID_INSTRUCTION_INDEX as usize, 0, offset, 0)
+    opcode_visitor.dispatch(state, LEGACY_INVALID_RAW_OPCODE as usize, 0, offset, length)
 }
 
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn visitor_step_runner<T, const FAST_PATH: bool>(
+fn visitor_step_runner_legacy<T, const FAST_PATH: bool>(
     state: &mut <T as OpcodeVisitor>::State,
     code: &[u8],
     bitmask: &[u8],
@@ -317,46 +294,251 @@ where
     T: OpcodeVisitor<ReturnTy = ()>,
 {
     let (next_offset, (), is_next_instruction_invalid) = if FAST_PATH {
-        visitor_step_fast(state, code, bitmask, offset, opcode_visitor)
+        visitor_step_fast_legacy(state, code, bitmask, offset, opcode_visitor)
     } else {
-        visitor_step_slow(state, code, bitmask, offset, opcode_visitor)
+        visitor_step_slow_legacy(state, code, bitmask, offset, opcode_visitor)
     };
 
     offset = next_offset;
     if is_next_instruction_invalid {
-        visitor_step_invalid_instruction(state, offset, opcode_visitor);
-        if (offset as usize) < code.len() {
-            let next_offset = find_next_offset_unbounded(bitmask, code.len() as u32, offset);
+        // The invalid instruction covers everything up until the next real instruction.
+        let next_offset = if (offset as usize) < code.len() {
+            let next_offset = find_next_offset_legacy_unbounded(bitmask, code.len() as u32, offset);
             debug_assert!(next_offset > offset);
-            offset = next_offset;
-        }
+            next_offset
+        } else {
+            offset
+        };
+
+        visitor_step_invalid_instruction(state, offset, next_offset - offset, opcode_visitor);
+        offset = next_offset;
     }
 
     offset
 }
 
-// Having this be never inlined makes it easier to analyze the resulting assembly/machine code,
-// and it also seems to make the code mariginally faster for some reason.
-#[inline(never)]
+#[cfg_attr(not(debug_assertions), inline(always))]
 fn visitor_run<T>(state: &mut <T as OpcodeVisitor>::State, blob: &ProgramBlob, opcode_visitor: T)
 where
     T: OpcodeVisitor<ReturnTy = ()>,
 {
-    let code = blob.code();
-    let bitmask = blob.bitmask();
+    if opcode_visitor.instruction_set().is_legacy() {
+        visitor_run_legacy(state, blob.code(), blob.bitmask(), opcode_visitor)
+    } else {
+        visitor_run_extended(state, blob.code(), opcode_visitor)
+    }
+}
 
+// Having this be never inlined makes it easier to analyze the resulting assembly/machine code,
+// and it also seems to make the code mariginally faster for some reason.
+#[inline(never)]
+fn visitor_run_legacy<T>(state: &mut <T as OpcodeVisitor>::State, code: &[u8], bitmask: &[u8], opcode_visitor: T)
+where
+    T: OpcodeVisitor<ReturnTy = ()>,
+{
     let mut offset = 0;
     if !get_bit_for_offset(bitmask, code.len(), 0) {
-        visitor_step_invalid_instruction(state, 0, opcode_visitor);
-        offset = find_next_offset_unbounded(bitmask, code.len() as u32, 0);
+        offset = find_next_offset_legacy_unbounded(bitmask, code.len() as u32, 0);
+        visitor_step_invalid_instruction(state, 0, offset, opcode_visitor);
     }
 
-    while offset as usize + 32 <= code.len() {
-        offset = visitor_step_runner::<T, true>(state, code, bitmask, offset, opcode_visitor);
+    while cast(offset).to_usize() + 32 <= code.len() {
+        offset = visitor_step_runner_legacy::<T, true>(state, code, bitmask, offset, opcode_visitor);
     }
 
-    while (offset as usize) < code.len() {
-        offset = visitor_step_runner::<T, false>(state, code, bitmask, offset, opcode_visitor);
+    while cast(offset).to_usize() < code.len() {
+        offset = visitor_step_runner_legacy::<T, false>(state, code, bitmask, offset, opcode_visitor);
+    }
+}
+
+#[inline(never)]
+fn visitor_run_extended<T>(state: &mut <T as OpcodeVisitor>::State, code: &[u8], opcode_visitor: T)
+where
+    T: OpcodeVisitor<ReturnTy = ()>,
+{
+    let table = opcode_visitor.instruction_set().raw_opcode_table();
+    let mut offset: usize = 0;
+
+    if code.len() >= CODE_BLOCK_SIZE {
+        offset = visitor_run_extended_full_blocks::<T>(state, code, opcode_visitor, table);
+    }
+
+    if offset < code.len() {
+        offset = visitor_run_extended_last_block::<T>(state, code, opcode_visitor, table, offset);
+    }
+
+    debug_assert_eq!(offset, code.len());
+}
+
+#[must_use]
+#[inline(never)]
+fn visitor_run_extended_full_blocks<T>(
+    state: &mut <T as OpcodeVisitor>::State,
+    code: &[u8],
+    opcode_visitor: T,
+    table: &'static RawOpcodeTable,
+) -> usize
+where
+    T: OpcodeVisitor<ReturnTy = ()>,
+{
+    let loop_boundary = (code.len() / CODE_BLOCK_SIZE) * CODE_BLOCK_SIZE;
+    let mut offset = 0;
+    while offset < loop_boundary {
+        debug_assert!(is_on_a_block_boundary(offset));
+
+        let block_boundary = offset + CODE_BLOCK_SIZE;
+        while offset < block_boundary {
+            offset = visitor_step_extended::<T>(state, code, offset, block_boundary, opcode_visitor, table);
+        }
+
+        debug_assert_eq!(offset, block_boundary);
+    }
+
+    offset
+}
+
+#[must_use]
+#[inline(never)]
+fn visitor_run_extended_last_block<T>(
+    state: &mut <T as OpcodeVisitor>::State,
+    code: &[u8],
+    opcode_visitor: T,
+    table: &'static RawOpcodeTable,
+    mut offset: usize,
+) -> usize
+where
+    T: OpcodeVisitor<ReturnTy = ()>,
+{
+    debug_assert!(is_on_a_block_boundary(offset));
+    debug_assert!(code.len() - offset < CODE_BLOCK_SIZE);
+
+    let block_boundary = code.len();
+    let bulk_boundary = (code.len() / 16) * 16;
+    while offset < bulk_boundary {
+        // Fast path.
+        offset = visitor_step_extended::<T>(state, code, offset, block_boundary, opcode_visitor, table);
+    }
+
+    while offset < code.len() {
+        // Slow path.
+        offset = visitor_step_extended::<T>(state, code, offset, block_boundary, opcode_visitor, table);
+    }
+
+    offset
+}
+
+#[cfg_attr(not(debug_assertions), inline(always))]
+fn load_chunk(code: &[u8], offset: usize) -> u128 {
+    let chunk = code.get(offset..offset + 16);
+    if let Some(chunk) = chunk {
+        // NOTE: This should produce the same assembly as the unsafe `read_unaligned`.
+        u128::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7], chunk[8], chunk[9], chunk[10], chunk[11],
+            chunk[12], chunk[13], chunk[14], chunk[15],
+        ])
+    } else {
+        let code = &code[core::cmp::min(offset, code.len())..];
+        let mut t: [u8; 16] = [0; 16];
+        t[..code.len()].copy_from_slice(code);
+        u128::from_le_bytes([
+            t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9], t[10], t[11], t[12], t[13], t[14], t[15],
+        ])
+    }
+}
+
+#[cfg_attr(not(debug_assertions), inline(always))]
+fn extract_opcode(chunk: u32) -> u32 {
+    let raw_opcode = chunk & 0xffff;
+    let mut opcode = raw_opcode & 0xff;
+    if opcode == u32::from(EXTENDED_OPCODE_PREFIX) {
+        opcode += raw_opcode >> 8;
+    }
+
+    opcode
+}
+
+#[cfg_attr(not(debug_assertions), inline(always))]
+fn visitor_step_extended<T>(
+    state: &mut <T as OpcodeVisitor>::State,
+    code: &[u8],
+    offset: usize,
+    block_boundary: usize,
+    opcode_visitor: T,
+    table: &'static RawOpcodeTable,
+) -> usize
+where
+    T: OpcodeVisitor<ReturnTy = ()>,
+{
+    let ((), next_offset) = parse_raw_extended(code, offset, block_boundary, table, move |raw_opcode, chunk, offset, length| {
+        debug_assert!(offset + cast(length).to_usize() <= block_boundary);
+        opcode_visitor.dispatch(
+            state,
+            cast(raw_opcode).to_usize(),
+            chunk,
+            cast(offset).to_u32_or_debug_panic(),
+            length,
+        );
+    });
+
+    next_offset
+}
+
+#[cfg_attr(not(debug_assertions), inline(always))]
+fn parse_raw_extended<F, R>(code: &[u8], offset: usize, block_boundary: usize, table: &'static RawOpcodeTable, callback: F) -> (R, usize)
+where
+    F: FnOnce(u32, u128, usize, u32) -> R,
+{
+    debug_assert!(code.len() <= u32::MAX as usize);
+    debug_assert!(offset <= code.len());
+
+    let chunk: u128 = load_chunk(code, offset);
+    let mut raw_opcode = extract_opcode(chunk as u32);
+    let Some(length) = table.length_table.get(cast(raw_opcode).to_usize()) else {
+        unreachable!();
+    };
+
+    let mut length = length.get();
+    let mut next_offset = offset + cast(length).to_usize();
+    if next_offset >= block_boundary {
+        // The last instruction of a macro block has to fit in it and has to end a basic block, otherwise it becomes a trap.
+        if next_offset > block_boundary || !table.ends_basic_block(cast(raw_opcode).to_usize()) {
+            raw_opcode = cast(EXTENDED_INVALID_RAW_OPCODE).to_u32_or_debug_panic();
+        }
+
+        length = cast(block_boundary - offset).to_u32_or_debug_panic();
+        next_offset = block_boundary;
+    }
+
+    let result = callback(raw_opcode, chunk, offset, length);
+    debug_assert!(next_offset > offset);
+    (result, next_offset)
+}
+
+#[derive(Copy, Clone, Debug)]
+struct ExtendedStep {
+    raw_opcode: usize,
+    next_offset: usize,
+    #[allow(dead_code)]
+    length: u32,
+}
+
+#[cfg_attr(not(debug_assertions), inline(always))]
+fn parse_simple_extended<I>(instruction_set: I, code: &[u8], offset: usize) -> ExtendedStep
+where
+    I: InstructionSet,
+{
+    let ((raw_opcode, length), next_offset) = parse_raw_extended(
+        code,
+        offset,
+        end_of_macro_block(offset, code.len()),
+        instruction_set.raw_opcode_table(),
+        |raw_opcode, _, _, length| (raw_opcode, length),
+    );
+
+    ExtendedStep {
+        raw_opcode: cast(raw_opcode).to_usize(),
+        next_offset,
+        length,
     }
 }
 
@@ -476,24 +658,83 @@ pub fn interpreter_calculate_cache_num_entries(bytes: usize) -> usize {
     bytes / INTERPRETER_CACHE_ENTRY_SIZE as usize
 }
 
-static TABLE_1: LookupTable = LookupTable::build(1);
 static TABLE_2: LookupTable = LookupTable::build(2);
+static TABLE_3: LookupTable = LookupTable::build(3);
+static TABLE_4: LookupTable = LookupTable::build(4);
 
 #[inline(always)]
-pub fn read_args_imm(chunk: u128, skip: u32) -> i32 {
-    cast(read_simple_varint(chunk as u32, skip)).bitwise_as_i32()
+fn fixup_length<const EXT: bool>(length: u32) -> u32 {
+    if EXT {
+        length - 2
+    } else {
+        length - 1
+    }
 }
 
 #[inline(always)]
-pub fn read_args_offset(chunk: u128, instruction_offset: u32, skip: u32) -> u32 {
-    instruction_offset.wrapping_add(cast(read_args_imm(chunk, skip)).bitwise_as_u32())
+const fn fixup_shift<const EXT: bool>() -> u32 {
+    if EXT {
+        16
+    } else {
+        8
+    }
 }
 
 #[inline(always)]
-pub fn read_args_imm2(chunk: u128, skip: u32) -> (i32, i32) {
-    let (imm1_bits, imm1_skip, imm2_bits) = TABLE_1.get(skip, chunk as u32);
-    let chunk = chunk >> 8;
-    let chunk = chunk as u64;
+fn chunk_into_u64<const EXT: bool, const EXTRA_SHIFT: u32>(chunk: u128) -> u64 {
+    let shift = const { fixup_shift::<EXT>() + EXTRA_SHIFT };
+    (chunk >> shift) as u64
+}
+
+#[inline(always)]
+fn chunk_into_u32<const EXT: bool, const EXTRA_SHIFT: u32>(chunk: u128) -> u32 {
+    let shift = const {
+        let shift = fixup_shift::<EXT>() + EXTRA_SHIFT;
+        assert!(shift <= 32);
+        shift
+    };
+    ((chunk as u64) >> shift) as u32
+}
+
+#[inline(always)]
+fn fixup_chunk64<const EXT: bool>(chunk: u128) -> u64 {
+    (chunk as u64) >> fixup_shift::<EXT>()
+}
+
+#[inline(always)]
+const fn fixup_table_1<const EXT: bool>() -> &'static LookupTable {
+    if EXT {
+        &TABLE_3
+    } else {
+        &TABLE_2
+    }
+}
+
+#[inline(always)]
+const fn fixup_table_2<const EXT: bool>() -> &'static LookupTable {
+    if EXT {
+        &TABLE_4
+    } else {
+        &TABLE_3
+    }
+}
+
+#[inline(always)]
+pub fn read_args_imm<const EXT: bool>(chunk: u128, length: u32) -> i32 {
+    let length = fixup_length::<EXT>(length);
+    let chunk = chunk_into_u32::<EXT, 0>(chunk);
+    cast(read_simple_varint(chunk, length)).bitwise_as_i32()
+}
+
+#[inline(always)]
+pub fn read_args_offset<const EXT: bool>(chunk: u128, instruction_offset: u32, length: u32) -> u32 {
+    instruction_offset.wrapping_add(cast(read_args_imm::<EXT>(chunk, length)).bitwise_as_u32())
+}
+
+#[inline(always)]
+pub fn read_args_imm2<const EXT: bool>(chunk: u128, length: u32) -> (i32, i32) {
+    let (imm1_bits, imm1_skip, imm2_bits) = fixup_table_1::<EXT>().get(length, chunk_into_u32::<EXT, 0>(chunk));
+    let chunk = chunk_into_u64::<EXT, 8>(chunk);
     let imm1 = sign_extend_at(chunk as u32, imm1_bits);
     let chunk = chunk >> imm1_skip;
     let imm2 = sign_extend_at(chunk as u32, imm2_bits);
@@ -501,21 +742,20 @@ pub fn read_args_imm2(chunk: u128, skip: u32) -> (i32, i32) {
 }
 
 #[inline(always)]
-pub fn read_args_reg_imm(chunk: u128, skip: u32) -> (RawReg, i32) {
-    let chunk = chunk as u64;
+pub fn read_args_reg_imm<const EXT: bool>(chunk: u128, length: u32) -> (RawReg, i32) {
+    let chunk = fixup_chunk64::<EXT>(chunk);
     let reg = RawReg(chunk as u32);
     let chunk = chunk >> 8;
-    let (_, _, imm_bits) = TABLE_1.get(skip, 0);
+    let (_, _, imm_bits) = fixup_table_1::<EXT>().get(length, 0);
     let imm = sign_extend_at(chunk as u32, imm_bits);
     (reg, cast(imm).bitwise_as_i32())
 }
 
 #[inline(always)]
-pub fn read_args_reg_imm2(chunk: u128, skip: u32) -> (RawReg, i32, i32) {
-    let reg = RawReg(chunk as u32);
-    let (imm1_bits, imm1_skip, imm2_bits) = TABLE_1.get(skip, chunk as u32 >> 4);
-    let chunk = chunk >> 8;
-    let chunk = chunk as u64;
+pub fn read_args_reg_imm2<const EXT: bool>(chunk: u128, length: u32) -> (RawReg, i32, i32) {
+    let reg = RawReg(chunk_into_u32::<EXT, 0>(chunk));
+    let (imm1_bits, imm1_skip, imm2_bits) = fixup_table_1::<EXT>().get(length, chunk_into_u32::<EXT, 4>(chunk));
+    let chunk = chunk_into_u64::<EXT, 8>(chunk);
     let imm1 = sign_extend_at(chunk as u32, imm1_bits);
     let chunk = chunk >> imm1_skip;
     let imm2 = sign_extend_at(chunk as u32, imm2_bits);
@@ -523,22 +763,21 @@ pub fn read_args_reg_imm2(chunk: u128, skip: u32) -> (RawReg, i32, i32) {
 }
 
 #[inline(always)]
-pub fn read_args_reg_imm_offset(chunk: u128, instruction_offset: u32, skip: u32) -> (RawReg, i32, u32) {
-    let (reg, imm1, imm2) = read_args_reg_imm2(chunk, skip);
+pub fn read_args_reg_imm_offset<const EXT: bool>(chunk: u128, instruction_offset: u32, length: u32) -> (RawReg, i32, u32) {
+    let (reg, imm1, imm2) = read_args_reg_imm2::<EXT>(chunk, length);
     let imm2 = instruction_offset.wrapping_add(cast(imm2).bitwise_as_u32());
     (reg, imm1, imm2)
 }
 
 #[inline(always)]
-pub fn read_args_regs2_imm2(chunk: u128, skip: u32) -> (RawReg, RawReg, i32, i32) {
+pub fn read_args_regs2_imm2<const EXT: bool>(chunk: u128, length: u32) -> (RawReg, RawReg, i32, i32) {
     let (reg1, reg2, imm1_aux) = {
-        let value = chunk as u32;
+        let value = chunk_into_u32::<EXT, 0>(chunk);
         (RawReg(value), RawReg(value >> 4), value >> 8)
     };
 
-    let (imm1_bits, imm1_skip, imm2_bits) = TABLE_2.get(skip, imm1_aux);
-    let chunk = chunk >> 16;
-    let chunk = chunk as u64;
+    let (imm1_bits, imm1_skip, imm2_bits) = fixup_table_2::<EXT>().get(length, imm1_aux);
+    let chunk = chunk_into_u64::<EXT, 16>(chunk);
     let imm1 = sign_extend_at(chunk as u32, imm1_bits);
     let chunk = chunk >> imm1_skip;
     let imm2 = sign_extend_at(chunk as u32, imm2_bits);
@@ -546,42 +785,42 @@ pub fn read_args_regs2_imm2(chunk: u128, skip: u32) -> (RawReg, RawReg, i32, i32
 }
 
 #[inline(always)]
-pub fn read_args_reg_imm64(chunk: u128, _skip: u32) -> (RawReg, u64) {
-    let reg = RawReg(chunk as u32);
-    let imm = (chunk >> 8) as u64;
+pub fn read_args_reg_imm64<const EXT: bool>(chunk: u128) -> (RawReg, u64) {
+    let reg = RawReg(chunk_into_u32::<EXT, 0>(chunk));
+    let imm = chunk_into_u64::<EXT, 8>(chunk);
     (reg, imm)
 }
 
 #[inline(always)]
-pub fn read_args_regs2_imm(chunk: u128, skip: u32) -> (RawReg, RawReg, i32) {
-    let chunk = chunk as u64;
+pub fn read_args_regs2_imm<const EXT: bool>(chunk: u128, length: u32) -> (RawReg, RawReg, i32) {
+    let chunk = fixup_chunk64::<EXT>(chunk);
     let (reg1, reg2) = {
         let value = chunk as u32;
         (RawReg(value), RawReg(value >> 4))
     };
     let chunk = chunk >> 8;
-    let (_, _, imm_bits) = TABLE_1.get(skip, 0);
+    let (_, _, imm_bits) = fixup_table_1::<EXT>().get(length, 0);
     let imm = sign_extend_at(chunk as u32, imm_bits);
     (reg1, reg2, cast(imm).bitwise_as_i32())
 }
 
 #[inline(always)]
-pub fn read_args_regs2_offset(chunk: u128, instruction_offset: u32, skip: u32) -> (RawReg, RawReg, u32) {
-    let (reg1, reg2, imm) = read_args_regs2_imm(chunk, skip);
+pub fn read_args_regs2_offset<const EXT: bool>(chunk: u128, instruction_offset: u32, length: u32) -> (RawReg, RawReg, u32) {
+    let (reg1, reg2, imm) = read_args_regs2_imm::<EXT>(chunk, length);
     let imm = instruction_offset.wrapping_add(cast(imm).bitwise_as_u32());
     (reg1, reg2, imm)
 }
 
 #[inline(always)]
-pub fn read_args_regs3(chunk: u128) -> (RawReg, RawReg, RawReg) {
-    let chunk = chunk as u32;
+pub fn read_args_regs3<const EXT: bool>(chunk: u128) -> (RawReg, RawReg, RawReg) {
+    let chunk = chunk_into_u32::<EXT, 0>(chunk);
     let (reg2, reg3, reg1) = (RawReg(chunk), RawReg(chunk >> 4), RawReg(chunk >> 8));
     (reg1, reg2, reg3)
 }
 
 #[inline(always)]
-pub fn read_args_regs2(chunk: u128) -> (RawReg, RawReg) {
-    let chunk = chunk as u32;
+pub fn read_args_regs2<const EXT: bool>(chunk: u128) -> (RawReg, RawReg) {
+    let chunk = chunk_into_u32::<EXT, 0>(chunk);
     let (reg1, reg2) = (RawReg(chunk), RawReg(chunk >> 4));
     (reg1, reg2)
 }
@@ -637,31 +876,51 @@ mod kani {
     }
 
     macro_rules! args {
-        () => {{
+        ($opcode_bytes:expr) => {{
             let code: [u8; 16] = kani::any();
             let chunk = u128::from_le_bytes(code);
-            let skip: u32 = kani::any_where(|x| *x <= super::BITMASK_MAX);
+            let length: u32 = kani::any_where(|x| *x >= $opcode_bytes && *x - $opcode_bytes <= super::BITMASK_MAX);
 
-            (code, chunk, skip)
+            (code, chunk, length)
+        }};
+    }
+
+    macro_rules! for_both_ext {
+        (|$code:ident, $chunk:ident, $length:ident, $args:ident, $read_args:ident| $body:expr) => {{
+            {
+                let (code, $chunk, $length) = args!(1);
+                let $code = &code[1..];
+                let $args = $length - 1;
+                let $read_args = super::$read_args::<false>;
+                $body
+            }
+            {
+                let (code, $chunk, $length) = args!(2);
+                let $code = &code[2..];
+                let $args = $length - 2;
+                let $read_args = super::$read_args::<true>;
+                $body
+            }
         }};
     }
 
     #[kani::proof]
     fn verify_read_args_imm() {
-        fn simple_read_args_imm(code: &[u8], skip: u32) -> i32 {
-            let imm_length = min(4, skip);
+        fn simple_read_args_imm(code: &[u8], args_length: u32) -> i32 {
+            let imm_length = min(4, args_length);
             cast(sext(read(code, 0, imm_length), imm_length)).bitwise_as_i32()
         }
 
-        let (code, chunk, skip) = args!();
-        assert_eq!(super::read_args_imm(chunk, skip), simple_read_args_imm(&code, skip));
+        for_both_ext!(|code, chunk, length, args_length, read_args_imm| {
+            assert_eq!(read_args_imm(chunk, length), simple_read_args_imm(code, args_length));
+        });
     }
 
     #[kani::proof]
     fn verify_read_args_imm2() {
-        fn simple_read_args_imm2(code: &[u8], skip: i32) -> (i32, i32) {
+        fn simple_read_args_imm2(code: &[u8], args_length: i32) -> (i32, i32) {
             let imm1_length = min(4, i32::from(code[0]) & 0b111);
-            let imm2_length = clamp(0..=4, skip - imm1_length - 1);
+            let imm2_length = clamp(0..=4, args_length - imm1_length - 1);
             let imm1 = sext(read(code, 1, imm1_length), imm1_length);
             let imm2 = sext(read(code, 1 + imm1_length, imm2_length), imm2_length);
             let imm1 = cast(imm1).bitwise_as_i32();
@@ -669,32 +928,34 @@ mod kani {
             (imm1, imm2)
         }
 
-        let (code, chunk, skip) = args!();
-        assert_eq!(super::read_args_imm2(chunk, skip), simple_read_args_imm2(&code, skip as i32));
+        for_both_ext!(|code, chunk, length, args_length, read_args_imm2| {
+            assert_eq!(read_args_imm2(chunk, length), simple_read_args_imm2(code, args_length as i32));
+        });
     }
 
     #[kani::proof]
     fn verify_read_args_reg_imm() {
-        fn simple_read_args_reg_imm(code: &[u8], skip: i32) -> (u8, i32) {
+        fn simple_read_args_reg_imm(code: &[u8], args_length: i32) -> (u8, i32) {
             let reg = min(12, code[0] & 0b1111);
-            let imm_length = clamp(0..=4, skip - 1);
+            let imm_length = clamp(0..=4, args_length - 1);
             let imm = sext(read(code, 1, imm_length), imm_length);
             let imm = cast(imm).bitwise_as_i32();
             (reg, imm)
         }
 
-        let (code, chunk, skip) = args!();
-        let (reg, imm) = super::read_args_reg_imm(chunk, skip);
-        let reg = reg.get() as u8;
-        assert_eq!((reg, imm), simple_read_args_reg_imm(&code, skip as i32));
+        for_both_ext!(|code, chunk, length, args_length, read_args_reg_imm| {
+            let (reg, imm) = read_args_reg_imm(chunk, length);
+            let reg = reg.get() as u8;
+            assert_eq!((reg, imm), simple_read_args_reg_imm(code, args_length as i32));
+        });
     }
 
     #[kani::proof]
     fn verify_read_args_reg_imm2() {
-        fn simple_read_args_reg_imm2(code: &[u8], skip: i32) -> (u8, i32, i32) {
+        fn simple_read_args_reg_imm2(code: &[u8], args_length: i32) -> (u8, i32, i32) {
             let reg = min(12, code[0] & 0b1111);
             let imm1_length = min(4, i32::from(code[0] >> 4) & 0b111);
-            let imm2_length = clamp(0..=4, skip - imm1_length - 1);
+            let imm2_length = clamp(0..=4, args_length - imm1_length - 1);
             let imm1 = sext(read(code, 1, imm1_length), imm1_length);
             let imm2 = sext(read(code, 1 + imm1_length, imm2_length), imm2_length);
             let imm1 = cast(imm1).bitwise_as_i32();
@@ -702,19 +963,20 @@ mod kani {
             (reg, imm1, imm2)
         }
 
-        let (code, chunk, skip) = args!();
-        let (reg, imm1, imm2) = super::read_args_reg_imm2(chunk, skip);
-        let reg = reg.get() as u8;
-        assert_eq!((reg, imm1, imm2), simple_read_args_reg_imm2(&code, skip as i32));
+        for_both_ext!(|code, chunk, length, args_length, read_args_reg_imm2| {
+            let (reg, imm1, imm2) = read_args_reg_imm2(chunk, length);
+            let reg = reg.get() as u8;
+            assert_eq!((reg, imm1, imm2), simple_read_args_reg_imm2(code, args_length as i32));
+        });
     }
 
     #[kani::proof]
     fn verify_read_args_regs2_imm2() {
-        fn simple_read_args_regs2_imm2(code: &[u8], skip: i32) -> (u8, u8, i32, i32) {
+        fn simple_read_args_regs2_imm2(code: &[u8], args_length: i32) -> (u8, u8, i32, i32) {
             let reg1 = min(12, code[0] & 0b1111);
             let reg2 = min(12, code[0] >> 4);
             let imm1_length = min(4, i32::from(code[1]) & 0b111);
-            let imm2_length = clamp(0..=4, skip - imm1_length - 2);
+            let imm2_length = clamp(0..=4, args_length - imm1_length - 2);
             let imm1 = sext(read(code, 2, imm1_length), imm1_length);
             let imm2 = sext(read(code, 2 + imm1_length, imm2_length), imm2_length);
             let imm1 = cast(imm1).bitwise_as_i32();
@@ -722,29 +984,31 @@ mod kani {
             (reg1, reg2, imm1, imm2)
         }
 
-        let (code, chunk, skip) = args!();
-        let (reg1, reg2, imm1, imm2) = super::read_args_regs2_imm2(chunk, skip);
-        let reg1 = reg1.get() as u8;
-        let reg2 = reg2.get() as u8;
-        assert_eq!((reg1, reg2, imm1, imm2), simple_read_args_regs2_imm2(&code, skip as i32))
+        for_both_ext!(|code, chunk, length, args_length, read_args_regs2_imm2| {
+            let (reg1, reg2, imm1, imm2) = read_args_regs2_imm2(chunk, length);
+            let reg1 = reg1.get() as u8;
+            let reg2 = reg2.get() as u8;
+            assert_eq!((reg1, reg2, imm1, imm2), simple_read_args_regs2_imm2(code, args_length as i32));
+        });
     }
 
     #[kani::proof]
     fn verify_read_args_regs2_imm() {
-        fn simple_read_args_regs2_imm(code: &[u8], skip: u32) -> (u8, u8, i32) {
+        fn simple_read_args_regs2_imm(code: &[u8], args_length: u32) -> (u8, u8, i32) {
             let reg1 = min(12, code[0] & 0b1111);
             let reg2 = min(12, code[0] >> 4);
-            let imm_length = clamp(0..=4, skip as i32 - 1);
+            let imm_length = clamp(0..=4, args_length as i32 - 1);
             let imm = sext(read(code, 1, imm_length), imm_length);
             let imm = cast(imm).bitwise_as_i32();
             (reg1, reg2, imm)
         }
 
-        let (code, chunk, skip) = args!();
-        let (reg1, reg2, imm) = super::read_args_regs2_imm(chunk, skip);
-        let reg1 = reg1.get() as u8;
-        let reg2 = reg2.get() as u8;
-        assert_eq!((reg1, reg2, imm), simple_read_args_regs2_imm(&code, skip));
+        for_both_ext!(|code, chunk, length, args_length, read_args_regs2_imm| {
+            let (reg1, reg2, imm) = read_args_regs2_imm(chunk, length);
+            let reg1 = reg1.get() as u8;
+            let reg2 = reg2.get() as u8;
+            assert_eq!((reg1, reg2, imm), simple_read_args_regs2_imm(code, args_length));
+        });
     }
 
     #[kani::proof]
@@ -756,12 +1020,22 @@ mod kani {
             (reg1, reg2, reg3)
         }
 
-        let (code, chunk, _) = args!();
-        let (reg1, reg2, reg3) = super::read_args_regs3(chunk);
-        let reg1 = reg1.get() as u8;
-        let reg2 = reg2.get() as u8;
-        let reg3 = reg3.get() as u8;
-        assert_eq!((reg1, reg2, reg3), simple_read_args_regs3(&code));
+        {
+            let (code, chunk, _) = args!(1);
+            let (reg1, reg2, reg3) = super::read_args_regs3::<false>(chunk);
+            assert_eq!(
+                (reg1.get() as u8, reg2.get() as u8, reg3.get() as u8),
+                simple_read_args_regs3(&code[1..])
+            );
+        }
+        {
+            let (code, chunk, _) = args!(2);
+            let (reg1, reg2, reg3) = super::read_args_regs3::<true>(chunk);
+            assert_eq!(
+                (reg1.get() as u8, reg2.get() as u8, reg3.get() as u8),
+                simple_read_args_regs3(&code[2..])
+            );
+        }
     }
 
     #[kani::proof]
@@ -772,11 +1046,16 @@ mod kani {
             (reg1, reg2)
         }
 
-        let (code, chunk, _) = args!();
-        let (reg1, reg2) = super::read_args_regs2(chunk);
-        let reg1 = reg1.get() as u8;
-        let reg2 = reg2.get() as u8;
-        assert_eq!((reg1, reg2), simple_read_args_regs2(&code));
+        {
+            let (code, chunk, _) = args!(1);
+            let (reg1, reg2) = super::read_args_regs2::<false>(chunk);
+            assert_eq!((reg1.get() as u8, reg2.get() as u8), simple_read_args_regs2(&code[1..]));
+        }
+        {
+            let (code, chunk, _) = args!(2);
+            let (reg1, reg2) = super::read_args_regs2::<true>(chunk);
+            assert_eq!((reg1.get() as u8, reg2.get() as u8), simple_read_args_regs2(&code[2..]));
+        }
     }
 
     #[kani::proof]
@@ -791,6 +1070,47 @@ mod kani {
         assert!(calculated_bytes <= x);
         assert!(x - calculated_bytes <= super::interpreter_calculate_cache_size(1));
     }
+
+    #[kani::proof]
+    fn verify_extended_parse_simple() {
+        let isa = super::ISA_Latest64;
+        let mut code = [0_u8; super::CODE_BLOCK_SIZE + 6];
+        let offset: usize = kani::any_where(|x| *x < super::CODE_BLOCK_SIZE + 6);
+        code[offset] = kani::any();
+        if offset + 1 < code.len() {
+            code[offset + 1] = kani::any();
+        }
+
+        let block_end = super::end_of_macro_block(offset, code.len());
+        let step = super::parse_simple_extended(isa, &code, offset);
+        assert!(step.next_offset > offset);
+        assert!(step.next_offset <= block_end);
+        assert!(offset + step.length as usize == step.next_offset);
+
+        if step.raw_opcode != super::EXTENDED_INVALID_RAW_OPCODE {
+            let length = super::InstructionSet::raw_opcode_table(isa).length_table[step.raw_opcode].get();
+            assert!(step.next_offset == min(offset + length as usize, block_end));
+
+            // The last instruction of a macro block always ends a basic block.
+            assert!(step.next_offset < block_end || super::ends_basic_block_extended(isa, step.raw_opcode));
+        }
+    }
+
+    #[kani::proof]
+    fn verify_extended_parse_instruction() {
+        let isa = super::ISA_Latest64;
+        let raw_opcode: usize = kani::any_where(|x| *x <= super::EXTENDED_INVALID_RAW_OPCODE);
+        let chunk: u128 = kani::any();
+        let offset: u32 = kani::any();
+        let length = if raw_opcode == super::EXTENDED_INVALID_RAW_OPCODE {
+            // A truncated instruction is decoded as `invalid` with the length it covers.
+            kani::any()
+        } else {
+            super::InstructionSet::raw_opcode_table(isa).length_table[raw_opcode].get()
+        };
+
+        let _ = super::InstructionSet::parse_instruction(isa, raw_opcode, chunk, offset, length);
+    }
 }
 
 /// The lowest level visitor; dispatches directly on opcode numbers.
@@ -800,7 +1120,7 @@ pub trait OpcodeVisitor: Copy {
     type InstructionSet: InstructionSet;
 
     fn instruction_set(self) -> Self::InstructionSet;
-    fn dispatch(self, state: &mut Self::State, opcode: usize, chunk: u128, offset: u32, skip: u32) -> Self::ReturnTy;
+    fn dispatch(self, state: &mut Self::State, opcode: usize, chunk: u128, offset: u32, length: u32) -> Self::ReturnTy;
 }
 
 macro_rules! define_all_instructions {
@@ -907,21 +1227,21 @@ macro_rules! define_all_instructions {
                 impl ParsingVisitor for $visitor_ty {
                     type ReturnTy = <$visitor_ty as $crate::program::InstructionVisitor>::ReturnTy;
 
-                    $(fn $name_argless(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_argless(self) })+
-                    $(fn $name_reg_imm(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm(self, reg, imm) })+
-                    $(fn $name_reg_imm_offset(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm1: i32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm_offset(self, reg, imm1, imm2) })+
-                    $(fn $name_reg_imm_imm(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm1: i32, imm2: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm_imm(self, reg, imm1, imm2) })+
-                    $(fn $name_reg_reg_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm(self, reg1, reg2, imm) })+
-                    $(fn $name_reg_reg_offset(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_offset(self, reg1, reg2, imm) })+
-                    $(fn $name_reg_reg_reg(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_reg(self, reg1, reg2, reg3) })+
-                    $(fn $name_offset(&mut self, _offset: u32, _args_length: u32, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_offset(self, imm) })+
-                    $(fn $name_imm(&mut self, _offset: u32, _args_length: u32, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm(self, imm) })+
-                    $(fn $name_imm_imm(&mut self, _offset: u32, _args_length: u32, imm1: i32, imm2: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm_imm(self, imm1, imm2) })+
-                    $(fn $name_reg_reg(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg(self, reg1, reg2) })+
-                    $(fn $name_reg_reg_imm_imm(&mut self, _offset: u32, _args_length: u32, reg1: RawReg, reg2: RawReg, imm1: i32, imm2: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm_imm(self, reg1, reg2, imm1, imm2) })+
-                    $(fn $name_reg_imm64(&mut self, _offset: u32, _args_length: u32, reg: RawReg, imm: u64) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm64(self, reg, imm) })+
+                    $(fn $name_argless(&mut self, _offset: u32, _length: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_argless(self) })+
+                    $(fn $name_reg_imm(&mut self, _offset: u32, _length: u32, reg: RawReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm(self, reg, imm) })+
+                    $(fn $name_reg_imm_offset(&mut self, _offset: u32, _length: u32, reg: RawReg, imm1: i32, imm2: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm_offset(self, reg, imm1, imm2) })+
+                    $(fn $name_reg_imm_imm(&mut self, _offset: u32, _length: u32, reg: RawReg, imm1: i32, imm2: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm_imm(self, reg, imm1, imm2) })+
+                    $(fn $name_reg_reg_imm(&mut self, _offset: u32, _length: u32, reg1: RawReg, reg2: RawReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm(self, reg1, reg2, imm) })+
+                    $(fn $name_reg_reg_offset(&mut self, _offset: u32, _length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_offset(self, reg1, reg2, imm) })+
+                    $(fn $name_reg_reg_reg(&mut self, _offset: u32, _length: u32, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_reg(self, reg1, reg2, reg3) })+
+                    $(fn $name_offset(&mut self, _offset: u32, _length: u32, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_offset(self, imm) })+
+                    $(fn $name_imm(&mut self, _offset: u32, _length: u32, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm(self, imm) })+
+                    $(fn $name_imm_imm(&mut self, _offset: u32, _length: u32, imm1: i32, imm2: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm_imm(self, imm1, imm2) })+
+                    $(fn $name_reg_reg(&mut self, _offset: u32, _length: u32, reg1: RawReg, reg2: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg(self, reg1, reg2) })+
+                    $(fn $name_reg_reg_imm_imm(&mut self, _offset: u32, _length: u32, reg1: RawReg, reg2: RawReg, imm1: i32, imm2: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm_imm(self, reg1, reg2, imm1, imm2) })+
+                    $(fn $name_reg_imm64(&mut self, _offset: u32, _length: u32, reg: RawReg, imm: u64) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_imm64(self, reg, imm) })+
 
-                    fn invalid(&mut self, _offset: u32, _args_length: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::invalid(self) }
+                    fn invalid(&mut self, _offset: u32, _length: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::invalid(self) }
                 }
             };
         }
@@ -929,21 +1249,21 @@ macro_rules! define_all_instructions {
         pub trait ParsingVisitor {
             type ReturnTy;
 
-            $(fn $name_argless(&mut self, offset: u32, args_length: u32) -> Self::ReturnTy;)+
-            $(fn $name_reg_imm(&mut self, offset: u32, args_length: u32, reg: RawReg, imm: i32) -> Self::ReturnTy;)+
-            $(fn $name_reg_imm_offset(&mut self, offset: u32, args_length: u32, reg: RawReg, imm1: i32, imm2: u32) -> Self::ReturnTy;)+
-            $(fn $name_reg_imm_imm(&mut self, offset: u32, args_length: u32, reg: RawReg, imm1: i32, imm2: i32) -> Self::ReturnTy;)+
-            $(fn $name_reg_reg_imm(&mut self, offset: u32, args_length: u32, reg1: RawReg, reg2: RawReg, imm: i32) -> Self::ReturnTy;)+
-            $(fn $name_reg_reg_offset(&mut self, offset: u32, args_length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy;)+
-            $(fn $name_reg_reg_reg(&mut self, offset: u32, args_length: u32, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> Self::ReturnTy;)+
-            $(fn $name_offset(&mut self, offset: u32, args_length: u32, imm: u32) -> Self::ReturnTy;)+
-            $(fn $name_imm(&mut self, offset: u32, args_length: u32, imm: i32) -> Self::ReturnTy;)+
-            $(fn $name_imm_imm(&mut self, offset: u32, args_length: u32, imm1: i32, imm2: i32) -> Self::ReturnTy;)+
-            $(fn $name_reg_reg(&mut self, offset: u32, args_length: u32, reg1: RawReg, reg2: RawReg) -> Self::ReturnTy;)+
-            $(fn $name_reg_reg_imm_imm(&mut self, offset: u32, args_length: u32, reg1: RawReg, reg2: RawReg, imm1: i32, imm2: i32) -> Self::ReturnTy;)+
-            $(fn $name_reg_imm64(&mut self, offset: u32, args_length: u32, reg: RawReg, imm: u64) -> Self::ReturnTy;)+
+            $(fn $name_argless(&mut self, offset: u32, length: u32) -> Self::ReturnTy;)+
+            $(fn $name_reg_imm(&mut self, offset: u32, length: u32, reg: RawReg, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_reg_imm_offset(&mut self, offset: u32, length: u32, reg: RawReg, imm1: i32, imm2: u32) -> Self::ReturnTy;)+
+            $(fn $name_reg_imm_imm(&mut self, offset: u32, length: u32, reg: RawReg, imm1: i32, imm2: i32) -> Self::ReturnTy;)+
+            $(fn $name_reg_reg_imm(&mut self, offset: u32, length: u32, reg1: RawReg, reg2: RawReg, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_reg_reg_offset(&mut self, offset: u32, length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy;)+
+            $(fn $name_reg_reg_reg(&mut self, offset: u32, length: u32, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> Self::ReturnTy;)+
+            $(fn $name_offset(&mut self, offset: u32, length: u32, imm: u32) -> Self::ReturnTy;)+
+            $(fn $name_imm(&mut self, offset: u32, length: u32, imm: i32) -> Self::ReturnTy;)+
+            $(fn $name_imm_imm(&mut self, offset: u32, length: u32, imm1: i32, imm2: i32) -> Self::ReturnTy;)+
+            $(fn $name_reg_reg(&mut self, offset: u32, length: u32, reg1: RawReg, reg2: RawReg) -> Self::ReturnTy;)+
+            $(fn $name_reg_reg_imm_imm(&mut self, offset: u32, length: u32, reg1: RawReg, reg2: RawReg, imm1: i32, imm2: i32) -> Self::ReturnTy;)+
+            $(fn $name_reg_imm64(&mut self, offset: u32, length: u32, reg: RawReg, imm: u64) -> Self::ReturnTy;)+
 
-            fn invalid(&mut self, offset: u32, args_length: u32) -> Self::ReturnTy;
+            fn invalid(&mut self, offset: u32, length: u32) -> Self::ReturnTy;
         }
 
         pub trait InstructionVisitor {
@@ -984,7 +1304,7 @@ macro_rules! define_all_instructions {
             $($name_reg_reg(RawReg, RawReg),)+
             $($name_reg_reg_imm_imm(RawReg, RawReg, i32, i32),)+
             $($name_reg_imm64(RawReg, u64),)+
-            invalid = INVALID_INSTRUCTION_INDEX as u32,
+            invalid = LEGACY_INVALID_RAW_OPCODE as u32,
         }
 
         impl Instruction {
@@ -1007,42 +1327,41 @@ macro_rules! define_all_instructions {
                 }
             }
 
-            pub fn visit_parsing<T>(self, offset: u32, args_length: u32, visitor: &mut T) -> T::ReturnTy where T: ParsingVisitor {
+            pub fn visit_parsing<T>(self, offset: u32, length: u32, visitor: &mut T) -> T::ReturnTy where T: ParsingVisitor {
                 match self {
-                    $(Self::$name_argless => visitor.$name_argless(offset, args_length),)+
-                    $(Self::$name_reg_imm(reg, imm) => visitor.$name_reg_imm(offset, args_length, reg, imm),)+
-                    $(Self::$name_reg_imm_offset(reg, imm1, imm2) => visitor.$name_reg_imm_offset(offset, args_length, reg, imm1, imm2),)+
-                    $(Self::$name_reg_imm_imm(reg, imm1, imm2) => visitor.$name_reg_imm_imm(offset, args_length, reg, imm1, imm2),)+
-                    $(Self::$name_reg_reg_imm(reg1, reg2, imm) => visitor.$name_reg_reg_imm(offset, args_length, reg1, reg2, imm),)+
-                    $(Self::$name_reg_reg_offset(reg1, reg2, imm) => visitor.$name_reg_reg_offset(offset, args_length, reg1, reg2, imm),)+
-                    $(Self::$name_reg_reg_reg(reg1, reg2, reg3) => visitor.$name_reg_reg_reg(offset, args_length, reg1, reg2, reg3),)+
-                    $(Self::$name_offset(imm) => visitor.$name_offset(offset, args_length, imm),)+
-                    $(Self::$name_imm(imm) => visitor.$name_imm(offset, args_length, imm),)+
-                    $(Self::$name_imm_imm(imm1, imm2) => visitor.$name_imm_imm(offset, args_length, imm1, imm2),)+
-                    $(Self::$name_reg_reg(reg1, reg2) => visitor.$name_reg_reg(offset, args_length, reg1, reg2),)+
-                    $(Self::$name_reg_reg_imm_imm(reg1, reg2, imm1, imm2) => visitor.$name_reg_reg_imm_imm(offset, args_length, reg1, reg2, imm1, imm2),)+
-                    $(Self::$name_reg_imm64(reg, imm) => visitor.$name_reg_imm64(offset, args_length, reg, imm),)+
-                    Self::invalid => visitor.invalid(offset, args_length),
+                    $(Self::$name_argless => visitor.$name_argless(offset, length),)+
+                    $(Self::$name_reg_imm(reg, imm) => visitor.$name_reg_imm(offset, length, reg, imm),)+
+                    $(Self::$name_reg_imm_offset(reg, imm1, imm2) => visitor.$name_reg_imm_offset(offset, length, reg, imm1, imm2),)+
+                    $(Self::$name_reg_imm_imm(reg, imm1, imm2) => visitor.$name_reg_imm_imm(offset, length, reg, imm1, imm2),)+
+                    $(Self::$name_reg_reg_imm(reg1, reg2, imm) => visitor.$name_reg_reg_imm(offset, length, reg1, reg2, imm),)+
+                    $(Self::$name_reg_reg_offset(reg1, reg2, imm) => visitor.$name_reg_reg_offset(offset, length, reg1, reg2, imm),)+
+                    $(Self::$name_reg_reg_reg(reg1, reg2, reg3) => visitor.$name_reg_reg_reg(offset, length, reg1, reg2, reg3),)+
+                    $(Self::$name_offset(imm) => visitor.$name_offset(offset, length, imm),)+
+                    $(Self::$name_imm(imm) => visitor.$name_imm(offset, length, imm),)+
+                    $(Self::$name_imm_imm(imm1, imm2) => visitor.$name_imm_imm(offset, length, imm1, imm2),)+
+                    $(Self::$name_reg_reg(reg1, reg2) => visitor.$name_reg_reg(offset, length, reg1, reg2),)+
+                    $(Self::$name_reg_reg_imm_imm(reg1, reg2, imm1, imm2) => visitor.$name_reg_reg_imm_imm(offset, length, reg1, reg2, imm1, imm2),)+
+                    $(Self::$name_reg_imm64(reg, imm) => visitor.$name_reg_imm64(offset, length, reg, imm),)+
+                    Self::invalid => visitor.invalid(offset, length),
                 }
             }
 
             pub fn serialize_into<I>(self, isa: I, position: u32, buffer: &mut [u8]) -> usize where I: InstructionSet {
                 match self {
-                    $(Self::$name_argless => Self::serialize_argless(buffer, isa.opcode_to_u8(Opcode::$name_argless).unwrap_or(UNUSED_RAW_OPCODE)),)+
-                    $(Self::$name_reg_imm(reg, imm) => Self::serialize_reg_imm(buffer, isa.opcode_to_u8(Opcode::$name_reg_imm).unwrap_or(UNUSED_RAW_OPCODE), reg, imm),)+
-                    $(Self::$name_reg_imm_offset(reg, imm1, imm2) => Self::serialize_reg_imm_offset(buffer, position, isa.opcode_to_u8(Opcode::$name_reg_imm_offset).unwrap_or(UNUSED_RAW_OPCODE), reg, imm1, imm2),)+
-                    $(Self::$name_reg_imm_imm(reg, imm1, imm2) => Self::serialize_reg_imm_imm(buffer, isa.opcode_to_u8(Opcode::$name_reg_imm_imm).unwrap_or(UNUSED_RAW_OPCODE), reg, imm1, imm2),)+
-                    $(Self::$name_reg_reg_imm(reg1, reg2, imm) => Self::serialize_reg_reg_imm(buffer, isa.opcode_to_u8(Opcode::$name_reg_reg_imm).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, imm),)+
-                    $(Self::$name_reg_reg_offset(reg1, reg2, imm) => Self::serialize_reg_reg_offset(buffer, position, isa.opcode_to_u8(Opcode::$name_reg_reg_offset).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, imm),)+
-                    $(Self::$name_reg_reg_reg(reg1, reg2, reg3) => Self::serialize_reg_reg_reg(buffer, isa.opcode_to_u8(Opcode::$name_reg_reg_reg).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, reg3),)+
-                    $(Self::$name_offset(imm) => Self::serialize_offset(buffer, position, isa.opcode_to_u8(Opcode::$name_offset).unwrap_or(UNUSED_RAW_OPCODE), imm),)+
-                    $(Self::$name_imm(imm) => Self::serialize_imm(buffer, isa.opcode_to_u8(Opcode::$name_imm).unwrap_or(UNUSED_RAW_OPCODE), imm),)+
-                    $(Self::$name_imm_imm(imm1, imm2) => Self::serialize_imm_imm(buffer, isa.opcode_to_u8(Opcode::$name_imm_imm).unwrap_or(UNUSED_RAW_OPCODE), imm1, imm2),)+
-                    $(Self::$name_reg_reg(reg1, reg2) => Self::serialize_reg_reg(buffer, isa.opcode_to_u8(Opcode::$name_reg_reg).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2),)+
-                    $(Self::$name_reg_reg_imm_imm(reg1, reg2, imm1, imm2) => Self::serialize_reg_reg_imm_imm(buffer, isa.opcode_to_u8(Opcode::$name_reg_reg_imm_imm).unwrap_or(UNUSED_RAW_OPCODE), reg1, reg2, imm1, imm2),)+
-                    $(Self::$name_reg_imm64(reg, imm) => Self::serialize_reg_imm64(buffer, isa.opcode_to_u8(Opcode::$name_reg_imm64).unwrap_or(UNUSED_RAW_OPCODE), reg, imm),)+
-                    Self::invalid => Self::serialize_argless(buffer, isa.opcode_to_u8(Opcode::trap).unwrap_or(UNUSED_RAW_OPCODE)),
-
+                    $(Self::$name_argless => Self::serialize_argless(isa, buffer, Opcode::$name_argless),)+
+                    $(Self::$name_reg_imm(reg, imm) => Self::serialize_reg_imm(isa, buffer, Opcode::$name_reg_imm, reg, imm),)+
+                    $(Self::$name_reg_imm_offset(reg, imm1, imm2) => Self::serialize_reg_imm_offset(isa, buffer, position, Opcode::$name_reg_imm_offset, reg, imm1, imm2),)+
+                    $(Self::$name_reg_imm_imm(reg, imm1, imm2) => Self::serialize_reg_imm_imm(isa, buffer, Opcode::$name_reg_imm_imm, reg, imm1, imm2),)+
+                    $(Self::$name_reg_reg_imm(reg1, reg2, imm) => Self::serialize_reg_reg_imm(isa, buffer, Opcode::$name_reg_reg_imm, reg1, reg2, imm),)+
+                    $(Self::$name_reg_reg_offset(reg1, reg2, imm) => Self::serialize_reg_reg_offset(isa, buffer, position, Opcode::$name_reg_reg_offset, reg1, reg2, imm),)+
+                    $(Self::$name_reg_reg_reg(reg1, reg2, reg3) => Self::serialize_reg_reg_reg(isa, buffer, Opcode::$name_reg_reg_reg, reg1, reg2, reg3),)+
+                    $(Self::$name_offset(imm) => Self::serialize_offset(isa, buffer, position, Opcode::$name_offset, imm),)+
+                    $(Self::$name_imm(imm) => Self::serialize_imm(isa, buffer, Opcode::$name_imm, imm),)+
+                    $(Self::$name_imm_imm(imm1, imm2) => Self::serialize_imm_imm(isa, buffer, Opcode::$name_imm_imm, imm1, imm2),)+
+                    $(Self::$name_reg_reg(reg1, reg2) => Self::serialize_reg_reg(isa, buffer, Opcode::$name_reg_reg, reg1, reg2),)+
+                    $(Self::$name_reg_reg_imm_imm(reg1, reg2, imm1, imm2) => Self::serialize_reg_reg_imm_imm(isa, buffer, Opcode::$name_reg_reg_imm_imm, reg1, reg2, imm1, imm2),)+
+                    $(Self::$name_reg_imm64(reg, imm) => Self::serialize_reg_imm64(isa, buffer, Opcode::$name_reg_imm64, reg, imm),)+
+                    Self::invalid => Self::serialize_argless(isa, buffer, Opcode::trap),
                 }
             }
 
@@ -1166,16 +1485,16 @@ macro_rules! define_all_instructions {
                 self.instruction_set
             }
 
-            fn dispatch(self, _state: &mut (), opcode: usize, chunk: u128, offset: u32, skip: u32) -> Instruction {
-                self.instruction_set().parse_instruction(opcode, chunk, offset, skip)
+            fn dispatch(self, _state: &mut (), opcode: usize, chunk: u128, offset: u32, length: u32) -> Instruction {
+                self.instruction_set().parse_instruction(opcode, chunk, offset, length)
             }
         }
     };
 }
 
-pub(crate) const UNUSED_RAW_OPCODE: u8 = 255;
+const UNUSED_RAW_OPCODE: u32 = 254;
 
-macro_rules! define_instruction_set {
+macro_rules! define_legacy_instruction_set {
     (@impl_shared $isa_name:ident, $($name:ident = $value:expr,)+) => {
         #[allow(non_camel_case_types)]
         #[derive(Copy, Clone, Debug, Default)]
@@ -1192,12 +1511,12 @@ macro_rules! define_instruction_set {
             };
 
             pub const OPCODE_DISCRIMINANT_TO_RAW_OPCODE_CONST: [u8; 256] = {
-                let mut map = [u8::MAX; 256];
+                let mut map = [UNUSED_RAW_OPCODE as u8; 256];
                 assert!($isa_name::RAW_OPCODE_TO_ENUM_CONST[UNUSED_RAW_OPCODE as usize].is_none());
 
                 $({
                     let discriminant = Opcode::$name.discriminant() as usize;
-                    assert!(map[discriminant] == UNUSED_RAW_OPCODE);
+                    assert!(map[discriminant] as u32 == UNUSED_RAW_OPCODE);
                     map[discriminant] = $value;
                 })+
 
@@ -1224,7 +1543,7 @@ macro_rules! define_instruction_set {
         [$($name_reg_reg_imm_imm:ident = $value_reg_reg_imm_imm:expr,)+]
         [$($name_reg_imm64:ident = $value_reg_imm64:expr,)*]
     ) => {
-        define_instruction_set!(
+        define_legacy_instruction_set!(
             @impl_shared
             $isa_name,
             $($name_argless = $value_argless,)+
@@ -1243,20 +1562,25 @@ macro_rules! define_instruction_set {
         );
 
         impl InstructionSet for $isa_name {
-            #[cfg_attr(feature = "alloc", inline)]
-            fn opcode_from_u8(self, byte: u8) -> Option<Opcode> {
-                static RAW_OPCODE_TO_ENUM: [Option<Opcode>; 256] = $isa_name::RAW_OPCODE_TO_ENUM_CONST;
-                RAW_OPCODE_TO_ENUM[byte as usize]
+            #[inline]
+            fn is_legacy(self) -> bool {
+                true
             }
 
             #[cfg_attr(feature = "alloc", inline)]
-            fn opcode_to_u8(self, opcode: Opcode) -> Option<u8> {
+            fn opcode_from_raw(self, raw_opcode: u32) -> Option<Opcode> {
+                static RAW_OPCODE_TO_ENUM: [Option<Opcode>; 256] = $isa_name::RAW_OPCODE_TO_ENUM_CONST;
+                *RAW_OPCODE_TO_ENUM.get(raw_opcode as usize)?
+            }
+
+            #[cfg_attr(feature = "alloc", inline)]
+            fn opcode_to_raw(self, opcode: Opcode, args_length: u32) -> Option<(u32, u32)> {
                 static OPCODE_DISCRIMINANT_TO_RAW_OPCODE: [u8; 256] = $isa_name::OPCODE_DISCRIMINANT_TO_RAW_OPCODE_CONST;
                 let raw_opcode = OPCODE_DISCRIMINANT_TO_RAW_OPCODE[opcode.discriminant() as usize];
-                if raw_opcode == UNUSED_RAW_OPCODE {
+                if u32::from(raw_opcode) == UNUSED_RAW_OPCODE {
                     None
                 } else {
-                    Some(raw_opcode)
+                    Some((u32::from(raw_opcode), args_length))
                 }
             }
 
@@ -1280,80 +1604,80 @@ macro_rules! define_instruction_set {
                 }
             }
 
-            fn parse_instruction(self, opcode: usize, chunk: u128, offset: u32, skip: u32) -> Instruction {
-                match opcode {
+            fn parse_instruction(self, raw_opcode: usize, chunk: u128, offset: u32, length: u32) -> Instruction {
+                match raw_opcode {
                     $(
                         $value_argless => Instruction::$name_argless,
                     )+
                     $(
                         $value_reg_imm => {
-                            let (reg, imm) = $crate::program::read_args_reg_imm(chunk, skip);
+                            let (reg, imm) = $crate::program::read_args_reg_imm::<false>(chunk, length);
                             Instruction::$name_reg_imm(reg, imm)
                         },
                     )+
                     $(
                         $value_reg_imm_offset => {
-                            let (reg, imm1, imm2) = $crate::program::read_args_reg_imm_offset(chunk, offset, skip);
+                            let (reg, imm1, imm2) = $crate::program::read_args_reg_imm_offset::<false>(chunk, offset, length);
                             Instruction::$name_reg_imm_offset(reg, imm1, imm2)
                         },
                     )+
                     $(
                         $value_reg_imm_imm => {
-                            let (reg, imm1, imm2) = $crate::program::read_args_reg_imm2(chunk, skip);
+                            let (reg, imm1, imm2) = $crate::program::read_args_reg_imm2::<false>(chunk, length);
                             Instruction::$name_reg_imm_imm(reg, imm1, imm2)
                         },
                     )+
                     $(
                         $value_reg_reg_imm => {
-                            let (reg1, reg2, imm) = $crate::program::read_args_regs2_imm(chunk, skip);
+                            let (reg1, reg2, imm) = $crate::program::read_args_regs2_imm::<false>(chunk, length);
                             Instruction::$name_reg_reg_imm(reg1, reg2, imm)
                         }
                     )+
                     $(
                         $value_reg_reg_offset => {
-                            let (reg1, reg2, imm) = $crate::program::read_args_regs2_offset(chunk, offset, skip);
+                            let (reg1, reg2, imm) = $crate::program::read_args_regs2_offset::<false>(chunk, offset, length);
                             Instruction::$name_reg_reg_offset(reg1, reg2, imm)
                         }
                     )+
                     $(
                         $value_reg_reg_reg => {
-                            let (reg1, reg2, reg3) = $crate::program::read_args_regs3(chunk);
+                            let (reg1, reg2, reg3) = $crate::program::read_args_regs3::<false>(chunk);
                             Instruction::$name_reg_reg_reg(reg1, reg2, reg3)
                         }
                     )+
                     $(
                         $value_offset => {
-                            let imm = $crate::program::read_args_offset(chunk, offset, skip);
+                            let imm = $crate::program::read_args_offset::<false>(chunk, offset, length);
                             Instruction::$name_offset(imm)
                         }
                     )+
                     $(
                         $value_imm => {
-                            let imm = $crate::program::read_args_imm(chunk, skip);
+                            let imm = $crate::program::read_args_imm::<false>(chunk, length);
                             Instruction::$name_imm(imm)
                         }
                     )+
                     $(
                         $value_imm_imm => {
-                            let (imm1, imm2) = $crate::program::read_args_imm2(chunk, skip);
+                            let (imm1, imm2) = $crate::program::read_args_imm2::<false>(chunk, length);
                             Instruction::$name_imm_imm(imm1, imm2)
                         }
                     )+
                     $(
                         $value_reg_reg => {
-                            let (reg1, reg2) = $crate::program::read_args_regs2(chunk);
+                            let (reg1, reg2) = $crate::program::read_args_regs2::<false>(chunk);
                             Instruction::$name_reg_reg(reg1, reg2)
                         }
                     )+
                     $(
                         $value_reg_reg_imm_imm => {
-                            let (reg1, reg2, imm1, imm2) = $crate::program::read_args_regs2_imm2(chunk, skip);
+                            let (reg1, reg2, imm1, imm2) = $crate::program::read_args_regs2_imm2::<false>(chunk, length);
                             Instruction::$name_reg_reg_imm_imm(reg1, reg2, imm1, imm2)
                         }
                     )+
                     $(
                         $value_reg_imm64 => {
-                            let (reg, imm) = $crate::program::read_args_reg_imm64(chunk, skip);
+                            let (reg, imm) = $crate::program::read_args_reg_imm64::<false>(chunk);
                             Instruction::$name_reg_imm64(reg, imm)
                         }
                     )*
@@ -1366,14 +1690,15 @@ macro_rules! define_instruction_set {
         macro_rules! $build_static_dispatch_table {
             ($table_name:ident, $visitor_ty:ident<$d($visitor_ty_params:tt),*>) => {{
                 use $crate::program::{
+                    LEGACY_RAW_OPCODE_COUNT,
                     ParsingVisitor
                 };
 
                 type ReturnTy<$d($visitor_ty_params),*> = <$visitor_ty<$d($visitor_ty_params),*> as ParsingVisitor>::ReturnTy;
-                type VisitFn<$d($visitor_ty_params),*> = fn(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, args_length: u32);
+                type VisitFn<$d($visitor_ty_params),*> = fn(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32);
 
                 #[derive(Copy, Clone)]
-                struct DispatchTable<'a>(&'a [VisitFn<'a>; 257]);
+                struct DispatchTable<'a>(&'a [VisitFn<'a>; LEGACY_RAW_OPCODE_COUNT]);
 
                 impl<'a> $crate::program::OpcodeVisitor for DispatchTable<'a> {
                     type State = $visitor_ty<'a>;
@@ -1386,13 +1711,13 @@ macro_rules! define_instruction_set {
                     }
 
                     #[inline]
-                    fn dispatch(self, state: &mut $visitor_ty<'a>, opcode: usize, chunk: u128, offset: u32, skip: u32) {
-                        self.0[opcode](state, chunk, offset, skip)
+                    fn dispatch(self, state: &mut $visitor_ty<'a>, opcode: usize, chunk: u128, offset: u32, length: u32) {
+                        self.0[opcode](state, chunk, offset, length)
                     }
                 }
 
-                static $table_name: [VisitFn; 257] = {
-                    let mut table = [invalid_instruction as VisitFn; 257];
+                static $table_name: [VisitFn; LEGACY_RAW_OPCODE_COUNT] = {
+                    let mut table = [invalid_instruction as VisitFn; LEGACY_RAW_OPCODE_COUNT];
 
                     $({
                         // Putting all of the handlers in a single link section can make a big difference
@@ -1400,8 +1725,8 @@ macro_rules! define_instruction_set {
                         // compiler and the linker to put all of this code near each other, minimizing
                         // instruction cache misses.
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_argless<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, _chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            state.$name_argless(instruction_offset, skip)
+                        fn $name_argless<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, _chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            state.$name_argless(offset, length)
                         }
 
                         if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_argless].is_some() {
@@ -1411,9 +1736,9 @@ macro_rules! define_instruction_set {
 
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg, imm) = $crate::program::read_args_reg_imm(chunk, skip);
-                            state.$name_reg_imm(instruction_offset, skip, reg, imm)
+                        fn $name_reg_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg, imm) = $crate::program::read_args_reg_imm::<false>(chunk, length);
+                            state.$name_reg_imm(offset, length, reg, imm)
                         }
 
                         if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_imm].is_some() {
@@ -1423,9 +1748,9 @@ macro_rules! define_instruction_set {
 
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_imm_offset<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg, imm1, imm2) = $crate::program::read_args_reg_imm_offset(chunk, instruction_offset, skip);
-                            state.$name_reg_imm_offset(instruction_offset, skip, reg, imm1, imm2)
+                        fn $name_reg_imm_offset<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg, imm1, imm2) = $crate::program::read_args_reg_imm_offset::<false>(chunk, offset, length);
+                            state.$name_reg_imm_offset(offset, length, reg, imm1, imm2)
                         }
 
                         if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_imm_offset].is_some() {
@@ -1435,9 +1760,9 @@ macro_rules! define_instruction_set {
 
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_imm_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg, imm1, imm2) = $crate::program::read_args_reg_imm2(chunk, skip);
-                            state.$name_reg_imm_imm(instruction_offset, skip, reg, imm1, imm2)
+                        fn $name_reg_imm_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg, imm1, imm2) = $crate::program::read_args_reg_imm2::<false>(chunk, length);
+                            state.$name_reg_imm_imm(offset, length, reg, imm1, imm2)
                         }
 
                         if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_imm_imm].is_some() {
@@ -1447,9 +1772,9 @@ macro_rules! define_instruction_set {
 
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_reg_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg1, reg2, imm) = $crate::program::read_args_regs2_imm(chunk, skip);
-                            state.$name_reg_reg_imm(instruction_offset, skip, reg1, reg2, imm)
+                        fn $name_reg_reg_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, imm) = $crate::program::read_args_regs2_imm::<false>(chunk, length);
+                            state.$name_reg_reg_imm(offset, length, reg1, reg2, imm)
                         }
 
                         if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_reg_imm].is_some() {
@@ -1459,9 +1784,9 @@ macro_rules! define_instruction_set {
 
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_reg_offset<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg1, reg2, imm) = $crate::program::read_args_regs2_offset(chunk, instruction_offset, skip);
-                            state.$name_reg_reg_offset(instruction_offset, skip, reg1, reg2, imm)
+                        fn $name_reg_reg_offset<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, imm) = $crate::program::read_args_regs2_offset::<false>(chunk, offset, length);
+                            state.$name_reg_reg_offset(offset, length, reg1, reg2, imm)
                         }
 
                         if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_reg_offset].is_some() {
@@ -1471,9 +1796,9 @@ macro_rules! define_instruction_set {
 
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_reg_reg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg1, reg2, reg3) = $crate::program::read_args_regs3(chunk);
-                            state.$name_reg_reg_reg(instruction_offset, skip, reg1, reg2, reg3)
+                        fn $name_reg_reg_reg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, reg3) = $crate::program::read_args_regs3::<false>(chunk);
+                            state.$name_reg_reg_reg(offset, length, reg1, reg2, reg3)
                         }
 
                         if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_reg_reg].is_some() {
@@ -1483,9 +1808,9 @@ macro_rules! define_instruction_set {
 
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_offset<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let imm = $crate::program::read_args_offset(chunk, instruction_offset, skip);
-                            state.$name_offset(instruction_offset, skip, imm)
+                        fn $name_offset<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let imm = $crate::program::read_args_offset::<false>(chunk, offset, length);
+                            state.$name_offset(offset, length, imm)
                         }
 
                         if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_offset].is_some() {
@@ -1495,9 +1820,9 @@ macro_rules! define_instruction_set {
 
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let imm = $crate::program::read_args_imm(chunk, skip);
-                            state.$name_imm(instruction_offset, skip, imm)
+                        fn $name_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let imm = $crate::program::read_args_imm::<false>(chunk, length);
+                            state.$name_imm(offset, length, imm)
                         }
 
                         if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_imm].is_some() {
@@ -1507,9 +1832,9 @@ macro_rules! define_instruction_set {
 
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_imm_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (imm1, imm2) = $crate::program::read_args_imm2(chunk, skip);
-                            state.$name_imm_imm(instruction_offset, skip, imm1, imm2)
+                        fn $name_imm_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (imm1, imm2) = $crate::program::read_args_imm2::<false>(chunk, length);
+                            state.$name_imm_imm(offset, length, imm1, imm2)
                         }
 
                         if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_imm_imm].is_some() {
@@ -1519,9 +1844,9 @@ macro_rules! define_instruction_set {
 
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_reg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg1, reg2) = $crate::program::read_args_regs2(chunk);
-                            state.$name_reg_reg(instruction_offset, skip, reg1, reg2)
+                        fn $name_reg_reg<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2) = $crate::program::read_args_regs2::<false>(chunk);
+                            state.$name_reg_reg(offset, length, reg1, reg2)
                         }
 
                         if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_reg].is_some() {
@@ -1531,9 +1856,9 @@ macro_rules! define_instruction_set {
 
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_reg_imm_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg1, reg2, imm1, imm2) = $crate::program::read_args_regs2_imm2(chunk, skip);
-                            state.$name_reg_reg_imm_imm(instruction_offset, skip, reg1, reg2, imm1, imm2)
+                        fn $name_reg_reg_imm_imm<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, imm1, imm2) = $crate::program::read_args_regs2_imm2::<false>(chunk, length);
+                            state.$name_reg_reg_imm_imm(offset, length, reg1, reg2, imm1, imm2)
                         }
 
                         if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_reg_imm_imm].is_some() {
@@ -1543,9 +1868,9 @@ macro_rules! define_instruction_set {
 
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
-                        fn $name_reg_imm64<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                            let (reg, imm) = $crate::program::read_args_reg_imm64(chunk, skip);
-                            state.$name_reg_imm64(instruction_offset, skip, reg, imm)
+                        fn $name_reg_imm64<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg, imm) = $crate::program::read_args_reg_imm64::<false>(chunk);
+                            state.$name_reg_imm64(offset, length, reg, imm)
                         }
 
                         if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_reg_imm64].is_some() {
@@ -1555,8 +1880,475 @@ macro_rules! define_instruction_set {
 
                     #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
                     #[cold]
-                    fn invalid_instruction<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, _chunk: u128, instruction_offset: u32, skip: u32) -> ReturnTy<$d($visitor_ty_params),*>{
-                        state.invalid(instruction_offset, skip)
+                    fn invalid_instruction<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, _chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                        state.invalid(offset, length)
+                    }
+
+                    table
+                };
+
+                #[inline]
+                #[allow(unsafe_code)]
+                // SAFETY: Here we transmute the lifetimes which were unnecessarily extended to be 'static due to the table here being a `static`.
+                fn transmute_lifetime<'a>(table: DispatchTable<'static>) -> DispatchTable<'a> {
+                    unsafe { core::mem::transmute(&$table_name) }
+                }
+
+                transmute_lifetime(DispatchTable(&$table_name))
+            }};
+        }
+
+        pub use $build_static_dispatch_table;
+    };
+}
+
+macro_rules! define_extended_instruction_set {
+    (
+        ($d:tt)
+        $isa_name:ident,
+        $build_static_dispatch_table:ident,
+
+        [$($name_argless:ident = [$($length_argless:literal: $value_argless:expr),+],)+]
+        [$($name_reg_imm:ident = [$($length_reg_imm:literal: $value_reg_imm:expr),+],)+]
+        [$($name_reg_imm_offset:ident = [$($length_reg_imm_offset:literal: $value_reg_imm_offset:expr),+],)+]
+        [$($name_reg_imm_imm:ident = [$($length_reg_imm_imm:literal: $value_reg_imm_imm:expr),+],)+]
+        [$($name_reg_reg_imm:ident = [$($length_reg_reg_imm:literal: $value_reg_reg_imm:expr),+],)+]
+        [$($name_reg_reg_offset:ident = [$($length_reg_reg_offset:literal: $value_reg_reg_offset:expr),+],)+]
+        [$($name_reg_reg_reg:ident = [$($length_reg_reg_reg:literal: $value_reg_reg_reg:expr),+],)+]
+        [$($name_offset:ident = [$($length_offset:literal: $value_offset:expr),+],)+]
+        [$($name_imm:ident = [$($length_imm:literal: $value_imm:expr),+],)+]
+        [$($name_imm_imm:ident = [$($length_imm_imm:literal: $value_imm_imm:expr),+],)+]
+        [$($name_reg_reg:ident = [$($length_reg_reg:literal: $value_reg_reg:expr),+],)+]
+        [$($name_reg_reg_imm_imm:ident = [$($length_reg_reg_imm_imm:literal: $value_reg_reg_imm_imm:expr),+],)+]
+        [$($name_reg_imm64:ident = [$($length_reg_imm64:literal: $value_reg_imm64:expr),*],)*]
+    ) => {
+        #[allow(non_camel_case_types)]
+        #[derive(Copy, Clone, Debug, Default)]
+        pub struct $isa_name;
+
+        macro_rules! extended_for_each_entry {
+            ($d callback:ident) => {
+                $($( $d callback!($name_argless, $value_argless, $length_argless); )+)+
+                $($( $d callback!($name_reg_imm, $value_reg_imm, $length_reg_imm); )+)+
+                $($( $d callback!($name_reg_imm_offset, $value_reg_imm_offset, $length_reg_imm_offset); )+)+
+                $($( $d callback!($name_reg_imm_imm, $value_reg_imm_imm, $length_reg_imm_imm); )+)+
+                $($( $d callback!($name_reg_reg_imm, $value_reg_reg_imm, $length_reg_reg_imm); )+)+
+                $($( $d callback!($name_reg_reg_offset, $value_reg_reg_offset, $length_reg_reg_offset); )+)+
+                $($( $d callback!($name_reg_reg_reg, $value_reg_reg_reg, $length_reg_reg_reg); )+)+
+                $($( $d callback!($name_offset, $value_offset, $length_offset); )+)+
+                $($( $d callback!($name_imm, $value_imm, $length_imm); )+)+
+                $($( $d callback!($name_imm_imm, $value_imm_imm, $length_imm_imm); )+)+
+                $($( $d callback!($name_reg_reg, $value_reg_reg, $length_reg_reg); )+)+
+                $($( $d callback!($name_reg_reg_imm_imm, $value_reg_reg_imm_imm, $length_reg_reg_imm_imm); )+)+
+                $($( $d callback!($name_reg_imm64, $value_reg_imm64, $length_reg_imm64); )*)*
+            }
+        }
+
+        impl $isa_name {
+            #[doc(hidden)]
+            pub const RAW_OPCODE_TO_ENUM_CONST: [Option<Opcode>; EXTENDED_RAW_OPCODE_COUNT] = {
+                let mut map = [None; EXTENDED_RAW_OPCODE_COUNT];
+                macro_rules! set {
+                    ($entry_name:ident, $value:expr, $args_length:expr) => {
+                        assert!($value < EXTENDED_INVALID_RAW_OPCODE);
+                        #[allow(unused_comparisons)]
+                        {
+                            assert!($args_length <= EXTENDED_MAX_ARGS_LENGTH);
+                        }
+                        assert!(map[$value].is_none(), "duplicate opcode byte value");
+                        map[$value] = Some(Opcode::$entry_name);
+                    };
+                }
+                extended_for_each_entry!(set);
+                map
+            };
+
+            #[doc(hidden)]
+            pub const RAW_OPCODE_STARTS_NEW_BASIC_BLOCK_CONST: [bool; EXTENDED_RAW_OPCODE_COUNT] = {
+                let mut map = [true; EXTENDED_RAW_OPCODE_COUNT];
+                macro_rules! set {
+                    ($entry_name:ident, $value:expr, $args_length:expr) => {
+                        map[$value] = Opcode::$entry_name.starts_new_basic_block();
+                    };
+                }
+                extended_for_each_entry!(set);
+                map
+            };
+
+            #[doc(hidden)]
+            pub const RAW_OPCODE_TO_LENGTH_CONST: [RawOpcodeLength; EXTENDED_RAW_OPCODE_COUNT] = {
+                let mut map = [RawOpcodeLength(0_u8); EXTENDED_RAW_OPCODE_COUNT];
+                let mut index = 0;
+                while index < map.len() {
+                    map[index].0 = 1;
+                    if index >= 255 {
+                        map[index].0 += 1;
+                    }
+                    index += 1;
+                }
+
+                macro_rules! set {
+                    ($entry_name:ident, $raw_opcode:expr, $args_length:expr) => {
+                        let mut length = $args_length as u8 + 1;
+                        if $raw_opcode >= 255 {
+                            length += 1;
+                        }
+                        map[$raw_opcode].0 = length;
+                    };
+                }
+                extended_for_each_entry!(set);
+                map
+            };
+
+            #[doc(hidden)]
+            pub const OPCODE_AND_LENGTH_TO_RAW_OPCODE_CONST: [[RawOpcodeEntry; EXTENDED_MAX_ARGS_LENGTH + 1]; 256] = {
+                let mut map = [[RawOpcodeEntry::empty(); EXTENDED_MAX_ARGS_LENGTH + 1]; 256];
+                macro_rules! set {
+                    ($entry_name:ident, $raw_opcode:expr, $args_length:expr) => {
+                        let args_length: u16 = $args_length;
+                        let discriminant = Opcode::$entry_name.discriminant() as usize;
+                        let entry = &mut map[discriminant];
+                        entry[args_length as usize] = RawOpcodeEntry::new($raw_opcode as u16, args_length);
+
+                        let mut args_length_subset = 0;
+                        while args_length_subset < args_length {
+                            if entry[args_length_subset as usize].is_empty() {
+                                entry[args_length_subset as usize] = RawOpcodeEntry::new($raw_opcode as u16, args_length);
+                            }
+                            args_length_subset += 1;
+                        }
+                    };
+                }
+                extended_for_each_entry!(set);
+                map
+            };
+
+            #[doc(hidden)]
+            pub const OPCODE_IS_SUPPORTED_CONST: [bool; 256] = {
+                let mut map = [false; 256];
+                macro_rules! set {
+                    ($entry_name:ident, $raw_opcode:expr, $args_length:expr) => {
+                        map[Opcode::$entry_name.discriminant() as usize] = true;
+                    };
+                }
+                extended_for_each_entry!(set);
+                map
+            };
+        }
+
+        impl InstructionSet for $isa_name {
+            #[inline]
+            fn is_legacy(self) -> bool {
+                false
+            }
+
+            #[cfg_attr(feature = "alloc", inline)]
+            fn opcode_from_raw(self, raw_opcode: u32) -> Option<Opcode> {
+                static RAW_OPCODE_TO_ENUM: [Option<Opcode>; EXTENDED_RAW_OPCODE_COUNT] = $isa_name::RAW_OPCODE_TO_ENUM_CONST;
+                *RAW_OPCODE_TO_ENUM.get(raw_opcode as usize)?
+            }
+
+            #[cfg_attr(feature = "alloc", inline)]
+            fn opcode_to_raw(self, opcode: Opcode, args_length: u32) -> Option<(u32, u32)> {
+                static OPCODE_AND_LENGTH_TO_RAW_OPCODE: [[RawOpcodeEntry; EXTENDED_MAX_ARGS_LENGTH + 1]; 256] = $isa_name::OPCODE_AND_LENGTH_TO_RAW_OPCODE_CONST;
+                let entry = *OPCODE_AND_LENGTH_TO_RAW_OPCODE[opcode.discriminant() as usize].get(args_length as usize)?;
+                if entry.is_empty() {
+                    None
+                } else {
+                    Some((u32::from(entry.raw_opcode()), u32::from(entry.args_length())))
+                }
+            }
+
+            #[cfg_attr(feature = "alloc", inline)]
+            fn supports_opcode(self, opcode: Opcode) -> bool {
+                static OPCODE_IS_SUPPORTED: [bool; 256] = $isa_name::OPCODE_IS_SUPPORTED_CONST;
+                OPCODE_IS_SUPPORTED[opcode.discriminant() as usize]
+            }
+
+            #[cfg_attr(feature = "alloc", inline)]
+            fn raw_opcode_table(self) -> &'static RawOpcodeTable {
+                static RAW_OPCODE_TABLE: RawOpcodeTable = RawOpcodeTable {
+                    length_table: $isa_name::RAW_OPCODE_TO_LENGTH_CONST,
+                    starts_new_basic_block_table: $isa_name::RAW_OPCODE_STARTS_NEW_BASIC_BLOCK_CONST,
+                };
+
+                &RAW_OPCODE_TABLE
+            }
+
+            fn parse_instruction(self, raw_opcode: usize, chunk: u128, offset: u32, length: u32) -> Instruction {
+                macro_rules! args {
+                    ($name:ident($d($arg:ident),+)) => {
+                        if raw_opcode >= 255 {
+                            $crate::program::$name::<true>($d($arg),+)
+                        } else {
+                            $crate::program::$name::<false>($d($arg),+)
+                        }
+                    }
+                }
+
+                match raw_opcode {
+                    $(
+                        $($value_argless)|+ => Instruction::$name_argless,
+                    )+
+                    $(
+                        $($value_reg_imm)|+ => {
+                            let (reg, imm) = args!(read_args_reg_imm(chunk, length));
+                            Instruction::$name_reg_imm(reg, imm)
+                        },
+                    )+
+                    $(
+                        $($value_reg_imm_offset)|+ => {
+                            let (reg, imm1, imm2) = args!(read_args_reg_imm_offset(chunk, offset, length));
+                            Instruction::$name_reg_imm_offset(reg, imm1, imm2)
+                        },
+                    )+
+                    $(
+                        $($value_reg_imm_imm)|+ => {
+                            let (reg, imm1, imm2) = args!(read_args_reg_imm2(chunk, length));
+                            Instruction::$name_reg_imm_imm(reg, imm1, imm2)
+                        },
+                    )+
+                    $(
+                        $($value_reg_reg_imm)|+ => {
+                            let (reg1, reg2, imm) = args!(read_args_regs2_imm(chunk, length));
+                            Instruction::$name_reg_reg_imm(reg1, reg2, imm)
+                        }
+                    )+
+                    $(
+                        $($value_reg_reg_offset)|+ => {
+                            let (reg1, reg2, imm) = args!(read_args_regs2_offset(chunk, offset, length));
+                            Instruction::$name_reg_reg_offset(reg1, reg2, imm)
+                        }
+                    )+
+                    $(
+                        $($value_reg_reg_reg)|+ => {
+                            let (reg1, reg2, reg3) = args!(read_args_regs3(chunk));
+                            Instruction::$name_reg_reg_reg(reg1, reg2, reg3)
+                        }
+                    )+
+                    $(
+                        $($value_offset)|+ => {
+                            let imm = args!(read_args_offset(chunk, offset, length));
+                            Instruction::$name_offset(imm)
+                        }
+                    )+
+                    $(
+                        $($value_imm)|+ => {
+                            let imm = args!(read_args_imm(chunk, length));
+                            Instruction::$name_imm(imm)
+                        }
+                    )+
+                    $(
+                        $($value_imm_imm)|+ => {
+                            let (imm1, imm2) = args!(read_args_imm2(chunk, length));
+                            Instruction::$name_imm_imm(imm1, imm2)
+                        }
+                    )+
+                    $(
+                        $($value_reg_reg)|+ => {
+                            let (reg1, reg2) = args!(read_args_regs2(chunk));
+                            Instruction::$name_reg_reg(reg1, reg2)
+                        }
+                    )+
+                    $(
+                        $($value_reg_reg_imm_imm)|+ => {
+                            let (reg1, reg2, imm1, imm2) = args!(read_args_regs2_imm2(chunk, length));
+                            Instruction::$name_reg_reg_imm_imm(reg1, reg2, imm1, imm2)
+                        }
+                    )+
+                    $(
+                        $($value_reg_imm64)|+ => {
+                            let (reg, imm) = args!(read_args_reg_imm64(chunk));
+                            Instruction::$name_reg_imm64(reg, imm)
+                        }
+                    )*
+                    _ => Instruction::invalid,
+                }
+            }
+        }
+
+        #[macro_export]
+        macro_rules! $build_static_dispatch_table {
+            ($table_name:ident, $visitor_ty:ident<$d($visitor_ty_params:tt),*>) => {{
+                use $crate::program::{
+                    EXTENDED_RAW_OPCODE_COUNT,
+                    ParsingVisitor
+                };
+
+                type ReturnTy<$d($visitor_ty_params),*> = <$visitor_ty<$d($visitor_ty_params),*> as ParsingVisitor>::ReturnTy;
+                type VisitFn<$d($visitor_ty_params),*> = fn(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32);
+
+                #[derive(Copy, Clone)]
+                struct DispatchTable<'a>(&'a [VisitFn<'a>; EXTENDED_RAW_OPCODE_COUNT]);
+
+                impl<'a> $crate::program::OpcodeVisitor for DispatchTable<'a> {
+                    type State = $visitor_ty<'a>;
+                    type ReturnTy = ();
+                    type InstructionSet = $crate::program::$isa_name;
+
+                    #[inline]
+                    fn instruction_set(self) -> Self::InstructionSet {
+                        $crate::program::$isa_name
+                    }
+
+                    #[inline]
+                    fn dispatch(self, state: &mut $visitor_ty<'a>, opcode: usize, chunk: u128, offset: u32, length: u32) {
+                        self.0[opcode](state, chunk, offset, length)
+                    }
+                }
+
+                static $table_name: [VisitFn; EXTENDED_RAW_OPCODE_COUNT] = {
+                    let mut table = [invalid_instruction as VisitFn; EXTENDED_RAW_OPCODE_COUNT];
+
+                    $({
+                        // Putting all of the handlers in a single link section can make a big difference
+                        // when it comes to performance, even up to 10% in some cases. This will force the
+                        // compiler and the linker to put all of this code near each other, minimizing
+                        // instruction cache misses.
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_argless<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, _chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            state.$name_argless(offset, length)
+                        }
+
+                        $(table[$value_argless] = $name_argless;)+
+                    })*
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_imm<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg, imm) = $crate::program::read_args_reg_imm::<EXT>(chunk, length);
+                            state.$name_reg_imm(offset, length, reg, imm)
+                        }
+
+                        $(table[$value_reg_imm] = $name_reg_imm::<{ ($value_reg_imm) >= 255 }>;)+
+                    })*
+
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_imm_offset<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg, imm1, imm2) = $crate::program::read_args_reg_imm_offset::<EXT>(chunk, offset, length);
+                            state.$name_reg_imm_offset(offset, length, reg, imm1, imm2)
+                        }
+
+                        $(table[$value_reg_imm_offset] = $name_reg_imm_offset::<{ ($value_reg_imm_offset) >= 255 }>;)+
+                    })*
+
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_imm_imm<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg, imm1, imm2) = $crate::program::read_args_reg_imm2::<EXT>(chunk, length);
+                            state.$name_reg_imm_imm(offset, length, reg, imm1, imm2)
+                        }
+
+                        $(table[$value_reg_imm_imm] = $name_reg_imm_imm::<{ ($value_reg_imm_imm) >= 255 }>;)+
+                    })*
+
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_reg_imm<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, imm) = $crate::program::read_args_regs2_imm::<EXT>(chunk, length);
+                            state.$name_reg_reg_imm(offset, length, reg1, reg2, imm)
+                        }
+
+                        $(table[$value_reg_reg_imm] = $name_reg_reg_imm::<{ ($value_reg_reg_imm) >= 255 }>;)+
+                    })*
+
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_reg_offset<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, imm) = $crate::program::read_args_regs2_offset::<EXT>(chunk, offset, length);
+                            state.$name_reg_reg_offset(offset, length, reg1, reg2, imm)
+                        }
+
+                        $(table[$value_reg_reg_offset] = $name_reg_reg_offset::<{ ($value_reg_reg_offset) >= 255 }>;)+
+                    })*
+
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_reg_reg<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, reg3) = $crate::program::read_args_regs3::<EXT>(chunk);
+                            state.$name_reg_reg_reg(offset, length, reg1, reg2, reg3)
+                        }
+
+                        $(table[$value_reg_reg_reg] = $name_reg_reg_reg::<{ ($value_reg_reg_reg) >= 255 }>;)+
+                    })*
+
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_offset<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let imm = $crate::program::read_args_offset::<EXT>(chunk, offset, length);
+                            state.$name_offset(offset, length, imm)
+                        }
+
+                        $(table[$value_offset] = $name_offset::<{ ($value_offset) >= 255 }>;)+
+                    })*
+
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_imm<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let imm = $crate::program::read_args_imm::<EXT>(chunk, length);
+                            state.$name_imm(offset, length, imm)
+                        }
+
+                        $(table[$value_imm] = $name_imm::<{ ($value_imm) >= 255 }>;)+
+                    })*
+
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_imm_imm<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (imm1, imm2) = $crate::program::read_args_imm2::<EXT>(chunk, length);
+                            state.$name_imm_imm(offset, length, imm1, imm2)
+                        }
+
+                        $(table[$value_imm_imm] = $name_imm_imm::<{ ($value_imm_imm) >= 255 }>;)+
+                    })*
+
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_reg<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2) = $crate::program::read_args_regs2::<EXT>(chunk);
+                            state.$name_reg_reg(offset, length, reg1, reg2)
+                        }
+
+                        $(table[$value_reg_reg] = $name_reg_reg::<{ ($value_reg_reg) >= 255 }>;)+
+                    })*
+
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_reg_imm_imm<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg1, reg2, imm1, imm2) = $crate::program::read_args_regs2_imm2::<EXT>(chunk, length);
+                            state.$name_reg_reg_imm_imm(offset, length, reg1, reg2, imm1, imm2)
+                        }
+
+                        $(table[$value_reg_reg_imm_imm] = $name_reg_reg_imm_imm::<{ ($value_reg_reg_imm_imm) >= 255 }>;)+
+                    })*
+
+
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_reg_imm64<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (reg, imm) = $crate::program::read_args_reg_imm64::<EXT>(chunk);
+                            state.$name_reg_imm64(offset, length, reg, imm)
+                        }
+
+                        $(table[$value_reg_imm64] = $name_reg_imm64::<{ ($value_reg_imm64) >= 255 }>;)*
+                    })*
+
+
+                    #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                    #[cold]
+                    fn invalid_instruction<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, _chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                        state.invalid(offset, length)
                     }
 
                     table
@@ -1578,19 +2370,22 @@ macro_rules! define_instruction_set {
 }
 
 #[inline]
-fn parse_instruction<I>(instruction_set: I, code: &[u8], bitmask: &[u8], offset: u32) -> (u32, Instruction, bool)
+fn parse_instruction_legacy<I>(instruction_set: I, code: &[u8], bitmask: &[u8], offset: u32) -> (u32, Instruction, bool)
 where
     I: InstructionSet,
 {
     let visitor = EnumVisitor { instruction_set };
     if offset as usize + 32 <= code.len() {
-        visitor_step_fast(&mut (), code, bitmask, offset, visitor)
+        visitor_step_fast_legacy(&mut (), code, bitmask, offset, visitor)
     } else {
-        visitor_step_slow(&mut (), code, bitmask, offset, visitor)
+        visitor_step_slow_legacy(&mut (), code, bitmask, offset, visitor)
     }
 }
 
-const INVALID_INSTRUCTION_INDEX: u32 = 256;
+const LEGACY_INVALID_RAW_OPCODE: u32 = 256;
+
+#[doc(hidden)]
+pub const LEGACY_RAW_OPCODE_COUNT: usize = 257;
 
 define_all_instructions! {
     // Instructions with args: none
@@ -1791,7 +2586,7 @@ define_all_instructions! {
     ]
 }
 
-define_instruction_set! {
+define_legacy_instruction_set! {
     ($)
 
     ISA_ReviveV1,
@@ -1965,7 +2760,7 @@ define_instruction_set! {
     ]
 }
 
-define_instruction_set! {
+define_legacy_instruction_set! {
     ($)
 
     ISA_Latest32,
@@ -2105,182 +2900,195 @@ define_instruction_set! {
     ]
 }
 
-define_instruction_set! {
+define_extended_instruction_set! {
     ($)
 
     ISA_Latest64,
     build_static_dispatch_table_latest64,
 
+    // argless
     [
-        trap                                     = 0,
-        fallthrough                              = 1,
-        memset                                   = 2,
-        unlikely                                 = 3,
+        trap                                     = [0: 0],
+        fallthrough                              = [0: 1],
+        memset                                   = [0: 510],
+        unlikely                                 = [0: 2],
     ]
+    // reg_imm
     [
-        jump_indirect                            = 50,
-        load_imm                                 = 51,
-        load_u8                                  = 52,
-        load_i8                                  = 53,
-        load_u16                                 = 54,
-        load_i16                                 = 55,
-        load_i32                                 = 57,
-        load_u32                                 = 56,
-        load_u64                                 = 58,
-        store_u8                                 = 59,
-        store_u16                                = 60,
-        store_u32                                = 61,
-        store_u64                                = 62,
+        jump_indirect                            = [1: 3, 5: 255],
+        load_imm                                 = [1: 4, 2: 5, 3: 6, 4: 7, 5: 8],
+        load_u8                                  = [5: 9],
+        load_i8                                  = [4: 10, 5: 256],
+        load_u16                                 = [5: 11],
+        load_i16                                 = [5: 12],
+        load_i32                                 = [4: 13, 5: 14],
+        load_u32                                 = [5: 15],
+        load_u64                                 = [4: 16, 5: 17],
+        store_u8                                 = [5: 18],
+        store_u16                                = [5: 19],
+        store_u32                                = [5: 20],
+        store_u64                                = [4: 21, 5: 22],
     ]
+    // reg_imm_offset
     [
-        load_imm_and_jump                        = 80,
-        branch_eq_imm                            = 81,
-        branch_not_eq_imm                        = 82,
-        branch_less_unsigned_imm                 = 83,
-        branch_less_signed_imm                   = 87,
-        branch_greater_or_equal_unsigned_imm     = 85,
-        branch_greater_or_equal_signed_imm       = 89,
-        branch_less_or_equal_signed_imm          = 88,
-        branch_less_or_equal_unsigned_imm        = 84,
-        branch_greater_signed_imm                = 90,
-        branch_greater_unsigned_imm              = 86,
+        load_imm_and_jump                        = [4: 23, 5: 24, 6: 25, 7: 26, 8: 27, 9: 257],
+        branch_eq_imm                            = [2: 28, 3: 29, 4: 30, 5: 31, 6: 32, 9: 33],
+        branch_not_eq_imm                        = [2: 34, 3: 35, 4: 36, 6: 37, 9: 258],
+        branch_less_unsigned_imm                 = [3: 38, 4: 39, 5: 40, 9: 41],
+        branch_less_signed_imm                   = [2: 42, 3: 43, 4: 44, 9: 45],
+        branch_greater_or_equal_unsigned_imm     = [3: 46, 4: 47, 5: 48, 9: 259],
+        branch_greater_or_equal_signed_imm       = [2: 49, 3: 50, 9: 51],
+        branch_less_or_equal_signed_imm          = [2: 52, 3: 53, 6: 54, 9: 260],
+        branch_less_or_equal_unsigned_imm        = [3: 55, 4: 56, 6: 57, 9: 261],
+        branch_greater_signed_imm                = [3: 58, 4: 59, 5: 60, 9: 61],
+        branch_greater_unsigned_imm              = [3: 62, 4: 63, 5: 64, 9: 65],
     ]
+    // reg_imm_imm
     [
-        store_imm_indirect_u8                    = 70,
-        store_imm_indirect_u16                   = 71,
-        store_imm_indirect_u32                   = 72,
-        store_imm_indirect_u64                   = 73,
+        store_imm_indirect_u8                    = [1: 66, 2: 67, 3: 68, 4: 69, 5: 70, 9: 262],
+        store_imm_indirect_u16                   = [2: 71, 3: 72, 4: 73, 5: 74, 9: 263],
+        store_imm_indirect_u32                   = [1: 75, 2: 76, 3: 77, 4: 78, 6: 79, 9: 80],
+        store_imm_indirect_u64                   = [1: 81, 2: 82, 3: 83, 4: 84, 5: 85, 6: 86, 7: 87, 9: 264],
     ]
+    // reg_reg_imm
     [
-        store_indirect_u8                        = 120,
-        store_indirect_u16                       = 121,
-        store_indirect_u32                       = 122,
-        store_indirect_u64                       = 123,
-        load_indirect_u8                         = 124,
-        load_indirect_i8                         = 125,
-        load_indirect_u16                        = 126,
-        load_indirect_i16                        = 127,
-        load_indirect_i32                        = 129,
-        load_indirect_u32                        = 128,
-        load_indirect_u64                        = 130,
-        add_imm_32                               = 131,
-        add_imm_64                               = 149,
-        and_imm                                  = 132,
-        xor_imm                                  = 133,
-        or_imm                                   = 134,
-        mul_imm_32                               = 135,
-        mul_imm_64                               = 150,
-        set_less_than_unsigned_imm               = 136,
-        set_less_than_signed_imm                 = 137,
-        shift_logical_left_imm_32                = 138,
-        shift_logical_left_imm_64                = 151,
-        shift_logical_right_imm_32               = 139,
-        shift_logical_right_imm_64               = 152,
-        shift_arithmetic_right_imm_32            = 140,
-        shift_arithmetic_right_imm_64            = 153,
-        negate_and_add_imm_32                    = 141,
-        negate_and_add_imm_64                    = 154,
-        set_greater_than_unsigned_imm            = 142,
-        set_greater_than_signed_imm              = 143,
-        shift_logical_right_imm_alt_32           = 145,
-        shift_logical_right_imm_alt_64           = 156,
-        shift_arithmetic_right_imm_alt_32        = 146,
-        shift_arithmetic_right_imm_alt_64        = 157,
-        shift_logical_left_imm_alt_32            = 144,
-        shift_logical_left_imm_alt_64            = 155,
-        cmov_if_zero_imm                         = 147,
-        cmov_if_not_zero_imm                     = 148,
-        rotate_right_imm_32                      = 160,
-        rotate_right_imm_alt_32                  = 161,
-        rotate_right_imm_64                      = 158,
-        rotate_right_imm_alt_64                  = 159,
+        store_indirect_u8                        = [1: 88, 2: 89, 3: 90, 5: 265],
+        store_indirect_u16                       = [1: 91, 2: 92, 3: 93, 5: 266],
+        store_indirect_u32                       = [1: 94, 2: 95, 3: 96, 5: 267],
+        store_indirect_u64                       = [1: 97, 2: 98, 3: 99, 5: 268],
+        load_indirect_u8                         = [1: 100, 2: 101, 3: 102, 5: 269],
+        load_indirect_i8                         = [1: 103, 2: 104, 3: 105, 5: 270],
+        load_indirect_u16                        = [1: 106, 2: 107, 3: 108, 5: 271],
+        load_indirect_i16                        = [1: 109, 2: 110, 3: 111, 5: 272],
+        load_indirect_i32                        = [1: 112, 2: 113, 3: 114, 5: 273],
+        load_indirect_u32                        = [1: 115, 2: 116, 3: 117, 5: 274],
+        load_indirect_u64                        = [1: 118, 2: 119, 3: 120, 5: 275],
+        add_imm_32                               = [1: 121, 2: 122, 3: 123, 5: 124],
+        add_imm_64                               = [2: 125, 3: 126, 4: 127, 5: 128],
+        and_imm                                  = [2: 129, 3: 130, 5: 131],
+        xor_imm                                  = [2: 132, 3: 133, 5: 134],
+        or_imm                                   = [2: 135, 3: 136, 5: 137],
+        mul_imm_32                               = [5: 138],
+        mul_imm_64                               = [2: 139, 3: 140, 5: 141],
+        set_less_than_unsigned_imm               = [2: 142, 3: 143, 5: 144],
+        set_less_than_signed_imm                 = [1: 145, 2: 146, 5: 276],
+        shift_logical_left_imm_32                = [2: 147, 5: 277],
+        shift_logical_left_imm_64                = [2: 148, 5: 278],
+        shift_logical_right_imm_32               = [2: 149, 5: 279],
+        shift_logical_right_imm_64               = [2: 150, 5: 280],
+        shift_arithmetic_right_imm_32            = [2: 151, 5: 281],
+        shift_arithmetic_right_imm_64            = [2: 152, 5: 282],
+        negate_and_add_imm_32                    = [1: 153, 3: 154, 5: 283],
+        negate_and_add_imm_64                    = [1: 155, 2: 156, 5: 157],
+        set_greater_than_unsigned_imm            = [1: 158, 5: 159],
+        set_greater_than_signed_imm              = [1: 160, 5: 284],
+        shift_logical_right_imm_alt_32           = [5: 285],
+        shift_logical_right_imm_alt_64           = [2: 161, 5: 162],
+        shift_arithmetic_right_imm_alt_32        = [5: 286],
+        shift_arithmetic_right_imm_alt_64        = [5: 287],
+        shift_logical_left_imm_alt_32            = [5: 163],
+        shift_logical_left_imm_alt_64            = [2: 164, 5: 288],
+        cmov_if_zero_imm                         = [1: 165, 2: 166, 5: 167],
+        cmov_if_not_zero_imm                     = [1: 168, 2: 169, 5: 170],
+        rotate_right_imm_32                      = [2: 171, 5: 289],
+        rotate_right_imm_alt_32                  = [5: 290],
+        rotate_right_imm_64                      = [2: 172, 5: 291],
+        rotate_right_imm_alt_64                  = [5: 292],
     ]
+    // reg_reg_offset
     [
-        branch_eq                                = 170,
-        branch_not_eq                            = 171,
-        branch_less_unsigned                     = 172,
-        branch_less_signed                       = 173,
-        branch_greater_or_equal_unsigned         = 174,
-        branch_greater_or_equal_signed           = 175,
+        branch_eq                                = [2: 173, 3: 174, 5: 175],
+        branch_not_eq                            = [2: 176, 3: 177, 5: 178],
+        branch_less_unsigned                     = [2: 179, 3: 180, 5: 293],
+        branch_less_signed                       = [2: 181, 3: 182, 5: 294],
+        branch_greater_or_equal_unsigned         = [2: 183, 3: 184, 5: 295],
+        branch_greater_or_equal_signed           = [2: 185, 3: 186, 5: 296],
     ]
+    // reg_reg_reg
     [
-        add_32                                   = 190,
-        add_64                                   = 200,
-        sub_32                                   = 191,
-        sub_64                                   = 201,
-        and                                      = 210,
-        xor                                      = 211,
-        or                                       = 212,
-        mul_32                                   = 192,
-        mul_64                                   = 202,
-        mul_upper_signed_signed                  = 213,
-        mul_upper_unsigned_unsigned              = 214,
-        mul_upper_signed_unsigned                = 215,
-        set_less_than_unsigned                   = 216,
-        set_less_than_signed                     = 217,
-        shift_logical_left_32                    = 197,
-        shift_logical_left_64                    = 207,
-        shift_logical_right_32                   = 198,
-        shift_logical_right_64                   = 208,
-        shift_arithmetic_right_32                = 199,
-        shift_arithmetic_right_64                = 209,
-        div_unsigned_32                          = 193,
-        div_unsigned_64                          = 203,
-        div_signed_32                            = 194,
-        div_signed_64                            = 204,
-        rem_unsigned_32                          = 195,
-        rem_unsigned_64                          = 205,
-        rem_signed_32                            = 196,
-        rem_signed_64                            = 206,
-        cmov_if_zero                             = 218,
-        cmov_if_not_zero                         = 219,
-        and_inverted                             = 224,
-        or_inverted                              = 225,
-        xnor                                     = 226,
-        maximum                                  = 227,
-        maximum_unsigned                         = 228,
-        minimum                                  = 229,
-        minimum_unsigned                         = 230,
-        rotate_left_32                           = 221,
-        rotate_left_64                           = 220,
-        rotate_right_32                          = 223,
-        rotate_right_64                          = 222,
+        add_32                                   = [2: 187],
+        add_64                                   = [2: 188],
+        sub_32                                   = [2: 189],
+        sub_64                                   = [2: 190],
+        and                                      = [2: 191],
+        xor                                      = [2: 192],
+        or                                       = [2: 193],
+        mul_32                                   = [2: 194],
+        mul_64                                   = [2: 195],
+        mul_upper_signed_signed                  = [2: 297],
+        mul_upper_unsigned_unsigned              = [2: 196],
+        mul_upper_signed_unsigned                = [2: 298],
+        set_less_than_unsigned                   = [2: 197],
+        set_less_than_signed                     = [2: 198],
+        shift_logical_left_32                    = [2: 199],
+        shift_logical_left_64                    = [2: 200],
+        shift_logical_right_32                   = [2: 201],
+        shift_logical_right_64                   = [2: 202],
+        shift_arithmetic_right_32                = [2: 299],
+        shift_arithmetic_right_64                = [2: 300],
+        div_unsigned_32                          = [2: 203],
+        div_unsigned_64                          = [2: 204],
+        div_signed_32                            = [2: 205],
+        div_signed_64                            = [2: 301],
+        rem_unsigned_32                          = [2: 206],
+        rem_unsigned_64                          = [2: 207],
+        rem_signed_32                            = [2: 208],
+        rem_signed_64                            = [2: 302],
+        cmov_if_zero                             = [2: 209],
+        cmov_if_not_zero                         = [2: 210],
+        and_inverted                             = [2: 211],
+        or_inverted                              = [2: 212],
+        xnor                                     = [2: 213],
+        maximum                                  = [2: 303],
+        maximum_unsigned                         = [2: 214],
+        minimum                                  = [2: 304],
+        minimum_unsigned                         = [2: 215],
+        rotate_left_32                           = [2: 305],
+        rotate_left_64                           = [2: 216],
+        rotate_right_32                          = [2: 306],
+        rotate_right_64                          = [2: 307],
     ]
+    // offset
     [
-        jump                                     = 40,
+        jump                                     = [1: 217, 2: 218, 3: 219, 4: 220],
     ]
+    // imm
     [
-        ecalli                                   = 10,
+        ecalli                                   = [1: 221, 4: 308],
     ]
+    // imm_imm
     [
-        store_imm_u8                             = 30,
-        store_imm_u16                            = 31,
-        store_imm_u32                            = 32,
-        store_imm_u64                            = 33,
+        store_imm_u8                             = [6: 222, 9: 309],
+        store_imm_u16                            = [9: 310],
+        store_imm_u32                            = [5: 223, 6: 224, 9: 225],
+        store_imm_u64                            = [5: 226, 9: 311],
     ]
+    // reg_reg
     [
-        move_reg                                 = 100,
-        sbrk                                     = 101,
-        count_leading_zero_bits_32               = 105,
-        count_leading_zero_bits_64               = 104,
-        count_trailing_zero_bits_32              = 107,
-        count_trailing_zero_bits_64              = 106,
-        count_set_bits_32                        = 103,
-        count_set_bits_64                        = 102,
-        sign_extend_8                            = 108,
-        sign_extend_16                           = 109,
-        zero_extend_16                           = 110,
-        reverse_byte                             = 111,
+        move_reg                                 = [1: 227],
+        sbrk                                     = [1: 509],
+        count_leading_zero_bits_32               = [1: 228],
+        count_leading_zero_bits_64               = [1: 229],
+        count_trailing_zero_bits_32              = [1: 312],
+        count_trailing_zero_bits_64              = [1: 230],
+        count_set_bits_32                        = [1: 231],
+        count_set_bits_64                        = [1: 232],
+        sign_extend_8                            = [1: 233],
+        sign_extend_16                           = [1: 234],
+        zero_extend_16                           = [1: 235],
+        reverse_byte                             = [1: 236],
     ]
+    // reg_reg_imm_imm
     [
-        load_imm_and_jump_indirect               = 180,
+        load_imm_and_jump_indirect               = [4: 237, 5: 238, 10: 313],
     ]
+    // reg_imm64
     [
-        load_imm64                               = 20,
+        load_imm64                               = [9: 239],
     ]
 }
 
-define_instruction_set! {
+define_legacy_instruction_set! {
     ($)
 
     ISA_JamV1,
@@ -2454,9 +3262,16 @@ define_instruction_set! {
 }
 
 #[test]
-fn test_opcode_from_u8() {
-    assert_eq!(ISA_Latest64.opcode_from_u8(3), Some(Opcode::unlikely));
-    assert_eq!(ISA_ReviveV1.opcode_from_u8(3), None);
+fn test_opcode_from_raw() {
+    assert_eq!(ISA_Latest64.opcode_from_raw(0), Some(Opcode::trap));
+    assert_eq!(ISA_Latest64.opcode_from_raw(1), Some(Opcode::fallthrough));
+    assert_eq!(
+        ISA_Latest64.opcode_from_raw(u32::from(EXTENDED_OPCODE_PREFIX)),
+        Some(Opcode::jump_indirect)
+    );
+    assert_eq!(ISA_Latest64.opcode_from_raw(EXTENDED_INVALID_RAW_OPCODE as u32), None);
+    assert_eq!(ISA_ReviveV1.opcode_from_raw(LEGACY_INVALID_RAW_OPCODE), None);
+    assert_eq!(ISA_ReviveV1.opcode_from_raw(3), None);
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -2506,32 +3321,54 @@ impl InstructionSetKind {
     }
 }
 
+macro_rules! dispatch_isa {
+    ($self:ident, $isa:ident => $e:expr) => {
+        match $self {
+            Self::ReviveV1 => {
+                let $isa = ISA_ReviveV1;
+                $e
+            }
+            Self::Latest32 => {
+                let $isa = ISA_Latest32;
+                $e
+            }
+            Self::Latest64 => {
+                let $isa = ISA_Latest64;
+                $e
+            }
+            Self::JamV1 => {
+                let $isa = ISA_JamV1;
+                $e
+            }
+        }
+    };
+}
+
 impl InstructionSet for InstructionSetKind {
-    fn opcode_from_u8(self, byte: u8) -> Option<Opcode> {
-        match self {
-            Self::ReviveV1 => ISA_ReviveV1.opcode_from_u8(byte),
-            Self::Latest32 => ISA_Latest32.opcode_from_u8(byte),
-            Self::Latest64 => ISA_Latest64.opcode_from_u8(byte),
-            Self::JamV1 => ISA_JamV1.opcode_from_u8(byte),
-        }
+    fn opcode_from_raw(self, raw_opcode: u32) -> Option<Opcode> {
+        dispatch_isa!(self, isa => isa.opcode_from_raw(raw_opcode))
     }
 
-    fn opcode_to_u8(self, opcode: Opcode) -> Option<u8> {
-        match self {
-            Self::ReviveV1 => ISA_ReviveV1.opcode_to_u8(opcode),
-            Self::Latest32 => ISA_Latest32.opcode_to_u8(opcode),
-            Self::Latest64 => ISA_Latest64.opcode_to_u8(opcode),
-            Self::JamV1 => ISA_JamV1.opcode_to_u8(opcode),
-        }
+    fn opcode_to_raw(self, opcode: Opcode, args_length: u32) -> Option<(u32, u32)> {
+        dispatch_isa!(self, isa => isa.opcode_to_raw(opcode, args_length))
     }
 
-    fn parse_instruction(self, opcode: usize, chunk: u128, offset: u32, skip: u32) -> Instruction {
-        match self {
-            Self::ReviveV1 => ISA_ReviveV1.parse_instruction(opcode, chunk, offset, skip),
-            Self::Latest32 => ISA_Latest32.parse_instruction(opcode, chunk, offset, skip),
-            Self::Latest64 => ISA_Latest64.parse_instruction(opcode, chunk, offset, skip),
-            Self::JamV1 => ISA_JamV1.parse_instruction(opcode, chunk, offset, skip),
-        }
+    fn supports_opcode(self, opcode: Opcode) -> bool {
+        dispatch_isa!(self, isa => isa.supports_opcode(opcode))
+    }
+
+    fn parse_instruction(self, raw_opcode: usize, chunk: u128, offset: u32, length: u32) -> Instruction {
+        dispatch_isa!(self, isa => isa.parse_instruction(raw_opcode, chunk, offset, length))
+    }
+
+    #[inline]
+    fn is_legacy(self) -> bool {
+        dispatch_isa!(self, isa => isa.is_legacy())
+    }
+
+    #[inline]
+    fn raw_opcode_table(self) -> &'static RawOpcodeTable {
+        dispatch_isa!(self, isa => isa.raw_opcode_table())
     }
 }
 
@@ -2543,7 +3380,7 @@ impl Opcode {
         )
     }
 
-    pub fn starts_new_basic_block(self) -> bool {
+    pub const fn starts_new_basic_block(self) -> bool {
         matches!(
             self,
             Self::trap
@@ -2601,110 +3438,213 @@ impl Instruction {
         self.opcode().starts_new_basic_block()
     }
 
-    fn serialize_argless(buffer: &mut [u8], opcode: u8) -> usize {
-        buffer[0] = opcode;
-        1
+    #[must_use]
+    fn serialize_opcode(isa: impl InstructionSet, buffer: &mut [u8], opcode: Opcode, args_length: u32) -> (usize, u32) {
+        if let Some((raw_opcode, actual_args_length)) = isa.opcode_to_raw(opcode, args_length) {
+            let length = if raw_opcode < u32::from(EXTENDED_OPCODE_PREFIX) {
+                buffer[0] = raw_opcode as u8;
+                1
+            } else {
+                buffer[0] = EXTENDED_OPCODE_PREFIX;
+                buffer[1] = (raw_opcode - u32::from(EXTENDED_OPCODE_PREFIX)) as u8;
+                2
+            };
+
+            (length, actual_args_length - args_length)
+        } else {
+            buffer[0] = UNUSED_RAW_OPCODE as u8;
+            (1, 0)
+        }
     }
 
-    fn serialize_reg_imm_offset(buffer: &mut [u8], position: u32, opcode: u8, reg: RawReg, imm1: i32, imm2: u32) -> usize {
+    fn adjust_length(imm_length: u32, length_delta: u32) -> u32 {
+        debug_assert!(imm_length <= 4);
+        let imm_length_ext = imm_length + length_delta;
+        debug_assert!(imm_length_ext <= 4);
+        imm_length_ext
+    }
+
+    fn adjust_length2(imm1_length: u32, imm2_length: u32, length_delta: u32) -> (u32, u32) {
+        debug_assert!(imm1_length <= 4);
+        debug_assert!(imm2_length <= 4);
+
+        let imm1_length_ext = (imm1_length + length_delta).min(4);
+        let length_delta = length_delta - (imm1_length_ext - imm1_length);
+        let imm2_length_ext = imm2_length + length_delta;
+
+        debug_assert!(imm1_length_ext <= 4);
+        debug_assert!(imm2_length_ext <= 4);
+
+        (imm1_length_ext, imm2_length_ext)
+    }
+
+    fn serialize_argless(isa: impl InstructionSet, buffer: &mut [u8], opcode: Opcode) -> usize {
+        Self::serialize_opcode(isa, buffer, opcode, 0).0
+    }
+
+    fn serialize_reg_imm_offset(
+        isa: impl InstructionSet,
+        buffer: &mut [u8],
+        position: u32,
+        opcode: Opcode,
+        reg: RawReg,
+        imm1: i32,
+        imm2: u32,
+    ) -> usize {
         let imm1 = cast(imm1).bitwise_as_u32();
         let imm2 = imm2.wrapping_sub(position);
-        buffer[0] = opcode;
-        let mut position = 2;
-        let imm1_length = write_simple_varint(imm1, &mut buffer[position..]);
-        position += imm1_length;
-        buffer[1] = reg.0 as u8 | (imm1_length << 4) as u8;
-        position += write_simple_varint(imm2, &mut buffer[position..]);
+        let imm1_length = simple_varint_length(imm1);
+        let imm2_length = simple_varint_length(imm2);
+        let (mut position, length_delta) = Self::serialize_opcode(isa, buffer, opcode, 1 + imm1_length + imm2_length);
+        let (imm1_length, imm2_length) = Self::adjust_length2(imm1_length, imm2_length, length_delta);
+        buffer[position] = reg.0 as u8 | (imm1_length << 4) as u8;
+        position += 1;
+        position += write_simple_varint_with_length(imm1, imm1_length, &mut buffer[position..]);
+        position += write_simple_varint_with_length(imm2, imm2_length, &mut buffer[position..]);
         position
     }
 
-    fn serialize_reg_imm_imm(buffer: &mut [u8], opcode: u8, reg: RawReg, imm1: i32, imm2: i32) -> usize {
+    fn serialize_reg_imm_imm(isa: impl InstructionSet, buffer: &mut [u8], opcode: Opcode, reg: RawReg, imm1: i32, imm2: i32) -> usize {
         let imm1 = cast(imm1).bitwise_as_u32();
         let imm2 = cast(imm2).bitwise_as_u32();
-        buffer[0] = opcode;
-        let mut position = 2;
-        let imm1_length = write_simple_varint(imm1, &mut buffer[position..]);
-        position += imm1_length;
-        buffer[1] = reg.0 as u8 | (imm1_length << 4) as u8;
-        position += write_simple_varint(imm2, &mut buffer[position..]);
+        let imm1_length = simple_varint_length(imm1);
+        let imm2_length = simple_varint_length(imm2);
+        let (mut position, length_delta) = Self::serialize_opcode(isa, buffer, opcode, 1 + imm1_length + imm2_length);
+        let (imm1_length, imm2_length) = Self::adjust_length2(imm1_length, imm2_length, length_delta);
+        buffer[position] = reg.0 as u8 | (imm1_length << 4) as u8;
+        position += 1;
+        position += write_simple_varint_with_length(imm1, imm1_length, &mut buffer[position..]);
+        position += write_simple_varint_with_length(imm2, imm2_length, &mut buffer[position..]);
         position
     }
-    fn serialize_reg_reg_imm_imm(buffer: &mut [u8], opcode: u8, reg1: RawReg, reg2: RawReg, imm1: i32, imm2: i32) -> usize {
+    fn serialize_reg_reg_imm_imm(
+        isa: impl InstructionSet,
+        buffer: &mut [u8],
+        opcode: Opcode,
+        reg1: RawReg,
+        reg2: RawReg,
+        imm1: i32,
+        imm2: i32,
+    ) -> usize {
         let imm1 = cast(imm1).bitwise_as_u32();
         let imm2 = cast(imm2).bitwise_as_u32();
-        buffer[0] = opcode;
-        buffer[1] = reg1.0 as u8 | (reg2.0 as u8) << 4;
-        let mut position = 3;
-        let imm1_length = write_simple_varint(imm1, &mut buffer[position..]);
-        buffer[2] = imm1_length as u8;
-        position += imm1_length;
-        position += write_simple_varint(imm2, &mut buffer[position..]);
-        position
+        let imm1_length = simple_varint_length(imm1);
+        let imm2_length = simple_varint_length(imm2);
+        let (mut position, length_delta) = Self::serialize_opcode(isa, buffer, opcode, 2 + imm1_length + imm2_length);
+        let (imm1_length, imm2_length) = Self::adjust_length2(imm1_length, imm2_length, length_delta);
+        buffer[position] = reg1.0 as u8 | (reg2.0 as u8) << 4;
+        position += 1;
+        buffer[position] = imm1_length as u8;
+        position += 1;
+        position += write_simple_varint_with_length(imm1, imm1_length, &mut buffer[position..]);
+        position + write_simple_varint_with_length(imm2, imm2_length, &mut buffer[position..])
     }
 
-    fn serialize_reg_imm64(buffer: &mut [u8], opcode: u8, reg: RawReg, imm: u64) -> usize {
-        buffer[0] = opcode;
-        buffer[1] = reg.0 as u8;
-        buffer[2..10].copy_from_slice(&imm.to_le_bytes());
-        10
+    fn serialize_reg_imm64(isa: impl InstructionSet, buffer: &mut [u8], opcode: Opcode, reg: RawReg, imm: u64) -> usize {
+        let (mut position, _) = Self::serialize_opcode(isa, buffer, opcode, 9);
+        buffer[position] = reg.0 as u8;
+        position += 1;
+        buffer[position..position + 8].copy_from_slice(&imm.to_le_bytes());
+        position + 8
     }
 
-    fn serialize_reg_reg_reg(buffer: &mut [u8], opcode: u8, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> usize {
-        buffer[0] = opcode;
-        buffer[1] = reg2.0 as u8 | (reg3.0 as u8) << 4;
-        buffer[2] = reg1.0 as u8;
-        3
+    fn serialize_reg_reg_reg(
+        isa: impl InstructionSet,
+        buffer: &mut [u8],
+        opcode: Opcode,
+        reg1: RawReg,
+        reg2: RawReg,
+        reg3: RawReg,
+    ) -> usize {
+        let (mut position, _) = Self::serialize_opcode(isa, buffer, opcode, 2);
+        buffer[position] = reg2.0 as u8 | (reg3.0 as u8) << 4;
+        position += 1;
+        buffer[position] = reg1.0 as u8;
+        position + 1
     }
 
-    fn serialize_reg_reg_imm(buffer: &mut [u8], opcode: u8, reg1: RawReg, reg2: RawReg, imm: i32) -> usize {
+    fn serialize_reg_reg_imm(isa: impl InstructionSet, buffer: &mut [u8], opcode: Opcode, reg1: RawReg, reg2: RawReg, imm: i32) -> usize {
         let imm = cast(imm).bitwise_as_u32();
-        buffer[0] = opcode;
-        buffer[1] = reg1.0 as u8 | (reg2.0 as u8) << 4;
-        write_simple_varint(imm, &mut buffer[2..]) + 2
+        let imm_length = simple_varint_length(imm);
+        let (mut position, length_delta) = Self::serialize_opcode(isa, buffer, opcode, 1 + imm_length);
+        let imm_length = Self::adjust_length(imm_length, length_delta);
+        buffer[position] = reg1.0 as u8 | (reg2.0 as u8) << 4;
+        position += 1;
+        position + write_simple_varint_with_length(imm, imm_length, &mut buffer[position..])
     }
 
-    fn serialize_reg_reg_offset(buffer: &mut [u8], position: u32, opcode: u8, reg1: RawReg, reg2: RawReg, imm: u32) -> usize {
+    fn serialize_reg_reg_offset(
+        isa: impl InstructionSet,
+        buffer: &mut [u8],
+        position: u32,
+        opcode: Opcode,
+        reg1: RawReg,
+        reg2: RawReg,
+        imm: u32,
+    ) -> usize {
         let imm = imm.wrapping_sub(position);
-        buffer[0] = opcode;
-        buffer[1] = reg1.0 as u8 | (reg2.0 as u8) << 4;
-        write_simple_varint(imm, &mut buffer[2..]) + 2
+        let imm_length = simple_varint_length(imm);
+        let (mut position, length_delta) = Self::serialize_opcode(isa, buffer, opcode, 1 + imm_length);
+        let imm_length = Self::adjust_length(imm_length, length_delta);
+        buffer[position] = reg1.0 as u8 | (reg2.0 as u8) << 4;
+        position += 1;
+        position + write_simple_varint_with_length(imm, imm_length, &mut buffer[position..])
     }
 
-    fn serialize_reg_imm(buffer: &mut [u8], opcode: u8, reg: RawReg, imm: i32) -> usize {
+    fn serialize_reg_imm(isa: impl InstructionSet, buffer: &mut [u8], opcode: Opcode, reg: RawReg, imm: i32) -> usize {
         let imm = cast(imm).bitwise_as_u32();
-        buffer[0] = opcode;
-        buffer[1] = reg.0 as u8;
-        write_simple_varint(imm, &mut buffer[2..]) + 2
+        let imm_length = simple_varint_length(imm);
+        let (mut position, length_delta) = Self::serialize_opcode(isa, buffer, opcode, 1 + imm_length);
+        let imm_length = Self::adjust_length(imm_length, length_delta);
+        buffer[position] = reg.0 as u8;
+        position += 1;
+        position + write_simple_varint_with_length(imm, imm_length, &mut buffer[position..])
     }
 
-    fn serialize_offset(buffer: &mut [u8], position: u32, opcode: u8, imm: u32) -> usize {
+    fn serialize_offset(isa: impl InstructionSet, buffer: &mut [u8], position: u32, opcode: Opcode, imm: u32) -> usize {
+        Self::serialize_offset_with_minimum_imm_length(isa, buffer, position, opcode, imm, 0)
+    }
+
+    pub(crate) fn serialize_offset_with_minimum_imm_length(
+        isa: impl InstructionSet,
+        buffer: &mut [u8],
+        position: u32,
+        opcode: Opcode,
+        imm: u32,
+        minimum_imm_length: u32,
+    ) -> usize {
         let imm = imm.wrapping_sub(position);
-        buffer[0] = opcode;
-        write_simple_varint(imm, &mut buffer[1..]) + 1
+        let imm_length = simple_varint_length(imm).max(minimum_imm_length);
+        let (position, length_delta) = Self::serialize_opcode(isa, buffer, opcode, imm_length);
+        let imm_length = Self::adjust_length(imm_length, length_delta);
+        position + write_simple_varint_with_length(imm, imm_length, &mut buffer[position..])
     }
 
-    fn serialize_imm(buffer: &mut [u8], opcode: u8, imm: i32) -> usize {
+    fn serialize_imm(isa: impl InstructionSet, buffer: &mut [u8], opcode: Opcode, imm: i32) -> usize {
         let imm = cast(imm).bitwise_as_u32();
-        buffer[0] = opcode;
-        write_simple_varint(imm, &mut buffer[1..]) + 1
+        let imm_length = simple_varint_length(imm);
+        let (position, length_delta) = Self::serialize_opcode(isa, buffer, opcode, imm_length);
+        let imm_length = Self::adjust_length(imm_length, length_delta);
+        position + write_simple_varint_with_length(imm, imm_length, &mut buffer[position..])
     }
 
-    fn serialize_imm_imm(buffer: &mut [u8], opcode: u8, imm1: i32, imm2: i32) -> usize {
+    fn serialize_imm_imm(isa: impl InstructionSet, buffer: &mut [u8], opcode: Opcode, imm1: i32, imm2: i32) -> usize {
         let imm1 = cast(imm1).bitwise_as_u32();
         let imm2 = cast(imm2).bitwise_as_u32();
-        buffer[0] = opcode;
-        let mut position = 2;
-        let imm1_length = write_simple_varint(imm1, &mut buffer[position..]);
-        buffer[1] = imm1_length as u8;
-        position += imm1_length;
-        position += write_simple_varint(imm2, &mut buffer[position..]);
-        position
+        let imm1_length = simple_varint_length(imm1);
+        let imm2_length = simple_varint_length(imm2);
+        let (mut position, length_delta) = Self::serialize_opcode(isa, buffer, opcode, 1 + imm1_length + imm2_length);
+        let (imm1_length, imm2_length) = Self::adjust_length2(imm1_length, imm2_length, length_delta);
+        buffer[position] = imm1_length as u8;
+        position += 1;
+        position += write_simple_varint_with_length(imm1, imm1_length, &mut buffer[position..]);
+        position + write_simple_varint_with_length(imm2, imm2_length, &mut buffer[position..])
     }
 
-    fn serialize_reg_reg(buffer: &mut [u8], opcode: u8, reg1: RawReg, reg2: RawReg) -> usize {
-        buffer[0] = opcode;
-        buffer[1] = reg1.0 as u8 | (reg2.0 as u8) << 4;
-        2
+    fn serialize_reg_reg(isa: impl InstructionSet, buffer: &mut [u8], opcode: Opcode, reg1: RawReg, reg2: RawReg) -> usize {
+        let (position, _) = Self::serialize_opcode(isa, buffer, opcode, 1);
+        buffer[position] = reg1.0 as u8 | (reg2.0 as u8) << 4;
+        position + 1
     }
 }
 
@@ -4387,7 +5327,7 @@ impl<'a> Iterator for JumpTableIter<'a> {
 
 pub const BITMASK_MAX: u32 = 24;
 
-pub fn get_bit_for_offset(bitmask: &[u8], code_len: usize, offset: u32) -> bool {
+fn get_bit_for_offset(bitmask: &[u8], code_len: usize, offset: u32) -> bool {
     let Some(byte) = bitmask.get(offset as usize >> 3) else {
         return false;
     };
@@ -4402,15 +5342,18 @@ pub fn get_bit_for_offset(bitmask: &[u8], code_len: usize, offset: u32) -> bool 
 
 fn get_previous_instruction_skip(bitmask: &[u8], offset: u32) -> Option<u32> {
     let shift = offset & 7;
-    let mut mask = u32::from(bitmask[offset as usize >> 3]) << 24;
+    let mut mask = u64::from(bitmask[offset as usize >> 3]) << 56;
     if offset >= 8 {
-        mask |= u32::from(bitmask[(offset as usize >> 3) - 1]) << 16;
+        mask |= u64::from(bitmask[(offset as usize >> 3) - 1]) << 48;
     }
     if offset >= 16 {
-        mask |= u32::from(bitmask[(offset as usize >> 3) - 2]) << 8;
+        mask |= u64::from(bitmask[(offset as usize >> 3) - 2]) << 40;
     }
     if offset >= 24 {
-        mask |= u32::from(bitmask[(offset as usize >> 3) - 3]);
+        mask |= u64::from(bitmask[(offset as usize >> 3) - 3]) << 32;
+    }
+    if offset >= 32 {
+        mask |= u64::from(bitmask[(offset as usize >> 3) - 4]) << 24;
     }
 
     mask <<= 8 - shift;
@@ -4434,83 +5377,746 @@ fn test_get_previous_instruction_skip() {
     assert_eq!(get_previous_instruction_skip(&[0b00000001, 0b00000000], 8), Some(7));
 }
 
-pub trait InstructionSet: Copy {
-    fn opcode_from_u8(self, byte: u8) -> Option<Opcode>;
-    fn opcode_to_u8(self, opcode: Opcode) -> Option<u8>;
-    fn parse_instruction(self, opcode: usize, chunk: u128, offset: u32, skip: u32) -> Instruction;
+#[test]
+fn test_get_previous_instruction_skip_max_length() {
+    for previous in 0_u32..64 {
+        let mut bitmask = [0_u8; 16];
+        bitmask[cast(previous).to_usize() >> 3] |= 1 << (previous & 7);
 
-    #[inline]
-    fn supports_opcode(self, opcode: Opcode) -> bool {
-        self.opcode_to_u8(opcode).is_some()
+        let offset = previous + BITMASK_MAX + 1;
+        assert_eq!(
+            get_previous_instruction_skip(&bitmask, offset),
+            Some(BITMASK_MAX),
+            "the instruction at {previous} is out of reach from {offset}"
+        );
+
+        assert_eq!(get_previous_instruction_skip(&bitmask, offset + 1), None);
     }
+}
+
+#[repr(transparent)]
+#[derive(Copy, Clone)]
+pub struct RawOpcodeLength(u8);
+
+impl RawOpcodeLength {
+    #[inline]
+    pub fn get(self) -> u32 {
+        u32::from(self.0)
+    }
+}
+
+#[repr(transparent)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct RawOpcodeEntry(u16);
+
+impl RawOpcodeEntry {
+    pub const fn empty() -> Self {
+        Self::new(EXTENDED_INVALID_RAW_OPCODE as u16, 0)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.raw_opcode() == EXTENDED_INVALID_RAW_OPCODE as u16
+    }
+
+    pub const fn new(raw_opcode: u16, args_length: u16) -> Self {
+        assert!(args_length < 2_u16.pow(4));
+        assert!(raw_opcode < 2_u16.pow(12));
+        Self(raw_opcode | (args_length << 12))
+    }
+
+    pub const fn raw_opcode(self) -> u16 {
+        self.0 & 0x0fff
+    }
+
+    pub const fn args_length(self) -> u16 {
+        self.0 >> 12
+    }
+}
+
+pub struct RawOpcodeTable {
+    length_table: [RawOpcodeLength; EXTENDED_RAW_OPCODE_COUNT],
+    starts_new_basic_block_table: [bool; EXTENDED_RAW_OPCODE_COUNT],
+}
+
+impl RawOpcodeTable {
+    #[inline(always)]
+    fn ends_basic_block(&self, raw_opcode: usize) -> bool {
+        let Some(&ends_basic_block) = self.starts_new_basic_block_table.get(raw_opcode) else {
+            unreachable!();
+        };
+
+        ends_basic_block
+    }
+}
+
+pub trait InstructionSet: Copy {
+    fn opcode_from_raw(self, raw_opcode: u32) -> Option<Opcode>;
+    fn opcode_to_raw(self, opcode: Opcode, args_length: u32) -> Option<(u32, u32)>;
+    fn parse_instruction(self, raw_opcode: usize, chunk: u128, offset: u32, length: u32) -> Instruction;
+    fn supports_opcode(self, opcode: Opcode) -> bool;
+    fn is_legacy(self) -> bool;
+
+    fn raw_opcode_table(self) -> &'static RawOpcodeTable {
+        unimplemented!();
+    }
+}
+
+pub const CODE_BLOCK_SIZE: usize = 1024;
+const _: () = assert!(CODE_BLOCK_SIZE.is_power_of_two());
+
+#[inline(always)]
+fn start_of_block_boundary(offset: usize) -> usize {
+    offset & !(CODE_BLOCK_SIZE - 1)
+}
+
+#[inline(always)]
+fn is_on_a_block_boundary(offset: usize) -> bool {
+    offset % CODE_BLOCK_SIZE == 0
+}
+
+#[inline(always)]
+pub(crate) fn next_block_boundary(offset: usize) -> usize {
+    start_of_block_boundary(offset) + CODE_BLOCK_SIZE
+}
+
+#[inline(always)]
+fn end_of_macro_block(offset: usize, code_len: usize) -> usize {
+    next_block_boundary(offset).min(code_len)
+}
+
+const EXTENDED_OPCODE_PREFIX: u8 = 255;
+const EXTENDED_INVALID_RAW_OPCODE: usize = 512;
+
+#[doc(hidden)]
+pub const EXTENDED_RAW_OPCODE_COUNT: usize = 513;
+const EXTENDED_MAX_ARGS_LENGTH: usize = 10;
+
+fn extended_scan_is_instruction_boundary<I>(instruction_set: I, code: &[u8], offset: u32) -> bool
+where
+    I: InstructionSet,
+{
+    debug_assert!(!instruction_set.is_legacy());
+
+    let offset = cast(offset).to_usize();
+    if offset >= code.len() {
+        return false;
+    }
+
+    let mut position = start_of_block_boundary(offset);
+    while position < offset {
+        position = parse_simple_extended(instruction_set, code, position).next_offset;
+    }
+
+    position == offset
+}
+
+fn extended_scan_find_next_offset<I>(instruction_set: I, code: &[u8], offset: u32) -> u32
+where
+    I: InstructionSet,
+{
+    let offset = cast(offset).to_usize();
+    if offset >= code.len() {
+        return code.len() as u32;
+    }
+
+    let mut position = start_of_block_boundary(offset);
+    while position <= offset {
+        debug_assert!(position < code.len());
+        position = parse_simple_extended(instruction_set, code, position).next_offset;
+    }
+
+    core::cmp::min(position, code.len()) as u32
+}
+
+#[cfg(feature = "alloc")]
+pub fn extended_assert_decode_is_deterministic<I>(instruction_set: I, code: &[u8])
+where
+    I: InstructionSet,
+{
+    use alloc::vec::Vec;
+
+    assert!(!instruction_set.is_legacy());
+    assert!(code.len() <= u32::MAX as usize);
+
+    let mut linear: Vec<usize> = Vec::new();
+    let mut offset = 0;
+    while offset < code.len() {
+        linear.push(offset);
+        let next_offset = parse_simple_extended(instruction_set, code, offset).next_offset;
+        assert!(next_offset > offset);
+        offset = next_offset;
+    }
+
+    let mut linear_iter = linear.iter().copied().peekable();
+    let mut block_start = 0;
+    while block_start < code.len() {
+        assert_eq!(linear_iter.peek(), Some(&block_start));
+
+        let block_end = core::cmp::min(code.len(), block_start + CODE_BLOCK_SIZE);
+        let mut offset = block_start;
+        let mut last_raw_opcode = EXTENDED_INVALID_RAW_OPCODE;
+        while offset < block_end {
+            assert_eq!(linear_iter.next(), Some(offset));
+
+            let step = parse_simple_extended(instruction_set, code, offset);
+            assert_eq!(offset + step.length as usize, step.next_offset, "mismatch at offset {offset}");
+            offset = step.next_offset;
+            last_raw_opcode = step.raw_opcode;
+        }
+
+        assert_eq!(offset, block_end);
+        assert!(
+            ends_basic_block_extended(instruction_set, last_raw_opcode),
+            "the macro block at offset {block_start} doesn't end a basic block"
+        );
+
+        block_start += CODE_BLOCK_SIZE;
+    }
+
+    assert_eq!(linear_iter.next(), None);
+
+    for offset in 0..=code.len() {
+        assert_eq!(
+            extended_scan_is_instruction_boundary(instruction_set, code, offset as u32),
+            linear.binary_search(&offset).is_ok(),
+            "mismatch at offset {offset}"
+        );
+    }
+
+    for &offset in &linear {
+        let step = parse_simple_extended(instruction_set, code, offset);
+        if ends_basic_block_extended(instruction_set, step.raw_opcode) && step.next_offset < code.len() {
+            assert!(
+                scan_is_jump_target_valid_extended(instruction_set, code, step.next_offset as u32),
+                "the instruction after the one at offset {offset} is not a valid jump target"
+            );
+        }
+    }
+
+    let mut block_start = 0;
+    while block_start < code.len() {
+        let mut bitmap = CodeBlockBitmap::new();
+        bitmap.build(instruction_set, code, block_start as u32);
+
+        for bit in 0..CODE_BLOCK_SIZE {
+            let offset = block_start + bit;
+            let is_valid = scan_is_jump_target_valid_extended(instruction_set, code, offset as u32);
+            assert_eq!(bitmap.get_local_raw(bit), is_valid, "mismatch at offset {offset}");
+
+            if cfg!(test) || block_start <= 2 * CODE_BLOCK_SIZE {
+                // Don't slow down the fuzz test unnecessarily.
+                assert_eq!(
+                    is_valid,
+                    scan_find_start_of_basic_block_extended(instruction_set, code, offset as u32) == Some(offset as u32),
+                    "mismatch at offset {offset}"
+                );
+            }
+
+            if is_valid {
+                assert!(linear.binary_search(&offset).is_ok());
+            }
+        }
+
+        let block_end = core::cmp::min(code.len(), block_start + CODE_BLOCK_SIZE);
+        let mut offset = block_start;
+        while offset < block_end {
+            let step = parse_simple_extended(instruction_set, code, offset);
+            if ends_basic_block_extended(instruction_set, step.raw_opcode) && step.next_offset < block_end {
+                assert!(
+                    bitmap.get_local_raw(step.next_offset - block_start),
+                    "the instruction after the one at offset {offset} is not a valid jump target"
+                );
+            }
+
+            offset = step.next_offset;
+        }
+
+        block_start += CODE_BLOCK_SIZE;
+    }
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn test_extended_decode_is_deterministic() {
+    let mut state: u64 = 0x853c49e6748fea9b;
+    let mut rng = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+
+    for _ in 0..50 {
+        let length = (rng() % (CODE_BLOCK_SIZE as u64 * 5 / 2)) as usize;
+        let mut code = alloc::vec![0; length];
+        for byte in code.iter_mut() {
+            *byte = match rng() % 4 {
+                0 => EXTENDED_OPCODE_PREFIX,
+                _ => (rng() & 0xff) as u8,
+            };
+        }
+
+        extended_assert_decode_is_deterministic(ISA_Latest64, &code);
+    }
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn test_extended_serialization_round_trip() {
+    let r1 = Reg::A1;
+    let r2 = Reg::A5;
+    let r3 = Reg::SP;
+
+    let mut instructions = alloc::vec::Vec::new();
+    for imm in [
+        0_i32,
+        1,
+        -1,
+        63,
+        64,
+        127,
+        128,
+        -128,
+        255,
+        256,
+        -257,
+        0x7fff,
+        -0x8000,
+        0x10000,
+        i32::MAX,
+        i32::MIN,
+    ] {
+        instructions.extend([
+            asm::load_imm(r1, imm),
+            asm::add_imm_64(r1, r2, imm),
+            asm::add_imm_32(r1, r2, imm),
+            asm::store_imm_indirect_u32(r1, imm, imm.wrapping_mul(3)),
+            asm::store_imm_u64(imm, imm.wrapping_add(7)),
+            asm::cmov_if_zero_imm(r1, r2, imm),
+            asm::jump_indirect(r2, imm),
+            asm::load_u16(r1, imm),
+            asm::store_u8(r2, imm),
+        ]);
+    }
+
+    instructions.extend([
+        asm::trap(),
+        asm::fallthrough(),
+        asm::memset(),
+        asm::unlikely(),
+        asm::sbrk(r1, r2),
+        asm::move_reg(r1, r2),
+        asm::add_64(r1, r2, r3),
+        asm::mul_upper_signed_signed(r1, r2, r3),
+        asm::load_imm64(r1, 0x1234_5678_9abc_def0),
+        asm::load_imm64(r2, u64::MAX),
+        asm::ecalli(0),
+        asm::ecalli(100_000),
+    ]);
+
+    for target in [0_u32, 60, 300, 70_000] {
+        instructions.extend([
+            asm::jump(target),
+            asm::load_imm_and_jump(r1, -5, target),
+            asm::branch_eq(r1, r2, target),
+            asm::branch_less_signed_imm(r1, -100, target),
+        ]);
+    }
+
+    let mut position: u32 = 12345;
+    for instruction in instructions {
+        let mut buffer = [0; MAX_INSTRUCTION_LENGTH];
+        let length = instruction.serialize_into(ISA_Latest64, position, &mut buffer) as u32;
+        assert!(length > 0 && length <= MAX_INSTRUCTION_LENGTH as u32);
+
+        let chunk = load_chunk(&buffer, 0);
+        let step = parse_simple_extended(ISA_Latest64, &buffer, 0);
+        assert_eq!(step.length, length, "length mismatch for {instruction:?}");
+
+        let parsed = ISA_Latest64.parse_instruction(step.raw_opcode, chunk, position, step.length);
+        assert_eq!(parsed, instruction, "round trip failed at length {length}");
+        position += length;
+    }
+}
+
+#[test]
+fn test_extended_jumping_after_an_invalid_instruction_is_allowed() {
+    let invalid_opcode = (0..EXTENDED_OPCODE_PREFIX)
+        .find(|&raw_opcode| ISA_Latest64.opcode_from_raw(u32::from(raw_opcode)).is_none())
+        .expect("no unused opcode found to test with");
+
+    let mut buffer = [0; MAX_INSTRUCTION_LENGTH];
+    let filler = asm::add_imm_64(Reg::A0, Reg::A0, 1);
+    let filler_length = filler.serialize_into(ISA_Latest64, 0, &mut buffer);
+
+    let mut code = [0; CODE_BLOCK_SIZE];
+    code[..filler_length].copy_from_slice(&buffer[..filler_length]);
+    code[filler_length] = invalid_opcode;
+
+    let step = parse_simple_extended(ISA_Latest64, &code, filler_length);
+    assert_eq!(step.raw_opcode, usize::from(invalid_opcode));
+    let after_invalid = step.next_offset;
+
+    let mut bitmap = CodeBlockBitmap::new();
+    bitmap.build(ISA_Latest64, &code, 0);
+
+    assert!(!scan_is_jump_target_valid_extended(ISA_Latest64, &code, filler_length as u32));
+    assert!(!bitmap.get_local_raw(filler_length));
+    assert_eq!(
+        scan_find_start_of_basic_block_extended(ISA_Latest64, &code, filler_length as u32),
+        Some(0)
+    );
+
+    assert!(scan_is_jump_target_valid_extended(ISA_Latest64, &code, after_invalid as u32));
+    assert!(bitmap.get_local_raw(after_invalid));
+    assert_eq!(
+        scan_find_start_of_basic_block_extended(ISA_Latest64, &code, after_invalid as u32),
+        Some(after_invalid as u32)
+    );
+}
+
+#[test]
+fn test_extended_instruction_overhanging_a_block_boundary_is_a_trap() {
+    let mut buffer = [0; MAX_INSTRUCTION_LENGTH];
+    let instruction = asm::load_imm64(Reg::A0, u64::MAX);
+    let length = instruction.serialize_into(ISA_Latest64, 0, &mut buffer);
+    assert_eq!(length, 10);
+
+    let mut code = [0; 2048];
+    let offset = CODE_BLOCK_SIZE - 1;
+    code[offset..offset + length].copy_from_slice(&buffer[..length]);
+
+    let step = parse_simple_extended(ISA_Latest64, &code, offset);
+    assert_eq!(step.raw_opcode, EXTENDED_INVALID_RAW_OPCODE);
+    assert_eq!(step.length as usize, CODE_BLOCK_SIZE - offset);
+    assert_eq!(step.next_offset, CODE_BLOCK_SIZE);
+
+    let chunk = load_chunk(&code, offset);
+    assert_eq!(
+        ISA_Latest64.parse_instruction(step.raw_opcode, chunk, offset as u32, step.length),
+        Instruction::invalid
+    );
+
+    // The very same instruction is decoded normally when it fits.
+    code[CODE_BLOCK_SIZE..CODE_BLOCK_SIZE + length].copy_from_slice(&buffer[..length]);
+    let step = parse_simple_extended(ISA_Latest64, &code, CODE_BLOCK_SIZE);
+    assert_eq!(step.next_offset, CODE_BLOCK_SIZE + length);
+    let chunk = load_chunk(&code, CODE_BLOCK_SIZE);
+    assert_eq!(
+        ISA_Latest64.parse_instruction(step.raw_opcode, chunk, CODE_BLOCK_SIZE as u32, step.length),
+        instruction
+    );
 }
 
 /// Returns whether a jump to a given `offset` is allowed.
 #[inline]
-pub fn is_jump_target_valid<I>(instruction_set: I, code: &[u8], bitmask: &[u8], offset: u32) -> bool
+pub fn scan_is_jump_target_valid<I>(instruction_set: I, code: &[u8], bitmask: &[u8], offset: u32) -> bool
 where
     I: InstructionSet,
 {
-    if !get_bit_for_offset(bitmask, code.len(), offset) {
+    if instruction_set.is_legacy() {
+        is_jump_target_valid_legacy(instruction_set, code, bitmask, offset)
+    } else {
+        scan_is_jump_target_valid_extended(instruction_set, code, offset)
+    }
+}
+
+fn is_instruction_start_legacy(bitmask: &[u8], code_len: usize, offset: u32) -> bool {
+    if cast(offset).to_usize() >= code_len {
+        return false;
+    }
+
+    offset == 0 || get_bit_for_offset(bitmask, code_len, offset) || get_previous_instruction_skip(bitmask, offset) == Some(BITMASK_MAX)
+}
+
+#[inline(never)]
+fn is_jump_target_valid_legacy<I>(instruction_set: I, code: &[u8], bitmask: &[u8], offset: u32) -> bool
+where
+    I: InstructionSet,
+{
+    debug_assert!(instruction_set.is_legacy());
+
+    if !is_instruction_start_legacy(bitmask, code.len(), offset) {
         // We can't jump if there's no instruction here.
         return false;
     }
 
-    if offset == 0 {
-        // This is the very first instruction, so we can always jump here.
-        return true;
-    }
-
-    let Some(skip) = get_previous_instruction_skip(bitmask, offset) else {
-        // We can't jump if there's no previous instruction in range.
-        return false;
-    };
-
-    let Some(opcode) = instruction_set.opcode_from_u8(code[offset as usize - skip as usize - 1]) else {
-        // We can't jump after an invalid instruction.
-        return false;
-    };
-
-    if !opcode.starts_new_basic_block() {
-        // We can't jump after this instruction.
-        return false;
-    }
-
-    true
+    previous_instruction_legacy(instruction_set, code, bitmask, offset).is_none_or(|(_, opcode)| opcode.starts_new_basic_block())
 }
 
 #[inline]
-pub fn find_start_of_basic_block<I>(instruction_set: I, code: &[u8], bitmask: &[u8], mut offset: u32) -> Option<u32>
+fn previous_instruction_legacy<I>(instruction_set: I, code: &[u8], bitmask: &[u8], offset: u32) -> Option<(u32, Opcode)>
 where
     I: InstructionSet,
 {
-    if !get_bit_for_offset(bitmask, code.len(), offset) {
+    let skip = get_previous_instruction_skip(bitmask, offset)?;
+    let previous_offset = offset - skip - 1;
+    let opcode = instruction_set
+        .opcode_from_raw(u32::from(code[cast(previous_offset).to_usize()]))
+        .unwrap_or(Opcode::trap);
+
+    Some((previous_offset, opcode))
+}
+
+#[inline(never)]
+fn scan_is_jump_target_valid_extended<I>(instruction_set: I, code: &[u8], offset: u32) -> bool
+where
+    I: InstructionSet,
+{
+    debug_assert!(!instruction_set.is_legacy());
+
+    let offset = cast(offset).to_usize();
+    if offset >= code.len() {
+        return false;
+    }
+
+    let start_of_block = start_of_block_boundary(offset);
+    if offset == start_of_block {
+        // A macro block boundary always starts a new basic block, so we can always jump here.
+        return true;
+    }
+
+    let mut position = start_of_block;
+    while position < offset {
+        let step = parse_simple_extended(instruction_set, code, position);
+        if step.next_offset == offset {
+            return ends_basic_block_extended(instruction_set, step.raw_opcode);
+        }
+
+        position = step.next_offset;
+    }
+
+    // There's no instruction boundary at `offset`, so we can't jump here.
+    false
+}
+
+#[inline]
+fn ends_basic_block_extended<I>(instruction_set: I, raw_opcode: usize) -> bool
+where
+    I: InstructionSet,
+{
+    debug_assert!(!instruction_set.is_legacy());
+    instruction_set.raw_opcode_table().ends_basic_block(raw_opcode)
+}
+
+#[inline]
+pub fn scan_find_start_of_basic_block<I>(instruction_set: I, code: &[u8], bitmask: &[u8], offset: u32) -> Option<u32>
+where
+    I: InstructionSet,
+{
+    if instruction_set.is_legacy() {
+        find_start_of_basic_block_legacy(instruction_set, code, bitmask, offset)
+    } else {
+        scan_find_start_of_basic_block_extended(instruction_set, code, offset)
+    }
+}
+
+fn find_start_of_basic_block_legacy<I>(instruction_set: I, code: &[u8], bitmask: &[u8], mut offset: u32) -> Option<u32>
+where
+    I: InstructionSet,
+{
+    if !is_instruction_start_legacy(bitmask, code.len(), offset) {
         // We can't jump if there's no instruction here.
         return None;
     }
 
-    if offset == 0 {
-        // This is the very first instruction, so we can always jump here.
-        return Some(0);
-    }
-
-    loop {
-        // We can't jump if there's no previous instruction in range.
-        let skip = get_previous_instruction_skip(bitmask, offset)?;
-        let previous_offset = offset - skip - 1;
-        let opcode = instruction_set
-            .opcode_from_u8(code[previous_offset as usize])
-            .unwrap_or(Opcode::trap);
+    while let Some((previous_offset, opcode)) = previous_instruction_legacy(instruction_set, code, bitmask, offset) {
         if opcode.starts_new_basic_block() {
-            // We can jump after this instruction.
-            return Some(offset);
+            break;
         }
 
         offset = previous_offset;
-        if offset == 0 {
-            return Some(0);
+    }
+
+    Some(offset)
+}
+
+fn scan_find_start_of_basic_block_extended<I>(instruction_set: I, code: &[u8], offset: u32) -> Option<u32>
+where
+    I: InstructionSet,
+{
+    let offset = cast(offset).to_usize();
+    if offset >= code.len() {
+        // We can't jump if there's no instruction here.
+        return None;
+    }
+
+    let start_of_block = start_of_block_boundary(offset);
+    let mut block_start = start_of_block;
+    let mut position = start_of_block;
+    while position < offset {
+        let step = parse_simple_extended(instruction_set, code, position);
+        if ends_basic_block_extended(instruction_set, step.raw_opcode) {
+            block_start = step.next_offset;
+        }
+
+        position = step.next_offset;
+    }
+
+    if position != offset {
+        // There's no instruction boundary at `offset`, so we can't jump here.
+        return None;
+    }
+
+    Some(block_start as u32)
+}
+
+const CODE_BLOCK_BITMAP_ELEMENTS: usize = CODE_BLOCK_SIZE / 64;
+
+#[derive(Copy, Clone)]
+pub struct CodeBlockBitmap {
+    /// Address of the macro block; `u32::MAX` when none.
+    block_start: u32,
+    bits: [u64; CODE_BLOCK_BITMAP_ELEMENTS],
+}
+
+#[cfg(feature = "alloc")]
+pub type CodeBlockBitmapBox = alloc::boxed::Box<CodeBlockBitmap>;
+
+impl Default for CodeBlockBitmap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CodeBlockBitmap {
+    pub fn new() -> Self {
+        Self {
+            block_start: u32::MAX,
+            bits: [0_u64; CODE_BLOCK_BITMAP_ELEMENTS],
         }
     }
+
+    #[cfg(feature = "alloc")]
+    pub fn new_boxed() -> CodeBlockBitmapBox {
+        alloc::boxed::Box::new(Self::new())
+    }
+
+    pub fn get(&self, pc: ProgramCounter) -> bool {
+        self.is_for_the_block_containing(pc) && self.get_local_raw(cast(pc.0).to_usize() % CODE_BLOCK_SIZE)
+    }
+
+    fn is_for_the_block_containing(&self, pc: ProgramCounter) -> bool {
+        cast(start_of_block_boundary(cast(pc.0).to_usize())).to_u32_or_debug_panic() == self.block_start
+    }
+
+    pub fn get_local_raw(&self, bit: usize) -> bool {
+        self.bits[bit / 64] & (1 << (bit % 64)) != 0
+    }
+
+    pub fn set_local_raw(&mut self, bit: usize) {
+        self.bits[bit / 64] |= 1 << (bit % 64);
+    }
+
+    pub fn clear(&mut self) {
+        self.block_start = u32::MAX;
+        self.bits.fill(0);
+    }
+
+    /// Computes the valid jump target bitmap for the whole macro block containing `offset` in a single scan.
+    pub fn build<I>(&mut self, instruction_set: I, code: &[u8], offset: u32)
+    where
+        I: InstructionSet,
+    {
+        assert!(!instruction_set.is_legacy());
+        self.clear();
+
+        let block_start = start_of_block_boundary(cast(offset).to_usize());
+        self.block_start = cast(block_start).to_u32_or_debug_panic();
+        if block_start >= code.len() {
+            return;
+        }
+
+        // A macro block boundary always starts a new basic block.
+        self.set_local_raw(0);
+
+        let block_end = core::cmp::min(code.len(), block_start + CODE_BLOCK_SIZE);
+        let mut position = block_start;
+        while position < block_end {
+            let step = parse_simple_extended(instruction_set, code, position);
+            if ends_basic_block_extended(instruction_set, step.raw_opcode) && step.next_offset < block_end {
+                self.set_local_raw(step.next_offset - block_start);
+            }
+
+            position = step.next_offset;
+        }
+    }
+
+    /// Returns the index of the closest set bit at or before `bit`.
+    fn find_previous_set_bit(&self, bit: usize) -> Option<usize> {
+        let mut index = bit / 64;
+        let mut word = self.bits[index] & (u64::MAX >> (63 - bit % 64));
+        while word == 0 {
+            index = index.checked_sub(1)?;
+            word = self.bits[index];
+        }
+
+        Some(index * 64 + cast(u64::BITS - 1 - word.leading_zeros()).to_usize())
+    }
+
+    pub fn find_start_of_basic_block(&self, program_counter: ProgramCounter) -> Option<ProgramCounter> {
+        if !self.is_for_the_block_containing(program_counter) {
+            return None;
+        }
+
+        let offset = cast(program_counter.0).to_usize();
+        let bit = offset % CODE_BLOCK_SIZE;
+        let block_start = offset - bit;
+
+        Some(ProgramCounter(
+            cast(block_start + self.find_previous_set_bit(bit)?).to_u32_or_debug_panic(),
+        ))
+    }
+}
+
+#[test]
+fn test_find_previous_set_bit_matches_a_linear_search() {
+    let mut state: u64 = 0x243f6a8885a308d3;
+    let mut rng = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+
+    for iteration in 0..100 {
+        let mut bitmap = CodeBlockBitmap::new();
+        for word in bitmap.bits.iter_mut() {
+            *word = match iteration % 4 {
+                0 => 0,
+                1 => rng(),
+                2 => rng() & rng() & rng(),
+                _ => u64::MAX,
+            };
+        }
+
+        for bit in 0..CODE_BLOCK_SIZE {
+            let expected = (0..=bit).rev().find(|&bit| bitmap.get_local_raw(bit));
+            assert_eq!(bitmap.find_previous_set_bit(bit), expected, "mismatch at bit {bit}");
+        }
+    }
+}
+
+#[test]
+fn test_code_block_bitmap_only_answers_queries_about_its_own_block() {
+    let opcode_unlikely = ISA_Latest64.opcode_to_raw(Opcode::unlikely, 0).unwrap().0 as u8;
+    let opcode_fallthrough = ISA_Latest64.opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
+
+    // Nothing in the first macro block ends a basic block, while everything does in the second one.
+    let mut code = [opcode_unlikely; CODE_BLOCK_SIZE * 2];
+    code[CODE_BLOCK_SIZE..].fill(opcode_fallthrough);
+
+    let mut bitmap = CodeBlockBitmap::new();
+    bitmap.build(ISA_Latest64, &code, CODE_BLOCK_SIZE as u32);
+
+    let inside = ProgramCounter(CODE_BLOCK_SIZE as u32 + 5);
+    assert!(bitmap.get(inside));
+    assert_eq!(bitmap.find_start_of_basic_block(inside), Some(inside));
+
+    let outside = ProgramCounter(5);
+    assert!(!scan_is_jump_target_valid_extended(ISA_Latest64, &code, outside.0));
+    assert!(!bitmap.get(outside));
+    assert_eq!(bitmap.find_start_of_basic_block(outside), None);
 }
 
 #[cfg(test)]
@@ -4556,8 +6162,7 @@ fn test_is_jump_target_valid() {
         }
     }
 
-    let opcode_load_imm = ISA_Latest64.opcode_to_u8(Opcode::load_imm).unwrap();
-    let opcode_trap = ISA_Latest64.opcode_to_u8(Opcode::trap).unwrap();
+    let opcode_trap = ISA_Latest64.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
 
     macro_rules! g {
         ($code_length:expr, $bits:expr) => {{
@@ -4588,47 +6193,147 @@ fn test_is_jump_target_valid() {
     macro_rules! assert_valid {
         ($code_length:expr, $bits:expr, $offset:expr) => {{
             let (code, bitmask) = g!($code_length, $bits);
-            assert!(is_jump_target_valid(DefaultInstructionSet::default(), &code, &bitmask, $offset));
+            assert!(is_jump_target_valid_legacy(
+                DefaultInstructionSet::default(),
+                &code,
+                &bitmask,
+                $offset
+            ));
         }};
     }
 
     macro_rules! assert_invalid {
         ($code_length:expr, $bits:expr, $offset:expr) => {{
             let (code, bitmask) = g!($code_length, $bits);
-            assert!(!is_jump_target_valid(DefaultInstructionSet::default(), &code, &bitmask, $offset));
+            assert!(!is_jump_target_valid_legacy(
+                DefaultInstructionSet::default(),
+                &code,
+                &bitmask,
+                $offset
+            ));
         }};
     }
 
     assert_valid!(1, [0], 0);
-    assert_invalid!(1, [], 0);
     assert_valid!(2, [0, 1], 1);
-    assert_invalid!(2, [1], 1);
     assert_valid!(8, [0, 7], 7);
     assert_valid!(9, [0, 8], 8);
     assert_valid!(25, [0, 24], 24);
     assert_valid!(26, [0, 25], 25);
-    assert_invalid!(27, [0, 26], 26);
 
-    assert!(is_jump_target_valid(
+    assert_invalid!(3, [0, 2], 1);
+    assert_invalid!(27, [0], 24);
+
+    assert_valid!(1, [], 0);
+    assert_valid!(2, [1], 1);
+    assert_valid!(27, [0], 25);
+    assert_valid!(27, [0, 26], 26);
+
+    let opcode_load_imm = ISA_Latest32.opcode_to_raw(Opcode::load_imm, 1).unwrap().0 as u8;
+    assert!(is_jump_target_valid_legacy(
         DefaultInstructionSet::default(),
         &[opcode_load_imm],
         &[0b00000001],
         0
     ));
 
-    assert!(!is_jump_target_valid(
+    assert!(!is_jump_target_valid_legacy(
         DefaultInstructionSet::default(),
         &[opcode_load_imm, opcode_load_imm],
         &[0b00000011],
         1
     ));
 
-    assert!(is_jump_target_valid(
+    assert!(is_jump_target_valid_legacy(
         DefaultInstructionSet::default(),
         &[opcode_trap, opcode_load_imm],
         &[0b00000011],
         1
     ));
+
+    // An unassigned opcode is an invalid instruction, which is a trap, so it also ends a basic block.
+    let opcode_unassigned = (0..=u8::MAX)
+        .find(|&raw_opcode| DefaultInstructionSet::default().opcode_from_raw(u32::from(raw_opcode)).is_none())
+        .unwrap();
+
+    assert!(is_jump_target_valid_legacy(
+        DefaultInstructionSet::default(),
+        &[opcode_unassigned, opcode_load_imm],
+        &[0b00000011],
+        1
+    ));
+}
+
+#[test]
+fn test_legacy_runner_and_free_functions_match() {
+    #[derive(Copy, Clone)]
+    struct CollectInstructionStarts<I>(I);
+
+    impl<I> OpcodeVisitor for CollectInstructionStarts<I>
+    where
+        I: InstructionSet,
+    {
+        type State = [bool; 256];
+        type ReturnTy = ();
+        type InstructionSet = I;
+
+        fn instruction_set(self) -> I {
+            self.0
+        }
+
+        fn dispatch(self, state: &mut Self::State, _opcode: usize, _chunk: u128, offset: u32, _length: u32) {
+            if let Some(is_start) = state.get_mut(cast(offset).to_usize()) {
+                *is_start = true;
+            }
+        }
+    }
+
+    let mut state: u64 = 0x243f6a8885a308d3;
+    let mut rng = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state as u8
+    };
+
+    let instruction_set = DefaultInstructionSet::default();
+    let mut injected_instructions = 0;
+    for iteration in 0..100 {
+        let mut code = [0_u8; 256];
+        code.fill_with(&mut rng);
+
+        let mut bitmask = [0_u8; 256 / 8];
+        bitmask.fill_with(|| match iteration % 4 {
+            0 => 0,
+            1 => rng(),
+            2 => rng() & rng() & rng(),
+            _ => u8::MAX,
+        });
+
+        let mut decoded_starts = [false; 256];
+        visitor_run_legacy(&mut decoded_starts, &code, &bitmask, CollectInstructionStarts(instruction_set));
+
+        for offset in 0..cast(code.len()).to_u32_or_debug_panic() {
+            let is_instruction_start = is_instruction_start_legacy(&bitmask, code.len(), offset);
+            assert_eq!(
+                is_instruction_start,
+                decoded_starts[cast(offset).to_usize()],
+                "mismatch at offset {offset} of iteration {iteration}"
+            );
+
+            assert_eq!(
+                is_jump_target_valid_legacy(instruction_set, &code, &bitmask, offset),
+                find_start_of_basic_block_legacy(instruction_set, &code, &bitmask, offset) == Some(offset),
+                "jump target and start of basic block mismatch at offset {offset} of iteration {iteration}"
+            );
+
+            if is_instruction_start && offset != 0 && !get_bit_for_offset(&bitmask, code.len(), offset) {
+                injected_instructions += 1;
+            }
+        }
+    }
+
+    assert!(injected_instructions > 0);
 }
 
 #[cfg_attr(not(debug_assertions), inline(always))]
@@ -4720,9 +6425,8 @@ impl ParsedInstruction {
     where
         T: ParsingVisitor,
     {
-        let args_offset = self.offset.0 + 1;
         self.kind
-            .visit_parsing(self.offset.0, self.next_offset.0.saturating_sub(args_offset), visitor)
+            .visit_parsing(self.offset.0, self.next_offset.0.saturating_sub(self.offset.0), visitor)
     }
 }
 
@@ -4751,16 +6455,40 @@ where
     }
 
     #[inline]
+    pub fn new_bounded_known_boundary(instruction_set: I, code: &'a [u8], bitmask: &'a [u8], offset: u32) -> Self {
+        Self::new_impl(instruction_set, code, bitmask, offset, true, true)
+    }
+
+    #[inline]
     pub fn new_unbounded(instruction_set: I, code: &'a [u8], bitmask: &'a [u8], offset: u32) -> Self {
         Self::new(instruction_set, code, bitmask, offset, false)
     }
 
     #[inline]
     fn new(instruction_set: I, code: &'a [u8], bitmask: &'a [u8], offset: u32, is_bounded: bool) -> Self {
-        assert!(code.len() <= u32::MAX as usize);
-        assert_eq!(bitmask.len(), code.len().div_ceil(8));
+        Self::new_impl(instruction_set, code, bitmask, offset, is_bounded, false)
+    }
 
-        let is_valid = get_bit_for_offset(bitmask, code.len(), offset);
+    #[inline]
+    fn new_impl(instruction_set: I, code: &'a [u8], bitmask: &'a [u8], offset: u32, is_bounded: bool, is_known_boundary: bool) -> Self {
+        assert!(code.len() <= u32::MAX as usize);
+        let is_legacy = instruction_set.is_legacy();
+        if is_legacy {
+            assert_eq!(bitmask.len(), code.len().div_ceil(8));
+        }
+
+        let is_valid = if is_legacy {
+            debug_assert!(
+                !is_known_boundary || cast(offset).to_usize() >= code.len() || is_instruction_start_legacy(bitmask, code.len(), offset)
+            );
+            get_bit_for_offset(bitmask, code.len(), offset)
+        } else if is_known_boundary && (offset as usize) < code.len() {
+            debug_assert!(extended_scan_is_instruction_boundary(instruction_set, code, offset));
+            true
+        } else {
+            extended_scan_is_instruction_boundary(instruction_set, code, offset)
+        };
+
         let mut is_done = false;
         let (offset, invalid_offset) = if is_valid {
             (offset, None)
@@ -4772,9 +6500,13 @@ where
                 (core::cmp::min(offset + 1, code.len() as u32), Some(offset))
             }
         } else {
-            let next_offset = find_next_offset_unbounded(bitmask, code.len() as u32, offset);
+            let next_offset = if is_legacy {
+                find_next_offset_legacy_unbounded(bitmask, code.len() as u32, offset)
+            } else {
+                extended_scan_find_next_offset(instruction_set, code, offset)
+            };
             debug_assert!(
-                next_offset as usize == code.len() || get_bit_for_offset(bitmask, code.len(), next_offset),
+                next_offset as usize == code.len() || !is_legacy || get_bit_for_offset(bitmask, code.len(), next_offset),
                 "bit at {offset} is zero"
             );
             (next_offset, Some(offset))
@@ -4834,11 +6566,29 @@ where
             return None;
         }
 
+        if !self.instruction_set.is_legacy() {
+            self.next_extended()
+        } else {
+            self.next_legacy()
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.code.len() - core::cmp::min(self.offset() as usize, self.code.len())))
+    }
+}
+
+impl<'a, I> Instructions<'a, I>
+where
+    I: InstructionSet,
+{
+    fn next_legacy(&mut self) -> Option<ParsedInstruction> {
         let offset = self.offset;
         debug_assert!(get_bit_for_offset(self.bitmask, self.code.len(), offset), "bit at {offset} is zero");
 
         let (next_offset, instruction, is_next_instruction_invalid) =
-            parse_instruction(self.instruction_set, self.code, self.bitmask, self.offset);
+            parse_instruction_legacy(self.instruction_set, self.code, self.bitmask, self.offset);
+
         debug_assert!(next_offset > self.offset);
 
         if !is_next_instruction_invalid {
@@ -4853,13 +6603,9 @@ where
                 self.offset = self.code.len() as u32 + 1;
             } else if self.is_bounded {
                 self.is_done = true;
-                if instruction.opcode().can_fallthrough() {
-                    self.offset = self.code.len() as u32;
-                } else {
-                    self.offset = next_offset;
-                }
+                self.offset = self.code.len() as u32;
             } else {
-                self.offset = find_next_offset_unbounded(self.bitmask, self.code.len() as u32, next_offset);
+                self.offset = find_next_offset_legacy_unbounded(self.bitmask, self.code.len() as u32, next_offset);
                 debug_assert!(
                     self.offset as usize == self.code.len() || get_bit_for_offset(self.bitmask, self.code.len(), self.offset),
                     "bit at {} is zero",
@@ -4867,9 +6613,7 @@ where
                 );
             }
 
-            if instruction.opcode().can_fallthrough() {
-                self.invalid_offset = Some(next_offset);
-            }
+            self.invalid_offset = Some(next_offset);
         }
 
         Some(ParsedInstruction {
@@ -4879,14 +6623,33 @@ where
         })
     }
 
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, Some(self.code.len() - core::cmp::min(self.offset() as usize, self.code.len())))
+    fn next_extended(&mut self) -> Option<ParsedInstruction> {
+        let offset = self.offset;
+        let (instruction, next_offset) = parse_raw_extended(
+            self.code,
+            cast(offset).to_usize(),
+            end_of_macro_block(cast(offset).to_usize(), self.code.len()),
+            self.instruction_set.raw_opcode_table(),
+            |raw_opcode, chunk, offset, length| {
+                self.instruction_set
+                    .parse_instruction(cast(raw_opcode).to_usize(), chunk, cast(offset).to_u32_or_debug_panic(), length)
+            },
+        );
+
+        let next_offset = cast(next_offset).to_u32_or_debug_panic();
+        self.offset = next_offset;
+
+        Some(ParsedInstruction {
+            kind: instruction,
+            offset: ProgramCounter(offset),
+            next_offset: ProgramCounter(next_offset),
+        })
     }
 }
 
 #[test]
 fn test_instructions_iterator_with_implicit_trap() {
-    let opcode_fallthrough = ISA_Latest64.opcode_to_u8(Opcode::fallthrough).unwrap();
+    let opcode_fallthrough = DefaultInstructionSet::default().opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
     let code = [opcode_fallthrough];
     for is_bounded in [false, true] {
         let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &[0b00000001], 0, is_bounded);
@@ -4914,7 +6677,7 @@ fn test_instructions_iterator_with_implicit_trap() {
 
 #[test]
 fn test_instructions_iterator_without_implicit_trap() {
-    let opcode_trap = ISA_Latest64.opcode_to_u8(Opcode::trap).unwrap();
+    let opcode_trap = DefaultInstructionSet::default().opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap];
     for is_bounded in [false, true] {
         let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &[0b00000001], 0, is_bounded);
@@ -4934,7 +6697,7 @@ fn test_instructions_iterator_without_implicit_trap() {
 #[test]
 fn test_instructions_iterator_very_long_bitmask_bounded() {
     let mut code = [0_u8; 64];
-    code[0] = ISA_Latest64.opcode_to_u8(Opcode::fallthrough).unwrap();
+    code[0] = DefaultInstructionSet::default().opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
     let mut bitmask = [0_u8; 8];
     bitmask[0] = 0b00000001;
     bitmask[7] = 0b10000000;
@@ -4964,7 +6727,7 @@ fn test_instructions_iterator_very_long_bitmask_bounded() {
 #[test]
 fn test_instructions_iterator_very_long_bitmask_unbounded() {
     let mut code = [0_u8; 64];
-    code[0] = ISA_Latest64.opcode_to_u8(Opcode::fallthrough).unwrap();
+    code[0] = DefaultInstructionSet::default().opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
     let mut bitmask = [0_u8; 8];
     bitmask[0] = 0b00000001;
     bitmask[7] = 0b10000000;
@@ -5002,7 +6765,7 @@ fn test_instructions_iterator_very_long_bitmask_unbounded() {
 
 #[test]
 fn test_instructions_iterator_start_at_invalid_offset_bounded() {
-    let opcode_trap = ISA_Latest64.opcode_to_u8(Opcode::trap).unwrap();
+    let opcode_trap = DefaultInstructionSet::default().opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap; 8];
     let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &[0b10000001], 1, true);
     assert_eq!(
@@ -5020,7 +6783,7 @@ fn test_instructions_iterator_start_at_invalid_offset_bounded() {
 
 #[test]
 fn test_instructions_iterator_start_at_invalid_offset_unbounded() {
-    let opcode_trap = ISA_Latest64.opcode_to_u8(Opcode::trap).unwrap();
+    let opcode_trap = DefaultInstructionSet::default().opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap; 8];
     let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &[0b10000001], 1, false);
     assert_eq!(
@@ -5045,8 +6808,8 @@ fn test_instructions_iterator_start_at_invalid_offset_unbounded() {
 }
 
 #[test]
-fn test_instructions_iterator_does_not_emit_unnecessary_invalid_instructions_if_bounded_and_ends_with_a_trap() {
-    let opcode_trap = ISA_Latest64.opcode_to_u8(Opcode::trap).unwrap();
+fn test_instructions_iterator_emits_an_injected_invalid_instruction_if_bounded_and_ends_with_a_trap() {
+    let opcode_trap = DefaultInstructionSet::default().opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap; 32];
     let bitmask = [0b00000001, 0b00000000, 0b00000000, 0b00000100];
     let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &bitmask, 0, true);
@@ -5060,12 +6823,20 @@ fn test_instructions_iterator_does_not_emit_unnecessary_invalid_instructions_if_
         })
     );
     assert_eq!(i.offset(), 25);
+    assert_eq!(
+        i.next(),
+        Some(ParsedInstruction {
+            kind: Instruction::invalid,
+            offset: ProgramCounter(25),
+            next_offset: ProgramCounter(32)
+        })
+    );
     assert_eq!(i.next(), None);
 }
 
 #[test]
-fn test_instructions_iterator_does_not_emit_unnecessary_invalid_instructions_if_unbounded_and_ends_with_a_trap() {
-    let opcode_trap = ISA_Latest64.opcode_to_u8(Opcode::trap).unwrap();
+fn test_instructions_iterator_emits_an_injected_invalid_instruction_if_unbounded_and_ends_with_a_trap() {
+    let opcode_trap = DefaultInstructionSet::default().opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap; 32];
     let bitmask = [0b00000001, 0b00000000, 0b00000000, 0b00000100];
     let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &bitmask, 0, false);
@@ -5078,7 +6849,15 @@ fn test_instructions_iterator_does_not_emit_unnecessary_invalid_instructions_if_
             next_offset: ProgramCounter(25)
         })
     );
-    assert_eq!(i.offset(), 26);
+    assert_eq!(i.offset(), 25);
+    assert_eq!(
+        i.next(),
+        Some(ParsedInstruction {
+            kind: Instruction::invalid,
+            offset: ProgramCounter(25),
+            next_offset: ProgramCounter(26)
+        })
+    );
     assert_eq!(
         i.next(),
         Some(ParsedInstruction {
@@ -5345,27 +7124,35 @@ impl ProgramBlob {
             blob.jump_table = reader.read_slice_as_bytes(jump_table_length as usize)?;
             blob.code = reader.read_slice_as_bytes(code_length as usize)?;
 
-            let bitmask_length = parts.code_and_jump_table.len() - (reader.position - initial_position);
-            blob.bitmask = reader.read_slice_as_bytes(bitmask_length)?;
-
-            let mut expected_bitmask_length = blob.code.len() / 8;
-            let is_bitmask_padded = blob.code.len() % 8 != 0;
-            expected_bitmask_length += usize::from(is_bitmask_padded);
-
-            if blob.bitmask.len() != expected_bitmask_length {
-                return Err(ProgramParseError(ProgramParseErrorKind::Other(
-                    "the bitmask length doesn't match the code length",
-                )));
-            }
-
-            if is_bitmask_padded {
-                let last_byte = *blob.bitmask.last().unwrap();
-                let padding_bits = blob.bitmask.len() * 8 - blob.code.len();
-                let padding_mask = ((0b10000000_u8 as i8) >> (padding_bits - 1)) as u8;
-                if last_byte & padding_mask != 0 {
+            if !blob.isa.is_legacy() {
+                if reader.position - initial_position != parts.code_and_jump_table.len() {
                     return Err(ProgramParseError(ProgramParseErrorKind::Other(
-                        "the bitmask is padded with non-zero bits",
+                        "unexpected data after the end of the code",
                     )));
+                }
+            } else {
+                let bitmask_length = parts.code_and_jump_table.len() - (reader.position - initial_position);
+                blob.bitmask = reader.read_slice_as_bytes(bitmask_length)?;
+
+                let mut expected_bitmask_length = blob.code.len() / 8;
+                let is_bitmask_padded = blob.code.len() % 8 != 0;
+                expected_bitmask_length += usize::from(is_bitmask_padded);
+
+                if blob.bitmask.len() != expected_bitmask_length {
+                    return Err(ProgramParseError(ProgramParseErrorKind::Other(
+                        "the bitmask length doesn't match the code length",
+                    )));
+                }
+
+                if is_bitmask_padded {
+                    let last_byte = *blob.bitmask.last().unwrap();
+                    let padding_bits = blob.bitmask.len() * 8 - blob.code.len();
+                    let padding_mask = ((0b10000000_u8 as i8) >> (padding_bits - 1)) as u8;
+                    if last_byte & padding_mask != 0 {
+                        return Err(ProgramParseError(ProgramParseErrorKind::Other(
+                            "the bitmask is padded with non-zero bits",
+                        )));
+                    }
                 }
             }
         }
@@ -5635,6 +7422,16 @@ impl ProgramBlob {
         Instructions::new_bounded(instruction_set, self.code(), self.bitmask(), offset.0)
     }
 
+    /// Same as [`Self::instructions_bounded_at`], but assumes `offset` is a known instruction boundary
+    /// (e.g. it was validated with `is_jump_target_valid`), skipping the boundary check.
+    ///
+    /// Calling this with an offset which is *not* an instruction boundary may decode in a way
+    /// which disagrees with a linear decode of the program.
+    #[inline]
+    pub fn instructions_bounded_at_known_boundary(&self, offset: ProgramCounter) -> Instructions<InstructionSetKind> {
+        Instructions::new_bounded_known_boundary(self.isa, self.code(), self.bitmask(), offset.0)
+    }
+
     /// Returns whether the code of the module is well formed. Has worst-case O(n) complexity.
     pub fn validate_code_with_isa<I>(&self, instruction_set: I) -> Result<(), ProgramCounter>
     where
@@ -5650,11 +7447,15 @@ impl ProgramBlob {
     }
 
     /// Returns whether the given program counter is a valid target for a jump.
-    pub fn is_jump_target_valid<I>(&self, instruction_set: I, target: ProgramCounter) -> bool
+    pub fn scan_is_jump_target_valid<I>(&self, instruction_set: I, target: ProgramCounter) -> bool
     where
         I: InstructionSet,
     {
-        is_jump_target_valid(instruction_set, self.code(), self.bitmask(), target.0)
+        if instruction_set.is_legacy() {
+            is_jump_target_valid_legacy(instruction_set, self.code(), self.bitmask(), target.0)
+        } else {
+            scan_is_jump_target_valid_extended(instruction_set, self.code(), target.0)
+        }
     }
 
     /// Returns a jump table.
@@ -5908,6 +7709,12 @@ impl ProgramBlob {
         let code_length = self.code.len();
         purgeable_ram_consumption = purgeable_ram_consumption.saturating_add((code_length + 1) * INTERPRETER_FLATMAP_ENTRY_SIZE as usize);
 
+        if !self.isa.is_legacy() {
+            purgeable_ram_consumption = purgeable_ram_consumption.saturating_add(
+                code_length.div_ceil(CODE_BLOCK_SIZE) * (core::mem::size_of::<CodeBlockBitmap>() + core::mem::size_of::<usize>()),
+            );
+        }
+
         let Ok(purgeable_ram_consumption) = u32::try_from(purgeable_ram_consumption) else {
             return Err("estimated interpreter cache size is too large");
         };
@@ -5935,6 +7742,42 @@ impl ProgramBlob {
             purgeable_ram_consumption,
         })
     }
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn test_estimate_interpreter_memory_usage_accounts_for_the_jump_target_bitmaps() {
+    fn estimate(isa: InstructionSetKind) -> (usize, usize) {
+        let mut code = alloc::vec![asm::add_imm_64(Reg::A0, Reg::A0, 1); 2000];
+        code.push(asm::trap());
+
+        let mut builder = crate::writer::ProgramBlobBuilder::new(isa);
+        builder.set_code(&code, &[]);
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let info = blob
+            .estimate_interpreter_memory_usage(EstimateInterpreterMemoryUsageArgs::UnboundedCache {
+                instruction_count: code.len() as u32,
+                basic_block_count: 1,
+                page_size: 0x4000,
+            })
+            .unwrap();
+
+        let cache = interpreter_calculate_cache_size(code.len() + 1);
+        let flat_map = (blob.code().len() + 1) * INTERPRETER_FLATMAP_ENTRY_SIZE as usize;
+        (
+            blob.code().len(),
+            cast(info.purgeable_ram_consumption).to_usize() - cache - flat_map,
+        )
+    }
+
+    assert_eq!(estimate(InstructionSetKind::ReviveV1).1, 0);
+
+    let (code_length, extra) = estimate(InstructionSetKind::Latest64);
+    assert!(code_length > CODE_BLOCK_SIZE);
+    assert_eq!(
+        extra,
+        code_length.div_ceil(CODE_BLOCK_SIZE) * (core::mem::size_of::<CodeBlockBitmap>() + 8)
+    );
 }
 
 #[cfg(feature = "alloc")]
@@ -5970,6 +7813,20 @@ fn test_calculate_blob_length() {
         blob.calculate_blob_length(),
         (big_blob.len() + small_blob.len()).try_into().unwrap()
     );
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn test_jump_table_entry_width_with_interior_zero_byte() {
+    const TARGET_POSITION: u32 = 0x0100FB;
+
+    let mut code = alloc::vec![Instruction::trap; TARGET_POSITION as usize];
+    code.push(Instruction::fallthrough);
+
+    let mut builder = crate::writer::ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.set_code(&code, &[TARGET_POSITION]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    assert_eq!(blob.jump_table().get_by_index(0), Some(ProgramCounter(TARGET_POSITION)));
 }
 
 /// The source location.

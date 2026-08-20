@@ -274,6 +274,28 @@ fn is_sandbox_logging_enabled() -> bool {
     cfg!(test) || log::log_enabled!(target: "polkavm", log::Level::Trace) || log::log_enabled!(target: "polkavm::zygote", log::Level::Trace)
 }
 
+#[cfg(any(target_os = "linux", feature = "generic-sandbox"))]
+fn is_start_of_basic_block<S>(module: &Module, compiled_module: &CompiledModule<S>, pc: ProgramCounter) -> bool
+where
+    S: Sandbox,
+{
+    let instruction_offsets = compiled_module.program_counter_to_machine_code_offset();
+    let Ok(index) = instruction_offsets.binary_search_by_key(&pc, |&(offset, _)| offset) else {
+        // There's no instruction here at all.
+        return false;
+    };
+
+    if index == 0 {
+        // This is the very first instruction.
+        return true;
+    }
+
+    module
+        .instructions_bounded_at_known_boundary(instruction_offsets[index - 1].0)
+        .next()
+        .is_some_and(|instruction| instruction.starts_new_basic_block())
+}
+
 // This is the same for both sandboxes.
 #[cfg(any(target_os = "linux", feature = "generic-sandbox"))]
 pub(crate) fn charge_gas_on_entry<S>(
@@ -290,7 +312,12 @@ where
 
     module.gas_metering()?;
 
-    let Some(origin) = compiled_module.lookup_gas_metering_offset_for_basic_block_if_address_is_in_the_middle(native_address) else {
+    let is_start_of_basic_block = is_start_of_basic_block(module, compiled_module, pc);
+    debug_assert_eq!(module.scan_find_start_of_basic_block(pc) == Some(pc), is_start_of_basic_block);
+
+    let Some(origin) =
+        compiled_module.lookup_gas_metering_offset_for_basic_block_if_address_is_in_the_middle(native_address, is_start_of_basic_block)
+    else {
         log::debug!("Will not charge gas on entry: native address 0x{native_address:x} already points at the start of a basic block");
         return None;
     };

@@ -344,12 +344,16 @@ impl Module {
         self.state().blob.instructions_bounded_at(offset)
     }
 
-    pub(crate) fn is_jump_target_valid(&self, offset: ProgramCounter) -> bool {
-        self.state().blob.is_jump_target_valid(self.state().blob.isa(), offset)
+    pub(crate) fn instructions_bounded_at_known_boundary(&self, offset: ProgramCounter) -> Instructions<InstructionSetKind> {
+        self.state().blob.instructions_bounded_at_known_boundary(offset)
     }
 
-    pub(crate) fn find_start_of_basic_block(&self, offset: ProgramCounter) -> Option<ProgramCounter> {
-        polkavm_common::program::find_start_of_basic_block(
+    pub(crate) fn scan_is_jump_target_valid(&self, offset: ProgramCounter) -> bool {
+        self.state().blob.scan_is_jump_target_valid(self.state().blob.isa(), offset)
+    }
+
+    pub(crate) fn scan_find_start_of_basic_block(&self, offset: ProgramCounter) -> Option<ProgramCounter> {
+        polkavm_common::program::scan_find_start_of_basic_block(
             self.state().blob.isa(),
             self.state().blob.code(),
             self.state().blob.bitmask(),
@@ -924,7 +928,7 @@ impl Module {
     /// Will return `None` if the given `code_offset` is invalid.
     /// Mostly only useful for debugging.
     pub fn calculate_gas_cost_for(&self, code_offset: ProgramCounter) -> Option<Gas> {
-        if !self.is_jump_target_valid(code_offset) && code_offset.0 < self.code_len() {
+        if !self.scan_is_jump_target_valid(code_offset) && code_offset.0 < self.code_len() {
             return None;
         }
 

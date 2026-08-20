@@ -5,7 +5,7 @@ use std::sync::Arc;
 use polkavm_assembler::{Assembler, Label};
 use polkavm_common::abi::VM_CODE_ADDRESS_ALIGNMENT;
 use polkavm_common::cast::cast;
-use polkavm_common::program::{is_jump_target_valid, InstructionSetKind, JumpTable, ProgramCounter, ProgramExport, RawReg};
+use polkavm_common::program::{scan_is_jump_target_valid, InstructionSetKind, JumpTable, ProgramCounter, ProgramExport, RawReg};
 use polkavm_common::utils::{Bitness, BitnessT, GasVisitorT};
 use polkavm_common::zygote::VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH;
 
@@ -108,6 +108,7 @@ where
     rem64s_label: Label,
     invalid_jump_label: Label,
     instruction_set: InstructionSetKind,
+    last_basic_block_start: u32,
     memset_trampoline_start: usize,
     memset_trampoline_end: usize,
     custom_codegen: Option<Arc<dyn CustomCodegen>>,
@@ -273,6 +274,7 @@ where
             gas_metering_stub_offsets,
             gas_cost_for_basic_block,
             instruction_set,
+            last_basic_block_start: 0,
             memset_trampoline_start: 0,
             memset_trampoline_end: 0,
             custom_codegen: config.custom_codegen.clone(),
@@ -300,12 +302,12 @@ where
             .program_counter_to_machine_code_offset_list
             .push((ProgramCounter(0), visitor.asm.len() as u32));
 
-        visitor.force_start_new_basic_block(0, visitor.is_jump_target_valid(0));
+        visitor.force_start_new_basic_block(0, visitor.scan_is_jump_target_valid(0));
         Ok((visitor, address_space))
     }
 
-    fn is_jump_target_valid(&self, offset: u32) -> bool {
-        is_jump_target_valid(self.instruction_set, self.code, self.bitmask, offset)
+    fn scan_is_jump_target_valid(&self, offset: u32) -> bool {
+        scan_is_jump_target_valid(self.instruction_set, self.code, self.bitmask, offset)
     }
 
     pub(crate) fn finish_compilation(
@@ -472,6 +474,7 @@ where
     #[inline(always)]
     fn force_start_new_basic_block(&mut self, program_counter: u32, is_valid_jump_target: bool) {
         log::trace!("Starting new basic block at: {program_counter}");
+        self.last_basic_block_start = program_counter;
         if is_valid_jump_target {
             if let Some(label) = self.program_counter_to_label.get(program_counter) {
                 log::trace!("Label: {label} -> {program_counter} -> {:08x}", self.asm.current_address());
@@ -499,7 +502,7 @@ where
         }
     }
 
-    fn after_instruction<const KIND: usize>(&mut self, program_counter: u32, args_length: u32) {
+    fn after_instruction<const KIND: usize>(&mut self, program_counter: u32, length: u32) {
         const {
             assert!(
                 KIND == CONTINUE_BASIC_BLOCK
@@ -517,24 +520,21 @@ where
             }
         }
 
-        let next_program_counter = program_counter + args_length + 1;
+        let next_program_counter = program_counter + length;
         self.program_counter_to_machine_code_offset_list
             .push((ProgramCounter(next_program_counter), self.asm.len() as u32));
 
-        if KIND == END_BASIC_BLOCK_INVALID && self.first_invalid_offset.is_none() {
-            self.first_invalid_offset = Some(ProgramCounter(program_counter));
-        }
-
         if KIND != CONTINUE_BASIC_BLOCK {
+            if KIND == END_BASIC_BLOCK_INVALID && self.first_invalid_offset.is_none() {
+                self.first_invalid_offset = Some(ProgramCounter(program_counter));
+            }
+
             if self.gas_metering.is_some() {
                 let cost = self.gas_visitor.take_block_cost().unwrap();
                 self.gas_cost_for_basic_block.push(cost);
             }
 
-            self.force_start_new_basic_block(
-                next_program_counter,
-                KIND != END_BASIC_BLOCK_INVALID && cast(next_program_counter).to_usize() < self.code.len(),
-            );
+            self.force_start_new_basic_block(next_program_counter, cast(next_program_counter).to_usize() < self.code.len());
         } else if self.step_tracing {
             self.step(next_program_counter);
         }
@@ -597,37 +597,37 @@ where
     }
 
     #[cold]
-    fn broken_fallthrough(&mut self, code_offset: u32, args_length: u32) {
+    fn broken_fallthrough(&mut self, code_offset: u32, length: u32) {
         ArchVisitor(self).trap(code_offset);
-        self.after_instruction::<END_BASIC_BLOCK_INVALID>(code_offset, args_length);
+        self.after_instruction::<END_BASIC_BLOCK_INVALID>(code_offset, length);
     }
 
     #[inline]
-    fn with_possible_fallthrough(&mut self, code_offset: u32, args_length: u32, callback: impl FnOnce(&mut Self)) {
-        let next_program_counter = cast(code_offset + args_length + 1).to_usize();
+    fn with_possible_fallthrough(&mut self, code_offset: u32, length: u32, callback: impl FnOnce(&mut Self)) {
+        let next_program_counter = cast(code_offset + length).to_usize();
         if next_program_counter < self.code.len() {
             callback(self);
-            self.after_instruction::<END_BASIC_BLOCK_CONDITIONAL>(code_offset, args_length);
+            self.after_instruction::<END_BASIC_BLOCK_CONDITIONAL>(code_offset, length);
         } else {
-            self.broken_fallthrough(code_offset, args_length)
+            self.broken_fallthrough(code_offset, length)
         }
     }
 }
 
 macro_rules! emit_instruction {
-    ($self:ident, $code_offset:ident, $args_length:ident, $kind:ident, $name:ident($($arg:expr),*)) => {{
+    ($self:ident, $code_offset:ident, $length:ident, $kind:ident, $name:ident($($arg:expr),*)) => {{
         $self.before_instruction($code_offset);
-        $self.gas_visitor.$name($code_offset, $args_length $(, $arg)*);
+        $self.gas_visitor.$name($code_offset, $length $(, $arg)*);
         ArchVisitor($self).$name($($arg),*);
-        $self.after_instruction::<$kind>($code_offset, $args_length);
+        $self.after_instruction::<$kind>($code_offset, $length);
     }};
 }
 
 macro_rules! emit_branch {
-    ($self:ident, $code_offset:ident, $args_length:ident, $name:ident($($arg:expr),*)) => {{
+    ($self:ident, $code_offset:ident, $length:ident, $name:ident($($arg:expr),*)) => {{
         $self.before_instruction($code_offset);
-        $self.gas_visitor.$name($code_offset, $args_length $(, $arg)*);
-        $self.with_possible_fallthrough($code_offset, $args_length, move |itself| {
+        $self.gas_visitor.$name($code_offset, $length $(, $arg)*);
+        $self.with_possible_fallthrough($code_offset, $length, move |itself| {
             ArchVisitor(itself).$name($($arg),*)
         });
     }};
@@ -641,1026 +641,911 @@ where
 {
     type ReturnTy = ();
 
-    fn and_inverted(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, and_inverted(d, s1, s2));
+    fn and_inverted(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, and_inverted(d, s1, s2));
     }
 
-    fn or_inverted(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, or_inverted(d, s1, s2));
+    fn or_inverted(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, or_inverted(d, s1, s2));
     }
 
-    fn xnor(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, xnor(d, s1, s2));
+    fn xnor(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, xnor(d, s1, s2));
     }
 
-    fn maximum(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, maximum(d, s1, s2));
+    fn maximum(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, maximum(d, s1, s2));
     }
 
-    fn maximum_unsigned(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, maximum_unsigned(d, s1, s2));
+    fn maximum_unsigned(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, maximum_unsigned(d, s1, s2));
     }
 
-    fn minimum(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, minimum(d, s1, s2));
+    fn minimum(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, minimum(d, s1, s2));
     }
 
-    fn minimum_unsigned(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, minimum_unsigned(d, s1, s2));
+    fn minimum_unsigned(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, minimum_unsigned(d, s1, s2));
     }
 
-    fn rotate_left_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, rotate_left_32(d, s1, s2));
+    fn rotate_left_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, rotate_left_32(d, s1, s2));
     }
 
-    fn rotate_left_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, rotate_left_64(d, s1, s2));
+    fn rotate_left_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, rotate_left_64(d, s1, s2));
     }
 
-    fn rotate_right_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, rotate_right_32(d, s1, s2));
+    fn rotate_right_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, rotate_right_32(d, s1, s2));
     }
 
-    fn rotate_right_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, rotate_right_64(d, s1, s2));
+    fn rotate_right_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, rotate_right_64(d, s1, s2));
     }
 
     #[inline(always)]
-    fn invalid(&mut self, code_offset: u32, args_length: u32) -> Self::ReturnTy {
+    fn invalid(&mut self, code_offset: u32, length: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.trap(code_offset, args_length);
+        self.gas_visitor.trap(code_offset, length);
         ArchVisitor(self).invalid(code_offset);
-        self.after_instruction::<END_BASIC_BLOCK_INVALID>(code_offset, args_length);
+        self.after_instruction::<END_BASIC_BLOCK_INVALID>(code_offset, length);
     }
 
     #[inline(always)]
-    fn trap(&mut self, code_offset: u32, args_length: u32) -> Self::ReturnTy {
+    fn trap(&mut self, code_offset: u32, length: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.trap(code_offset, args_length);
+        self.gas_visitor.trap(code_offset, length);
         ArchVisitor(self).trap(code_offset);
-        self.after_instruction::<END_BASIC_BLOCK_UNCONDITIONAL>(code_offset, args_length);
+        self.after_instruction::<END_BASIC_BLOCK_UNCONDITIONAL>(code_offset, length);
     }
 
     #[inline(always)]
-    fn fallthrough(&mut self, code_offset: u32, args_length: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, fallthrough());
+    fn fallthrough(&mut self, code_offset: u32, length: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, fallthrough());
     }
 
     #[inline(always)]
-    fn unlikely(&mut self, code_offset: u32, args_length: u32) -> Self::ReturnTy {
+    fn unlikely(&mut self, code_offset: u32, length: u32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.unlikely(code_offset, args_length);
-        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+        self.gas_visitor.unlikely(code_offset, length);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, length);
     }
 
     #[inline(always)]
-    fn sbrk(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, sbrk(d, s));
+    fn sbrk(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, sbrk(d, s));
     }
 
     #[inline(always)]
-    fn memset(&mut self, code_offset: u32, args_length: u32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, memset());
+    fn memset(&mut self, code_offset: u32, length: u32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, memset());
     }
 
     #[inline(always)]
-    fn ecalli(&mut self, code_offset: u32, args_length: u32, imm: i32) -> Self::ReturnTy {
+    fn ecalli(&mut self, code_offset: u32, length: u32, imm: i32) -> Self::ReturnTy {
         self.before_instruction(code_offset);
-        self.gas_visitor.ecalli(code_offset, args_length, imm);
-        ArchVisitor(self).ecalli(code_offset, args_length, imm);
-        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, args_length);
+        self.gas_visitor.ecalli(code_offset, length, imm);
+        ArchVisitor(self).ecalli(code_offset, length, imm);
+        self.after_instruction::<CONTINUE_BASIC_BLOCK>(code_offset, length);
     }
 
     #[inline(always)]
-    fn set_less_than_unsigned(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            set_less_than_unsigned(d, s1, s2)
-        );
+    fn set_less_than_unsigned(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, set_less_than_unsigned(d, s1, s2));
     }
 
     #[inline(always)]
-    fn set_less_than_signed(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            set_less_than_signed(d, s1, s2)
-        );
+    fn set_less_than_signed(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, set_less_than_signed(d, s1, s2));
     }
 
     #[inline(always)]
-    fn shift_logical_right_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            shift_logical_right_32(d, s1, s2)
-        );
+    fn shift_logical_right_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, shift_logical_right_32(d, s1, s2));
     }
 
     #[inline(always)]
-    fn shift_logical_right_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn shift_logical_right_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            shift_logical_right_64(d, s1, s2)
-        );
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, shift_logical_right_64(d, s1, s2));
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn shift_arithmetic_right_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             shift_arithmetic_right_32(d, s1, s2)
         );
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn shift_arithmetic_right_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             shift_arithmetic_right_64(d, s1, s2)
         );
     }
 
     #[inline(always)]
-    fn shift_logical_left_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn shift_logical_left_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, shift_logical_left_32(d, s1, s2));
+    }
+
+    #[inline(always)]
+    fn shift_logical_left_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, shift_logical_left_64(d, s1, s2));
+    }
+
+    #[inline(always)]
+    fn xor(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, xor(d, s1, s2));
+    }
+
+    #[inline(always)]
+    fn and(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, and(d, s1, s2));
+    }
+
+    #[inline(always)]
+    fn or(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, or(d, s1, s2));
+    }
+
+    #[inline(always)]
+    fn add_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, add_32(d, s1, s2));
+    }
+
+    #[inline(always)]
+    fn add_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, add_64(d, s1, s2));
+    }
+
+    #[inline(always)]
+    fn sub_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, sub_32(d, s1, s2));
+    }
+
+    #[inline(always)]
+    fn sub_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, sub_64(d, s1, s2));
+    }
+
+    #[inline(always)]
+    fn mul_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, mul_32(d, s1, s2));
+    }
+
+    #[inline(always)]
+    fn mul_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        assert_eq!(B::BITNESS, Bitness::B64);
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, mul_64(d, s1, s2));
+    }
+
+    #[inline(always)]
+    fn mul_upper_signed_signed(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, mul_upper_signed_signed(d, s1, s2));
+    }
+
+    #[inline(always)]
+    fn mul_upper_unsigned_unsigned(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            shift_logical_left_32(d, s1, s2)
-        );
-    }
-
-    #[inline(always)]
-    fn shift_logical_left_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            shift_logical_left_64(d, s1, s2)
-        );
-    }
-
-    #[inline(always)]
-    fn xor(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, xor(d, s1, s2));
-    }
-
-    #[inline(always)]
-    fn and(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, and(d, s1, s2));
-    }
-
-    #[inline(always)]
-    fn or(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, or(d, s1, s2));
-    }
-
-    #[inline(always)]
-    fn add_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, add_32(d, s1, s2));
-    }
-
-    #[inline(always)]
-    fn add_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, add_64(d, s1, s2));
-    }
-
-    #[inline(always)]
-    fn sub_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, sub_32(d, s1, s2));
-    }
-
-    #[inline(always)]
-    fn sub_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, sub_64(d, s1, s2));
-    }
-
-    #[inline(always)]
-    fn mul_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, mul_32(d, s1, s2));
-    }
-
-    #[inline(always)]
-    fn mul_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, mul_64(d, s1, s2));
-    }
-
-    #[inline(always)]
-    fn mul_upper_signed_signed(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            mul_upper_signed_signed(d, s1, s2)
-        );
-    }
-
-    #[inline(always)]
-    fn mul_upper_unsigned_unsigned(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             mul_upper_unsigned_unsigned(d, s1, s2)
         );
     }
 
     #[inline(always)]
-    fn mul_upper_signed_unsigned(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn mul_upper_signed_unsigned(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             mul_upper_signed_unsigned(d, s1, s2)
         );
     }
 
     #[inline(always)]
-    fn div_unsigned_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, div_unsigned_32(d, s1, s2));
+    fn div_unsigned_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, div_unsigned_32(d, s1, s2));
     }
 
     #[inline(always)]
-    fn div_unsigned_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn div_unsigned_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, div_unsigned_64(d, s1, s2));
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, div_unsigned_64(d, s1, s2));
     }
 
     #[inline(always)]
-    fn div_signed_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, div_signed_32(d, s1, s2));
+    fn div_signed_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, div_signed_32(d, s1, s2));
     }
 
     #[inline(always)]
-    fn div_signed_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn div_signed_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, div_signed_64(d, s1, s2));
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, div_signed_64(d, s1, s2));
     }
 
     #[inline(always)]
-    fn rem_unsigned_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, rem_unsigned_32(d, s1, s2));
+    fn rem_unsigned_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, rem_unsigned_32(d, s1, s2));
     }
 
     #[inline(always)]
-    fn rem_unsigned_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rem_unsigned_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, rem_unsigned_64(d, s1, s2));
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, rem_unsigned_64(d, s1, s2));
     }
 
     #[inline(always)]
-    fn rem_signed_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, rem_signed_32(d, s1, s2));
+    fn rem_signed_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, rem_signed_32(d, s1, s2));
     }
 
     #[inline(always)]
-    fn rem_signed_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
+    fn rem_signed_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, rem_signed_64(d, s1, s2));
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, rem_signed_64(d, s1, s2));
     }
 
     #[inline(always)]
-    fn mul_imm_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, mul_imm_32(d, s1, s2));
+    fn mul_imm_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, mul_imm_32(d, s1, s2));
     }
 
     #[inline(always)]
-    fn mul_imm_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
+    fn mul_imm_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, mul_imm_64(d, s1, s2));
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, mul_imm_64(d, s1, s2));
     }
 
     #[inline(always)]
-    fn set_less_than_unsigned_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
+    fn set_less_than_unsigned_imm(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             set_less_than_unsigned_imm(d, s1, s2)
         );
     }
 
     #[inline(always)]
-    fn set_less_than_signed_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            set_less_than_signed_imm(d, s1, s2)
-        );
+    fn set_less_than_signed_imm(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, set_less_than_signed_imm(d, s1, s2));
     }
 
     #[inline(always)]
-    fn set_greater_than_unsigned_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
+    fn set_greater_than_unsigned_imm(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             set_greater_than_unsigned_imm(d, s1, s2)
         );
     }
 
     #[inline(always)]
-    fn set_greater_than_signed_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
+    fn set_greater_than_signed_imm(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             set_greater_than_signed_imm(d, s1, s2)
         );
     }
 
     #[inline(always)]
-    fn shift_logical_right_imm_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             shift_logical_right_imm_32(d, s1, s2)
         );
     }
 
     #[inline(always)]
-    fn shift_logical_right_imm_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             shift_logical_right_imm_64(d, s1, s2)
         );
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_imm_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             shift_arithmetic_right_imm_32(d, s1, s2)
         );
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_imm_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             shift_arithmetic_right_imm_64(d, s1, s2)
         );
     }
 
     #[inline(always)]
-    fn shift_logical_left_imm_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             shift_logical_left_imm_32(d, s1, s2)
         );
     }
 
     #[inline(always)]
-    fn shift_logical_left_imm_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             shift_logical_left_imm_64(d, s1, s2)
         );
     }
 
     #[inline(always)]
-    fn shift_logical_right_imm_alt_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_alt_32(&mut self, code_offset: u32, length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             shift_logical_right_imm_alt_32(d, s2, s1)
         );
     }
 
     #[inline(always)]
-    fn shift_logical_right_imm_alt_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
+    fn shift_logical_right_imm_alt_64(&mut self, code_offset: u32, length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             shift_logical_right_imm_alt_64(d, s2, s1)
         );
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_imm_alt_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_alt_32(&mut self, code_offset: u32, length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             shift_arithmetic_right_imm_alt_32(d, s2, s1)
         );
     }
 
     #[inline(always)]
-    fn shift_arithmetic_right_imm_alt_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
+    fn shift_arithmetic_right_imm_alt_64(&mut self, code_offset: u32, length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             shift_arithmetic_right_imm_alt_64(d, s2, s1)
         );
     }
 
     #[inline(always)]
-    fn shift_logical_left_imm_alt_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_alt_32(&mut self, code_offset: u32, length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             shift_logical_left_imm_alt_32(d, s2, s1)
         );
     }
 
     #[inline(always)]
-    fn shift_logical_left_imm_alt_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
+    fn shift_logical_left_imm_alt_64(&mut self, code_offset: u32, length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             shift_logical_left_imm_alt_64(d, s2, s1)
         );
     }
 
     #[inline(always)]
-    fn or_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, imm: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, or_imm(d, s, imm));
+    fn or_imm(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg, imm: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, or_imm(d, s, imm));
     }
 
     #[inline(always)]
-    fn and_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, imm: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, and_imm(d, s, imm));
+    fn and_imm(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg, imm: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, and_imm(d, s, imm));
     }
 
     #[inline(always)]
-    fn xor_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, imm: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, xor_imm(d, s, imm));
+    fn xor_imm(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg, imm: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, xor_imm(d, s, imm));
     }
 
     #[inline(always)]
-    fn move_reg(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, move_reg(d, s));
+    fn move_reg(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, move_reg(d, s));
     }
 
-    fn count_leading_zero_bits_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            count_leading_zero_bits_32(d, s)
-        );
+    fn count_leading_zero_bits_32(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, count_leading_zero_bits_32(d, s));
     }
 
-    fn count_leading_zero_bits_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            count_leading_zero_bits_64(d, s)
-        );
+    fn count_leading_zero_bits_64(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, count_leading_zero_bits_64(d, s));
     }
 
-    fn count_trailing_zero_bits_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            count_trailing_zero_bits_32(d, s)
-        );
+    fn count_trailing_zero_bits_32(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, count_trailing_zero_bits_32(d, s));
     }
 
-    fn count_trailing_zero_bits_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            count_trailing_zero_bits_64(d, s)
-        );
+    fn count_trailing_zero_bits_64(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, count_trailing_zero_bits_64(d, s));
     }
 
-    fn count_set_bits_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, count_set_bits_32(d, s));
+    fn count_set_bits_32(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, count_set_bits_32(d, s));
     }
 
-    fn count_set_bits_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, count_set_bits_64(d, s));
+    fn count_set_bits_64(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, count_set_bits_64(d, s));
     }
 
-    fn sign_extend_8(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, sign_extend_8(d, s));
+    fn sign_extend_8(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, sign_extend_8(d, s));
     }
 
-    fn sign_extend_16(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, sign_extend_16(d, s));
+    fn sign_extend_16(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, sign_extend_16(d, s));
     }
 
-    fn zero_extend_16(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, zero_extend_16(d, s));
+    fn zero_extend_16(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, zero_extend_16(d, s));
     }
 
-    fn reverse_byte(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, reverse_byte(d, s));
+    fn reverse_byte(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, reverse_byte(d, s));
     }
 
     #[inline(always)]
-    fn cmov_if_zero(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, cmov_if_zero(d, s, c));
+    fn cmov_if_zero(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg, c: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, cmov_if_zero(d, s, c));
     }
 
     #[inline(always)]
-    fn cmov_if_not_zero(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: RawReg) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, cmov_if_not_zero(d, s, c));
+    fn cmov_if_not_zero(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg, c: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, cmov_if_not_zero(d, s, c));
     }
 
     #[inline(always)]
-    fn cmov_if_zero_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, c: RawReg, s: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, cmov_if_zero_imm(d, c, s));
+    fn cmov_if_zero_imm(&mut self, code_offset: u32, length: u32, d: RawReg, c: RawReg, s: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, cmov_if_zero_imm(d, c, s));
     }
 
     #[inline(always)]
-    fn cmov_if_not_zero_imm(&mut self, code_offset: u32, args_length: u32, d: RawReg, c: RawReg, s: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, cmov_if_not_zero_imm(d, c, s));
+    fn cmov_if_not_zero_imm(&mut self, code_offset: u32, length: u32, d: RawReg, c: RawReg, s: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, cmov_if_not_zero_imm(d, c, s));
     }
 
     #[inline(always)]
-    fn rotate_right_imm_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, rotate_right_imm_32(d, s, c));
+    fn rotate_right_imm_32(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg, c: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, rotate_right_imm_32(d, s, c));
     }
 
     #[inline(always)]
-    fn rotate_right_imm_alt_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: i32) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            rotate_right_imm_alt_32(d, s, c)
-        );
+    fn rotate_right_imm_alt_32(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg, c: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, rotate_right_imm_alt_32(d, s, c));
     }
 
     #[inline(always)]
-    fn rotate_right_imm_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, rotate_right_imm_64(d, s, c));
+    fn rotate_right_imm_64(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg, c: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, rotate_right_imm_64(d, s, c));
     }
 
     #[inline(always)]
-    fn rotate_right_imm_alt_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, c: i32) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            rotate_right_imm_alt_64(d, s, c)
-        );
+    fn rotate_right_imm_alt_64(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg, c: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, rotate_right_imm_alt_64(d, s, c));
     }
 
     #[inline(always)]
-    fn add_imm_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, imm: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, add_imm_32(d, s, imm));
+    fn add_imm_32(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg, imm: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, add_imm_32(d, s, imm));
     }
 
     #[inline(always)]
-    fn add_imm_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s: RawReg, imm: i32) -> Self::ReturnTy {
+    fn add_imm_64(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg, imm: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, add_imm_64(d, s, imm));
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, add_imm_64(d, s, imm));
     }
 
     #[inline(always)]
-    fn negate_and_add_imm_32(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            negate_and_add_imm_32(d, s1, s2)
-        );
+    fn negate_and_add_imm_32(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, negate_and_add_imm_32(d, s1, s2));
     }
 
     #[inline(always)]
-    fn negate_and_add_imm_64(&mut self, code_offset: u32, args_length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
+    fn negate_and_add_imm_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            negate_and_add_imm_64(d, s1, s2)
-        );
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, negate_and_add_imm_64(d, s1, s2));
     }
 
     #[inline(always)]
-    fn store_imm_indirect_u8(&mut self, code_offset: u32, args_length: u32, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
+    fn store_imm_indirect_u8(&mut self, code_offset: u32, length: u32, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             store_imm_indirect_u8(base, offset, value)
         );
     }
 
     #[inline(always)]
-    fn store_imm_indirect_u16(&mut self, code_offset: u32, args_length: u32, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
+    fn store_imm_indirect_u16(&mut self, code_offset: u32, length: u32, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             store_imm_indirect_u16(base, offset, value)
         );
     }
 
     #[inline(always)]
-    fn store_imm_indirect_u32(&mut self, code_offset: u32, args_length: u32, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
+    fn store_imm_indirect_u32(&mut self, code_offset: u32, length: u32, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             store_imm_indirect_u32(base, offset, value)
         );
     }
 
     #[inline(always)]
-    fn store_imm_indirect_u64(&mut self, code_offset: u32, args_length: u32, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
+    fn store_imm_indirect_u64(&mut self, code_offset: u32, length: u32, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             store_imm_indirect_u64(base, offset, value)
         );
     }
 
     #[inline(always)]
-    fn store_indirect_u8(&mut self, code_offset: u32, args_length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn store_indirect_u8(&mut self, code_offset: u32, length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             store_indirect_u8(src, base, offset)
         );
     }
 
     #[inline(always)]
-    fn store_indirect_u16(&mut self, code_offset: u32, args_length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn store_indirect_u16(&mut self, code_offset: u32, length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             store_indirect_u16(src, base, offset)
         );
     }
 
     #[inline(always)]
-    fn store_indirect_u32(&mut self, code_offset: u32, args_length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn store_indirect_u32(&mut self, code_offset: u32, length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             store_indirect_u32(src, base, offset)
         );
     }
 
     #[inline(always)]
-    fn store_indirect_u64(&mut self, code_offset: u32, args_length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn store_indirect_u64(&mut self, code_offset: u32, length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             store_indirect_u64(src, base, offset)
         );
     }
 
     #[inline(always)]
-    fn store_imm_u8(&mut self, code_offset: u32, args_length: u32, value: i32, offset: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, store_imm_u8(value, offset));
+    fn store_imm_u8(&mut self, code_offset: u32, length: u32, value: i32, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, store_imm_u8(value, offset));
     }
 
     #[inline(always)]
-    fn store_imm_u16(&mut self, code_offset: u32, args_length: u32, value: i32, offset: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, store_imm_u16(value, offset));
+    fn store_imm_u16(&mut self, code_offset: u32, length: u32, value: i32, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, store_imm_u16(value, offset));
     }
 
     #[inline(always)]
-    fn store_imm_u32(&mut self, code_offset: u32, args_length: u32, value: i32, offset: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, store_imm_u32(value, offset));
+    fn store_imm_u32(&mut self, code_offset: u32, length: u32, value: i32, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, store_imm_u32(value, offset));
     }
 
     #[inline(always)]
-    fn store_imm_u64(&mut self, code_offset: u32, args_length: u32, value: i32, offset: i32) -> Self::ReturnTy {
+    fn store_imm_u64(&mut self, code_offset: u32, length: u32, value: i32, offset: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, store_imm_u64(value, offset));
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, store_imm_u64(value, offset));
     }
 
     #[inline(always)]
-    fn store_u8(&mut self, code_offset: u32, args_length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, store_u8(src, offset));
+    fn store_u8(&mut self, code_offset: u32, length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, store_u8(src, offset));
     }
 
     #[inline(always)]
-    fn store_u16(&mut self, code_offset: u32, args_length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, store_u16(src, offset));
+    fn store_u16(&mut self, code_offset: u32, length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, store_u16(src, offset));
     }
 
     #[inline(always)]
-    fn store_u32(&mut self, code_offset: u32, args_length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, store_u32(src, offset));
+    fn store_u32(&mut self, code_offset: u32, length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, store_u32(src, offset));
     }
 
     #[inline(always)]
-    fn store_u64(&mut self, code_offset: u32, args_length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
+    fn store_u64(&mut self, code_offset: u32, length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, store_u64(src, offset));
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, store_u64(src, offset));
     }
 
     #[inline(always)]
-    fn load_indirect_u8(&mut self, code_offset: u32, args_length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            load_indirect_u8(dst, base, offset)
-        );
+    fn load_indirect_u8(&mut self, code_offset: u32, length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, load_indirect_u8(dst, base, offset));
     }
 
     #[inline(always)]
-    fn load_indirect_i8(&mut self, code_offset: u32, args_length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
-        emit_instruction!(
-            self,
-            code_offset,
-            args_length,
-            CONTINUE_BASIC_BLOCK,
-            load_indirect_i8(dst, base, offset)
-        );
+    fn load_indirect_i8(&mut self, code_offset: u32, length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, load_indirect_i8(dst, base, offset));
     }
 
     #[inline(always)]
-    fn load_indirect_u16(&mut self, code_offset: u32, args_length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_indirect_u16(&mut self, code_offset: u32, length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             load_indirect_u16(dst, base, offset)
         );
     }
 
     #[inline(always)]
-    fn load_indirect_i16(&mut self, code_offset: u32, args_length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_indirect_i16(&mut self, code_offset: u32, length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             load_indirect_i16(dst, base, offset)
         );
     }
 
     #[inline(always)]
-    fn load_indirect_u32(&mut self, code_offset: u32, args_length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_indirect_u32(&mut self, code_offset: u32, length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             load_indirect_u32(dst, base, offset)
         );
     }
 
     #[inline(always)]
-    fn load_indirect_i32(&mut self, code_offset: u32, args_length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_indirect_i32(&mut self, code_offset: u32, length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             load_indirect_i32(dst, base, offset)
         );
     }
 
     #[inline(always)]
-    fn load_indirect_u64(&mut self, code_offset: u32, args_length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_indirect_u64(&mut self, code_offset: u32, length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             CONTINUE_BASIC_BLOCK,
             load_indirect_u64(dst, base, offset)
         );
     }
 
     #[inline(always)]
-    fn load_u8(&mut self, code_offset: u32, args_length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, load_u8(dst, offset));
+    fn load_u8(&mut self, code_offset: u32, length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, load_u8(dst, offset));
     }
 
     #[inline(always)]
-    fn load_i8(&mut self, code_offset: u32, args_length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, load_i8(dst, offset));
+    fn load_i8(&mut self, code_offset: u32, length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, load_i8(dst, offset));
     }
 
     #[inline(always)]
-    fn load_u16(&mut self, code_offset: u32, args_length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, load_u16(dst, offset));
+    fn load_u16(&mut self, code_offset: u32, length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, load_u16(dst, offset));
     }
 
     #[inline(always)]
-    fn load_i16(&mut self, code_offset: u32, args_length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, load_i16(dst, offset));
+    fn load_i16(&mut self, code_offset: u32, length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, load_i16(dst, offset));
     }
 
     #[inline(always)]
-    fn load_u32(&mut self, code_offset: u32, args_length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_u32(&mut self, code_offset: u32, length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, load_u32(dst, offset));
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, load_u32(dst, offset));
     }
 
     #[inline(always)]
-    fn load_i32(&mut self, code_offset: u32, args_length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, load_i32(dst, offset));
+    fn load_i32(&mut self, code_offset: u32, length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, load_i32(dst, offset));
     }
 
     #[inline(always)]
-    fn load_u64(&mut self, code_offset: u32, args_length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
+    fn load_u64(&mut self, code_offset: u32, length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, load_u64(dst, offset));
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, load_u64(dst, offset));
     }
 
     #[inline(always)]
-    fn branch_less_unsigned(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_less_unsigned(s1, s2, imm));
+    fn branch_less_unsigned(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_less_unsigned(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_less_signed(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_less_signed(s1, s2, imm));
+    fn branch_less_signed(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_less_signed(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_greater_or_equal_unsigned(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_greater_or_equal_unsigned(s1, s2, imm));
+    fn branch_greater_or_equal_unsigned(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_greater_or_equal_unsigned(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_greater_or_equal_signed(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_greater_or_equal_signed(s1, s2, imm));
+    fn branch_greater_or_equal_signed(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_greater_or_equal_signed(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_eq(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_eq(s1, s2, imm));
+    fn branch_eq(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_eq(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_not_eq(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_not_eq(s1, s2, imm));
+    fn branch_not_eq(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: RawReg, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_not_eq(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_eq_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_eq_imm(s1, s2, imm));
+    fn branch_eq_imm(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_eq_imm(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_not_eq_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_not_eq_imm(s1, s2, imm));
+    fn branch_not_eq_imm(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_not_eq_imm(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_less_unsigned_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_less_unsigned_imm(s1, s2, imm));
+    fn branch_less_unsigned_imm(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_less_unsigned_imm(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_less_signed_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_less_signed_imm(s1, s2, imm));
+    fn branch_less_signed_imm(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_less_signed_imm(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_greater_or_equal_unsigned_imm(
-        &mut self,
-        code_offset: u32,
-        args_length: u32,
-        s1: RawReg,
-        s2: i32,
-        imm: u32,
-    ) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_greater_or_equal_unsigned_imm(s1, s2, imm));
+    fn branch_greater_or_equal_unsigned_imm(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_greater_or_equal_unsigned_imm(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_greater_or_equal_signed_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_greater_or_equal_signed_imm(s1, s2, imm));
+    fn branch_greater_or_equal_signed_imm(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_greater_or_equal_signed_imm(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_less_or_equal_unsigned_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_less_or_equal_unsigned_imm(s1, s2, imm));
+    fn branch_less_or_equal_unsigned_imm(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_less_or_equal_unsigned_imm(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_less_or_equal_signed_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_less_or_equal_signed_imm(s1, s2, imm));
+    fn branch_less_or_equal_signed_imm(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_less_or_equal_signed_imm(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_greater_unsigned_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_greater_unsigned_imm(s1, s2, imm));
+    fn branch_greater_unsigned_imm(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_greater_unsigned_imm(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn branch_greater_signed_imm(&mut self, code_offset: u32, args_length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
-        emit_branch!(self, code_offset, args_length, branch_greater_signed_imm(s1, s2, imm));
+    fn branch_greater_signed_imm(&mut self, code_offset: u32, length: u32, s1: RawReg, s2: i32, imm: u32) -> Self::ReturnTy {
+        emit_branch!(self, code_offset, length, branch_greater_signed_imm(s1, s2, imm));
     }
 
     #[inline(always)]
-    fn load_imm(&mut self, code_offset: u32, args_length: u32, dst: RawReg, value: i32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, load_imm(dst, value));
+    fn load_imm(&mut self, code_offset: u32, length: u32, dst: RawReg, value: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, load_imm(dst, value));
     }
 
     #[inline(always)]
-    fn load_imm64(&mut self, code_offset: u32, args_length: u32, dst: RawReg, value: u64) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, CONTINUE_BASIC_BLOCK, load_imm64(dst, value));
+    fn load_imm64(&mut self, code_offset: u32, length: u32, dst: RawReg, value: u64) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, load_imm64(dst, value));
     }
 
     #[inline(always)]
-    fn load_imm_and_jump(&mut self, code_offset: u32, args_length: u32, ra: RawReg, value: i32, target: u32) -> Self::ReturnTy {
+    fn load_imm_and_jump(&mut self, code_offset: u32, length: u32, ra: RawReg, value: i32, target: u32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             END_BASIC_BLOCK_UNCONDITIONAL,
             load_imm_and_jump(ra, value, target)
         );
@@ -1670,7 +1555,7 @@ where
     fn load_imm_and_jump_indirect(
         &mut self,
         code_offset: u32,
-        args_length: u32,
+        length: u32,
         ra: RawReg,
         base: RawReg,
         value: i32,
@@ -1679,23 +1564,23 @@ where
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             END_BASIC_BLOCK_UNCONDITIONAL,
             load_imm_and_jump_indirect(ra, base, value, offset)
         );
     }
 
     #[inline(always)]
-    fn jump(&mut self, code_offset: u32, args_length: u32, target: u32) -> Self::ReturnTy {
-        emit_instruction!(self, code_offset, args_length, END_BASIC_BLOCK_UNCONDITIONAL, jump(target));
+    fn jump(&mut self, code_offset: u32, length: u32, target: u32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, END_BASIC_BLOCK_UNCONDITIONAL, jump(target));
     }
 
     #[inline(always)]
-    fn jump_indirect(&mut self, code_offset: u32, args_length: u32, base: RawReg, offset: i32) -> Self::ReturnTy {
+    fn jump_indirect(&mut self, code_offset: u32, length: u32, base: RawReg, offset: i32) -> Self::ReturnTy {
         emit_instruction!(
             self,
             code_offset,
-            args_length,
+            length,
             END_BASIC_BLOCK_UNCONDITIONAL,
             jump_indirect(base, offset)
         );
@@ -1735,14 +1620,29 @@ where
         &self.program_counter_to_machine_code_offset_list
     }
 
-    pub fn lookup_gas_metering_offset_for_basic_block_if_address_is_in_the_middle(&self, machine_code_address: u64) -> Option<u32> {
+    pub fn lookup_gas_metering_offset_for_basic_block_if_address_is_in_the_middle(
+        &self,
+        machine_code_address: u64,
+        is_start_of_basic_block: bool,
+    ) -> Option<u32> {
+        if is_start_of_basic_block {
+            return None;
+        }
+
         let machine_code_offset = machine_code_address.checked_sub(self.native_code_origin)?;
         let machine_code_offset = cast(machine_code_offset).to_u32_or_debug_panic();
 
         if !self.step_tracing {
             // Every basic block starts with a gas metering stub.
             match self.gas_metering_stub_offsets.binary_search(&machine_code_offset) {
-                Ok(_) | Err(0) => None,
+                Ok(index) => {
+                    // The program counter lies inside a basic block whose remaining
+                    // instructions generate no machine code, so the address coincides
+                    // with the next block's gas metering stub; the containing block
+                    // still has to be charged.
+                    index.checked_sub(1).map(|index| self.gas_metering_stub_offsets[index])
+                }
+                Err(0) => None,
                 Err(index) => Some(self.gas_metering_stub_offsets[index - 1]),
             }
         } else {

@@ -32,8 +32,26 @@ impl InstructionBuffer {
             };
             assert!(minimum_size >= 1 && minimum_size <= 5);
 
-            buffer.bytes[1..minimum_size].copy_from_slice(&u32::to_le_bytes(target.wrapping_sub(position))[..minimum_size - 1]);
-            length = minimum_size;
+            if isa.is_legacy() {
+                buffer.bytes[1..minimum_size].copy_from_slice(&u32::to_le_bytes(target.wrapping_sub(position))[..minimum_size - 1]);
+                length = minimum_size;
+            } else {
+                for minimum_imm_length in 1..=4 {
+                    length = program::Instruction::serialize_offset_with_minimum_imm_length(
+                        isa,
+                        &mut buffer.bytes,
+                        position,
+                        program::Opcode::jump,
+                        target,
+                        minimum_imm_length,
+                    );
+                    if length == minimum_size {
+                        break;
+                    }
+                }
+
+                assert_eq!(length, minimum_size, "internal error: failed to serialize a fixed-size jump");
+            }
         }
 
         buffer.length = length as u8;
@@ -107,6 +125,7 @@ struct SerializedCode {
     code: Vec<u8>,
     bitmask: Vec<u8>,
     exports: Vec<(u32, Vec<u8>)>,
+    instruction_offsets: Vec<(ProgramCounter, ProgramCounter)>,
 }
 
 #[derive(Copy, Clone)]
@@ -181,7 +200,7 @@ impl ProgramBlobBuilder {
         self.jump_table = jump_table.to_vec();
     }
 
-    fn serialize_code(&self) -> Result<SerializedCode, String> {
+    fn serialize_code(&self, collect_instruction_offsets: bool) -> Result<SerializedCode, String> {
         fn mutate<T>(slot: &mut T, value: T) -> bool
         where
             T: PartialEq,
@@ -267,6 +286,42 @@ impl ProgramBlobBuilder {
             }
         }
 
+        let is_legacy = self.isa.is_legacy();
+        if !is_legacy && self.dispatch_table.len() * 5 > program::CODE_BLOCK_SIZE {
+            return Err("the dispatch table is too big to fit in a single code block".into());
+        }
+
+        let original_instruction_count = instructions.len();
+        if !is_legacy
+            && instructions
+                .last()
+                .is_some_and(|entry| !entry.instruction.opcode().starts_new_basic_block())
+        {
+            // The end of the code is a macro block boundary, so the last instruction has to end
+            // a basic block; if it doesn't then it would be decoded as a trap and never run.
+            instructions.push(SerializedInstruction {
+                instruction: Instruction::trap,
+                bytes: InstructionBuffer::default(),
+                target_nth_instruction: None,
+                position: 0,
+                minimum_size: 0,
+            });
+        }
+
+        let padded_position = |position: u32, length: u32, ends_block: bool| -> u32 {
+            if is_legacy || length == 0 {
+                return position;
+            }
+
+            let next_boundary = program::next_block_boundary(position as usize) as u32;
+            if position + length <= next_boundary - u32::from(!ends_block) {
+                position
+            } else {
+                // Instructions cannot cross a macro block, so start it in the new block.
+                next_boundary
+            }
+        };
+
         let mut position: u32 = 0;
         for (nth_instruction, entry) in instructions.iter_mut().enumerate() {
             entry.target_nth_instruction = entry.instruction.target_mut().map(|target| {
@@ -279,39 +334,72 @@ impl ProgramBlobBuilder {
 
             entry.position = position;
             entry.bytes = InstructionBuffer::new(self.isa, position, entry.minimum_size, entry.instruction);
-            position = position.checked_add(entry.bytes.len() as u32).expect("too many instructions");
+            let ends_block = entry.instruction.opcode().starts_new_basic_block();
+            let new_position = padded_position(position, entry.bytes.len() as u32, ends_block);
+            if new_position != position {
+                entry.position = new_position;
+                entry.bytes = InstructionBuffer::new(self.isa, new_position, entry.minimum_size, entry.instruction);
+            }
+
+            position = entry.position.checked_add(entry.bytes.len() as u32).expect("too many instructions");
         }
 
         // Adjust offsets to other instructions until we reach a steady state.
+        let mut remaining_iterations = 1024; // Limit the iteration count, just in case.
         loop {
             let mut any_modified = false;
             position = 0;
             for nth_instruction in 0..instructions.len() {
-                let mut self_modified = mutate(&mut instructions[nth_instruction].position, position);
+                let has_target = instructions[nth_instruction].target_nth_instruction.is_some();
+                let mut target_modified = false;
                 if let Some(target_nth_instruction) = instructions[nth_instruction].target_nth_instruction {
                     let new_target = instructions[target_nth_instruction].position;
                     let old_target = instructions[nth_instruction].instruction.target_mut().unwrap();
-                    self_modified |= mutate(old_target, new_target);
-
-                    if self_modified {
-                        instructions[nth_instruction].bytes = InstructionBuffer::new(
-                            self.isa,
-                            position,
-                            instructions[nth_instruction].minimum_size,
-                            instructions[nth_instruction].instruction,
-                        );
-                    }
+                    target_modified = mutate(old_target, new_target);
                 }
 
-                position = position
+                // Only instructions with a target have position-dependent bytes, so only
+                // they need re-serialization when their position changes.
+                if target_modified || (has_target && instructions[nth_instruction].position != position) {
+                    instructions[nth_instruction].bytes = InstructionBuffer::new(
+                        self.isa,
+                        position,
+                        instructions[nth_instruction].minimum_size,
+                        instructions[nth_instruction].instruction,
+                    );
+                }
+
+                let ends_block = instructions[nth_instruction].instruction.opcode().starts_new_basic_block();
+                let new_position = padded_position(position, instructions[nth_instruction].bytes.len() as u32, ends_block);
+                if new_position != position && has_target {
+                    instructions[nth_instruction].bytes = InstructionBuffer::new(
+                        self.isa,
+                        new_position,
+                        instructions[nth_instruction].minimum_size,
+                        instructions[nth_instruction].instruction,
+                    );
+
+                    debug_assert_eq!(
+                        padded_position(new_position, instructions[nth_instruction].bytes.len() as u32, ends_block),
+                        new_position
+                    );
+                }
+
+                let position_modified = mutate(&mut instructions[nth_instruction].position, new_position);
+                position = new_position
                     .checked_add(instructions[nth_instruction].bytes.len() as u32)
                     .expect("too many instructions");
 
-                any_modified |= self_modified;
+                any_modified |= target_modified | position_modified;
             }
 
             if !any_modified {
                 break;
+            }
+
+            remaining_iterations -= 1;
+            if remaining_iterations == 0 {
+                return Err("internal error: failed to build a program: the code layout did not reach a steady state".into());
             }
         }
 
@@ -320,9 +408,9 @@ impl ProgramBlobBuilder {
         for &target in &self.jump_table {
             let target = target + basic_block_shift;
             let target_nth_instruction = basic_block_to_instruction_index[target as usize];
-            let offset = instructions[target_nth_instruction].position.to_le_bytes();
-            jump_table_entries.push(offset);
-            jump_table_entry_size = core::cmp::max(jump_table_entry_size, offset.iter().take_while(|&&b| b != 0).count());
+            let position = instructions[target_nth_instruction].position;
+            jump_table_entries.push(position.to_le_bytes());
+            jump_table_entry_size = core::cmp::max(jump_table_entry_size, 4 - position.leading_zeros() as usize / 8);
         }
 
         let mut output = SerializedCode {
@@ -332,6 +420,22 @@ impl ProgramBlobBuilder {
             code: Vec::with_capacity(instructions.iter().map(|entry| entry.bytes.len()).sum()),
             bitmask: Vec::new(),
             exports: Vec::with_capacity(self.exports.len()),
+            instruction_offsets: if collect_instruction_offsets {
+                (0..original_instruction_count)
+                    .map(|nth_instruction| {
+                        let entry = &instructions[nth_instruction];
+                        let end = match instructions.get(nth_instruction + 1) {
+                            Some(next_entry) => next_entry.position,
+                            // Extend the range to the next instruction, so that debug info works as expected.
+                            None => entry.position + entry.bytes.len() as u32,
+                        };
+
+                        (ProgramCounter(entry.position), ProgramCounter(end))
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
         };
 
         for target in jump_table_entries {
@@ -371,17 +475,45 @@ impl ProgramBlobBuilder {
             }
         }
 
-        let mut bitmask = BitVec::with_capacity(output.code.capacity() / 8 + 1);
-        for entry in &instructions {
-            bitmask.push(true);
-            for _ in 1..entry.bytes.len() {
-                bitmask.push(false);
+        if is_legacy {
+            let mut bitmask = BitVec::with_capacity(output.code.capacity() / 8 + 1);
+            for entry in &instructions {
+                bitmask.push(true);
+                for _ in 1..entry.bytes.len() {
+                    bitmask.push(false);
+                }
+
+                output.code.extend_from_slice(&entry.bytes);
             }
 
-            output.code.extend_from_slice(&entry.bytes);
-        }
+            output.bitmask = bitmask.finish();
+        } else {
+            let to_single_byte_opcode = |instruction: Instruction| -> u8 {
+                let mut buffer = [0; program::MAX_INSTRUCTION_LENGTH];
+                let length = instruction.serialize_into(self.isa, 0, &mut buffer);
+                assert_eq!(length, 1, "internal error: {instruction:?} is not a single byte instruction");
+                buffer[0]
+            };
 
-        output.bitmask = bitmask.finish();
+            let fallthrough_byte = to_single_byte_opcode(Instruction::fallthrough);
+            let unlikely_byte = to_single_byte_opcode(Instruction::unlikely);
+            for entry in &instructions {
+                let Some(gap) = entry.position.checked_sub(output.code.len() as u32) else {
+                    return Err("internal error: failed to build a program: the code layout produced overlapping instructions".into());
+                };
+
+                if gap > 0 {
+                    debug_assert_eq!(entry.position as usize % program::CODE_BLOCK_SIZE, 0);
+                    debug_assert!(gap < program::CODE_BLOCK_SIZE as u32);
+
+                    // The padding has to end with an instruction which ends a basic block.
+                    output.code.resize(entry.position as usize - 1, unlikely_byte);
+                    output.code.push(fallthrough_byte);
+                }
+
+                output.code.extend_from_slice(&entry.bytes);
+            }
+        }
 
         for (target, symbol) in &self.exports {
             let nth_instruction = match target {
@@ -413,8 +545,38 @@ impl ProgramBlobBuilder {
                 offsets.insert(instruction.offset);
             }
 
-            assert_eq!(parsed.len(), instructions.len());
-            for (nth_instruction, (mut parsed, entry)) in parsed.into_iter().zip(instructions.into_iter()).enumerate() {
+            let mut nth_instruction = 0;
+            let mut previous_ends_block = true;
+            for mut parsed in parsed {
+                assert!(
+                    nth_instruction < instructions.len(),
+                    "parsed more instructions than were serialized"
+                );
+
+                if !is_legacy {
+                    // A macro block boundary must always start a new basic block.
+                    if parsed.offset.0 as usize % program::CODE_BLOCK_SIZE == 0 && parsed.offset.0 != 0 {
+                        assert!(
+                            previous_ends_block,
+                            "instruction at the macro block boundary {} is not preceded by a basic block terminator",
+                            parsed.offset
+                        );
+                    }
+
+                    previous_ends_block = parsed.kind.opcode().starts_new_basic_block();
+                }
+
+                let entry = &instructions[nth_instruction];
+                if !is_legacy && parsed.offset.0 < entry.position {
+                    // Macro block padding.
+                    assert!(
+                        matches!(parsed.kind, Instruction::fallthrough | Instruction::unlikely),
+                        "macro block padding decoded as something else than a padding instruction: {:?}",
+                        parsed.kind
+                    );
+                    continue;
+                }
+
                 let parsed_length = parsed.next_offset.0 - parsed.offset.0;
                 let opcode_mismatch = parsed.kind != entry.instruction && !self.ignore_instruction_set_incompatibility;
                 if opcode_mismatch || entry.position != parsed.offset.0 || u32::from(entry.bytes.length) != parsed_length {
@@ -447,7 +609,11 @@ impl ProgramBlobBuilder {
                 if let Some(target) = parsed.kind.target_mut() {
                     assert!(offsets.contains(&ProgramCounter(*target)));
                 }
+
+                nth_instruction += 1;
             }
+
+            assert_eq!(nth_instruction, instructions.len());
         }
 
         Ok(output)
@@ -462,7 +628,20 @@ impl ProgramBlobBuilder {
     }
 
     pub fn to_vec(&self) -> Result<Vec<u8>, String> {
-        let code = self.serialize_code()?;
+        self.blob_from_code(self.serialize_code(false)?)
+    }
+
+    pub fn to_vec_with_instruction_offsets(
+        &mut self,
+        emit_extra_sections: impl FnOnce(&mut Self, &[(ProgramCounter, ProgramCounter)]),
+    ) -> Result<Vec<u8>, String> {
+        let mut code = self.serialize_code(true)?;
+        let instruction_offsets = core::mem::take(&mut code.instruction_offsets);
+        emit_extra_sections(self, &instruction_offsets);
+        self.blob_from_code(code)
+    }
+
+    fn blob_from_code(&self, code: SerializedCode) -> Result<Vec<u8>, String> {
         let mut output = Vec::new();
         let mut writer = Writer::new(&mut output);
 
@@ -631,5 +810,107 @@ mod tests {
     fn metadata_hash_is_empty_when_absent() {
         let blob = build_minimal(None);
         assert!(blob.metadata_hash().is_empty());
+    }
+
+    #[test]
+    fn program_which_doesnt_end_a_basic_block_gets_a_trap_appended() {
+        use crate::program::{asm, Reg};
+
+        let build = |code: &[Instruction]| -> alloc::vec::Vec<Instruction> {
+            let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+            builder.set_code(code, &[]);
+            let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+            blob.instructions().map(|instruction| instruction.kind).collect()
+        };
+
+        let unterminated = [asm::load_imm(Reg::A0, 1), asm::load_imm(Reg::A0, 2)];
+        assert_eq!(build(&unterminated), [unterminated[0], unterminated[1], Instruction::trap]);
+
+        let terminated = [asm::load_imm(Reg::A0, 1), asm::ret()];
+        assert_eq!(build(&terminated), terminated);
+    }
+
+    #[test]
+    fn oversized_basic_block_is_split_at_macro_block_boundaries() {
+        use crate::program::{asm, Opcode, Reg, CODE_BLOCK_SIZE};
+
+        let isa = InstructionSetKind::Latest64;
+        let mut code = alloc::vec::Vec::new();
+        for nth in 0..CODE_BLOCK_SIZE as i32 {
+            code.push(asm::load_imm(Reg::A0, 0x12345678 + nth));
+        }
+        code.push(asm::ret());
+
+        let mut builder = ProgramBlobBuilder::new(isa);
+        builder.set_code(&code, &[]);
+        let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+        assert!(blob.code().len() > CODE_BLOCK_SIZE);
+
+        let mut previous_ends_block = true;
+        let mut original = code.iter().copied();
+        for parsed in blob.instructions() {
+            if parsed.offset.0 as usize % CODE_BLOCK_SIZE == 0 && parsed.offset.0 != 0 {
+                assert!(
+                    previous_ends_block,
+                    "instruction at the macro block boundary {} is not preceded by a basic block terminator",
+                    parsed.offset
+                );
+            }
+
+            previous_ends_block = parsed.kind.opcode().starts_new_basic_block();
+            if matches!(parsed.kind.opcode(), Opcode::fallthrough | Opcode::unlikely) {
+                continue;
+            }
+
+            assert_eq!(Some(parsed.kind), original.next());
+        }
+
+        assert_eq!(original.next(), None);
+    }
+
+    #[test]
+    fn jump_heavy_code_layout_reaches_a_steady_state() {
+        use crate::program::{asm, InstructionSetKind, Reg};
+
+        let mut state: u64 = 0x853c49e6748fea9b;
+        let mut rng = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        for _ in 0..100 {
+            let mut code = alloc::vec::Vec::new();
+            for nth in 0..200 + rng() % 2000 {
+                code.push(match rng() % 8 {
+                    0 => asm::jump(rng() as u32),
+                    1 => asm::branch_eq(Reg::A0, Reg::A1, rng() as u32),
+                    2 => asm::load_imm64(Reg::A0, rng()),
+                    3 => asm::load_imm(Reg::A0, rng() as u32 as i32),
+                    4 => asm::add_imm_64(Reg::A0, Reg::A1, (rng() & 0xffff) as i32),
+                    5 => asm::store_imm_u64(rng() as u32 as i32, nth as i32),
+                    _ => asm::add_64(Reg::A0, Reg::A1, Reg::A2),
+                });
+            }
+            code.push(asm::trap());
+
+            // The very last basic block is empty, so it's not a legal jump target.
+            let block_count = code
+                .iter()
+                .filter(|instruction| instruction.opcode().starts_new_basic_block())
+                .count() as u32;
+            for instruction in code.iter_mut() {
+                if let Some(target) = instruction.target_mut() {
+                    *target %= block_count;
+                }
+            }
+
+            let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+            builder.set_code(&code, &[]);
+            if let Err(error) = builder.to_vec() {
+                panic!("failed to build a program with {} instructions: {error}", code.len());
+            }
+        }
     }
 }
