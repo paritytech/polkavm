@@ -737,6 +737,11 @@ where
 
         let count = conv_reg(Reg::A2.into());
 
+        // Gas was charged based on the truncated count, so truncate it here too.
+        if B::BITNESS == Bitness::B64 {
+            self.push(mov(RegSize::R32, count, count));
+        }
+
         // Grab the amount of gas we have (this will always be negative), and zero the gas counter.
         // (We assume the memset will consume all of the gas.)
         self.push(xor((RegSize::R32, rcx, rcx)));
@@ -1307,8 +1312,6 @@ where
 
     #[inline(always)]
     pub fn memset(&mut self) {
-        let reg_size = self.reg_size();
-
         const _: () = {
             assert!(TMP_REG as u32 == rcx as u32);
             assert!(conv_reg_const(Reg::A0) as u32 == rdi as u32);
@@ -1334,31 +1337,36 @@ where
 
         let count = conv_reg(Reg::A2.into());
 
+        // Truncate the destination address; upper 32-bits are ignored just like normal memory accesses.
+        if B::BITNESS == Bitness::B64 {
+            self.asm.push(mov(RegSize::R32, rdi, rdi));
+        }
+
         match self.gas_metering {
             None => {
-                self.asm.push(mov(reg_size, rcx, count));
+                self.asm.push(mov(RegSize::R32, rcx, count));
                 // rep stosb, rdi is destination pointer, rcx is count, rax is the value
                 self.emit_rep_stosb();
-                self.asm.push(mov(reg_size, count, rcx));
+                self.asm.push(mov(RegSize::R32, count, rcx));
             }
             Some(GasMeteringKind::Sync) => {
+                self.asm.push(mov(RegSize::R32, rcx, count));
                 // Pre charge the gas cost of the memset.
-                self.asm.push(sub((RegSize::R64, Self::vmctx_field(S::offset_table().gas), count)));
+                self.asm.push(sub((RegSize::R64, Self::vmctx_field(S::offset_table().gas), rcx)));
                 // Will we have enough gas to finish the operation?
                 self.asm.push(cmp((Self::vmctx_field(S::offset_table().gas), imm64(0))));
                 // If no - jump to a slower version of the routine.
                 let label_slow = self.memset_label;
                 branch_to_label(self.asm.reserve::<U1>(), Condition::Less, label_slow);
                 // If yes - do it the fast way.
-                self.asm.push(mov(reg_size, rcx, count));
                 self.emit_rep_stosb();
-                self.asm.push(mov(reg_size, count, rcx));
+                self.asm.push(mov(RegSize::R32, count, rcx));
             }
             Some(GasMeteringKind::Async) => {
-                self.asm.push(sub((RegSize::R64, Self::vmctx_field(S::offset_table().gas), count)));
-                self.asm.push(mov(reg_size, rcx, count));
+                self.asm.push(mov(RegSize::R32, rcx, count));
+                self.asm.push(sub((RegSize::R64, Self::vmctx_field(S::offset_table().gas), rcx)));
                 self.emit_rep_stosb();
-                self.asm.push(mov(reg_size, count, rcx));
+                self.asm.push(mov(RegSize::R32, count, rcx));
             }
         }
     }
