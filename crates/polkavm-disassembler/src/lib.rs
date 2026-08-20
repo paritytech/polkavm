@@ -543,7 +543,7 @@ mod tests {
     #[test]
     fn simple() {
         let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(0x4000).build().unwrap();
-        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
         builder.set_rw_data_size(0x4000);
         builder.add_export_by_basic_block(0, b"main");
         builder.add_import(b"hostcall");
@@ -569,14 +569,14 @@ mod tests {
             "// Stack size = 0 bytes",
             "",
             "// Instructions = 5",
-            "// Code size = 18 bytes",
+            "// Code size = 20 bytes",
             "",
             "      : @0 [export #0: 'main'] (gas: 5)",
             "     0: u32 [0x20000] = 0x12345678",
-            "     9: s0 = a0 + a1",
-            "    12: ecalli 0 // 'hostcall'",
-            "    13: a0 = a0 + s0",
-            "    16: ret",
+            "    10: i32 s0 = a0 + a1",
+            "    13: ecalli 0 // 'hostcall'",
+            "    15: i32 a0 = a0 + s0",
+            "    18: ret",
             "",
         ]
         .join("\n");

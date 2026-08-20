@@ -6555,7 +6555,7 @@ mod test {
         }
 
         fn append_assembly(&mut self, assembly: &str) {
-            let isa = InstructionSetKind::Latest32;
+            let isa = InstructionSetKind::Latest64;
             let raw_blob = polkavm_common::assembler::assemble(Some(isa), assembly).unwrap();
             let blob = ProgramBlob::parse(raw_blob.into()).unwrap();
             let mut program_counter_to_section_target = HashMap::new();
@@ -6668,7 +6668,7 @@ mod test {
         }
 
         fn build(&self, config: Config) -> TestProgram {
-            let isa = InstructionSetKind::Latest32;
+            let isa = InstructionSetKind::Latest64;
             let elf = Elf::default();
             let data_sections_set: HashSet<_> = core::iter::once(self.data_section).collect();
             let code_sections_set: HashSet<_> = self.next_offset_for_section.keys().copied().collect();
@@ -6893,7 +6893,7 @@ mod test {
             ",
             "
             @0 [export #0: 'main']
-                a0 = a0 + 0x1
+                i32 a0 = a0 + 0x1
                 jump @0 if a0 <u 10
             @1
                 ret
@@ -6920,7 +6920,7 @@ mod test {
                 a1 = 0x1
                 fallthrough
             @1
-                a0 = a0 + a1
+                i32 a0 = a0 + a1
                 jump @1 if a0 <u 10
             @2
                 ret
@@ -6945,7 +6945,7 @@ mod test {
             "
             @0 [export #0: 'main']
                 a1 = 0x8
-                a0 = a0 + 0x1
+                i32 a0 = a0 + 0x1
                 jump @0 if a0 <u 10
             @1
                 ret

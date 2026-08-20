@@ -6119,20 +6119,17 @@ fn test_code_block_bitmap_only_answers_queries_about_its_own_block() {
     assert_eq!(bitmap.find_start_of_basic_block(outside), None);
 }
 
-#[cfg(test)]
-type DefaultInstructionSet = ISA_Latest32;
-
 #[test]
 fn test_is_jump_target_valid() {
     fn assert_get_previous_instruction_skip_matches_instruction_parser(code: &[u8], bitmask: &[u8]) {
-        for instruction in Instructions::new(DefaultInstructionSet::default(), code, bitmask, 0, false) {
+        for instruction in Instructions::new(ISA_Latest32, code, bitmask, 0, false) {
             match instruction.kind {
                 Instruction::trap => {
                     let skip = get_previous_instruction_skip(bitmask, instruction.offset.0);
                     if let Some(skip) = skip {
                         let previous_offset = instruction.offset.0 - skip - 1;
                         assert_eq!(
-                            Instructions::new(DefaultInstructionSet::default(), code, bitmask, previous_offset, true)
+                            Instructions::new(ISA_Latest32, code, bitmask, previous_offset, true)
                                 .next()
                                 .unwrap(),
                             ParsedInstruction {
@@ -6147,7 +6144,7 @@ fn test_is_jump_target_valid() {
                                 continue;
                             };
                             assert_eq!(
-                                Instructions::new(DefaultInstructionSet::default(), code, bitmask, previous_offset, true)
+                                Instructions::new(ISA_Latest32, code, bitmask, previous_offset, true)
                                     .next()
                                     .unwrap()
                                     .kind,
@@ -6193,24 +6190,14 @@ fn test_is_jump_target_valid() {
     macro_rules! assert_valid {
         ($code_length:expr, $bits:expr, $offset:expr) => {{
             let (code, bitmask) = g!($code_length, $bits);
-            assert!(is_jump_target_valid_legacy(
-                DefaultInstructionSet::default(),
-                &code,
-                &bitmask,
-                $offset
-            ));
+            assert!(is_jump_target_valid_legacy(ISA_Latest32, &code, &bitmask, $offset));
         }};
     }
 
     macro_rules! assert_invalid {
         ($code_length:expr, $bits:expr, $offset:expr) => {{
             let (code, bitmask) = g!($code_length, $bits);
-            assert!(!is_jump_target_valid_legacy(
-                DefaultInstructionSet::default(),
-                &code,
-                &bitmask,
-                $offset
-            ));
+            assert!(!is_jump_target_valid_legacy(ISA_Latest32, &code, &bitmask, $offset));
         }};
     }
 
@@ -6230,22 +6217,17 @@ fn test_is_jump_target_valid() {
     assert_valid!(27, [0, 26], 26);
 
     let opcode_load_imm = ISA_Latest32.opcode_to_raw(Opcode::load_imm, 1).unwrap().0 as u8;
-    assert!(is_jump_target_valid_legacy(
-        DefaultInstructionSet::default(),
-        &[opcode_load_imm],
-        &[0b00000001],
-        0
-    ));
+    assert!(is_jump_target_valid_legacy(ISA_Latest32, &[opcode_load_imm], &[0b00000001], 0));
 
     assert!(!is_jump_target_valid_legacy(
-        DefaultInstructionSet::default(),
+        ISA_Latest32,
         &[opcode_load_imm, opcode_load_imm],
         &[0b00000011],
         1
     ));
 
     assert!(is_jump_target_valid_legacy(
-        DefaultInstructionSet::default(),
+        ISA_Latest32,
         &[opcode_trap, opcode_load_imm],
         &[0b00000011],
         1
@@ -6253,11 +6235,11 @@ fn test_is_jump_target_valid() {
 
     // An unassigned opcode is an invalid instruction, which is a trap, so it also ends a basic block.
     let opcode_unassigned = (0..=u8::MAX)
-        .find(|&raw_opcode| DefaultInstructionSet::default().opcode_from_raw(u32::from(raw_opcode)).is_none())
+        .find(|&raw_opcode| ISA_Latest32.opcode_from_raw(u32::from(raw_opcode)).is_none())
         .unwrap();
 
     assert!(is_jump_target_valid_legacy(
-        DefaultInstructionSet::default(),
+        ISA_Latest32,
         &[opcode_unassigned, opcode_load_imm],
         &[0b00000011],
         1
@@ -6296,7 +6278,7 @@ fn test_legacy_runner_and_free_functions_match() {
         state as u8
     };
 
-    let instruction_set = DefaultInstructionSet::default();
+    let instruction_set = ISA_Latest32;
     let mut injected_instructions = 0;
     for iteration in 0..100 {
         let mut code = [0_u8; 256];
@@ -6649,10 +6631,10 @@ where
 
 #[test]
 fn test_instructions_iterator_with_implicit_trap() {
-    let opcode_fallthrough = DefaultInstructionSet::default().opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
+    let opcode_fallthrough = ISA_Latest32.opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
     let code = [opcode_fallthrough];
     for is_bounded in [false, true] {
-        let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &[0b00000001], 0, is_bounded);
+        let mut i = Instructions::new(ISA_Latest32, &code, &[0b00000001], 0, is_bounded);
         assert_eq!(
             i.next(),
             Some(ParsedInstruction {
@@ -6677,10 +6659,10 @@ fn test_instructions_iterator_with_implicit_trap() {
 
 #[test]
 fn test_instructions_iterator_without_implicit_trap() {
-    let opcode_trap = DefaultInstructionSet::default().opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
+    let opcode_trap = ISA_Latest32.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap];
     for is_bounded in [false, true] {
-        let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &[0b00000001], 0, is_bounded);
+        let mut i = Instructions::new(ISA_Latest32, &code, &[0b00000001], 0, is_bounded);
         assert_eq!(
             i.next(),
             Some(ParsedInstruction {
@@ -6697,12 +6679,12 @@ fn test_instructions_iterator_without_implicit_trap() {
 #[test]
 fn test_instructions_iterator_very_long_bitmask_bounded() {
     let mut code = [0_u8; 64];
-    code[0] = DefaultInstructionSet::default().opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
+    code[0] = ISA_Latest32.opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
     let mut bitmask = [0_u8; 8];
     bitmask[0] = 0b00000001;
     bitmask[7] = 0b10000000;
 
-    let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &bitmask, 0, true);
+    let mut i = Instructions::new(ISA_Latest32, &code, &bitmask, 0, true);
     assert_eq!(
         i.next(),
         Some(ParsedInstruction {
@@ -6727,12 +6709,12 @@ fn test_instructions_iterator_very_long_bitmask_bounded() {
 #[test]
 fn test_instructions_iterator_very_long_bitmask_unbounded() {
     let mut code = [0_u8; 64];
-    code[0] = DefaultInstructionSet::default().opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
+    code[0] = ISA_Latest32.opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
     let mut bitmask = [0_u8; 8];
     bitmask[0] = 0b00000001;
     bitmask[7] = 0b10000000;
 
-    let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &bitmask, 0, false);
+    let mut i = Instructions::new(ISA_Latest32, &code, &bitmask, 0, false);
     assert_eq!(
         i.next(),
         Some(ParsedInstruction {
@@ -6765,9 +6747,9 @@ fn test_instructions_iterator_very_long_bitmask_unbounded() {
 
 #[test]
 fn test_instructions_iterator_start_at_invalid_offset_bounded() {
-    let opcode_trap = DefaultInstructionSet::default().opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
+    let opcode_trap = ISA_Latest32.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap; 8];
-    let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &[0b10000001], 1, true);
+    let mut i = Instructions::new(ISA_Latest32, &code, &[0b10000001], 1, true);
     assert_eq!(
         i.next(),
         Some(ParsedInstruction {
@@ -6783,9 +6765,9 @@ fn test_instructions_iterator_start_at_invalid_offset_bounded() {
 
 #[test]
 fn test_instructions_iterator_start_at_invalid_offset_unbounded() {
-    let opcode_trap = DefaultInstructionSet::default().opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
+    let opcode_trap = ISA_Latest32.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap; 8];
-    let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &[0b10000001], 1, false);
+    let mut i = Instructions::new(ISA_Latest32, &code, &[0b10000001], 1, false);
     assert_eq!(
         i.next(),
         Some(ParsedInstruction {
@@ -6809,10 +6791,10 @@ fn test_instructions_iterator_start_at_invalid_offset_unbounded() {
 
 #[test]
 fn test_instructions_iterator_emits_an_injected_invalid_instruction_if_bounded_and_ends_with_a_trap() {
-    let opcode_trap = DefaultInstructionSet::default().opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
+    let opcode_trap = ISA_Latest32.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap; 32];
     let bitmask = [0b00000001, 0b00000000, 0b00000000, 0b00000100];
-    let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &bitmask, 0, true);
+    let mut i = Instructions::new(ISA_Latest32, &code, &bitmask, 0, true);
     assert_eq!(i.offset(), 0);
     assert_eq!(
         i.next(),
@@ -6836,10 +6818,10 @@ fn test_instructions_iterator_emits_an_injected_invalid_instruction_if_bounded_a
 
 #[test]
 fn test_instructions_iterator_emits_an_injected_invalid_instruction_if_unbounded_and_ends_with_a_trap() {
-    let opcode_trap = DefaultInstructionSet::default().opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
+    let opcode_trap = ISA_Latest32.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap; 32];
     let bitmask = [0b00000001, 0b00000000, 0b00000000, 0b00000100];
-    let mut i = Instructions::new(DefaultInstructionSet::default(), &code, &bitmask, 0, false);
+    let mut i = Instructions::new(ISA_Latest32, &code, &bitmask, 0, false);
     assert_eq!(i.offset(), 0);
     assert_eq!(
         i.next(),
