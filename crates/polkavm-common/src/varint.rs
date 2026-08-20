@@ -127,35 +127,22 @@ fn get_bytes_required(value: u32) -> u32 {
 }
 
 #[inline]
-pub(crate) fn write_simple_varint(value: u32, buffer: &mut [u8]) -> usize {
-    let varint_length = get_bytes_required(value);
-    match varint_length {
-        0 => {}
-        1 => {
-            buffer[0] = value as u8;
-        }
-        2 => {
-            let bytes = value.to_le_bytes();
-            buffer[0] = bytes[0];
-            buffer[1] = bytes[1];
-        }
-        3 => {
-            let bytes = value.to_le_bytes();
-            buffer[0] = bytes[0];
-            buffer[1] = bytes[1];
-            buffer[2] = bytes[2];
-        }
-        4 => {
-            let bytes = value.to_le_bytes();
-            buffer[0] = bytes[0];
-            buffer[1] = bytes[1];
-            buffer[2] = bytes[2];
-            buffer[3] = bytes[3];
-        }
-        _ => unreachable!(),
-    }
+pub(crate) fn write_simple_varint_with_length(value: u32, length: u32, buffer: &mut [u8]) -> usize {
+    debug_assert!(length <= 4);
+    debug_assert!(length >= get_bytes_required(value));
+    let bytes = value.to_le_bytes();
+    buffer[..length as usize].copy_from_slice(&bytes[..length as usize]);
+    length as usize
+}
 
-    varint_length as usize
+#[inline]
+pub(crate) fn simple_varint_length(value: u32) -> u32 {
+    get_bytes_required(value)
+}
+
+#[cfg(test)]
+pub(crate) fn write_simple_varint(value: u32, buffer: &mut [u8]) -> usize {
+    write_simple_varint_with_length(value, get_bytes_required(value), buffer)
 }
 
 #[test]

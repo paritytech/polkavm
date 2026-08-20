@@ -19,6 +19,8 @@ use polkavm_linker::TargetInstructionSet;
 
 use paste::paste;
 
+const INVALID_RAW_OPCODE: u8 = 254;
+
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum TestProgram {
     Pinky,
@@ -1050,17 +1052,43 @@ fn jump_into_middle_of_basic_block_from_within(engine_config: Config, isa: Instr
     assert_eq!(instance.gas(), 999);
 }
 
-fn jump_after_invalid_instruction_from_within(engine_config: Config, isa: InstructionSetKind) {
+fn entry_into_the_middle_of_an_instruction_is_rejected(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
     let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
-    builder.set_code(&[asm::trap(), asm::add_imm_32(A0, A0, 100), asm::jump(1)], &[]);
+    builder.set_code(&[asm::load_imm(A0, 0x11223344), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut module_config: ModuleConfig = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    let instructions: Vec<_> = module.blob().instructions().collect();
+    assert!(instructions[0].next_offset.0 > instructions[0].offset.0 + 1);
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    for offset in instructions[0].offset.0 + 1..instructions[0].next_offset.0 {
+        instance.set_gas(1000);
+        instance.set_next_program_counter(ProgramCounter(offset));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+        assert_eq!(instance.program_counter(), Some(ProgramCounter(offset)));
+        assert_eq!(instance.gas(), 1000);
+    }
+}
+
+fn invalid_instruction_is_a_trap(engine_config: Config, isa: InstructionSetKind, make_invalid: impl FnOnce(&mut ProgramBlob)) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap(), asm::load_imm(A0, 42), asm::ret(), asm::jump(1)], &[]);
 
     let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-    let mut raw_code = blob.code().to_vec();
-    raw_code[0] = 255;
-    blob.set_code(raw_code.into());
+    make_invalid(&mut blob);
+
     let instructions: Vec<_> = blob.instructions().collect();
     assert_eq!(
         instructions[0],
@@ -1071,17 +1099,383 @@ fn jump_after_invalid_instruction_from_within(engine_config: Config, isa: Instru
         }
     );
 
+    assert_eq!(instructions[3].kind, asm::jump(instructions[0].next_offset.0));
+
     let mut module_config: ModuleConfig = ModuleConfig::new();
     module_config.set_page_size(get_native_page_size().try_into().unwrap());
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
-    let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    let run_from = |program_counter| {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_gas(1000);
+        instance.set_next_program_counter(program_counter);
+        let interrupt = instance.run().unwrap();
+        (interrupt, instance.reg(A0), instance.gas())
+    };
+
+    let (interrupt, a0, gas) = run_from(instructions[3].offset);
+    match_interrupt!(interrupt, InterruptKind::Finished);
+    assert_eq!((a0, gas), (42, 997));
+
+    let (interrupt, a0, gas) = run_from(instructions[1].offset);
+    match_interrupt!(interrupt, InterruptKind::Finished);
+    assert_eq!((a0, gas), (42, 998));
+
+    let (interrupt, a0, gas) = run_from(instructions[0].offset);
+    match_interrupt!(interrupt, InterruptKind::Trap);
+    assert_eq!((a0, gas), (0, 999));
+}
+
+fn jump_after_invalid_instruction_from_within(engine_config: Config, isa: InstructionSetKind) {
+    invalid_instruction_is_a_trap(engine_config, isa, |blob| {
+        let mut raw_code = blob.code().to_vec();
+        raw_code[0] = INVALID_RAW_OPCODE;
+        blob.set_code(raw_code.into());
+    });
+}
+
+fn jump_after_an_injected_invalid_instruction(engine_config: Config, isa: InstructionSetKind) {
+    if !isa.is_legacy() {
+        return;
+    }
+
+    invalid_instruction_is_a_trap(engine_config, isa, |blob| {
+        let mut raw_bitmask = blob.bitmask().to_vec();
+        raw_bitmask[0] &= !1;
+        blob.set_bitmask(raw_bitmask.into());
+    });
+}
+
+fn serialize_padded(isa: InstructionSetKind, length: usize, groups: &[(u32, &[polkavm_common::program::Instruction])]) -> Vec<u8> {
+    use polkavm_common::program::MAX_INSTRUCTION_LENGTH;
+
+    let opcode_unlikely = isa.opcode_to_raw(Opcode::unlikely, 0).unwrap().0 as u8;
+    let mut code = vec![opcode_unlikely; length];
+    for &(start, instructions) in groups {
+        let mut position = start;
+        for &instruction in instructions {
+            let mut buffer = [0; MAX_INSTRUCTION_LENGTH];
+            let instruction_length = instruction.serialize_into(isa, position, &mut buffer) as u32;
+            code[position as usize..(position + instruction_length) as usize].copy_from_slice(&buffer[..instruction_length as usize]);
+            position += instruction_length;
+        }
+    }
+
+    code
+}
+
+fn jump_to_macro_block_boundary_is_always_valid(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    if isa.is_legacy() {
+        return;
+    }
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let code = serialize_padded(
+        isa,
+        1040,
+        &[
+            (0, &[asm::jump(1024)]),
+            (1023, &[asm::fallthrough()]),
+            (1024, &[asm::load_imm(A1, 42), asm::ret()]),
+        ],
+    );
+    blob.set_code(code.into());
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    // A direct jump to the boundary.
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(1000);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A1), 42);
+    assert_eq!(instance.gas(), 997);
+
+    // An arbitrary entry landing exactly on the boundary.
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(1000);
+    instance.set_next_program_counter(ProgramCounter(1024));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A1), 42);
+    assert_eq!(instance.gas(), 998);
+
+    // An arbitrary entry into the `unlikely` run before the boundary.
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(3000);
+    instance.set_next_program_counter(ProgramCounter(5));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A1), 42);
+    assert_eq!(instance.gas(), 3000 - ((1024 - 3) + 2));
+}
+
+fn unterminated_macro_block_traps_at_its_last_instruction(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    if isa.is_legacy() {
+        return;
+    }
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let code = serialize_padded(isa, 1040, &[(1024, &[asm::load_imm(A1, 42), asm::ret()])]);
+    blob.set_code(code.into());
+
+    let instructions: Vec<_> = blob.instructions_bounded_at(ProgramCounter(1023)).collect();
+    assert_eq!(instructions[0].kind, crate::program::Instruction::invalid);
+    assert_eq!(instructions[0].next_offset, ProgramCounter(1024));
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(3000);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.reg(Reg::A1), 0);
+    assert_eq!(instance.program_counter(), Some(ProgramCounter(1023)));
+    assert_eq!(instance.gas(), 3000 - 1024);
+}
+
+fn instructions_across_macro_block_boundary_are_traps_1(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    if isa.is_legacy() {
+        return;
+    }
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let code = serialize_padded(
+        isa,
+        1040,
+        &[
+            (0, &[asm::jump(1019)]),
+            (1018, &[asm::fallthrough()]),
+            (1019, &[asm::load_imm64(A1, 0x112233)]),
+        ],
+    );
+    blob.set_code(code.into());
+
+    let instructions: Vec<_> = blob.instructions_bounded_at(ProgramCounter(1019)).collect();
+    assert_eq!(instructions[0].kind, crate::program::Instruction::invalid);
+    assert_eq!(instructions[0].next_offset, ProgramCounter(1024));
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_gas(1000);
-
-    instance.set_next_program_counter(instructions[1].offset);
+    instance.set_next_program_counter(ProgramCounter(0));
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.reg(Reg::A1), 0);
+    assert_eq!(instance.program_counter(), Some(ProgramCounter(1019)));
+    assert_eq!(instance.gas(), 998);
+}
+
+fn instructions_across_macro_block_boundary_are_traps_2(engine_config: Config, isa: InstructionSetKind) {
+    use polkavm_common::program::MAX_INSTRUCTION_LENGTH;
+
+    let _ = env_logger::try_init();
+    if isa.is_legacy() {
+        return;
+    }
+
+    const BOUNDARY: u32 = 1024;
+    const TARGET: u32 = 2048;
+
+    let branch = asm::branch_eq(A0, A1, TARGET);
+    let branch_offset = BOUNDARY - 2;
+    let branch_length = {
+        let mut buffer = [0; MAX_INSTRUCTION_LENGTH];
+        branch.serialize_into(isa, branch_offset, &mut buffer) as u32
+    };
+
+    assert!(branch_offset + branch_length > BOUNDARY);
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let code = serialize_padded(
+        isa,
+        3072,
+        &[
+            (branch_offset - 1, &[asm::fallthrough()]),
+            (branch_offset, &[branch]),
+            (branch_offset + branch_length, &[asm::add_imm_64(A0, A0, 1)]),
+            (TARGET, &[asm::load_imm(A1, 42), asm::ret()]),
+        ],
+    );
+    blob.set_code(code.into());
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    module_config.set_cost_model(Some(crate::CostModelKind::Full(crate::CacheModel::L1Hit)));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(1000);
+    instance.set_next_program_counter(ProgramCounter(branch_offset));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.reg(Reg::A1), 0);
+    assert_eq!(instance.gas(), 998);
+}
+
+fn instructions_across_code_blob_boundary_are_traps(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    if isa.is_legacy() {
+        return;
+    }
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut code = serialize_padded(isa, 17, &[]);
+
+    // A `load_imm` whose argument byte is past the end of the code; the decoder pads with zeros.
+    *code.last_mut().unwrap() = isa.opcode_to_raw(Opcode::load_imm, 1).unwrap().0 as u8;
+    blob.set_code(code.into());
+
+    let instructions: Vec<_> = blob.instructions().collect();
+    let [.., overshooting] = instructions.as_slice() else {
+        unreachable!()
+    };
+    assert_eq!(
+        (overshooting.kind, overshooting.offset, overshooting.next_offset),
+        (crate::program::Instruction::invalid, ProgramCounter(16), ProgramCounter(17))
+    );
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(1000);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.program_counter(), Some(ProgramCounter(16)));
+}
+
+#[test]
+fn linear_decode_matches_the_instruction_iterator() {
+    use polkavm_common::program::OpcodeVisitor;
+
+    #[derive(Copy, Clone)]
+    struct CollectOffsets(InstructionSetKind);
+
+    impl OpcodeVisitor for CollectOffsets {
+        type State = Vec<ProgramCounter>;
+        type ReturnTy = ();
+        type InstructionSet = InstructionSetKind;
+
+        fn instruction_set(self) -> Self::InstructionSet {
+            self.0
+        }
+
+        fn dispatch(self, state: &mut Self::State, _opcode: usize, _chunk: u128, offset: u32, _length: u32) {
+            state.push(ProgramCounter(offset));
+        }
+    }
+
+    let _ = env_logger::try_init();
+    let isa = InstructionSetKind::Latest64;
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.set_code(&[asm::trap()], &[]);
+
+    let code_length = 32;
+    for tail in [&[asm::trap()][..], &[][..]] {
+        let mut blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+        let code = serialize_padded(
+            isa,
+            code_length,
+            &[(0, &[asm::load_imm(A1, 42), asm::ret()]), (code_length as u32 - 1, tail)],
+        );
+        blob.set_code(code.into());
+
+        let mut linear = Vec::new();
+        blob.visit(CollectOffsets(isa), &mut linear);
+
+        let iterated: Vec<_> = blob.instructions().map(|instruction| instruction.offset).collect();
+        assert_eq!(linear, iterated);
+    }
+}
+
+fn jump_to_an_injected_invalid_instruction(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    if !isa.is_legacy() {
+        return;
+    }
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_imm(A1, 1), asm::load_imm(A1, 42), asm::ret(), asm::jump(0)], &[]);
+
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut raw_bitmask = blob.bitmask().to_vec();
+    raw_bitmask[0] &= !1;
+    blob.set_bitmask(raw_bitmask.into());
+
+    let instructions: Vec<_> = blob.instructions().collect();
+    assert_eq!(instructions[0].kind, crate::program::Instruction::invalid);
+    assert_eq!(instructions[0].offset, ProgramCounter(0));
+    assert_eq!(instructions[1].kind, asm::load_imm(A1, 42));
+    assert_eq!(instructions[3].kind, asm::jump(0));
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(1000);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.reg(Reg::A1), 0);
+    assert_eq!(instance.gas(), 999);
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(1000);
+    instance.set_next_program_counter(instructions[3].offset);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.reg(Reg::A1), 0);
     assert_eq!(instance.gas(), 998);
 }
 
@@ -2693,7 +3087,7 @@ fn invalid_instruction_after_fallthrough(engine_config: Config, isa: Instruction
     let instructions: Vec<_> = blob.instructions().collect();
 
     let mut raw_code = blob.code().to_vec();
-    raw_code[instructions[1].offset.0 as usize] = 255;
+    raw_code[instructions[1].offset.0 as usize] = INVALID_RAW_OPCODE;
     blob.set_code(raw_code.into());
 
     let instructions: Vec<_> = blob.instructions().collect();
@@ -2813,7 +3207,8 @@ fn invalid_branch_target(engine_config: Config, isa: InstructionSetKind) {
     }
 
     // Invalid branch (false case).
-    {
+    if isa.is_legacy() {
+        // TODO: Also test on non-legacy.
         let mut blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
         let mut raw_bitmask = blob.bitmask().to_vec();
         raw_bitmask.fill(0);
@@ -2851,14 +3246,6 @@ fn invalid_branch_target(engine_config: Config, isa: InstructionSetKind) {
 fn branch_gas_cost_consistent_across_backends(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
-
-    // A basic block ending in a conditional branch whose fall-through is a `trap`.
-    // With the full cost model computing the branch's gas cost requires peeking at the
-    // opcode of the instruction following the branch; the interpreter (via
-    // `visit_parsing`) and the compiler (via the static dispatch tables) used to derive
-    // a different `args_length` for that peek, so they charged a different
-    // branch-prediction cost. Under the tracing config the harness runs both backends
-    // in lockstep and cross-checks the gas, so any divergence fails the test.
     let blob = crate::program::assemble(
         Some(isa),
         "
@@ -5064,7 +5451,7 @@ fn jam_validate_invalid_opcode(config: Config, isa: InstructionSetKind) {
     builder.set_code(&[asm::load_imm(Reg::A0, 0x12345678), asm::ret()], &[]);
     let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let mut raw_code = blob.code().to_vec();
-    raw_code[0] = 255;
+    raw_code[0] = INVALID_RAW_OPCODE;
     blob.set_code(raw_code.into());
     assert!(blob.validate_code_with_isa(isa).is_err());
     assert!(matches!(
@@ -5198,15 +5585,33 @@ fn jam_reg_nibble_clamped_to_a5(config: Config, isa: InstructionSetKind) {
     // whose destination nibble is 13, 14 or 15 must still write to A5 and not to T2.
     // (See https://github.com/paritytech/polkavm/issues/391.)
     for nibble in 13..=15 {
-        let mut builder = ProgramBlobBuilder::new(isa);
-        builder.add_export_by_basic_block(0, b"main");
-        builder.set_code(&[asm::load_imm(Reg::A5, 0x12345678), asm::ret()], &[]);
-        let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let (mut blob, position) = {
+            let mut builder = ProgramBlobBuilder::new(isa);
+            builder.add_export_by_basic_block(0, b"main");
+            builder.set_code(&[asm::load_imm(Reg::A4, 0x12345678), asm::ret()], &[]);
+            let blob_a = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+            let mut builder = ProgramBlobBuilder::new(isa);
+            builder.add_export_by_basic_block(0, b"main");
+            builder.set_code(&[asm::load_imm(Reg::A5, 0x12345678), asm::ret()], &[]);
+            let blob_b = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+            // Automatically detect where the register is encoded.
+            let position = blob_a
+                .code()
+                .iter()
+                .copied()
+                .zip(blob_b.code().iter().copied())
+                .take_while(|(a, b)| a == b)
+                .count();
+
+            (blob_b, position)
+        };
 
         // Rewrite `load_imm`'s destination register nibble from 12 to the out-of-bounds value.
         let mut raw_code = blob.code().to_vec();
-        assert_eq!(raw_code[1], 12);
-        raw_code[1] = nibble;
+        assert_eq!(raw_code[position], 12);
+        raw_code[position] = nibble;
         blob.set_code(raw_code.into());
         assert!(blob.validate_code_with_isa(isa).is_ok());
 
@@ -5573,7 +5978,15 @@ run_tests! {
     dynamic_jump_to_null
     jump_into_middle_of_basic_block_from_outside
     jump_into_middle_of_basic_block_from_within
+    entry_into_the_middle_of_an_instruction_is_rejected
     jump_after_invalid_instruction_from_within
+    jump_after_an_injected_invalid_instruction
+    jump_to_macro_block_boundary_is_always_valid
+    unterminated_macro_block_traps_at_its_last_instruction
+    instructions_across_macro_block_boundary_are_traps_1
+    instructions_across_macro_block_boundary_are_traps_2
+    instructions_across_code_blob_boundary_are_traps
+    jump_to_an_injected_invalid_instruction
     jump_indirect_simple
     jump_indirect_big_table
     dynamic_paging_basic

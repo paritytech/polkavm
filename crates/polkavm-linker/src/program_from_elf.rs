@@ -11094,23 +11094,24 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
     builder.set_code(&raw_code, &jump_table);
 
     let mut offsets = Vec::new();
-    if !config.strip {
-        let blob = ProgramBlob::parse(builder.to_vec().map_err(ProgramFromElfError::other)?.into())?;
-        offsets = blob
-            .instructions()
-            .skip(config.dispatch_table.len())
-            .map(|instruction| (instruction.offset, instruction.next_offset))
-            .collect();
-        assert_eq!(offsets.len(), locations_for_instruction.len());
+    let raw_blob = if config.strip {
+        if let Some(metadata_hash) = config.metadata_hash.clone() {
+            builder.add_custom_section(program::SECTION_OPT_METADATA_HASH, metadata_hash);
+        }
 
-        emit_debug_info(&mut builder, &locations_for_instruction, &offsets);
+        builder.to_vec()
+    } else {
+        builder.to_vec_with_instruction_offsets(|builder, instruction_offsets| {
+            offsets = instruction_offsets.iter().copied().skip(config.dispatch_table.len()).collect();
+            assert_eq!(offsets.len(), locations_for_instruction.len());
+            emit_debug_info(builder, &locations_for_instruction, &offsets);
+
+            if let Some(metadata_hash) = config.metadata_hash.clone() {
+                builder.add_custom_section(program::SECTION_OPT_METADATA_HASH, metadata_hash);
+            }
+        })
     }
-
-    if let Some(metadata_hash) = config.metadata_hash.clone() {
-        builder.add_custom_section(program::SECTION_OPT_METADATA_HASH, metadata_hash);
-    }
-
-    let raw_blob = builder.to_vec().map_err(ProgramFromElfError::other)?;
+    .map_err(ProgramFromElfError::other)?;
 
     log::debug!("Built a program of {} bytes", raw_blob.len());
     let blob = ProgramBlob::parse(raw_blob[..].into())?;

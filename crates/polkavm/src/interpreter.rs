@@ -19,8 +19,8 @@ use polkavm_common::abi::VM_ADDR_RETURN_TO_HOST;
 use polkavm_common::cast::cast;
 use polkavm_common::operation::*;
 use polkavm_common::program::{
-    asm, interpreter_calculate_cache_num_entries, InstructionVisitor, RawReg, Reg, INTERPRETER_CACHE_ENTRY_SIZE,
-    INTERPRETER_FLATMAP_ENTRY_SIZE,
+    asm, interpreter_calculate_cache_num_entries, CodeBlockBitmap, CodeBlockBitmapBox, InstructionSet, InstructionVisitor, RawReg, Reg,
+    CODE_BLOCK_SIZE, INTERPRETER_CACHE_ENTRY_SIZE, INTERPRETER_FLATMAP_ENTRY_SIZE,
 };
 use polkavm_common::utils::{align_to_next_page_usize, slice_assume_init_mut, ArcBytes, GasVisitorT};
 
@@ -1269,7 +1269,10 @@ macro_rules! emit_branch {
     ($self:ident, $name:ident, $s1:ident, $s2:ident, $i:ident) => {
         let target_true = ProgramCounter($i);
         let target_false = $self.next_program_counter();
-        if $self.module.is_jump_target_valid(target_true) && $self.module.is_jump_target_valid(target_false) {
+        let is_legacy = $self.module.blob().isa().is_legacy();
+        if $self.is_jump_target_valid(target_true)
+            && ((is_legacy && $self.is_jump_target_valid(target_false)) || (!is_legacy && target_false.0 < $self.module.code_len()))
+        {
             emit!($self, $name($s1, $s2, target_true, target_false));
         } else {
             emit!($self, invalid_branch_trap($self.program_counter));
@@ -1428,6 +1431,60 @@ macro_rules! access_memory_mut {
     };
 }
 
+fn get_or_build_jump_target_cache<'a>(
+    module: &Module,
+    cache: &'a mut Vec<Option<CodeBlockBitmapBox>>,
+    program_counter: ProgramCounter,
+) -> Option<&'a CodeBlockBitmapBox> {
+    let blob = module.blob();
+    debug_assert!(!blob.isa().is_legacy());
+
+    let offset = cast(program_counter.0).to_usize();
+    if offset >= blob.code().len() {
+        return None;
+    }
+
+    let block = offset / CODE_BLOCK_SIZE;
+    if cache.len() <= block {
+        cache.resize(blob.code().len().div_ceil(CODE_BLOCK_SIZE), None);
+    }
+
+    Some(cache[block].get_or_insert_with(|| {
+        let mut bitmap = CodeBlockBitmap::new_boxed();
+        bitmap.build(blob.isa(), blob.code(), program_counter.0);
+        bitmap
+    }))
+}
+
+fn is_jump_target_valid_cached(module: &Module, cache: &mut Vec<Option<CodeBlockBitmapBox>>, program_counter: ProgramCounter) -> bool {
+    if module.blob().isa().is_legacy() {
+        // The legacy check is O(1) already.
+        return module.scan_is_jump_target_valid(program_counter);
+    }
+
+    let Some(bitmap) = get_or_build_jump_target_cache(module, cache, program_counter) else {
+        return false;
+    };
+
+    bitmap.get(program_counter)
+}
+
+/// Finds the start of the basic block which contains `program_counter`.
+///
+/// For the extended ISA `program_counter` is only guaranteed to be *inside* of that block; it can
+/// point into the middle of an instruction, so this is not a substitute for validating the entry.
+fn find_start_of_enclosing_basic_block(
+    module: &Module,
+    cache: &mut Vec<Option<CodeBlockBitmapBox>>,
+    program_counter: ProgramCounter,
+) -> Option<ProgramCounter> {
+    if module.blob().isa().is_legacy() {
+        module.scan_find_start_of_basic_block(program_counter)
+    } else {
+        get_or_build_jump_target_cache(module, cache, program_counter)?.find_start_of_basic_block(program_counter)
+    }
+}
+
 pub(crate) struct InterpretedInstance {
     module: Module,
     standard_memory: StandardMemory,
@@ -1441,6 +1498,7 @@ pub(crate) struct InterpretedInstance {
     cycle_counter: u64,
     gas: i64,
     compiled_offset_for_block: FlatMap<CompiledOffset, true>,
+    valid_jump_targets_for_block: Vec<Option<CodeBlockBitmapBox>>,
     compiled_handlers: Vec<Handler>,
     compiled_args: Vec<Args>,
     next_compiled_offset: Target,
@@ -1458,6 +1516,7 @@ impl InterpretedInstance {
         let step_tracing = module.is_step_tracing() || force_step_tracing;
         let mut instance = Self {
             compiled_offset_for_block: FlatMap::new(module.code_len() + 1), // + 1 for one implicit out-of-bounds trap.
+            valid_jump_targets_for_block: Default::default(),
             compiled_handlers: Default::default(),
             compiled_args: Default::default(),
             module,
@@ -1759,9 +1818,11 @@ impl InterpretedInstance {
     pub fn reset_interpreter_cache(&mut self) {
         self.compiled_handlers.clear();
         self.compiled_args.clear();
+        self.valid_jump_targets_for_block.clear();
 
         self.compiled_handlers.shrink_to_fit();
         self.compiled_args.shrink_to_fit();
+        self.valid_jump_targets_for_block.shrink_to_fit();
 
         self.compiled_offset_for_block.reset();
         self.next_compiled_offset = 0;
@@ -1805,11 +1866,11 @@ impl InterpretedInstance {
             return Some(target);
         }
 
-        if !self.module.is_jump_target_valid(program_counter) {
+        if !is_jump_target_valid_cached(&self.module, &mut self.valid_jump_targets_for_block, program_counter) {
             return None;
         }
 
-        self.compile_block::<DEBUG>(program_counter)
+        self.compile_block::<DEBUG>(program_counter, !self.module.blob().isa().is_legacy())
     }
 
     #[inline(always)]
@@ -1866,22 +1927,28 @@ impl InterpretedInstance {
             log::trace!("Resolving arbitrary jump: {program_counter}");
         }
 
-        let basic_block_offset = match self.module.find_start_of_basic_block(program_counter) {
-            Some(offset) => {
-                log::trace!("  -> Found start of a basic block at: {offset}");
-                offset
+        let Some(basic_block_offset) =
+            find_start_of_enclosing_basic_block(&self.module, &mut self.valid_jump_targets_for_block, program_counter)
+        else {
+            if DEBUG {
+                log::trace!("  -> There's no instruction here!");
             }
-            None => {
-                if DEBUG {
-                    log::trace!("  -> Start of a basic block not found!");
-                }
 
-                return None;
-            }
+            return None;
         };
-        self.compile_block::<DEBUG>(basic_block_offset)?;
 
-        let compiled_offset = self.compiled_offset_for_block.get(program_counter.0)?;
+        if DEBUG {
+            log::trace!("  -> Found start of a basic block at: {basic_block_offset}");
+        }
+
+        self.compile_block::<DEBUG>(basic_block_offset, false)?;
+
+        // Reject a program counter pointing into the middle of an instruction.
+        let Some(compiled_offset) = self.compiled_offset_for_block.get(program_counter.0) else {
+            debug_assert_eq!(self.module.scan_find_start_of_basic_block(program_counter), None);
+            return None;
+        };
+
         if basic_block_offset == program_counter {
             Some((Self::unpack_target(compiled_offset).1, 0))
         } else {
@@ -1900,11 +1967,11 @@ impl InterpretedInstance {
             return Some(target);
         }
 
-        self.compile_block::<DEBUG>(program_counter)
+        self.compile_block::<DEBUG>(program_counter, !self.module.blob().isa().is_legacy())
     }
 
     #[inline(never)]
-    fn compile_block<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<Target> {
+    fn compile_block<const DEBUG: bool>(&mut self, program_counter: ProgramCounter, known_valid_jump_target: bool) -> Option<Target> {
         if program_counter.0 >= self.module.code_len() {
             return None;
         }
@@ -1917,9 +1984,13 @@ impl InterpretedInstance {
             CostModelKind::Simple(cost_model) => {
                 if self.module.is_per_instruction_metering() {
                     // TODO: Remove this.
-                    self.compile_block_impl::<_, DEBUG, true>(program_counter, GasVisitor::new(cost_model.clone()))
+                    self.compile_block_impl::<_, DEBUG, true>(program_counter, known_valid_jump_target, GasVisitor::new(cost_model.clone()))
                 } else {
-                    self.compile_block_impl::<_, DEBUG, false>(program_counter, GasVisitor::new(cost_model.clone()))
+                    self.compile_block_impl::<_, DEBUG, false>(
+                        program_counter,
+                        known_valid_jump_target,
+                        GasVisitor::new(cost_model.clone()),
+                    )
                 }
             }
             CostModelKind::Full(cost_model) => {
@@ -1931,10 +2002,10 @@ impl InterpretedInstance {
 
                 if self.module.blob().is_64_bit() {
                     let gas_visitor = Simulator::<B64, ()>::new(code, blob.isa(), *cost_model, ());
-                    self.compile_block_impl::<_, DEBUG, false>(program_counter, gas_visitor)
+                    self.compile_block_impl::<_, DEBUG, false>(program_counter, known_valid_jump_target, gas_visitor)
                 } else {
                     let gas_visitor = Simulator::<B32, ()>::new(code, blob.isa(), *cost_model, ());
-                    self.compile_block_impl::<_, DEBUG, false>(program_counter, gas_visitor)
+                    self.compile_block_impl::<_, DEBUG, false>(program_counter, known_valid_jump_target, gas_visitor)
                 }
             }
         }
@@ -1943,6 +2014,7 @@ impl InterpretedInstance {
     fn compile_block_impl<G, const DEBUG: bool, const PER_INSTRUCTION_METERING: bool>(
         &mut self,
         program_counter: ProgramCounter,
+        known_valid_jump_target: bool,
         mut gas_visitor: G,
     ) -> Option<Target>
     where
@@ -1952,9 +2024,26 @@ impl InterpretedInstance {
             panic!("internal compiled program counter overflow: the program is too big!");
         };
 
+        if cfg!(debug_assertions) && known_valid_jump_target {
+            assert!(is_jump_target_valid_cached(
+                &self.module,
+                &mut self.valid_jump_targets_for_block,
+                program_counter
+            ));
+        }
+
         let mut charge_gas_index = None;
-        let mut is_jump_target_valid = self.module.is_jump_target_valid(program_counter);
-        for instruction in self.module.instructions_bounded_at(program_counter) {
+        let mut is_jump_target_valid =
+            known_valid_jump_target || is_jump_target_valid_cached(&self.module, &mut self.valid_jump_targets_for_block, program_counter);
+
+        let instructions = if is_jump_target_valid {
+            // A valid jump target always lies on an instruction boundary.
+            self.module.instructions_bounded_at_known_boundary(program_counter)
+        } else {
+            self.module.instructions_bounded_at(program_counter)
+        };
+
+        for instruction in instructions {
             self.compiled_offset_for_block.insert(
                 instruction.offset.0,
                 Self::pack_target(self.compiled_handlers.len(), is_jump_target_valid),
@@ -2003,6 +2092,7 @@ impl InterpretedInstance {
                 next_program_counter: instruction.next_offset,
                 compiled_handlers: &mut self.compiled_handlers,
                 compiled_args: &mut self.compiled_args,
+                valid_jump_targets_for_block: &mut self.valid_jump_targets_for_block,
                 module: &self.module,
                 memory_kind,
             });
@@ -3275,7 +3365,7 @@ define_interpreter! {
         }
 
         visitor.reset_interpreter_cache();
-        if let Some(target) = visitor.compile_block::<DEBUG>(program_counter) {
+        if let Some(target) = visitor.compile_block::<DEBUG>(program_counter, false) {
             visitor.go_to_target(target)
         } else {
             visitor.trigger_interrupt(InterruptKind::Trap)
@@ -3366,7 +3456,12 @@ define_interpreter! {
             log::trace!("[{}]: ecalli {hostcall_number}", compiled_offset);
         }
 
-        let next_offset = visitor.module.instructions_bounded_at(program_counter).next().unwrap().next_offset;
+        let next_offset = visitor
+            .module
+            .instructions_bounded_at_known_boundary(program_counter)
+            .next()
+            .unwrap()
+            .next_offset;
         visitor.program_counter = program_counter;
         visitor.program_counter_valid = true;
         visitor.next_program_counter = Some(next_offset);
@@ -4771,6 +4866,7 @@ struct Compiler<'a, const DEBUG: bool> {
     next_program_counter: ProgramCounter,
     compiled_handlers: &'a mut Vec<Handler>,
     compiled_args: &'a mut Vec<Args>,
+    valid_jump_targets_for_block: &'a mut Vec<Option<CodeBlockBitmapBox>>,
     module: &'a Module,
     memory_kind: usize,
 }
@@ -4778,6 +4874,10 @@ struct Compiler<'a, const DEBUG: bool> {
 impl<'a, const DEBUG: bool> Compiler<'a, DEBUG> {
     fn next_program_counter(&self) -> ProgramCounter {
         self.next_program_counter
+    }
+
+    fn is_jump_target_valid(&mut self, program_counter: ProgramCounter) -> bool {
+        is_jump_target_valid_cached(self.module, self.valid_jump_targets_for_block, program_counter)
     }
 
     #[track_caller]
