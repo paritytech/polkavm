@@ -1205,6 +1205,22 @@ impl Sandbox {
         }
     }
 
+    fn recalculate_address_of_interrupted_access(&mut self) {
+        let program_counter = ProgramCounter(self.vmctx().next_program_counter.load(Ordering::Relaxed));
+        let Some(module) = self.module.as_ref() else { return };
+        let Some(instruction) = module.instructions_bounded_at(program_counter).next() else {
+            return;
+        };
+
+        let Some((base, offset)) = crate::compiler::indirect_memory_operand(instruction.kind) else {
+            return;
+        };
+
+        let base = cast(self.vmctx().regs[base.get() as usize]).truncate_to_u32();
+        let address = base.wrapping_add(cast(offset).bitwise_as_u32());
+        self.vmctx_mut().tmp_reg.store(u64::from(address), Ordering::Relaxed);
+    }
+
     fn set_aux_data_permission_for_host(&mut self) -> Result<(), Error> {
         if self.aux_data_full_length != 0 {
             let offset = self.guest_memory_offset + self.aux_data_address as usize;
@@ -1633,6 +1649,8 @@ impl super::Sandbox for Sandbox {
                 self.vmctx().next_program_counter.load(Ordering::Relaxed),
                 self.vmctx().next_native_program_counter.load(Ordering::Relaxed)
             );
+
+            self.recalculate_address_of_interrupted_access();
         }
 
         self.vmctx_mut().sandbox = self;
