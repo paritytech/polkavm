@@ -330,11 +330,16 @@ impl Assembler {
                 // AArch64 fixup: PC-relative offset from the instruction itself.
                 let offset = target_absolute - fixup.instruction_offset as isize;
                 let p = fixup.instruction_offset;
-                let existing = u32::from_le_bytes([
-                    self.code[p], self.code[p + 1], self.code[p + 2], self.code[p + 3]
-                ]);
-                let patched = Self::patch_aarch64_branch(existing, offset);
-                self.code[p..p + 4].copy_from_slice(&patched.to_le_bytes());
+                let existing = u32::from_le_bytes([self.code[p], self.code[p + 1], self.code[p + 2], self.code[p + 3]]);
+                if Self::is_aarch64_adrp(existing) {
+                    let add = u32::from_le_bytes([self.code[p + 4], self.code[p + 5], self.code[p + 6], self.code[p + 7]]);
+                    let (patched_adrp, patched_add) = Self::patch_aarch64_adrp_pair(existing, add, p, target_absolute);
+                    self.code[p..p + 4].copy_from_slice(&patched_adrp.to_le_bytes());
+                    self.code[p + 4..p + 8].copy_from_slice(&patched_add.to_le_bytes());
+                } else {
+                    let patched = Self::patch_aarch64_branch(existing, offset);
+                    self.code[p..p + 4].copy_from_slice(&patched.to_le_bytes());
+                }
             } else {
                 // x86-style fixup: offset is from end of instruction.
                 let origin = fixup.instruction_offset + fixup.instruction_length as usize;
@@ -373,11 +378,39 @@ impl Assembler {
         AssembledCode(self)
     }
 
+    #[inline]
+    fn is_aarch64_adrp(instruction: u32) -> bool {
+        instruction & 0x9f000000 == 0x90000000
+    }
+
+    fn patch_aarch64_adrp_pair(adrp: u32, add: u32, instruction_offset: usize, target_offset: isize) -> (u32, u32) {
+        debug_assert!(Self::is_aarch64_adrp(adrp));
+        debug_assert_eq!(add & 0xff000000, 0x91000000);
+
+        let instruction_page = (instruction_offset as isize) & !0xfff;
+        let target_page = target_offset & !0xfff;
+        let page_offset = (target_page - instruction_page) >> 12;
+        assert!(page_offset >= -(1 << 20) && page_offset < (1 << 20), "ADRP: out of range");
+
+        let encoded_page_offset = page_offset as u32;
+        let immlo = (encoded_page_offset & 0x3) << 29;
+        let immhi = ((encoded_page_offset >> 2) & 0x7ffff) << 5;
+        let patched_adrp = (adrp & !(0x3 << 29) & !(0x7ffff << 5)) | immlo | immhi;
+
+        let page_byte_offset = (target_offset as u32) & 0xfff;
+        let patched_add = (add & !(0xfff << 10)) | (page_byte_offset << 10);
+        (patched_adrp, patched_add)
+    }
+
     /// Patch an AArch64 instruction word with a PC-relative byte offset.
     /// Detects the instruction type from its encoding and places the offset
     /// in the correct bit fields.
     fn patch_aarch64_branch(instruction: u32, byte_offset: isize) -> u32 {
-        debug_assert!(byte_offset & 3 == 0, "AArch64 branch offset must be 4-byte aligned: {}", byte_offset);
+        debug_assert!(
+            byte_offset & 3 == 0,
+            "AArch64 branch offset must be 4-byte aligned: {}",
+            byte_offset
+        );
         let inst_offset = byte_offset >> 2; // Convert to instruction offset
 
         // Detect instruction type from top bits:
