@@ -5260,16 +5260,35 @@ fn memset_with_dynamic_paging(mut config: Config, isa: InstructionSetKind) {
         vec![0, 0x7a, 0, 0x7b, 0x7b, 0]
     );
     assert_eq!(instance.gas(), 95);
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_gas(100);
+    instance.set_reg(Reg::A0, 0xffffffff_00000000 | u64::from(memory_map.rw_data_range().start));
+    instance.set_reg(Reg::A1, 0x1234567a);
+    instance.set_reg(Reg::A2, 3);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(offsets[0]);
+    let segfault = expect_segfault(instance.run().unwrap());
+    assert_eq!(segfault.page_address, memory_map.rw_data_range().start);
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_range().start));
+    instance
+        .zero_memory_with_memory_protection(segfault.page_address, segfault.page_size, MemoryProtection::ReadWrite)
+        .unwrap();
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_range().start + 3));
+    assert_eq!(instance.reg(Reg::A2), 0);
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_range().start, 4).unwrap(),
+        vec![0x7a, 0x7a, 0x7a, 0]
+    );
 }
 
-fn memset_preserves_a0_and_a2(config: Config, isa: InstructionSetKind) {
+fn memset_truncates_a0_and_a2(config: Config, isa: InstructionSetKind) {
     if isa != InstructionSetKind::Latest64 {
         return;
     }
     let _ = env_logger::try_init();
 
-    // Memset must not truncate A0 or A2. With count=0, memset is a no-op
-    // and both registers must pass through with their upper 32 bits intact.
     let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::memset(), asm::ret()], &[]);
@@ -5281,14 +5300,86 @@ fn memset_preserves_a0_and_a2(config: Config, isa: InstructionSetKind) {
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::A0, 0x0000000100000000);
     instance.set_reg(Reg::A1, 0);
-    instance.set_reg(Reg::A2, 0);
+    instance.set_reg(Reg::A2, 0x0000000100000000);
     instance.set_reg(Reg::A3, 0xffffffffff08bdbd);
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(ProgramCounter(0));
     assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
-    assert_eq!(instance.reg(Reg::A0), 0x0000000100000000, "memset truncated A0");
+    assert_eq!(instance.reg(Reg::A0), 0);
     assert_eq!(instance.reg(Reg::A2), 0);
     assert_eq!(instance.reg(Reg::A3), 0xffffffffff08bdbd);
+}
+
+fn memset_truncates_the_destination_to_32_bits(config: Config, isa: InstructionSetKind) {
+    if !isa.supports_opcode(Opcode::memset) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.set_rw_data_size(64);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::memset(), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+    let address = module.memory_map().rw_data_address();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A0, 0xffffffff_00000000 | u64::from(address));
+    instance.set_reg(Reg::A1, 0x7a);
+    instance.set_reg(Reg::A2, 3);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.read_memory(address, 4).unwrap(), vec![0x7a, 0x7a, 0x7a, 0]);
+    assert_eq!(instance.reg(Reg::A0), u64::from(address) + 3);
+    assert_eq!(instance.reg(Reg::A2), 0);
+}
+
+fn memset_truncates_the_count_to_32_bits(config: Config, isa: InstructionSetKind) {
+    if !isa.supports_opcode(Opcode::memset) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+
+    let memset = |gas: Option<i64>, count: u64| {
+        let mut builder = ProgramBlobBuilder::new(isa);
+        builder.set_rw_data_size(64);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::memset(), asm::ret()], &[]);
+
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let engine = Engine::new(&config).unwrap();
+        let mut module_config = ModuleConfig::new();
+        module_config.set_gas_metering(gas.map(|_| GasMeteringKind::Sync));
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let address = module.memory_map().rw_data_address();
+
+        let mut instance = module.instantiate().unwrap();
+        if let Some(gas) = gas {
+            instance.set_gas(gas);
+        }
+        instance.set_reg(Reg::A0, u64::from(address));
+        instance.set_reg(Reg::A1, 0x7a);
+        instance.set_reg(Reg::A2, count);
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        let interrupt = instance.run().unwrap();
+        let written = instance.read_memory(address, 8).unwrap().iter().filter(|&&b| b == 0x7a).count();
+        (interrupt, written, instance.reg(Reg::A2))
+    };
+
+    assert_eq!(memset(None, 0x00000001_00000000), (InterruptKind::Finished, 0, 0));
+    assert_eq!(memset(None, 0x00000001_00000003), (InterruptKind::Finished, 3, 0));
+    assert_eq!(memset(Some(100), 0x00000001_00000003), (InterruptKind::Finished, 3, 0));
+
+    let (interrupt, written, remaining) = memset(Some(5), 0x00000001_00000008);
+    assert_eq!(interrupt, InterruptKind::NotEnoughGas);
+    assert_eq!(written + usize::try_from(remaining).unwrap(), 8);
 }
 
 fn count_leading_zero_bits_32_with_zero_input(config: Config, isa: InstructionSetKind) {
@@ -6069,7 +6160,9 @@ run_tests! {
     count_trailing_zero_bits_32_with_zero_input
     count_trailing_zero_bits_64_with_zero_input
     count_trailing_zero_bits_64_with_ffff0000
-    memset_preserves_a0_and_a2
+    memset_truncates_a0_and_a2
+    memset_truncates_the_count_to_32_bits
+    memset_truncates_the_destination_to_32_bits
 }
 
 run_tests_on_isa! { jam_v1, InstructionSetKind::JamV1,
