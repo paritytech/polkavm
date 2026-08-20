@@ -1541,6 +1541,31 @@ fn jump_indirect_big_table(engine_config: Config, isa: InstructionSetKind) {
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
 }
 
+fn jump_indirect_truncates_the_target_to_32_bits(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&engine_config).unwrap();
+
+    let jump_to = |offset: i32, target: u64| {
+        let mut builder = ProgramBlobBuilder::new(isa);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::jump_indirect(A0, offset), asm::load_imm(A1, 100), asm::ret()], &[1]);
+
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
+
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(Reg::A0, target);
+        instance.set_next_program_counter(ProgramCounter(0));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+        instance.reg(Reg::A1)
+    };
+
+    assert_eq!(jump_to(0, 0x00000001_00000002), 100);
+    assert_eq!(jump_to(2, 0x00000001_00000000), 100);
+    assert_eq!(jump_to(4, 0x00000000_fffffffe), 100);
+}
+
 fn dynamic_paging_basic(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
@@ -2269,31 +2294,38 @@ fn dynamic_paging_cancel_segfault_by_changing_address(mut engine_config: Config,
 
     let _ = env_logger::try_init();
 
-    let engine = Engine::new(&engine_config).unwrap();
-    let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(isa);
-    builder.add_export_by_basic_block(0, b"main");
-    builder.set_code(&[asm::store_imm_indirect_u32(Reg::A0, 0, 0x12345678), asm::ret()], &[]);
+    // The offset here matters: the recompiler can compute the address of an access into a
+    // scratch register, which then has to be recalculated when the address is changed.
+    for store_offset in [0, 4] {
+        let engine = Engine::new(&engine_config).unwrap();
+        let page_size = get_native_page_size() as u32;
+        let mut builder = ProgramBlobBuilder::new(isa);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::store_imm_indirect_u32(Reg::A0, store_offset, 0x12345678), asm::ret()], &[]);
 
-    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-    let mut module_config = ModuleConfig::new();
-    module_config.set_page_size(page_size);
-    module_config.set_dynamic_paging(true);
-    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let mut module_config = ModuleConfig::new();
+        module_config.set_page_size(page_size);
+        module_config.set_dynamic_paging(true);
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
-    let mut instance = module.instantiate().unwrap();
-    instance
-        .zero_memory_with_memory_protection(0x11000, page_size, MemoryProtection::ReadWrite)
-        .unwrap();
-    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
-    instance.set_next_program_counter(offsets[0]);
-    instance.set_reg(Reg::A0, 0x10000);
-    let segfault = expect_segfault(instance.run().unwrap());
-    assert_eq!(segfault.page_address, 0x10000);
-    instance.set_reg(Reg::A0, 0x11000);
-    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
-    assert_eq!(instance.read_memory(0x11000, 4).unwrap(), vec![0x78, 0x56, 0x34, 0x12]);
+        let mut instance = module.instantiate().unwrap();
+        instance
+            .zero_memory_with_memory_protection(0x11000, page_size, MemoryProtection::ReadWrite)
+            .unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(offsets[0]);
+        instance.set_reg(Reg::A0, 0x10000);
+        let segfault = expect_segfault(instance.run().unwrap());
+        assert_eq!(segfault.page_address, 0x10000);
+        instance.set_reg(Reg::A0, 0x11000);
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+        assert_eq!(
+            instance.read_memory(0x11000 + store_offset as u32, 4).unwrap(),
+            vec![0x78, 0x56, 0x34, 0x12]
+        );
+    }
 }
 
 fn dynamic_paging_worker_recycle_turn_dynamic_paging_on_and_off(mut engine_config: Config, isa: InstructionSetKind) {
@@ -2696,6 +2728,35 @@ fn dynamic_paging_parallel_page_fault_stress_test(mut engine_config: Config, isa
     for result in results {
         result.unwrap();
     }
+}
+
+fn memory_access_with_upper_address_bits_set(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+
+    let engine = Engine::new(&engine_config).unwrap();
+    const ADDRESS: u64 = 0xffffffff_fffffffc;
+
+    let run = |code: &[polkavm_common::program::Instruction]| {
+        let mut builder = ProgramBlobBuilder::new(isa);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(code, &[]);
+
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+        let offset = module.blob().instructions().next().unwrap().offset;
+
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(Reg::A0, ADDRESS);
+        instance.set_next_program_counter(offset);
+        instance.run().unwrap()
+    };
+
+    match_interrupt!(run(&[asm::load_indirect_u32(Reg::A1, Reg::A0, 0), asm::ret()]), InterruptKind::Trap);
+    match_interrupt!(
+        run(&[asm::store_indirect_u32(Reg::A1, Reg::A0, 0), asm::ret()]),
+        InterruptKind::Trap
+    );
 }
 
 fn decompress_zstd(mut bytes: &[u8]) -> Vec<u8> {
@@ -6080,6 +6141,7 @@ run_tests! {
     jump_to_an_injected_invalid_instruction
     jump_indirect_simple
     jump_indirect_big_table
+    jump_indirect_truncates_the_target_to_32_bits
     dynamic_paging_basic
     dynamic_paging_freeing_pages
     dynamic_paging_protect_memory
@@ -6105,6 +6167,7 @@ run_tests! {
     dynamic_paging_receive_from_another_thread_and_run
     dynamic_paging_instantiate_on_another_thread
     dynamic_paging_parallel_page_fault_stress_test
+    memory_access_with_upper_address_bits_set
     zero_memory
     doom_o3_dwarf5
     doom_o1_dwarf5

@@ -150,9 +150,16 @@ macro_rules! load_store_operand {
                         }
 
                         // [base] = ..
-                        (Some($base), 0) => {
-                            // NOTE: This assumes that `base` has its upper 32-bits clear.
+                        // (a 32-bit register always has its upper 32 bits clear)
+                        (Some($base), 0) if B::BITNESS == Bitness::B32 => {
                             let $op = base_index(RegSize::R64, GENERIC_SANDBOX_MEMORY_REG, conv_reg($base));
+                            $body
+                        }
+
+                        // [base] = ..
+                        (Some($base), 0) => {
+                            $self.push(mov(RegSize::R32, TMP_REG, conv_reg($base)));
+                            let $op = base_index(RegSize::R64, GENERIC_SANDBOX_MEMORY_REG, TMP_REG);
                             $body
                         }
 
@@ -246,6 +253,32 @@ const REP_STOSB_MACHINE_CODE: &[u8] = &[0xf3, 0xaa];
 pub(crate) enum MemsetKind {
     Inline,
     Trampoline,
+}
+
+#[cfg(feature = "generic-sandbox")]
+pub(crate) fn indirect_memory_operand(instruction: polkavm_common::program::Instruction) -> Option<(RawReg, i32)> {
+    use polkavm_common::program::Instruction;
+
+    match instruction {
+        Instruction::store_imm_indirect_u8(base, offset, _)
+        | Instruction::store_imm_indirect_u16(base, offset, _)
+        | Instruction::store_imm_indirect_u32(base, offset, _)
+        | Instruction::store_imm_indirect_u64(base, offset, _) => Some((base, offset)),
+
+        Instruction::store_indirect_u8(_, base, offset)
+        | Instruction::store_indirect_u16(_, base, offset)
+        | Instruction::store_indirect_u32(_, base, offset)
+        | Instruction::store_indirect_u64(_, base, offset)
+        | Instruction::load_indirect_u8(_, base, offset)
+        | Instruction::load_indirect_i8(_, base, offset)
+        | Instruction::load_indirect_u16(_, base, offset)
+        | Instruction::load_indirect_i16(_, base, offset)
+        | Instruction::load_indirect_u32(_, base, offset)
+        | Instruction::load_indirect_i32(_, base, offset)
+        | Instruction::load_indirect_u64(_, base, offset) => Some((base, offset)),
+
+        _ => None,
+    }
 }
 
 pub(crate) fn are_we_executing_memset<S>(
@@ -1063,11 +1096,19 @@ where
                 // TODO: This also could be more efficient.
                 self.push(lea_rip_label(TMP_REG, self.jump_table_label));
                 self.push(rex(push(conv_reg(base))));
-                self.push(shl_imm(RegSize::R64, conv_reg(base), 3));
+
+                // Make sure the access is in-bounds.
                 if offset != 0 {
-                    let offset = offset.wrapping_mul(8);
-                    self.push(rex(add((conv_reg(base), imm32(cast(offset).bitwise_as_u32())))));
+                    self.push(rex(lea(
+                        RegSize::R32,
+                        conv_reg(base),
+                        reg_indirect(RegSize::R32, conv_reg(base) + offset),
+                    )));
+                } else if B::BITNESS == Bitness::B64 {
+                    self.push(rex(mov(RegSize::R32, conv_reg(base), conv_reg(base))));
                 }
+
+                self.push(shl_imm(RegSize::R64, conv_reg(base), 3));
                 self.push(add((RegSize::R64, TMP_REG, conv_reg(base))));
                 self.push(rex(pop(conv_reg(base))));
                 self.push(load(LoadKind::U64, TMP_REG, reg_indirect(RegSize::R64, TMP_REG)));
