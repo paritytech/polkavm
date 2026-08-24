@@ -1185,6 +1185,391 @@ where
         );
     }
 
+    // The 128-bit family reaches the same trampoline with the same descriptor; only the
+    // registers it names are vector registers, because half of a wide register is one.
+
+    #[inline(always)]
+    pub fn wide_add_128(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideAdd128,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_sub_128(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideSubtract128,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_mul_128(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideMultiply128,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_and_128(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideAnd128,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_or_128(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideOr128,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_xor_128(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideXor128,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_div_unsigned_128(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideDivideUnsigned128,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_div_signed_128(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideDivideSigned128,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_rem_unsigned_128(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideRemainderUnsigned128,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_rem_signed_128(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideRemainderSigned128,
+            vector_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_set_equal_128(&mut self, code_offset: u32, d: RawReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideSetEqual128,
+            register_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_set_not_equal_128(&mut self, code_offset: u32, d: RawReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideSetNotEqual128,
+            register_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_set_less_than_unsigned_128(&mut self, code_offset: u32, d: RawReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideSetLessThanUnsigned128,
+            register_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_set_less_than_signed_128(&mut self, code_offset: u32, d: RawReg, s1: RawVecReg, s2: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideSetLessThanSigned128,
+            register_field(d),
+            vector_field(s1),
+            vector_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_shift_logical_left_128(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideShiftLeft128,
+            vector_field(d),
+            vector_field(s1),
+            register_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_shift_logical_right_128(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideShiftRight128,
+            vector_field(d),
+            vector_field(s1),
+            register_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_shift_arithmetic_right_128(&mut self, code_offset: u32, d: RawVecReg, s1: RawVecReg, s2: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideShiftRightSigned128,
+            vector_field(d),
+            vector_field(s1),
+            register_field(s2),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_move_128(&mut self, code_offset: u32, d: RawVecReg, s: RawVecReg) {
+        self.wide_operation(code_offset, WideOperationKind::WideMove128, vector_field(d), vector_field(s), 0, 0);
+    }
+
+    #[inline(always)]
+    pub fn wide_reverse_bytes_128(&mut self, code_offset: u32, d: RawVecReg, s: RawVecReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideReverseBytes128,
+            vector_field(d),
+            vector_field(s),
+            0,
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_to_reg_128(&mut self, code_offset: u32, s: RawVecReg, d: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideToRegister128,
+            register_field(d),
+            vector_field(s),
+            0,
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_count_set_bits_128(&mut self, code_offset: u32, s: RawVecReg, d: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideCountSetBits128,
+            register_field(d),
+            vector_field(s),
+            0,
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_count_leading_zero_bits_128(&mut self, code_offset: u32, s: RawVecReg, d: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideCountLeadingZeroBits128,
+            register_field(d),
+            vector_field(s),
+            0,
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_count_trailing_zero_bits_128(&mut self, code_offset: u32, s: RawVecReg, d: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideCountTrailingZeroBits128,
+            register_field(d),
+            vector_field(s),
+            0,
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_from_reg_unsigned_128(&mut self, code_offset: u32, d: RawVecReg, s: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideFromRegisterUnsigned128,
+            vector_field(d),
+            0,
+            register_field(s),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_from_reg_signed_128(&mut self, code_offset: u32, d: RawVecReg, s: RawReg) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideFromRegisterSigned128,
+            vector_field(d),
+            0,
+            register_field(s),
+            0,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_load_128(&mut self, code_offset: u32, d: RawVecReg, base: RawReg, offset: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideLoad128,
+            vector_field(d),
+            0,
+            register_field(base),
+            offset,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_store_128(&mut self, code_offset: u32, s: RawVecReg, base: RawReg, offset: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideStore128,
+            vector_field(s),
+            0,
+            register_field(base),
+            offset,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_load_imm_unsigned_128(&mut self, code_offset: u32, d: RawVecReg, imm: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideLoadImmediateUnsigned128,
+            vector_field(d),
+            0,
+            0,
+            imm,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_load_imm_signed_128(&mut self, code_offset: u32, d: RawVecReg, imm: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideLoadImmediateSigned128,
+            vector_field(d),
+            0,
+            0,
+            imm,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_load_absolute_128(&mut self, code_offset: u32, d: RawVecReg, imm: i32) {
+        self.wide_operation(code_offset, WideOperationKind::WideLoadAbsolute128, vector_field(d), 0, 0, imm);
+    }
+
+    #[inline(always)]
+    pub fn wide_shift_logical_left_imm_128(&mut self, code_offset: u32, d: RawVecReg, s: RawVecReg, imm: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideShiftLeftImmediate128,
+            vector_field(d),
+            vector_field(s),
+            0,
+            imm,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_shift_logical_right_imm_128(&mut self, code_offset: u32, d: RawVecReg, s: RawVecReg, imm: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideShiftRightImmediate128,
+            vector_field(d),
+            vector_field(s),
+            0,
+            imm,
+        );
+    }
+
+    #[inline(always)]
+    pub fn wide_shift_arithmetic_right_imm_128(&mut self, code_offset: u32, d: RawVecReg, s: RawVecReg, imm: i32) {
+        self.wide_operation(
+            code_offset,
+            WideOperationKind::WideShiftRightSignedImmediate128,
+            vector_field(d),
+            vector_field(s),
+            0,
+            imm,
+        );
+    }
+
     #[inline(always)]
     pub fn vector_arithmetic(&mut self, code_offset: u32, packed: i32) {
         self.wide_operation(code_offset, WideOperationKind::VectorArithmetic, 0, 0, 0, packed);

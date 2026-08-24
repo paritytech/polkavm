@@ -11,7 +11,10 @@
 use crate::cast::cast;
 use crate::program::{Reg, VecReg, WideReg, VECTOR_LENGTH_WORDS};
 use crate::vector::{VectorArithmetic, VectorConfig, VectorOperand, VectorOperation};
-use crate::wide::U256;
+use crate::wide::{
+    div_rem_128, div_signed_128, from_i64_128, less_than_signed_128, low_u64_128, rem_signed_128, shift_left_128, shift_right_128,
+    shift_right_signed_128, U256,
+};
 
 /// How many 64-bit words one vector register holds.
 pub const VECTOR_WORDS_PER_REGISTER: usize = VECTOR_LENGTH_WORDS;
@@ -572,6 +575,41 @@ pub enum WideOperationKind {
     VectorMove = 65,
     VectorLoad = 66,
     VectorStore = 67,
+    // The 128-bit family, which is every operation above that has a half-width twin. Its
+    // registers are vector registers, because half of a wide register is one of them.
+    WideAdd128 = 68,
+    WideSubtract128 = 69,
+    WideMultiply128 = 70,
+    WideAnd128 = 71,
+    WideOr128 = 72,
+    WideXor128 = 73,
+    WideDivideUnsigned128 = 74,
+    WideDivideSigned128 = 75,
+    WideRemainderUnsigned128 = 76,
+    WideRemainderSigned128 = 77,
+    WideSetEqual128 = 78,
+    WideSetNotEqual128 = 79,
+    WideSetLessThanUnsigned128 = 80,
+    WideSetLessThanSigned128 = 81,
+    WideShiftLeft128 = 82,
+    WideShiftRight128 = 83,
+    WideShiftRightSigned128 = 84,
+    WideShiftLeftImmediate128 = 85,
+    WideShiftRightImmediate128 = 86,
+    WideShiftRightSignedImmediate128 = 87,
+    WideReverseBytes128 = 88,
+    WideToRegister128 = 89,
+    WideFromRegisterUnsigned128 = 90,
+    WideFromRegisterSigned128 = 91,
+    WideCountSetBits128 = 92,
+    WideCountLeadingZeroBits128 = 93,
+    WideCountTrailingZeroBits128 = 94,
+    WideMove128 = 95,
+    WideLoadImmediateUnsigned128 = 96,
+    WideLoadImmediateSigned128 = 97,
+    WideLoad128 = 98,
+    WideStore128 = 99,
+    WideLoadAbsolute128 = 100,
 }
 
 impl WideOperationKind {
@@ -646,6 +684,39 @@ impl WideOperationKind {
             65 => VectorMove,
             66 => VectorLoad,
             67 => VectorStore,
+            68 => WideAdd128,
+            69 => WideSubtract128,
+            70 => WideMultiply128,
+            71 => WideAnd128,
+            72 => WideOr128,
+            73 => WideXor128,
+            74 => WideDivideUnsigned128,
+            75 => WideDivideSigned128,
+            76 => WideRemainderUnsigned128,
+            77 => WideRemainderSigned128,
+            78 => WideSetEqual128,
+            79 => WideSetNotEqual128,
+            80 => WideSetLessThanUnsigned128,
+            81 => WideSetLessThanSigned128,
+            82 => WideShiftLeft128,
+            83 => WideShiftRight128,
+            84 => WideShiftRightSigned128,
+            85 => WideShiftLeftImmediate128,
+            86 => WideShiftRightImmediate128,
+            87 => WideShiftRightSignedImmediate128,
+            88 => WideReverseBytes128,
+            89 => WideToRegister128,
+            90 => WideFromRegisterUnsigned128,
+            91 => WideFromRegisterSigned128,
+            92 => WideCountSetBits128,
+            93 => WideCountLeadingZeroBits128,
+            94 => WideCountTrailingZeroBits128,
+            95 => WideMove128,
+            96 => WideLoadImmediateUnsigned128,
+            97 => WideLoadImmediateSigned128,
+            98 => WideLoad128,
+            99 => WideStore128,
+            100 => WideLoadAbsolute128,
             _ => return None,
         })
     }
@@ -774,6 +845,24 @@ impl VectorState {
         let wide_shift = |this: &mut Self, amount: u64, callback: fn(U256, u64) -> U256| {
             let value = callback(this.wide_reg(wide_from_field(operation.b)), amount);
             this.set_wide_reg(wide_from_field(operation.a), value);
+        };
+        let wide3_128 = |this: &mut Self, callback: fn(u128, u128) -> u128| {
+            let value = callback(
+                this.wide_reg_128(vector_from_field(operation.b)),
+                this.wide_reg_128(vector_from_field(operation.c)),
+            );
+            this.set_wide_reg_128(vector_from_field(operation.a), value);
+        };
+        let wide_compare_128 = |this: &mut Self, set_register: &mut dyn FnMut(Reg, u64), callback: fn(u128, u128) -> bool| {
+            let value = callback(
+                this.wide_reg_128(vector_from_field(operation.b)),
+                this.wide_reg_128(vector_from_field(operation.c)),
+            );
+            set_register(register_from_field(operation.a), u64::from(value));
+        };
+        let wide_shift_128 = |this: &mut Self, amount: u64, callback: fn(u128, u64) -> u128| {
+            let value = callback(this.wide_reg_128(vector_from_field(operation.b)), amount);
+            this.set_wide_reg_128(vector_from_field(operation.a), value);
         };
         // The immediate stands for a general purpose register the caller would have loaded,
         // so it is sign extended to the register width the shift would have read.
@@ -972,6 +1061,80 @@ impl VectorState {
                     into_file: operation.kind == VectorLoad,
                 }));
             }
+            WideAdd128 => wide3_128(self, u128::wrapping_add),
+            WideSubtract128 => wide3_128(self, u128::wrapping_sub),
+            WideMultiply128 => wide3_128(self, u128::wrapping_mul),
+            WideAnd128 => wide3_128(self, |first, second| first & second),
+            WideOr128 => wide3_128(self, |first, second| first | second),
+            WideXor128 => wide3_128(self, |first, second| first ^ second),
+            WideDivideUnsigned128 => wide3_128(self, |first, second| div_rem_128(first, second).0),
+            WideDivideSigned128 => wide3_128(self, div_signed_128),
+            WideRemainderUnsigned128 => wide3_128(self, |first, second| div_rem_128(first, second).1),
+            WideRemainderSigned128 => wide3_128(self, rem_signed_128),
+            WideSetEqual128 => wide_compare_128(self, &mut set_register, |first, second| first == second),
+            WideSetNotEqual128 => wide_compare_128(self, &mut set_register, |first, second| first != second),
+            WideSetLessThanUnsigned128 => wide_compare_128(self, &mut set_register, |first, second| first < second),
+            WideSetLessThanSigned128 => wide_compare_128(self, &mut set_register, less_than_signed_128),
+            WideShiftLeft128 => wide_shift_128(self, get_register(register_from_field(operation.c)), shift_left_128),
+            WideShiftRight128 => wide_shift_128(self, get_register(register_from_field(operation.c)), shift_right_128),
+            WideShiftRightSigned128 => wide_shift_128(self, get_register(register_from_field(operation.c)), shift_right_signed_128),
+            WideShiftLeftImmediate128 => wide_shift_128(self, immediate_amount, shift_left_128),
+            WideShiftRightImmediate128 => wide_shift_128(self, immediate_amount, shift_right_128),
+            WideShiftRightSignedImmediate128 => wide_shift_128(self, immediate_amount, shift_right_signed_128),
+            WideReverseBytes128 => {
+                let value = self.wide_reg_128(vector_from_field(operation.b)).swap_bytes();
+                self.set_wide_reg_128(vector_from_field(operation.a), value);
+            }
+            WideToRegister128 => {
+                let value = low_u64_128(self.wide_reg_128(vector_from_field(operation.b)));
+                set_register(register_from_field(operation.a), value);
+            }
+            WideFromRegisterUnsigned128 => {
+                let value = u128::from(get_register(register_from_field(operation.c)));
+                self.set_wide_reg_128(vector_from_field(operation.a), value);
+            }
+            WideFromRegisterSigned128 => {
+                let value = from_i64_128(cast(get_register(register_from_field(operation.c))).bitwise_as_i64());
+                self.set_wide_reg_128(vector_from_field(operation.a), value);
+            }
+            WideCountSetBits128 => {
+                let value = u64::from(self.wide_reg_128(vector_from_field(operation.b)).count_ones());
+                set_register(register_from_field(operation.a), value);
+            }
+            WideCountLeadingZeroBits128 => {
+                let value = u64::from(self.wide_reg_128(vector_from_field(operation.b)).leading_zeros());
+                set_register(register_from_field(operation.a), value);
+            }
+            WideCountTrailingZeroBits128 => {
+                let value = u64::from(self.wide_reg_128(vector_from_field(operation.b)).trailing_zeros());
+                set_register(register_from_field(operation.a), value);
+            }
+            WideMove128 => {
+                let value = self.wide_reg_128(vector_from_field(operation.b));
+                self.set_wide_reg_128(vector_from_field(operation.a), value);
+            }
+            WideLoadImmediateUnsigned128 => {
+                let value = u128::from(cast(cast(operation.immediate).to_i64_sign_extend()).bitwise_as_u64());
+                self.set_wide_reg_128(vector_from_field(operation.a), value);
+            }
+            WideLoadImmediateSigned128 => {
+                let value = from_i64_128(cast(operation.immediate).to_i64_sign_extend());
+                self.set_wide_reg_128(vector_from_field(operation.a), value);
+            }
+            WideLoad128 | WideStore128 | WideLoadAbsolute128 => {
+                let register = vector_from_field(operation.a);
+                let guest_address = if operation.kind == WideLoadAbsolute128 {
+                    cast(cast(cast(operation.immediate).to_i64_sign_extend()).bitwise_as_u64()).truncate_to_u32()
+                } else {
+                    address_from_fields(operation, &get_register)
+                };
+                return Some(guarded_copy(UnitStrideCopy {
+                    file_offset: register.to_usize().wrapping_mul(VECTOR_BYTES_PER_REGISTER),
+                    guest_address,
+                    length: VECTOR_BYTES_PER_REGISTER,
+                    into_file: operation.kind != WideStore128,
+                }));
+            }
         }
 
         None
@@ -1010,6 +1173,26 @@ mod tests {
             immediate: i32::MIN,
         };
         assert_eq!(WideOperation::from_packed(operation.to_packed()), Some(operation));
+
+        // Every kind the table holds has to come back as itself, whatever its width: a hole
+        // would turn one operation into another at the far end of a call site.
+        let last = WideOperationKind::WideLoadAbsolute128;
+        for value in 0..=(last as u8) {
+            let Some(kind) = WideOperationKind::from_u8(value) else {
+                panic!("kind {value} is packed but does not unpack");
+            };
+
+            let operation = WideOperation {
+                kind,
+                a: 31,
+                b: 17,
+                c: 5,
+                immediate: i32::MIN,
+            };
+            assert_eq!(WideOperation::from_packed(operation.to_packed()), Some(operation), "{kind:?}");
+        }
+
+        assert_eq!(WideOperationKind::from_u8(last as u8 + 1), None);
     }
 
     #[test]
@@ -1072,6 +1255,86 @@ mod tests {
         let copy = state.dispatch(operation, |_| unreachable!(), |_, _| unreachable!());
         assert_eq!(copy, None);
         assert_eq!(state.wide_reg(WideReg::W0), U256::from_u64(2));
+    }
+
+    #[test]
+    fn dispatch_runs_the_128_bit_operations_over_the_halves_the_fields_name() {
+        // Which field is the minuend and which is the shift amount is part of the descriptor's
+        // contract, because the recompiler's call sites pack those fields by hand.
+        let mut state = VectorState::new();
+        state.set_wide_reg_128(VecReg::V1, 3);
+        state.set_wide_reg_128(VecReg::V2, 10);
+
+        let operation = WideOperation {
+            kind: WideOperationKind::WideSubtract128,
+            a: 0,
+            b: 1,
+            c: 2,
+            immediate: 0,
+        };
+        let copy = state.dispatch(operation, |_| unreachable!(), |_, _| unreachable!());
+        assert_eq!(copy, None);
+        assert_eq!(state.wide_reg_128(VecReg::V0), 3_u128.wrapping_sub(10));
+
+        // The register form's shift amount is a general purpose register, and a 128-bit
+        // operation reaches one half of a wide register, leaving the other half alone.
+        let operation = WideOperation {
+            kind: WideOperationKind::WideShiftLeft128,
+            a: 3,
+            b: 2,
+            c: 7,
+            immediate: 0,
+        };
+        let copy = state.dispatch(
+            operation,
+            |register| if register == Reg::ALL[7] { 4 } else { unreachable!() },
+            |_, _| unreachable!(),
+        );
+        assert_eq!(copy, None);
+        assert_eq!(state.wide_reg_128(VecReg::V3), 160);
+        assert_eq!(state.wide_reg(WideReg::W1), U256([10, 0, 160, 0]));
+    }
+
+    #[test]
+    fn dispatch_answers_a_128_bit_access_with_a_sixteen_byte_copy() {
+        let mut state = VectorState::new();
+
+        let operation = WideOperation {
+            kind: WideOperationKind::WideStore128,
+            a: 5,
+            b: 0,
+            c: 2,
+            immediate: -16,
+        };
+        let copy = state.dispatch(operation, |_| 0x1_0000, |_, _| unreachable!());
+        assert_eq!(
+            copy,
+            Some(UnitStrideCopy {
+                file_offset: 5 * VECTOR_BYTES_PER_REGISTER,
+                guest_address: 0xfff0,
+                length: VECTOR_BYTES_PER_REGISTER,
+                into_file: false,
+            })
+        );
+
+        // The absolute form's address is the immediate, so it never reads a base register.
+        let operation = WideOperation {
+            kind: WideOperationKind::WideLoadAbsolute128,
+            a: 5,
+            b: 0,
+            c: 2,
+            immediate: 0x40,
+        };
+        let copy = state.dispatch(operation, |_| unreachable!(), |_, _| unreachable!());
+        assert_eq!(
+            copy,
+            Some(UnitStrideCopy {
+                file_offset: 5 * VECTOR_BYTES_PER_REGISTER,
+                guest_address: 0x40,
+                length: VECTOR_BYTES_PER_REGISTER,
+                into_file: true,
+            })
+        );
     }
 
     #[test]

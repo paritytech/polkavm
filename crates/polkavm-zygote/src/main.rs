@@ -33,7 +33,9 @@ use polkavm_common::{
 };
 use polkavm_linux_raw as linux_raw;
 
-#[cfg(debug_assertions)]
+// The 128-bit divisions the wide operations run reach `compiler_builtins`, whose object for
+// them refers to the personality routine, so the symbol has to resolve in every build even
+// though this one aborts instead of unwinding and can never reach it.
 #[no_mangle]
 extern "C" fn rust_eh_personality() {
     abort_with_message("rust_eh_personality called");

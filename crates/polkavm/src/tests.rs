@@ -5925,6 +5925,62 @@ fn every_wide_and_vector_instruction_matches_the_interpreter(config: Config) {
     body.push(arithmetic(VectorOperation::Add, 12, 0, VectorOperand::Vector(2)));
     body.push(asm::wide_xor(W3, W3, W6));
 
+    // The 128-bit family, which reads the low halves of the operands the harness loaded: `v0`
+    // is the low half of `W0` and `v2` is the low half of `W1`. Every result goes to `v12`,
+    // which `W6` holds the pair of, so the same fold picks it up.
+    let wide_128_results = [
+        asm::wide_add_128(V12, V0, V2),
+        asm::wide_sub_128(V12, V0, V2),
+        asm::wide_mul_128(V12, V0, V2),
+        asm::wide_and_128(V12, V0, V2),
+        asm::wide_or_128(V12, V0, V2),
+        asm::wide_xor_128(V12, V0, V2),
+        asm::wide_div_unsigned_128(V12, V0, V2),
+        asm::wide_div_signed_128(V12, V0, V2),
+        asm::wide_rem_unsigned_128(V12, V0, V2),
+        asm::wide_rem_signed_128(V12, V0, V2),
+        asm::wide_shift_logical_left_128(V12, V0, A2),
+        asm::wide_shift_logical_right_128(V12, V0, A2),
+        asm::wide_shift_arithmetic_right_128(V12, V0, A2),
+        asm::wide_shift_logical_left_imm_128(V12, V0, 13),
+        asm::wide_shift_logical_right_imm_128(V12, V0, 13),
+        asm::wide_shift_arithmetic_right_imm_128(V12, V0, 125),
+        asm::wide_move_128(V12, V0),
+        asm::wide_reverse_bytes_128(V12, V0),
+        asm::wide_from_reg_unsigned_128(V12, A2),
+        asm::wide_from_reg_signed_128(V12, A2),
+        asm::wide_load_imm_unsigned_128(V12, -5),
+        asm::wide_load_imm_signed_128(V12, -5),
+        asm::wide_load_absolute_128(V12, absolute_address),
+    ];
+    for instruction in wide_128_results {
+        body.push(instruction);
+        body.push(asm::wide_xor(W3, W3, W6));
+    }
+
+    // A round trip through memory, sixteen bytes of it.
+    body.push(asm::wide_store_128(V0, A0, 320));
+    body.push(asm::wide_load_128(V12, A0, 320));
+    body.push(asm::wide_xor(W3, W3, W6));
+
+    // The 128-bit forms that write a general purpose register, folded the same way the
+    // 256-bit ones are.
+    let wide_128_register_results = [
+        asm::wide_set_equal_128(A1, V0, V2),
+        asm::wide_set_not_equal_128(A1, V0, V2),
+        asm::wide_set_less_than_unsigned_128(A1, V0, V2),
+        asm::wide_set_less_than_signed_128(A1, V0, V2),
+        asm::wide_to_reg_128(V0, A1),
+        asm::wide_count_set_bits_128(V0, A1),
+        asm::wide_count_leading_zero_bits_128(V0, A1),
+        asm::wide_count_trailing_zero_bits_128(V0, A1),
+    ];
+    for instruction in wide_128_register_results {
+        body.push(instruction);
+        body.push(asm::wide_from_reg_unsigned(W4, A1));
+        body.push(asm::wide_xor(W3, W3, W4));
+    }
+
     body.push(asm::wide_store(W3, A0, 96));
 
     let expected = {
@@ -6220,14 +6276,6 @@ fn run_wide_128(config: &Config, operands: &[u128], body: &[polkavm_common::prog
 #[cfg(feature = "std")]
 fn run_wide_128_register(config: &Config, operands: &[u128], body: &[polkavm_common::program::Instruction]) -> u64 {
     run_wide_128(config, operands, body) as u64
-}
-
-/// Whether this backend executes the 128-bit family yet.
-#[cfg(feature = "std")]
-fn runs_the_128_bit_family(config: &Config) -> bool {
-    // The recompiler traps on the whole family until the next commit teaches it the semantics,
-    // so its variants of these tests skip the way `bounded_interpreter_cache` does.
-    config.backend() == Some(crate::BackendKind::Interpreter)
 }
 
 #[cfg(feature = "std")]
@@ -6639,10 +6687,6 @@ fn vector_compares_produce_a_mask_the_population_count_reads(config: Config) {
 fn wide_128_arithmetic_follows_evm_semantics(config: Config) {
     use polkavm_common::program::VecReg::*;
 
-    if !runs_the_128_bit_family(&config) {
-        return;
-    }
-
     let seven = 7;
     let three = 3;
     let store = asm::wide_store_128(V6, A0, 96);
@@ -6684,10 +6728,6 @@ fn wide_128_arithmetic_follows_evm_semantics(config: Config) {
 fn wide_128_division_by_zero_is_zero(config: Config) {
     use polkavm_common::program::VecReg::*;
 
-    if !runs_the_128_bit_family(&config) {
-        return;
-    }
-
     // The family follows the EVM, where every division by zero is zero. The scalar and vector
     // instructions answer the same program with all ones for a division and with the dividend
     // for a remainder, so this is the one place the two conventions have to be kept apart.
@@ -6710,10 +6750,6 @@ fn wide_128_division_by_zero_is_zero(config: Config) {
 #[cfg(feature = "std")]
 fn wide_128_signed_division_takes_the_sign_of_the_dividend(config: Config) {
     use polkavm_common::program::VecReg::*;
-
-    if !runs_the_128_bit_family(&config) {
-        return;
-    }
 
     let minus_seven = (-7_i128) as u128;
     let two = 2;
@@ -6739,10 +6775,6 @@ fn wide_128_signed_division_takes_the_sign_of_the_dividend(config: Config) {
 fn wide_128_signed_division_overflow_wraps(config: Config) {
     use polkavm_common::program::VecReg::*;
 
-    if !runs_the_128_bit_family(&config) {
-        return;
-    }
-
     // The one signed division that has no representable result wraps to itself rather than
     // trapping, and its remainder is zero.
     let minimum = i128::MIN as u128;
@@ -6762,10 +6794,6 @@ fn wide_128_signed_division_overflow_wraps(config: Config) {
 #[cfg(feature = "std")]
 fn wide_128_shifts_past_the_width_clear_the_value(config: Config) {
     use polkavm_common::program::VecReg::*;
-
-    if !runs_the_128_bit_family(&config) {
-        return;
-    }
 
     let store = asm::wide_store_128(V6, A0, 96);
     let shift = |body: polkavm_common::program::Instruction, value: u128, amount: i32| -> u128 {
@@ -6818,10 +6846,6 @@ fn wide_128_shifts_past_the_width_clear_the_value(config: Config) {
 fn wide_128_shift_imm_matches_the_register_form(config: Config) {
     use polkavm_common::program::VecReg::*;
 
-    if !runs_the_128_bit_family(&config) {
-        return;
-    }
-
     let value = 0x0123_4567_89ab_cdef_8000_0000_0000_0001;
     let store = asm::wide_store_128(V6, A0, 96);
 
@@ -6853,10 +6877,6 @@ fn wide_128_shift_imm_matches_the_register_form(config: Config) {
 fn wide_128_bit_counts_write_a_general_purpose_register(config: Config) {
     use polkavm_common::program::VecReg::*;
 
-    if !runs_the_128_bit_family(&config) {
-        return;
-    }
-
     let count = |body: polkavm_common::program::Instruction, operand: u128| -> u64 {
         run_wide_128_register(&config, &[operand], &[body, asm::store_indirect_u64(A1, A0, 96)])
     };
@@ -6876,10 +6896,6 @@ fn wide_128_bit_counts_write_a_general_purpose_register(config: Config) {
 #[cfg(feature = "std")]
 fn wide_128_comparisons_write_a_general_purpose_register(config: Config) {
     use polkavm_common::program::VecReg::*;
-
-    if !runs_the_128_bit_family(&config) {
-        return;
-    }
 
     let compare = |body: polkavm_common::program::Instruction, operands: [u128; 2]| -> u64 {
         run_wide_128_register(&config, &operands, &[body, asm::store_indirect_u64(A1, A0, 96)])
@@ -6913,10 +6929,6 @@ fn wide_128_comparisons_write_a_general_purpose_register(config: Config) {
 fn wide_128_moves_and_conversions_round_trip(config: Config) {
     use polkavm_common::program::VecReg::*;
 
-    if !runs_the_128_bit_family(&config) {
-        return;
-    }
-
     let value: u128 = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
     let store = asm::wide_store_128(V6, A0, 96);
 
@@ -6944,10 +6956,6 @@ fn wide_128_moves_and_conversions_round_trip(config: Config) {
 #[cfg(feature = "std")]
 fn wide_128_load_imm_widens_like_the_register_form(config: Config) {
     use polkavm_common::program::VecReg::*;
-
-    if !runs_the_128_bit_family(&config) {
-        return;
-    }
 
     let store = asm::wide_store_128(V6, A0, 96);
 
@@ -6991,10 +6999,6 @@ fn wide_128_load_imm_widens_like_the_register_form(config: Config) {
 fn wide_128_load_absolute_reads_without_a_base_register(config: Config) {
     use polkavm_common::program::VecReg::*;
 
-    if !runs_the_128_bit_family(&config) {
-        return;
-    }
-
     // The harness writes the first operand at the start of the read-write data, which is where
     // the absolute form reads from here. Only its low half is a 128-bit register.
     let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(0x4000).build().unwrap();
@@ -7015,10 +7019,6 @@ fn wide_128_load_absolute_reads_without_a_base_register(config: Config) {
 fn wide_128_memory_moves_sixteen_little_endian_bytes(config: Config) {
     use polkavm_common::program::VecReg::*;
     use polkavm_common::wide::U256;
-
-    if !runs_the_128_bit_family(&config) {
-        return;
-    }
 
     // The exact byte image a store leaves behind, least significant byte first, which is what
     // a guest that reads the same bytes back one at a time depends on.
@@ -7044,10 +7044,6 @@ fn wide_128_registers_alias_the_halves_of_a_wide_register(config: Config) {
     use polkavm_common::program::VecReg::*;
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
-
-    if !runs_the_128_bit_family(&config) {
-        return;
-    }
 
     // The two files are one, so moving both halves of `w0` with the 128-bit instructions has
     // to leave `w3` holding what `w0` did.
@@ -7088,17 +7084,17 @@ fn wide_128_registers_alias_the_halves_of_a_wide_register(config: Config) {
 fn wide_128_access_past_the_end_of_memory_traps_with_nothing_moved(config: Config) {
     use polkavm_common::program::VecReg::*;
 
-    if !runs_the_128_bit_family(&config) {
-        return;
-    }
-
     const DATA_SIZE: u32 = 0x4000;
 
     // A 128-bit access is one access of sixteen bytes rather than two of eight, so an access
-    // whose last byte is past the end of the read-write data traps as a whole and leaves the
-    // bytes it could have reached alone. There is no 256-bit test of this to mirror, so what
-    // is pinned here is what the implementation guarantees: the access is bounds checked
-    // before any byte moves.
+    // whose last byte is past the end of the read-write data traps as a whole rather than
+    // writing the part of itself that fits. There is no 256-bit test of this to mirror.
+    //
+    // How much of a trapping access moved is not the same on both executors and is not
+    // pinned here: the interpreter checks the whole range before it moves anything, while
+    // recompiled code moves the bytes with a forward copy that faults on the first byte it
+    // cannot reach. An access that is wholly past the end moves nothing either way, because
+    // the first byte is already unreachable, and that is what is checked below.
     let run = |offset: i32| -> (InterruptKind, [u8; 16]) {
         let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(DATA_SIZE).build().unwrap();
         let base = memory_map.rw_data_address();
@@ -7139,8 +7135,13 @@ fn wide_128_access_past_the_end_of_memory_traps_with_nothing_moved(config: Confi
     match_interrupt!(interrupt, InterruptKind::Finished);
     assert_eq!(published, [0xff; 16]);
 
-    // Eight bytes below it do not, and nothing moves.
-    let (interrupt, published) = run(cast(DATA_SIZE - 8).bitwise_as_i32());
+    // Eight bytes below it do not, so the store traps instead of writing the half that fits.
+    let (interrupt, _) = run(cast(DATA_SIZE - 8).bitwise_as_i32());
+    match_interrupt!(interrupt, InterruptKind::Trap);
+
+    // An access that starts at the end reaches nothing at all, and leaves the last bytes of
+    // the accessible data as they were.
+    let (interrupt, published) = run(cast(DATA_SIZE).bitwise_as_i32());
     match_interrupt!(interrupt, InterruptKind::Trap);
     assert_eq!(published, [0xaa; 16]);
 }
