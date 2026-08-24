@@ -25,7 +25,10 @@ use polkavm_common::program::{
 use polkavm_common::utils::{align_to_next_page_usize, slice_assume_init_mut, ArcBytes, GasVisitorT};
 use polkavm_common::vector::VectorConfig;
 use polkavm_common::vector_state::VectorState;
-use polkavm_common::wide::U256;
+use polkavm_common::wide::{
+    div_rem_128, div_signed_128, from_i64_128, less_than_signed_128, low_u64_128, rem_signed_128, shift_left_128, shift_right_128,
+    shift_right_signed_128, U256,
+};
 
 type Target = u32;
 
@@ -2174,6 +2177,20 @@ impl InterpretedInstance {
     }
 
     #[inline(always)]
+    fn wide_reg_128(&self, reg: VecReg) -> u128 {
+        self.vector.wide_reg_128(reg)
+    }
+
+    #[inline(always)]
+    fn set_wide_reg_128<const DEBUG: bool>(&mut self, dst: VecReg, value: u128) {
+        if DEBUG {
+            log::trace!("  {dst} = 0x{value:032x}");
+        }
+
+        self.vector.set_wide_reg_128(dst, value);
+    }
+
+    #[inline(always)]
     fn set_wide3<const DEBUG: bool>(
         &mut self,
         compiled_offset: Target,
@@ -2188,6 +2205,20 @@ impl InterpretedInstance {
     }
 
     #[inline(always)]
+    fn set_wide3_128<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        dst: VecReg,
+        s1: VecReg,
+        s2: VecReg,
+        callback: impl Fn(u128, u128) -> u128,
+    ) -> Target {
+        let value = callback(self.wide_reg_128(s1), self.wide_reg_128(s2));
+        self.set_wide_reg_128::<DEBUG>(dst, value);
+        self.go_to_next_instruction(compiled_offset)
+    }
+
+    #[inline(always)]
     fn set_wide_compare<const DEBUG: bool>(
         &mut self,
         compiled_offset: Target,
@@ -2197,6 +2228,20 @@ impl InterpretedInstance {
         callback: impl Fn(U256, U256) -> bool,
     ) -> Target {
         let value = u64::from(callback(self.wide_reg(s1), self.wide_reg(s2)));
+        self.set_u64::<DEBUG>(dst, value);
+        self.go_to_next_instruction(compiled_offset)
+    }
+
+    #[inline(always)]
+    fn set_wide_compare_128<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        dst: Reg,
+        s1: VecReg,
+        s2: VecReg,
+        callback: impl Fn(u128, u128) -> bool,
+    ) -> Target {
+        let value = u64::from(callback(self.wide_reg_128(s1), self.wide_reg_128(s2)));
         self.set_u64::<DEBUG>(dst, value);
         self.go_to_next_instruction(compiled_offset)
     }
@@ -2246,6 +2291,47 @@ impl InterpretedInstance {
 
         let address = self.wide_address(base, offset);
         let value = self.wide_reg(src).to_le_bytes();
+        match self.write_memory(address, &value) {
+            Ok(()) => self.go_to_next_instruction(compiled_offset),
+            Err(error) => self.on_wide_access_trap::<DEBUG>(address, error),
+        }
+    }
+
+    fn wide_load_128<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        program_counter: ProgramCounter,
+        dst: VecReg,
+        base: Option<Reg>,
+        offset: i32,
+    ) -> Target {
+        self.program_counter = program_counter;
+
+        let address = self.wide_address(base, offset);
+        let mut buffer = [MaybeUninit::uninit(); VECTOR_BYTES_PER_REG];
+        match self.read_memory_into(address, &mut buffer) {
+            Ok(bytes) => {
+                let mut value = [0; VECTOR_BYTES_PER_REG];
+                value.copy_from_slice(bytes);
+                self.set_wide_reg_128::<DEBUG>(dst, u128::from_le_bytes(value));
+                self.go_to_next_instruction(compiled_offset)
+            }
+            Err(error) => self.on_wide_access_trap::<DEBUG>(address, error),
+        }
+    }
+
+    fn wide_store_128<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        program_counter: ProgramCounter,
+        src: VecReg,
+        base: Option<Reg>,
+        offset: i32,
+    ) -> Target {
+        self.program_counter = program_counter;
+
+        let address = self.wide_address(base, offset);
+        let value = self.wide_reg_128(src).to_le_bytes();
         match self.write_memory(address, &value) {
             Ok(()) => self.go_to_next_instruction(compiled_offset),
             Err(error) => self.on_wide_access_trap::<DEBUG>(address, error),
@@ -3481,6 +3567,44 @@ macro_rules! define_interpreter {
         $body
     }};
 
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: Reg, $a1:ident: VecReg, $a2:ident: VecReg) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<Reg>, a1: impl Into<VecReg>, a2: impl Into<VecReg>) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    a2: a2.into().to_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_reg(args.a0);
+        let $a1 = transmute_vec_reg(args.a1);
+        let $a2 = transmute_vec_reg(args.a2);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: VecReg, $a1:ident: VecReg, $a2:ident: Reg) => {{
+        impl Args {
+            pub fn $handler_name(a0: impl Into<VecReg>, a1: impl Into<VecReg>, a2: impl Into<Reg>) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    a2: a2.into().to_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_vec_reg(args.a0);
+        let $a1 = transmute_vec_reg(args.a1);
+        let $a2 = transmute_reg(args.a2);
+        $body
+    }};
+
     (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: VecReg, $a1:ident: Reg, $a2:ident: i32) => {{
         impl Args {
             pub fn $handler_name(a0: impl Into<VecReg>, a1: impl Into<Reg>, a2: i32) -> Args {
@@ -3749,6 +3873,25 @@ macro_rules! define_interpreter {
         let $a1 = transmute_wide_reg(args.a1);
         let $a2 = transmute_reg(args.a2);
         let $a3 = cast(args.a3).bitwise_as_i32();
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: ProgramCounter, $a1:ident: VecReg, $a2:ident: i32) => {{
+        impl Args {
+            pub fn $handler_name(a0: ProgramCounter, a1: impl Into<VecReg>, a2: i32) -> Args {
+                Args {
+                    a0: a0.0,
+                    a1: a1.into().to_u32(),
+                    a2: cast(a2).bitwise_as_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = ProgramCounter(args.a0);
+        let $a1 = transmute_vec_reg(args.a1);
+        let $a2 = cast(args.a2).bitwise_as_i32();
         $body
     }};
 
@@ -4499,6 +4642,317 @@ define_interpreter! {
         }
 
         visitor.wide_store::<DEBUG>(compiled_offset, program_counter, s, Some(base), offset)
+    }
+
+    fn wide_add_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_add_128(d, s1, s2));
+        }
+
+        visitor.set_wide3_128::<DEBUG>(compiled_offset, d, s1, s2, u128::wrapping_add)
+    }
+
+    fn wide_sub_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_sub_128(d, s1, s2));
+        }
+
+        visitor.set_wide3_128::<DEBUG>(compiled_offset, d, s1, s2, u128::wrapping_sub)
+    }
+
+    fn wide_mul_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_mul_128(d, s1, s2));
+        }
+
+        visitor.set_wide3_128::<DEBUG>(compiled_offset, d, s1, s2, u128::wrapping_mul)
+    }
+
+    fn wide_and_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_and_128(d, s1, s2));
+        }
+
+        visitor.set_wide3_128::<DEBUG>(compiled_offset, d, s1, s2, |s1, s2| s1 & s2)
+    }
+
+    fn wide_or_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_or_128(d, s1, s2));
+        }
+
+        visitor.set_wide3_128::<DEBUG>(compiled_offset, d, s1, s2, |s1, s2| s1 | s2)
+    }
+
+    fn wide_xor_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_xor_128(d, s1, s2));
+        }
+
+        visitor.set_wide3_128::<DEBUG>(compiled_offset, d, s1, s2, |s1, s2| s1 ^ s2)
+    }
+
+    fn wide_div_unsigned_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_div_unsigned_128(d, s1, s2));
+        }
+
+        visitor.set_wide3_128::<DEBUG>(compiled_offset, d, s1, s2, |s1, s2| div_rem_128(s1, s2).0)
+    }
+
+    fn wide_div_signed_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_div_signed_128(d, s1, s2));
+        }
+
+        visitor.set_wide3_128::<DEBUG>(compiled_offset, d, s1, s2, div_signed_128)
+    }
+
+    fn wide_rem_unsigned_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_rem_unsigned_128(d, s1, s2));
+        }
+
+        visitor.set_wide3_128::<DEBUG>(compiled_offset, d, s1, s2, |s1, s2| div_rem_128(s1, s2).1)
+    }
+
+    fn wide_rem_signed_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_rem_signed_128(d, s1, s2));
+        }
+
+        visitor.set_wide3_128::<DEBUG>(compiled_offset, d, s1, s2, rem_signed_128)
+    }
+
+    fn wide_set_equal_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_set_equal_128(d, s1, s2));
+        }
+
+        visitor.set_wide_compare_128::<DEBUG>(compiled_offset, d, s1, s2, |s1, s2| s1 == s2)
+    }
+
+    fn wide_set_not_equal_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_set_not_equal_128(d, s1, s2));
+        }
+
+        visitor.set_wide_compare_128::<DEBUG>(compiled_offset, d, s1, s2, |s1, s2| s1 != s2)
+    }
+
+    fn wide_set_less_than_unsigned_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_set_less_than_unsigned_128(d, s1, s2));
+        }
+
+        visitor.set_wide_compare_128::<DEBUG>(compiled_offset, d, s1, s2, |s1, s2| s1 < s2)
+    }
+
+    fn wide_set_less_than_signed_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s1: VecReg, s2: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_set_less_than_signed_128(d, s1, s2));
+        }
+
+        visitor.set_wide_compare_128::<DEBUG>(compiled_offset, d, s1, s2, less_than_signed_128)
+    }
+
+    fn wide_shift_logical_left_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_shift_logical_left_128(d, s1, s2));
+        }
+
+        let amount = visitor.get_u64::<DEBUG>(s2);
+        let value = shift_left_128(visitor.wide_reg_128(s1), amount);
+        visitor.set_wide_reg_128::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_shift_logical_right_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_shift_logical_right_128(d, s1, s2));
+        }
+
+        let amount = visitor.get_u64::<DEBUG>(s2);
+        let value = shift_right_128(visitor.wide_reg_128(s1), amount);
+        visitor.set_wide_reg_128::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_shift_arithmetic_right_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s1: VecReg, s2: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_shift_arithmetic_right_128(d, s1, s2));
+        }
+
+        let amount = visitor.get_u64::<DEBUG>(s2);
+        let value = shift_right_signed_128(visitor.wide_reg_128(s1), amount);
+        visitor.set_wide_reg_128::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_shift_logical_left_imm_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s: VecReg, imm: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_shift_logical_left_imm_128(d, s, imm));
+        }
+
+        // The immediate stands for a general purpose register the caller would have loaded,
+        // so it is sign extended to the register width the shift would have read.
+        let amount = cast(cast(imm).to_i64_sign_extend()).bitwise_as_u64();
+        let value = shift_left_128(visitor.wide_reg_128(s), amount);
+        visitor.set_wide_reg_128::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_shift_logical_right_imm_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s: VecReg, imm: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_shift_logical_right_imm_128(d, s, imm));
+        }
+
+        // The immediate stands for a general purpose register the caller would have loaded,
+        // so it is sign extended to the register width the shift would have read.
+        let amount = cast(cast(imm).to_i64_sign_extend()).bitwise_as_u64();
+        let value = shift_right_128(visitor.wide_reg_128(s), amount);
+        visitor.set_wide_reg_128::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_shift_arithmetic_right_imm_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s: VecReg, imm: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_shift_arithmetic_right_imm_128(d, s, imm));
+        }
+
+        // The immediate stands for a general purpose register the caller would have loaded,
+        // so it is sign extended to the register width the shift would have read.
+        let amount = cast(cast(imm).to_i64_sign_extend()).bitwise_as_u64();
+        let value = shift_right_signed_128(visitor.wide_reg_128(s), amount);
+        visitor.set_wide_reg_128::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_load_imm_unsigned_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, imm: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_load_imm_unsigned_128(d, imm));
+        }
+
+        // The immediate stands in for a general purpose register the caller would have loaded
+        // it into, so it is widened the same way: sign extended to the register width first,
+        // then taken as unsigned.
+        let value = u128::from(cast(cast(imm).to_i64_sign_extend()).bitwise_as_u64());
+        visitor.set_wide_reg_128::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_load_imm_signed_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, imm: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_load_imm_signed_128(d, imm));
+        }
+
+        let value = from_i64_128(cast(imm).to_i64_sign_extend());
+        visitor.set_wide_reg_128::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_move_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_move_128(d, s));
+        }
+
+        let value = visitor.wide_reg_128(s);
+        visitor.set_wide_reg_128::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_reverse_bytes_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s: VecReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_reverse_bytes_128(d, s));
+        }
+
+        let value = visitor.wide_reg_128(s).swap_bytes();
+        visitor.set_wide_reg_128::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_to_reg_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s: VecReg, d: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_to_reg_128(s, d));
+        }
+
+        let value = low_u64_128(visitor.wide_reg_128(s));
+        visitor.set_u64::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_count_set_bits_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s: VecReg, d: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_count_set_bits_128(s, d));
+        }
+
+        let value = u64::from(visitor.wide_reg_128(s).count_ones());
+        visitor.set_u64::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_count_leading_zero_bits_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s: VecReg, d: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_count_leading_zero_bits_128(s, d));
+        }
+
+        let value = u64::from(visitor.wide_reg_128(s).leading_zeros());
+        visitor.set_u64::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_count_trailing_zero_bits_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s: VecReg, d: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_count_trailing_zero_bits_128(s, d));
+        }
+
+        let value = u64::from(visitor.wide_reg_128(s).trailing_zeros());
+        visitor.set_u64::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_from_reg_unsigned_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_from_reg_unsigned_128(d, s));
+        }
+
+        let value = u128::from(visitor.get_u64::<DEBUG>(s));
+        visitor.set_wide_reg_128::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_from_reg_signed_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: VecReg, s: Reg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_from_reg_signed_128(d, s));
+        }
+
+        let value = from_i64_128(visitor.get_i64::<DEBUG>(s));
+        visitor.set_wide_reg_128::<DEBUG>(d, value);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_load_absolute_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: VecReg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_load_absolute_128(d, offset));
+        }
+
+        visitor.wide_load_128::<DEBUG>(compiled_offset, program_counter, d, None, offset)
+    }
+
+    fn wide_load_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, d: VecReg, base: Reg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_load_128(d, base, offset));
+        }
+
+        visitor.wide_load_128::<DEBUG>(compiled_offset, program_counter, d, Some(base), offset)
+    }
+
+    fn wide_store_128<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, s: VecReg, base: Reg, offset: i32) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: {}", compiled_offset, asm::wide_store_128(s, base, offset));
+        }
+
+        visitor.wide_store_128::<DEBUG>(compiled_offset, program_counter, s, Some(base), offset)
     }
 
     fn vector_arithmetic<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, packed: i32) -> Target {
@@ -6387,140 +6841,136 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
         emit!(self, wide_store(self.program_counter, s, base, offset));
     }
 
-    // The 128-bit family is in the instruction table but has no semantics here yet, so it
-    // does what an instruction this executor cannot run already does. The next commit
-    // replaces these with the real handlers.
-
-    fn wide_add_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_add_128(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_add_128(d, s1, s2));
     }
 
-    fn wide_sub_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_sub_128(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_sub_128(d, s1, s2));
     }
 
-    fn wide_mul_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_mul_128(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_mul_128(d, s1, s2));
     }
 
-    fn wide_and_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_and_128(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_and_128(d, s1, s2));
     }
 
-    fn wide_or_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_or_128(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_or_128(d, s1, s2));
     }
 
-    fn wide_xor_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_xor_128(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_xor_128(d, s1, s2));
     }
 
-    fn wide_div_unsigned_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_div_unsigned_128(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_div_unsigned_128(d, s1, s2));
     }
 
-    fn wide_div_signed_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_div_signed_128(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_div_signed_128(d, s1, s2));
     }
 
-    fn wide_rem_unsigned_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_rem_unsigned_128(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_rem_unsigned_128(d, s1, s2));
     }
 
-    fn wide_rem_signed_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_rem_signed_128(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_rem_signed_128(d, s1, s2));
     }
 
-    fn wide_set_equal_128(&mut self, _d: RawReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_set_equal_128(&mut self, d: RawReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_set_equal_128(d, s1, s2));
     }
 
-    fn wide_set_not_equal_128(&mut self, _d: RawReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_set_not_equal_128(&mut self, d: RawReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_set_not_equal_128(d, s1, s2));
     }
 
-    fn wide_set_less_than_unsigned_128(&mut self, _d: RawReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_set_less_than_unsigned_128(&mut self, d: RawReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_set_less_than_unsigned_128(d, s1, s2));
     }
 
-    fn wide_set_less_than_signed_128(&mut self, _d: RawReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_set_less_than_signed_128(&mut self, d: RawReg, s1: RawVecReg, s2: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_set_less_than_signed_128(d, s1, s2));
     }
 
-    fn wide_shift_logical_left_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_shift_logical_left_128(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_shift_logical_left_128(d, s1, s2));
     }
 
-    fn wide_shift_logical_right_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_shift_logical_right_128(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_shift_logical_right_128(d, s1, s2));
     }
 
-    fn wide_shift_arithmetic_right_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_shift_arithmetic_right_128(&mut self, d: RawVecReg, s1: RawVecReg, s2: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_shift_arithmetic_right_128(d, s1, s2));
     }
 
-    fn wide_shift_logical_left_imm_128(&mut self, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
-        self.trap();
+    fn wide_shift_logical_left_imm_128(&mut self, d: RawVecReg, s: RawVecReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, wide_shift_logical_left_imm_128(d, s, imm));
     }
 
-    fn wide_shift_logical_right_imm_128(&mut self, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
-        self.trap();
+    fn wide_shift_logical_right_imm_128(&mut self, d: RawVecReg, s: RawVecReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, wide_shift_logical_right_imm_128(d, s, imm));
     }
 
-    fn wide_shift_arithmetic_right_imm_128(&mut self, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
-        self.trap();
+    fn wide_shift_arithmetic_right_imm_128(&mut self, d: RawVecReg, s: RawVecReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, wide_shift_arithmetic_right_imm_128(d, s, imm));
     }
 
-    fn wide_load_absolute_128(&mut self, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
-        self.trap();
+    fn wide_load_absolute_128(&mut self, d: RawVecReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, wide_load_absolute_128(self.program_counter, d, imm));
     }
 
-    fn wide_load_imm_unsigned_128(&mut self, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
-        self.trap();
+    fn wide_load_imm_unsigned_128(&mut self, d: RawVecReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, wide_load_imm_unsigned_128(d, imm));
     }
 
-    fn wide_load_imm_signed_128(&mut self, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
-        self.trap();
+    fn wide_load_imm_signed_128(&mut self, d: RawVecReg, imm: i32) -> Self::ReturnTy {
+        emit!(self, wide_load_imm_signed_128(d, imm));
     }
 
-    fn wide_move_128(&mut self, _d: RawVecReg, _s: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_move_128(&mut self, d: RawVecReg, s: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_move_128(d, s));
     }
 
-    fn wide_reverse_bytes_128(&mut self, _d: RawVecReg, _s: RawVecReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_reverse_bytes_128(&mut self, d: RawVecReg, s: RawVecReg) -> Self::ReturnTy {
+        emit!(self, wide_reverse_bytes_128(d, s));
     }
 
-    fn wide_to_reg_128(&mut self, _s: RawVecReg, _d: RawReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_to_reg_128(&mut self, s: RawVecReg, d: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_to_reg_128(s, d));
     }
 
-    fn wide_count_set_bits_128(&mut self, _s: RawVecReg, _d: RawReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_count_set_bits_128(&mut self, s: RawVecReg, d: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_count_set_bits_128(s, d));
     }
 
-    fn wide_count_leading_zero_bits_128(&mut self, _s: RawVecReg, _d: RawReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_count_leading_zero_bits_128(&mut self, s: RawVecReg, d: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_count_leading_zero_bits_128(s, d));
     }
 
-    fn wide_count_trailing_zero_bits_128(&mut self, _s: RawVecReg, _d: RawReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_count_trailing_zero_bits_128(&mut self, s: RawVecReg, d: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_count_trailing_zero_bits_128(s, d));
     }
 
-    fn wide_from_reg_unsigned_128(&mut self, _d: RawVecReg, _s: RawReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_from_reg_unsigned_128(&mut self, d: RawVecReg, s: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_from_reg_unsigned_128(d, s));
     }
 
-    fn wide_from_reg_signed_128(&mut self, _d: RawVecReg, _s: RawReg) -> Self::ReturnTy {
-        self.trap();
+    fn wide_from_reg_signed_128(&mut self, d: RawVecReg, s: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_from_reg_signed_128(d, s));
     }
 
-    fn wide_load_128(&mut self, _d: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
-        self.trap();
+    fn wide_load_128(&mut self, d: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, wide_load_128(self.program_counter, d, base, offset));
     }
 
-    fn wide_store_128(&mut self, _s: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
-        self.trap();
+    fn wide_store_128(&mut self, s: RawVecReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit!(self, wide_store_128(self.program_counter, s, base, offset));
     }
 
     fn vector_arithmetic(&mut self, packed: i32) -> Self::ReturnTy {

@@ -1,8 +1,13 @@
-//! 256-bit integer arithmetic for the wide register file.
+//! 256-bit integer arithmetic for the wide register file, and its 128-bit half.
 //!
 //! The operations follow EVM semantics rather than Rust's, because that is what the
 //! instructions exist to implement: division and remainder by zero produce zero instead of
 //! trapping, shift amounts of 256 or more clear the value, and everything else wraps.
+//!
+//! The 128-bit family at the end of the file is the same set of conventions one width down.
+//! Half of a wide register fits in a machine integer, so those are free functions over `u128`
+//! rather than methods on a limb array, and only the operations whose answer differs from
+//! Rust's own need one at all.
 
 /// A 256-bit integer, stored as four 64-bit limbs, least significant first.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Default, Hash)]
@@ -440,6 +445,91 @@ impl U256 {
     }
 }
 
+/// The least significant 64 bits, which is what a narrowing conversion keeps.
+#[inline]
+pub const fn low_u64_128(value: u128) -> u64 {
+    value as u64
+}
+
+/// Sign extends an `i64` across the full width.
+#[inline]
+pub const fn from_i64_128(value: i64) -> u128 {
+    value as i128 as u128
+}
+
+/// Signed comparison, interpreting both operands as two's complement.
+#[inline]
+pub fn less_than_signed_128(value: u128, other: u128) -> bool {
+    (value as i128) < (other as i128)
+}
+
+/// Unsigned division and remainder. Division by zero produces zero, as `DIV` does.
+///
+/// This is where the family parts ways with the scalar and vector instructions, which answer
+/// a division by zero with all ones and a remainder by zero with the dividend.
+#[inline]
+pub fn div_rem_128(value: u128, divisor: u128) -> (u128, u128) {
+    if divisor == 0 {
+        return (0, 0);
+    }
+
+    (value / divisor, value % divisor)
+}
+
+/// Signed division, following `SDIV`: division by zero produces zero, and the one
+/// overflowing case wraps to itself.
+#[inline]
+pub fn div_signed_128(value: u128, divisor: u128) -> u128 {
+    if divisor == 0 {
+        return 0;
+    }
+
+    (value as i128).wrapping_div(divisor as i128) as u128
+}
+
+/// Signed remainder, following `SMOD`: the result takes the sign of the dividend.
+#[inline]
+pub fn rem_signed_128(value: u128, divisor: u128) -> u128 {
+    if divisor == 0 {
+        return 0;
+    }
+
+    (value as i128).wrapping_rem(divisor as i128) as u128
+}
+
+/// Shifts left. A shift of 128 or more clears the value, as `SHL` does.
+#[inline]
+pub fn shift_left_128(value: u128, amount: u64) -> u128 {
+    if amount >= 128 {
+        return 0;
+    }
+
+    value << amount
+}
+
+/// Shifts right, filling with zeroes. A shift of 128 or more clears the value.
+#[inline]
+pub fn shift_right_128(value: u128, amount: u64) -> u128 {
+    if amount >= 128 {
+        return 0;
+    }
+
+    value >> amount
+}
+
+/// Shifts right, filling with the sign bit. A shift of 128 or more saturates to all sign
+/// bits, as `SAR` does.
+#[inline]
+pub fn shift_right_signed_128(value: u128, amount: u64) -> u128 {
+    let value = value as i128;
+    let fill = if value < 0 { u128::MAX } else { 0 };
+    if amount >= 128 {
+        return fill;
+    }
+
+    (value >> amount) as u128
+}
+
 #[cfg(test)]
 mod tests {
     use super::U256;
@@ -667,5 +757,68 @@ mod tests {
     fn le_bytes_round_trip() {
         let value = U256([0x0123_4567_89ab_cdef, 2, 3, 4]);
         assert_eq!(U256::from_le_bytes(value.to_le_bytes()), value);
+    }
+
+    #[test]
+    fn division_128_by_zero_is_zero() {
+        // The 128-bit family answers a division by zero the way the 256-bit one does, which is
+        // not what the scalar instructions of either width do.
+        for value in [0, 1234, u128::MAX, i128::MIN as u128] {
+            assert_eq!(super::div_rem_128(value, 0), (0, 0), "{value}");
+            assert_eq!(super::div_signed_128(value, 0), 0, "{value}");
+            assert_eq!(super::rem_signed_128(value, 0), 0, "{value}");
+        }
+    }
+
+    #[test]
+    fn division_128_matches_native_arithmetic() {
+        // Everything but the zero divisor is what Rust computes, including the signed division
+        // that has no representable result and wraps to itself.
+        let values = [1u128, 7, 1234, 1 << 64, u128::MAX, i128::MAX as u128, i128::MIN as u128];
+        for value in values {
+            for divisor in values {
+                assert_eq!(super::div_rem_128(value, divisor), (value / divisor, value % divisor));
+
+                let (signed_value, signed_divisor) = (value as i128, divisor as i128);
+                assert_eq!(
+                    super::div_signed_128(value, divisor),
+                    signed_value.wrapping_div(signed_divisor) as u128
+                );
+                assert_eq!(
+                    super::rem_signed_128(value, divisor),
+                    signed_value.wrapping_rem(signed_divisor) as u128
+                );
+            }
+        }
+
+        assert_eq!(super::div_signed_128(i128::MIN as u128, -1_i128 as u128), i128::MIN as u128);
+        assert_eq!(super::rem_signed_128(i128::MIN as u128, -1_i128 as u128), 0);
+    }
+
+    #[test]
+    fn shifts_128_past_the_width_clear() {
+        // A native shift by the width or more is undefined, so the amount is checked rather
+        // than handed to the machine, and the amount is the whole 64-bit register.
+        let negative = 1_u128 << 127;
+        for amount in [128, 129, 255, 256, 1 << 32, u64::MAX] {
+            assert_eq!(super::shift_left_128(u128::MAX, amount), 0, "{amount}");
+            assert_eq!(super::shift_right_128(u128::MAX, amount), 0, "{amount}");
+            assert_eq!(super::shift_right_signed_128(negative, amount), u128::MAX, "{amount}");
+            assert_eq!(super::shift_right_signed_128(1, amount), 0, "{amount}");
+        }
+
+        // One below the width is the last amount that still moves bits.
+        assert_eq!(super::shift_left_128(1, 127), negative);
+        assert_eq!(super::shift_right_128(negative, 127), 1);
+        assert_eq!(super::shift_right_signed_128(negative, 127), u128::MAX);
+        assert_eq!(super::shift_right_signed_128(negative, 1), negative | (negative >> 1));
+    }
+
+    #[test]
+    fn conversions_128_narrow_and_widen() {
+        assert_eq!(super::low_u64_128(0x0123_4567_89ab_cdef_fedc_ba98_7654_3210), 0xfedc_ba98_7654_3210);
+        assert_eq!(super::from_i64_128(-1), u128::MAX);
+        assert_eq!(super::from_i64_128(i64::MIN), (i128::from(i64::MIN)) as u128);
+        assert_eq!(super::from_i64_128(7), 7);
     }
 }

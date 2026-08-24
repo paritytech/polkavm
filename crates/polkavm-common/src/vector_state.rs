@@ -122,6 +122,22 @@ impl VectorState {
         self.words[base + 3] = value.0[3];
     }
 
+    /// One vector register read as a single 128-bit value.
+    ///
+    /// The two files are one, so this is also half of a wide register: `v0` is the low half of
+    /// `w0` and `v1` is its high half. Everything that mixes the two widths, on either side of
+    /// the instruction set, relies on that.
+    pub fn wide_reg_128(&self, reg: VecReg) -> u128 {
+        let base = reg.to_usize() * VECTOR_WORDS_PER_REGISTER;
+        u128::from(self.words[base]) | (u128::from(self.words[base + 1]) << 64)
+    }
+
+    pub fn set_wide_reg_128(&mut self, dst: VecReg, value: u128) {
+        let base = dst.to_usize() * VECTOR_WORDS_PER_REGISTER;
+        self.words[base] = truncate_u128(value);
+        self.words[base + 1] = truncate_u128(value >> 64);
+    }
+
     pub fn vector_reg(&self, reg: VecReg) -> [u64; VECTOR_WORDS_PER_REGISTER] {
         let base = reg.to_usize() * VECTOR_WORDS_PER_REGISTER;
         [self.words[base], self.words[base + 1]]
@@ -1012,6 +1028,32 @@ mod tests {
             assert_eq!(state.wide_reg(register), U256::ZERO);
         }
         assert_eq!(state.config(), VectorState::new().config());
+    }
+
+    #[test]
+    fn the_128_bit_view_is_the_half_of_the_wide_register_it_names() {
+        // The two files being one is the contract the whole 128-bit family rests on, and code
+        // generators on the other side of the instruction set place their values by it.
+        let mut state = VectorState::new();
+        state.set_wide_reg(WideReg::W0, U256([1, 2, 3, 4]));
+
+        assert_eq!(state.wide_reg_128(VecReg::V0), 1 | (2 << 64));
+        assert_eq!(state.wide_reg_128(VecReg::V1), 3 | (4 << 64));
+
+        // Writing the high half through the narrow view leaves the low half as it was.
+        state.set_wide_reg_128(VecReg::V1, u128::MAX);
+        assert_eq!(state.wide_reg(WideReg::W0), U256([1, 2, u64::MAX, u64::MAX]));
+        assert_eq!(state.wide_reg_128(VecReg::V0), 1 | (2 << 64));
+    }
+
+    #[test]
+    fn odd_vector_registers_are_the_high_halves_of_their_wide_register() {
+        let mut state = VectorState::new();
+        state.set_wide_reg_128(VecReg::V3, 5 | (6 << 64));
+
+        assert_eq!(state.wide_reg(WideReg::W1), U256([0, 0, 5, 6]));
+        assert_eq!(state.wide_reg_128(VecReg::V2), 0);
+        assert_eq!(state.wide_reg(WideReg::W0), U256::ZERO);
     }
 
     #[test]

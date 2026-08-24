@@ -6064,6 +6064,20 @@ run_wide_tests! {
     vector_compares_produce_a_mask_the_population_count_reads
     every_wide_and_vector_instruction_matches_the_interpreter
     clearing_the_registers_also_clears_the_wide_registers
+    wide_128_arithmetic_follows_evm_semantics
+    wide_128_division_by_zero_is_zero
+    wide_128_signed_division_takes_the_sign_of_the_dividend
+    wide_128_signed_division_overflow_wraps
+    wide_128_shifts_past_the_width_clear_the_value
+    wide_128_shift_imm_matches_the_register_form
+    wide_128_bit_counts_write_a_general_purpose_register
+    wide_128_comparisons_write_a_general_purpose_register
+    wide_128_moves_and_conversions_round_trip
+    wide_128_load_imm_widens_like_the_register_form
+    wide_128_load_absolute_reads_without_a_base_register
+    wide_128_memory_moves_sixteen_little_endian_bytes
+    wide_128_access_past_the_end_of_memory_traps_with_nothing_moved
+    wide_128_registers_alias_the_halves_of_a_wide_register
 }
 
 /// The cycles the detailed cost model charges a basic block holding one instruction.
@@ -6183,6 +6197,37 @@ fn run_wide(
     body: &[polkavm_common::program::Instruction],
 ) -> polkavm_common::wide::U256 {
     polkavm_common::wide::U256::from_le_bytes(run_wide_program(config, operands, body))
+}
+
+/// Runs `body` and returns the 128-bit value it stored.
+///
+/// Each operand is widened into the wide register the harness loads it into, so operand `n`
+/// arrives in the low half of `Wn`, which is `v2n`: `v0`, `v2` and `v4`.
+#[cfg(feature = "std")]
+fn run_wide_128(config: &Config, operands: &[u128], body: &[polkavm_common::program::Instruction]) -> u128 {
+    use polkavm_common::wide::U256;
+
+    let operands: Vec<U256> = operands
+        .iter()
+        .map(|value| U256([*value as u64, (*value >> 64) as u64, 0, 0]))
+        .collect();
+    let stored = run_wide_program(config, &operands, body);
+    u128::from_le_bytes(stored[..16].try_into().unwrap())
+}
+
+/// Runs `body`, which stores a general purpose register into the result slot, and returns
+/// what it stored. The slot starts out zeroed, so the eight bytes above it read as zero.
+#[cfg(feature = "std")]
+fn run_wide_128_register(config: &Config, operands: &[u128], body: &[polkavm_common::program::Instruction]) -> u64 {
+    run_wide_128(config, operands, body) as u64
+}
+
+/// Whether this backend executes the 128-bit family yet.
+#[cfg(feature = "std")]
+fn runs_the_128_bit_family(config: &Config) -> bool {
+    // The recompiler traps on the whole family until the next commit teaches it the semantics,
+    // so its variants of these tests skip the way `bounded_interpreter_cache` does.
+    config.backend() == Some(crate::BackendKind::Interpreter)
 }
 
 #[cfg(feature = "std")]
@@ -6588,4 +6633,514 @@ fn vector_compares_produce_a_mask_the_population_count_reads(config: Config) {
     other.0[0] ^= 0xff;
     assert_eq!(count([value, other], true), 31);
     assert_eq!(count([value, other], false), 1);
+}
+
+#[cfg(feature = "std")]
+fn wide_128_arithmetic_follows_evm_semantics(config: Config) {
+    use polkavm_common::program::VecReg::*;
+
+    if !runs_the_128_bit_family(&config) {
+        return;
+    }
+
+    let seven = 7;
+    let three = 3;
+    let store = asm::wide_store_128(V6, A0, 96);
+
+    for (name, body, operands, expected) in [
+        ("add", asm::wide_add_128(V6, V0, V2), [seven, three], 10),
+        ("sub", asm::wide_sub_128(V6, V0, V2), [seven, three], 4),
+        ("mul", asm::wide_mul_128(V6, V0, V2), [seven, three], 21),
+        ("and", asm::wide_and_128(V6, V0, V2), [seven, three], 3),
+        ("or", asm::wide_or_128(V6, V0, V2), [seven, three], 7),
+        ("xor", asm::wide_xor_128(V6, V0, V2), [seven, three], 4),
+        ("divu", asm::wide_div_unsigned_128(V6, V0, V2), [seven, three], 2),
+        ("remu", asm::wide_rem_unsigned_128(V6, V0, V2), [seven, three], 1),
+        ("add wraps", asm::wide_add_128(V6, V0, V2), [u128::MAX, 1], 0),
+        ("sub wraps", asm::wide_sub_128(V6, V0, V2), [0, 1], u128::MAX),
+    ] {
+        assert_eq!(run_wide_128(&config, &operands, &[body, store]), expected, "{name}");
+    }
+
+    // The same operations over operands whose two halves both matter, which is what a family
+    // that only ever moved the low 64 bits would get wrong.
+    let first: u128 = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+    let second: u128 = 0xdead_beef_cafe_babe_0000_0000_0000_0007;
+    for (name, body, expected) in [
+        ("add", asm::wide_add_128(V6, V0, V2), first.wrapping_add(second)),
+        ("sub", asm::wide_sub_128(V6, V0, V2), first.wrapping_sub(second)),
+        ("mul", asm::wide_mul_128(V6, V0, V2), first.wrapping_mul(second)),
+        ("and", asm::wide_and_128(V6, V0, V2), first & second),
+        ("or", asm::wide_or_128(V6, V0, V2), first | second),
+        ("xor", asm::wide_xor_128(V6, V0, V2), first ^ second),
+        ("divu", asm::wide_div_unsigned_128(V6, V0, V2), first / second),
+        ("remu", asm::wide_rem_unsigned_128(V6, V0, V2), first % second),
+    ] {
+        assert_eq!(run_wide_128(&config, &[first, second], &[body, store]), expected, "wide {name}");
+    }
+}
+
+#[cfg(feature = "std")]
+fn wide_128_division_by_zero_is_zero(config: Config) {
+    use polkavm_common::program::VecReg::*;
+
+    if !runs_the_128_bit_family(&config) {
+        return;
+    }
+
+    // The family follows the EVM, where every division by zero is zero. The scalar and vector
+    // instructions answer the same program with all ones for a division and with the dividend
+    // for a remainder, so this is the one place the two conventions have to be kept apart.
+    let store = asm::wide_store_128(V6, A0, 96);
+    for (name, body) in [
+        ("divu", asm::wide_div_unsigned_128(V6, V0, V2)),
+        ("divs", asm::wide_div_signed_128(V6, V0, V2)),
+        ("remu", asm::wide_rem_unsigned_128(V6, V0, V2)),
+        ("rems", asm::wide_rem_signed_128(V6, V0, V2)),
+    ] {
+        assert_eq!(run_wide_128(&config, &[1234, 0], &[body, store]), 0, "{name}");
+        assert_eq!(
+            run_wide_128(&config, &[(-1234_i128) as u128, 0], &[body, store]),
+            0,
+            "{name} of a negative dividend"
+        );
+    }
+}
+
+#[cfg(feature = "std")]
+fn wide_128_signed_division_takes_the_sign_of_the_dividend(config: Config) {
+    use polkavm_common::program::VecReg::*;
+
+    if !runs_the_128_bit_family(&config) {
+        return;
+    }
+
+    let minus_seven = (-7_i128) as u128;
+    let two = 2;
+    let store = asm::wide_store_128(V6, A0, 96);
+
+    assert_eq!(
+        run_wide_128(&config, &[minus_seven, two], &[asm::wide_div_signed_128(V6, V0, V2), store]),
+        (-3_i128) as u128
+    );
+    assert_eq!(
+        run_wide_128(&config, &[minus_seven, two], &[asm::wide_rem_signed_128(V6, V0, V2), store]),
+        (-1_i128) as u128
+    );
+
+    // Unsigned, the same dividend is a value just below 2^128 and divides to something huge.
+    assert_eq!(
+        run_wide_128(&config, &[minus_seven, two], &[asm::wide_div_unsigned_128(V6, V0, V2), store]),
+        minus_seven / 2
+    );
+}
+
+#[cfg(feature = "std")]
+fn wide_128_signed_division_overflow_wraps(config: Config) {
+    use polkavm_common::program::VecReg::*;
+
+    if !runs_the_128_bit_family(&config) {
+        return;
+    }
+
+    // The one signed division that has no representable result wraps to itself rather than
+    // trapping, and its remainder is zero.
+    let minimum = i128::MIN as u128;
+    let minus_one = (-1_i128) as u128;
+    let store = asm::wide_store_128(V6, A0, 96);
+
+    assert_eq!(
+        run_wide_128(&config, &[minimum, minus_one], &[asm::wide_div_signed_128(V6, V0, V2), store]),
+        minimum
+    );
+    assert_eq!(
+        run_wide_128(&config, &[minimum, minus_one], &[asm::wide_rem_signed_128(V6, V0, V2), store]),
+        0
+    );
+}
+
+#[cfg(feature = "std")]
+fn wide_128_shifts_past_the_width_clear_the_value(config: Config) {
+    use polkavm_common::program::VecReg::*;
+
+    if !runs_the_128_bit_family(&config) {
+        return;
+    }
+
+    let store = asm::wide_store_128(V6, A0, 96);
+    let shift = |body: polkavm_common::program::Instruction, value: u128, amount: i32| -> u128 {
+        run_wide_128(&config, &[value], &[asm::load_imm(A1, amount), body, store])
+    };
+
+    let left = asm::wide_shift_logical_left_128(V6, V0, A1);
+    let right = asm::wide_shift_logical_right_128(V6, V0, A1);
+    let arithmetic = asm::wide_shift_arithmetic_right_128(V6, V0, A1);
+    let negative: u128 = 1 << 127;
+
+    // One below the width still shifts, and the width itself and everything above it clears,
+    // rather than wrapping the amount around the way a native 128-bit shift would.
+    assert_eq!(shift(left, 1, 127), negative);
+    assert_eq!(shift(left, 1, 128), 0);
+    assert_eq!(shift(left, 1, 129), 0);
+    assert_eq!(shift(left, u128::MAX, 1000), 0);
+
+    assert_eq!(shift(right, negative, 127), 1);
+    assert_eq!(shift(right, u128::MAX, 128), 0);
+    assert_eq!(shift(right, u128::MAX, 129), 0);
+    assert_eq!(shift(right, u128::MAX, 1000), 0);
+
+    // The arithmetic shift saturates to the sign instead of clearing.
+    assert_eq!(shift(arithmetic, negative, 127), u128::MAX);
+    assert_eq!(shift(arithmetic, u128::MAX, 128), u128::MAX);
+    assert_eq!(shift(arithmetic, u128::MAX, 129), u128::MAX);
+    assert_eq!(shift(arithmetic, u128::MAX, 1000), u128::MAX);
+    assert_eq!(shift(arithmetic, 1, 128), 0);
+    assert_eq!(shift(arithmetic, i128::MAX as u128, 1000), 0);
+
+    // The amount is the whole 64-bit register, so a value whose low bits alone would be a
+    // legal amount still clears.
+    assert_eq!(
+        run_wide_128(
+            &config,
+            &[u128::MAX],
+            &[
+                asm::load_imm(A1, 1),
+                asm::shift_logical_left_imm_64(A1, A1, 32),
+                asm::wide_shift_logical_left_128(V6, V0, A1),
+                store
+            ]
+        ),
+        0
+    );
+}
+
+#[cfg(feature = "std")]
+fn wide_128_shift_imm_matches_the_register_form(config: Config) {
+    use polkavm_common::program::VecReg::*;
+
+    if !runs_the_128_bit_family(&config) {
+        return;
+    }
+
+    let value = 0x0123_4567_89ab_cdef_8000_0000_0000_0001;
+    let store = asm::wide_store_128(V6, A0, 96);
+
+    for amount in [0, 1, 63, 64, 65, 127, 128, 129, 255, 1000] {
+        for (with_imm, with_reg) in [
+            (
+                asm::wide_shift_logical_left_imm_128(V6, V0, amount),
+                asm::wide_shift_logical_left_128(V6, V0, A1),
+            ),
+            (
+                asm::wide_shift_logical_right_imm_128(V6, V0, amount),
+                asm::wide_shift_logical_right_128(V6, V0, A1),
+            ),
+            (
+                asm::wide_shift_arithmetic_right_imm_128(V6, V0, amount),
+                asm::wide_shift_arithmetic_right_128(V6, V0, A1),
+            ),
+        ] {
+            assert_eq!(
+                run_wide_128(&config, &[value], &[with_imm, store]),
+                run_wide_128(&config, &[value], &[asm::load_imm(A1, amount), with_reg, store]),
+                "shift by {amount}"
+            );
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+fn wide_128_bit_counts_write_a_general_purpose_register(config: Config) {
+    use polkavm_common::program::VecReg::*;
+
+    if !runs_the_128_bit_family(&config) {
+        return;
+    }
+
+    let count = |body: polkavm_common::program::Instruction, operand: u128| -> u64 {
+        run_wide_128_register(&config, &[operand], &[body, asm::store_indirect_u64(A1, A0, 96)])
+    };
+
+    let top: u128 = 1 << 127;
+    assert_eq!(count(asm::wide_count_set_bits_128(V0, A1), u128::MAX), 128);
+    assert_eq!(count(asm::wide_count_set_bits_128(V0, A1), 0), 0);
+    assert_eq!(count(asm::wide_count_set_bits_128(V0, A1), top | 1), 2);
+    assert_eq!(count(asm::wide_count_leading_zero_bits_128(V0, A1), 0), 128);
+    assert_eq!(count(asm::wide_count_leading_zero_bits_128(V0, A1), top), 0);
+    assert_eq!(count(asm::wide_count_leading_zero_bits_128(V0, A1), 1), 127);
+    assert_eq!(count(asm::wide_count_trailing_zero_bits_128(V0, A1), 0), 128);
+    assert_eq!(count(asm::wide_count_trailing_zero_bits_128(V0, A1), top), 127);
+    assert_eq!(count(asm::wide_count_trailing_zero_bits_128(V0, A1), 1 << 64), 64);
+}
+
+#[cfg(feature = "std")]
+fn wide_128_comparisons_write_a_general_purpose_register(config: Config) {
+    use polkavm_common::program::VecReg::*;
+
+    if !runs_the_128_bit_family(&config) {
+        return;
+    }
+
+    let compare = |body: polkavm_common::program::Instruction, operands: [u128; 2]| -> u64 {
+        run_wide_128_register(&config, &operands, &[body, asm::store_indirect_u64(A1, A0, 96)])
+    };
+
+    let minimum = i128::MIN as u128;
+    let maximum = i128::MAX as u128;
+    let minus_one = u128::MAX;
+    let one = 1;
+
+    assert_eq!(compare(asm::wide_set_equal_128(A1, V0, V2), [one, one]), 1);
+    assert_eq!(compare(asm::wide_set_equal_128(A1, V0, V2), [one, minus_one]), 0);
+    assert_eq!(compare(asm::wide_set_not_equal_128(A1, V0, V2), [one, minus_one]), 1);
+    assert_eq!(compare(asm::wide_set_not_equal_128(A1, V0, V2), [one, one]), 0);
+
+    // Unsigned, `minus_one` is the largest value there is; signed, it is below one.
+    assert_eq!(compare(asm::wide_set_less_than_unsigned_128(A1, V0, V2), [one, minus_one]), 1);
+    assert_eq!(compare(asm::wide_set_less_than_unsigned_128(A1, V0, V2), [minus_one, one]), 0);
+    assert_eq!(compare(asm::wide_set_less_than_signed_128(A1, V0, V2), [one, minus_one]), 0);
+    assert_eq!(compare(asm::wide_set_less_than_signed_128(A1, V0, V2), [minus_one, one]), 1);
+
+    // The signed boundary: the smallest value is below the largest one, and unsigned it is
+    // the other way around.
+    assert_eq!(compare(asm::wide_set_less_than_signed_128(A1, V0, V2), [minimum, maximum]), 1);
+    assert_eq!(compare(asm::wide_set_less_than_signed_128(A1, V0, V2), [maximum, minimum]), 0);
+    assert_eq!(compare(asm::wide_set_less_than_unsigned_128(A1, V0, V2), [minimum, maximum]), 0);
+    assert_eq!(compare(asm::wide_set_less_than_unsigned_128(A1, V0, V2), [maximum, minimum]), 1);
+}
+
+#[cfg(feature = "std")]
+fn wide_128_moves_and_conversions_round_trip(config: Config) {
+    use polkavm_common::program::VecReg::*;
+
+    if !runs_the_128_bit_family(&config) {
+        return;
+    }
+
+    let value: u128 = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+    let store = asm::wide_store_128(V6, A0, 96);
+
+    assert_eq!(run_wide_128(&config, &[value], &[asm::wide_move_128(V6, V0), store]), value);
+    assert_eq!(
+        run_wide_128(&config, &[value], &[asm::wide_reverse_bytes_128(V6, V0), store]),
+        value.swap_bytes()
+    );
+
+    // Narrowing to a register keeps the low half, and widening it back zero extends.
+    assert_eq!(
+        run_wide_128(
+            &config,
+            &[value],
+            &[asm::wide_to_reg_128(V0, A1), asm::wide_from_reg_unsigned_128(V6, A1), store]
+        ),
+        u128::from(value as u64)
+    );
+    assert_eq!(
+        run_wide_128(&config, &[], &[asm::load_imm(A1, -1), asm::wide_from_reg_signed_128(V6, A1), store]),
+        u128::MAX
+    );
+}
+
+#[cfg(feature = "std")]
+fn wide_128_load_imm_widens_like_the_register_form(config: Config) {
+    use polkavm_common::program::VecReg::*;
+
+    if !runs_the_128_bit_family(&config) {
+        return;
+    }
+
+    let store = asm::wide_store_128(V6, A0, 96);
+
+    // The immediate stands for a general purpose register the caller would have loaded, so it
+    // is sign extended to the register width before the widening kind applies.
+    assert_eq!(run_wide_128(&config, &[], &[asm::wide_load_imm_unsigned_128(V6, 255), store]), 255);
+    assert_eq!(run_wide_128(&config, &[], &[asm::wide_load_imm_signed_128(V6, 255), store]), 255);
+    assert_eq!(
+        run_wide_128(&config, &[], &[asm::wide_load_imm_unsigned_128(V6, -1), store]),
+        u128::from(u64::MAX)
+    );
+    assert_eq!(
+        run_wide_128(&config, &[], &[asm::wide_load_imm_signed_128(V6, -1), store]),
+        u128::MAX
+    );
+
+    // And it agrees with loading the same value into a register and widening that.
+    for value in [0, 1, -1, i32::MIN, i32::MAX] {
+        assert_eq!(
+            run_wide_128(&config, &[], &[asm::wide_load_imm_unsigned_128(V6, value), store]),
+            run_wide_128(
+                &config,
+                &[],
+                &[asm::load_imm(A1, value), asm::wide_from_reg_unsigned_128(V6, A1), store]
+            ),
+            "unsigned {value}"
+        );
+        assert_eq!(
+            run_wide_128(&config, &[], &[asm::wide_load_imm_signed_128(V6, value), store]),
+            run_wide_128(
+                &config,
+                &[],
+                &[asm::load_imm(A1, value), asm::wide_from_reg_signed_128(V6, A1), store]
+            ),
+            "signed {value}"
+        );
+    }
+}
+
+#[cfg(feature = "std")]
+fn wide_128_load_absolute_reads_without_a_base_register(config: Config) {
+    use polkavm_common::program::VecReg::*;
+
+    if !runs_the_128_bit_family(&config) {
+        return;
+    }
+
+    // The harness writes the first operand at the start of the read-write data, which is where
+    // the absolute form reads from here. Only its low half is a 128-bit register.
+    let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(0x4000).build().unwrap();
+    let address = cast(memory_map.rw_data_address()).bitwise_as_i32();
+    let value = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+
+    assert_eq!(
+        run_wide_128(
+            &config,
+            &[value],
+            &[asm::wide_load_absolute_128(V6, address), asm::wide_store_128(V6, A0, 96)]
+        ),
+        value
+    );
+}
+
+#[cfg(feature = "std")]
+fn wide_128_memory_moves_sixteen_little_endian_bytes(config: Config) {
+    use polkavm_common::program::VecReg::*;
+    use polkavm_common::wide::U256;
+
+    if !runs_the_128_bit_family(&config) {
+        return;
+    }
+
+    // The exact byte image a store leaves behind, least significant byte first, which is what
+    // a guest that reads the same bytes back one at a time depends on.
+    let image: Vec<u8> = (0..16).collect();
+    let operand = U256([0x0706_0504_0302_0100, 0x0f0e_0d0c_0b0a_0908, 0, 0]);
+    let stored = run_wide_program(
+        &config,
+        &[operand],
+        &[
+            asm::wide_store_128(V0, A0, 96),
+            asm::wide_load_128(V7, A0, 96),
+            asm::wide_store_128(V7, A0, 112),
+        ],
+    );
+    assert_eq!(stored[..16], image[..]);
+
+    // And a load reads that image back, so the round trip through memory is the identity.
+    assert_eq!(stored[16..32], image[..]);
+}
+
+#[cfg(feature = "std")]
+fn wide_128_registers_alias_the_halves_of_a_wide_register(config: Config) {
+    use polkavm_common::program::VecReg::*;
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    if !runs_the_128_bit_family(&config) {
+        return;
+    }
+
+    // The two files are one, so moving both halves of `w0` with the 128-bit instructions has
+    // to leave `w3` holding what `w0` did.
+    let value = U256([1, 2, 3, 4]);
+    let store = asm::wide_store(W3, A0, 96);
+    assert_eq!(
+        run_wide(&config, &[value], &[asm::wide_move_128(V6, V0), asm::wide_move_128(V7, V1), store]),
+        value
+    );
+
+    // A 128-bit write reaches one half and leaves the other alone, whichever half it is.
+    assert_eq!(
+        run_wide(
+            &config,
+            &[],
+            &[asm::wide_load_imm_signed(W3, -1), asm::wide_load_imm_unsigned_128(V6, 0), store]
+        ),
+        U256([0, 0, u64::MAX, u64::MAX])
+    );
+    assert_eq!(
+        run_wide(
+            &config,
+            &[],
+            &[asm::wide_load_imm_signed(W3, -1), asm::wide_load_imm_unsigned_128(V7, 0), store]
+        ),
+        U256([u64::MAX, u64::MAX, 0, 0])
+    );
+
+    // A 256-bit value the wide instructions built is what the 128-bit ones read out of its
+    // two halves, low half first.
+    let low = run_wide_128(&config, &[], &[asm::wide_load_imm_signed(W3, -2), asm::wide_store_128(V6, A0, 96)]);
+    let high = run_wide_128(&config, &[], &[asm::wide_load_imm_signed(W3, -2), asm::wide_store_128(V7, A0, 96)]);
+    assert_eq!(low, u128::MAX - 1);
+    assert_eq!(high, u128::MAX);
+}
+
+#[cfg(feature = "std")]
+fn wide_128_access_past_the_end_of_memory_traps_with_nothing_moved(config: Config) {
+    use polkavm_common::program::VecReg::*;
+
+    if !runs_the_128_bit_family(&config) {
+        return;
+    }
+
+    const DATA_SIZE: u32 = 0x4000;
+
+    // A 128-bit access is one access of sixteen bytes rather than two of eight, so an access
+    // whose last byte is past the end of the read-write data traps as a whole and leaves the
+    // bytes it could have reached alone. There is no 256-bit test of this to mirror, so what
+    // is pinned here is what the implementation guarantees: the access is bounds checked
+    // before any byte moves.
+    let run = |offset: i32| -> (InterruptKind, [u8; 16]) {
+        let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(DATA_SIZE).build().unwrap();
+        let base = memory_map.rw_data_address();
+
+        let code = [
+            asm::load_imm(A0, cast(base).bitwise_as_i32()),
+            asm::wide_load_imm_signed_128(V6, -1),
+            asm::wide_store_128(V6, A0, offset),
+            asm::ret(),
+        ];
+
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::ReviveV1);
+        builder.set_rw_data_size(DATA_SIZE);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&code, &[]);
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+        let engine = Engine::new(&config).unwrap();
+        let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
+        let mut instance = module.instantiate().unwrap();
+
+        // The last sixteen bytes of the accessible data, which the trapping store overlaps.
+        let tail = base + DATA_SIZE - 16;
+        instance.write_memory(tail, &[0xaa; 16]).unwrap();
+
+        let entry_point = module.exports().find(|export| export == "main").unwrap().program_counter();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(entry_point);
+        let interrupt = instance.run().unwrap();
+
+        let mut published = [0; 16];
+        instance.read_memory_into(tail, &mut published[..]).unwrap();
+        (interrupt, published)
+    };
+
+    // Sixteen bytes below the end fit exactly.
+    let (interrupt, published) = run(cast(DATA_SIZE - 16).bitwise_as_i32());
+    match_interrupt!(interrupt, InterruptKind::Finished);
+    assert_eq!(published, [0xff; 16]);
+
+    // Eight bytes below it do not, and nothing moves.
+    let (interrupt, published) = run(cast(DATA_SIZE - 8).bitwise_as_i32());
+    match_interrupt!(interrupt, InterruptKind::Trap);
+    assert_eq!(published, [0xaa; 16]);
 }
