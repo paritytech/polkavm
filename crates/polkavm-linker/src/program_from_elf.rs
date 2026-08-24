@@ -21,8 +21,8 @@ use crate::riscv::DecoderConfig;
 use crate::riscv::Reg as RReg;
 use crate::riscv::{
     AtomicKind, BranchKind, CmovKind, Inst, LoadKind, RegImmKind, StoreKind, VecReg, VectorArithmeticOperand, VectorElementWidth,
-    VectorLength, VectorMaskKind, WideCompareKind, WideCountKind, WideFromRegKind, WideModularKind, WideMoveKind, WideReg, WideRegRegKind,
-    WideShiftKind,
+    VectorLength, VectorMaskKind, Wide128RegRegKind, WideCompareKind, WideCountKind, WideFromRegKind, WideModularKind, WideMoveKind,
+    WideReg, WideRegRegKind, WideShiftKind,
 };
 use polkavm_common::program::VECTOR_LENGTH_BYTES;
 use polkavm_common::vector::{VectorConfig, VectorOperation};
@@ -671,6 +671,12 @@ enum BasicInst<T> {
         dst: WideReg,
         target: SectionTarget,
     },
+    Wide128(Wide128Inst),
+    /// A 128-bit load from an address that is known once the sections are laid out.
+    Wide128LoadAbsolute {
+        dst: VecReg,
+        target: SectionTarget,
+    },
     Vector(VectorInst),
 }
 
@@ -747,6 +753,79 @@ enum WideInst {
     },
     Store {
         src: WideReg,
+        base: Reg,
+        offset: i32,
+    },
+}
+
+/// An instruction on a 128-bit value, which is one vector register.
+///
+/// This is [`WideInst`] at half the width: the same operations, minus the modular ones which
+/// have no 128-bit form, over single registers rather than pairs. The general purpose
+/// operands are spelled out separately for the same reason as there.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum Wide128Inst {
+    RegReg {
+        kind: Wide128RegRegKind,
+        dst: VecReg,
+        src1: VecReg,
+        src2: VecReg,
+    },
+    Compare {
+        kind: WideCompareKind,
+        dst: Reg,
+        src1: VecReg,
+        src2: VecReg,
+    },
+    Shift {
+        kind: WideShiftKind,
+        dst: VecReg,
+        src: VecReg,
+        amount: Reg,
+    },
+    Move {
+        kind: WideMoveKind,
+        dst: VecReg,
+        src: VecReg,
+    },
+    ToReg {
+        dst: Reg,
+        src: VecReg,
+    },
+    Count {
+        kind: WideCountKind,
+        dst: Reg,
+        src: VecReg,
+    },
+    FromReg {
+        kind: WideFromRegKind,
+        dst: VecReg,
+        src: Reg,
+    },
+    /// Widening a value the general purpose register was only loaded with, folded into one
+    /// instruction, as in [`WideInst::LoadImm`].
+    LoadImm {
+        kind: WideFromRegKind,
+        dst: VecReg,
+        imm: i32,
+    },
+    /// A 128-bit load whose offset the decoder already reconstructed, so the width flag the
+    /// encoding keeps in the immediate's bit 0 is not part of it.
+    Load {
+        dst: VecReg,
+        base: Reg,
+        offset: i32,
+    },
+    /// A shift by an amount the general purpose register was only loaded with.
+    ShiftImm {
+        kind: WideShiftKind,
+        dst: VecReg,
+        src: VecReg,
+        amount: i32,
+    },
+    /// A 128-bit store, whose offset is reconstructed as [`Wide128Inst::Load`]'s is.
+    Store {
+        src: VecReg,
         base: Reg,
         offset: i32,
     },
@@ -933,6 +1012,71 @@ impl WideInst {
     }
 }
 
+impl Wide128Inst {
+    /// The general purpose registers this reads.
+    fn src_mask(self) -> RegMask {
+        match self {
+            Wide128Inst::Shift { amount, .. } => RegMask::from(amount),
+            Wide128Inst::FromReg { src, .. } => RegMask::from(src),
+            Wide128Inst::Load { base, .. } | Wide128Inst::Store { base, .. } => RegMask::from(base),
+            Wide128Inst::RegReg { .. } | Wide128Inst::Compare { .. } | Wide128Inst::Move { .. } => RegMask::empty(),
+            Wide128Inst::ToReg { .. } | Wide128Inst::Count { .. } | Wide128Inst::LoadImm { .. } | Wide128Inst::ShiftImm { .. } => {
+                RegMask::empty()
+            }
+        }
+    }
+
+    /// The general purpose registers this writes.
+    fn dst_mask(self) -> RegMask {
+        match self {
+            Wide128Inst::Compare { dst, .. } | Wide128Inst::ToReg { dst, .. } | Wide128Inst::Count { dst, .. } => RegMask::from(dst),
+            _ => RegMask::empty(),
+        }
+    }
+
+    fn map_registers(self, mut map: impl FnMut(Reg, OpKind) -> Reg) -> Self {
+        match self {
+            Wide128Inst::Shift { kind, dst, src, amount } => Wide128Inst::Shift {
+                kind,
+                dst,
+                src,
+                amount: map(amount, OpKind::Read),
+            },
+            Wide128Inst::FromReg { kind, dst, src } => Wide128Inst::FromReg {
+                kind,
+                dst,
+                src: map(src, OpKind::Read),
+            },
+            Wide128Inst::Load { dst, base, offset } => Wide128Inst::Load {
+                dst,
+                base: map(base, OpKind::Read),
+                offset,
+            },
+            Wide128Inst::Store { src, base, offset } => Wide128Inst::Store {
+                src,
+                base: map(base, OpKind::Read),
+                offset,
+            },
+            Wide128Inst::Compare { kind, dst, src1, src2 } => Wide128Inst::Compare {
+                kind,
+                dst: map(dst, OpKind::Write),
+                src1,
+                src2,
+            },
+            Wide128Inst::ToReg { dst, src } => Wide128Inst::ToReg {
+                dst: map(dst, OpKind::Write),
+                src,
+            },
+            Wide128Inst::Count { kind, dst, src } => Wide128Inst::Count {
+                kind,
+                dst: map(dst, OpKind::Write),
+                src,
+            },
+            Wide128Inst::RegReg { .. } | Wide128Inst::Move { .. } | Wide128Inst::LoadImm { .. } | Wide128Inst::ShiftImm { .. } => self,
+        }
+    }
+}
+
 impl VectorInst {
     /// The general purpose registers this reads.
     fn src_mask(self) -> RegMask {
@@ -1086,8 +1230,9 @@ impl<T> BasicInst<T> {
             BasicInst::Prologue { ref regs, .. } => RegMask::from(Reg::SP) | RegMask::from_regs(regs.iter().map(|&(_, reg)| reg)),
             BasicInst::Epilogue { .. } => RegMask::from(Reg::SP),
             BasicInst::Wide(instruction) => instruction.src_mask(),
+            BasicInst::Wide128(instruction) => instruction.src_mask(),
             BasicInst::Vector(instruction) => instruction.src_mask(),
-            BasicInst::WideLoadAbsolute { .. } => RegMask::empty(),
+            BasicInst::WideLoadAbsolute { .. } | BasicInst::Wide128LoadAbsolute { .. } => RegMask::empty(),
         }
     }
 
@@ -1112,8 +1257,9 @@ impl<T> BasicInst<T> {
             BasicInst::Prologue { .. } => RegMask::from(Reg::SP),
             BasicInst::Epilogue { ref regs, .. } => RegMask::from(Reg::SP) | RegMask::from_regs(regs.iter().map(|&(_, reg)| reg)),
             BasicInst::Wide(instruction) => instruction.dst_mask(),
+            BasicInst::Wide128(instruction) => instruction.dst_mask(),
             BasicInst::Vector(instruction) => instruction.dst_mask(),
-            BasicInst::WideLoadAbsolute { .. } => RegMask::empty(),
+            BasicInst::WideLoadAbsolute { .. } | BasicInst::Wide128LoadAbsolute { .. } => RegMask::empty(),
         }
     }
 
@@ -1141,7 +1287,11 @@ impl<T> BasicInst<T> {
             // Liveness here is over the general purpose registers only, so an instruction
             // whose result lands in the vector file must not look dead. The configuration
             // instructions are kept for the same reason: what they write is `vtype`.
-            BasicInst::Wide(..) | BasicInst::Vector(..) | BasicInst::WideLoadAbsolute { .. } => true,
+            BasicInst::Wide(..)
+            | BasicInst::Wide128(..)
+            | BasicInst::Vector(..)
+            | BasicInst::WideLoadAbsolute { .. }
+            | BasicInst::Wide128LoadAbsolute { .. } => true,
         }
     }
 
@@ -1247,8 +1397,10 @@ impl<T> BasicInst<T> {
                 Some(output)
             }
             BasicInst::Wide(instruction) => Some(BasicInst::Wide(instruction.map_registers(map))),
+            BasicInst::Wide128(instruction) => Some(BasicInst::Wide128(instruction.map_registers(map))),
             BasicInst::Vector(instruction) => Some(BasicInst::Vector(instruction.map_registers(map))),
             BasicInst::WideLoadAbsolute { dst, target } => Some(BasicInst::WideLoadAbsolute { dst, target }),
+            BasicInst::Wide128LoadAbsolute { dst, target } => Some(BasicInst::Wide128LoadAbsolute { dst, target }),
         }
     }
 
@@ -1308,8 +1460,10 @@ impl<T> BasicInst<T> {
             BasicInst::StoreAbsolute { kind, src, target } => BasicInst::StoreAbsolute { kind, src, target },
             BasicInst::LoadAddress { dst, target } => BasicInst::LoadAddress { dst, target: map(target)? },
             BasicInst::Wide(instruction) => BasicInst::Wide(instruction),
+            BasicInst::Wide128(instruction) => BasicInst::Wide128(instruction),
             BasicInst::Vector(instruction) => BasicInst::Vector(instruction),
             BasicInst::WideLoadAbsolute { dst, target } => BasicInst::WideLoadAbsolute { dst, target },
+            BasicInst::Wide128LoadAbsolute { dst, target } => BasicInst::Wide128LoadAbsolute { dst, target },
             BasicInst::LoadAddressIndirect { dst, target } => BasicInst::LoadAddressIndirect { dst, target: map(target)? },
             BasicInst::LoadIndirect { kind, dst, base, offset } => BasicInst::LoadIndirect { kind, dst, base, offset },
             BasicInst::StoreIndirect { kind, src, base, offset } => BasicInst::StoreIndirect { kind, src, base, offset },
@@ -1333,7 +1487,7 @@ impl<T> BasicInst<T> {
     {
         match self {
             BasicInst::LoadAbsolute { target, .. } | BasicInst::StoreAbsolute { target, .. } => (Some(*target), None),
-            BasicInst::WideLoadAbsolute { target, .. } => (Some(*target), None),
+            BasicInst::WideLoadAbsolute { target, .. } | BasicInst::Wide128LoadAbsolute { target, .. } => (Some(*target), None),
             BasicInst::Vector(..) => (None, None),
             BasicInst::LoadAddress { target, .. } | BasicInst::LoadAddressIndirect { target, .. } => (None, Some(*target)),
             BasicInst::Nop
@@ -1352,6 +1506,7 @@ impl<T> BasicInst<T> {
             | BasicInst::Sbrk { .. }
             | BasicInst::Memset
             | BasicInst::Wide(..)
+            | BasicInst::Wide128(..)
             | BasicInst::Ecalli { .. } => (None, None),
         }
     }
@@ -2480,6 +2635,86 @@ fn convert_instruction(
             };
 
             emit(InstExt::Basic(BasicInst::Wide(WideInst::Store { src, base, offset })));
+            Ok(())
+        }
+        Inst::Wide128RegReg { kind, dst, src1, src2 } => {
+            emit(InstExt::Basic(BasicInst::Wide128(Wide128Inst::RegReg { kind, dst, src1, src2 })));
+            Ok(())
+        }
+        Inst::Wide128Compare { kind, dst, src1, src2 } => {
+            let Some(dst) = cast_reg_non_zero(dst)? else {
+                emit(InstExt::nop());
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Wide128(Wide128Inst::Compare { kind, dst, src1, src2 })));
+            Ok(())
+        }
+        Inst::Wide128Shift { kind, dst, src, amount } => {
+            // A shift by `zero` is a shift by nothing, which is the same as a move.
+            let Some(amount) = cast_reg_non_zero(amount)? else {
+                emit(InstExt::Basic(BasicInst::Wide128(Wide128Inst::Move {
+                    kind: WideMoveKind::Move,
+                    dst,
+                    src,
+                })));
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Wide128(Wide128Inst::Shift { kind, dst, src, amount })));
+            Ok(())
+        }
+        Inst::Wide128Move { kind, dst, src } => {
+            emit(InstExt::Basic(BasicInst::Wide128(Wide128Inst::Move { kind, dst, src })));
+            Ok(())
+        }
+        Inst::Wide128ToReg { dst, src } => {
+            let Some(dst) = cast_reg_non_zero(dst)? else {
+                emit(InstExt::nop());
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Wide128(Wide128Inst::ToReg { dst, src })));
+            Ok(())
+        }
+        Inst::Wide128Count { kind, dst, src } => {
+            let Some(dst) = cast_reg_non_zero(dst)? else {
+                emit(InstExt::nop());
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Wide128(Wide128Inst::Count { kind, dst, src })));
+            Ok(())
+        }
+        Inst::Wide128FromReg { kind, dst, src } => {
+            // Widening `zero` is a zero of either sign.
+            let Some(src) = cast_reg_non_zero(src)? else {
+                emit(InstExt::Basic(BasicInst::Wide128(Wide128Inst::RegReg {
+                    kind: Wide128RegRegKind::Xor,
+                    dst,
+                    src1: dst,
+                    src2: dst,
+                })));
+                return Ok(());
+            };
+
+            emit(InstExt::Basic(BasicInst::Wide128(Wide128Inst::FromReg { kind, dst, src })));
+            Ok(())
+        }
+        Inst::Wide128Load { dst, base, offset } => {
+            let Some(base) = cast_reg_non_zero(base)? else {
+                return Err(ProgramFromElfError::other("found a 128-bit wide load with no base register"));
+            };
+
+            emit(InstExt::Basic(BasicInst::Wide128(Wide128Inst::Load { dst, base, offset })));
+            Ok(())
+        }
+        Inst::Wide128Store { src, base, offset } => {
+            let Some(base) = cast_reg_non_zero(base)? else {
+                return Err(ProgramFromElfError::other("found a 128-bit wide store with no base register"));
+            };
+
+            emit(InstExt::Basic(BasicInst::Wide128(Wide128Inst::Store { src, base, offset })));
             Ok(())
         }
         Inst::VectorConfig { dst, length, vtype } => {
@@ -5969,6 +6204,31 @@ impl BlockRegs {
                     }
                 }
             }
+            BasicInst::Wide128(Wide128Inst::Shift { kind, dst, src, amount }) => {
+                if let RegValue::Constant(value) = self.get_reg(amount) {
+                    if let Ok(amount) = i32::try_from(value) {
+                        return Some(BasicInst::Wide128(Wide128Inst::ShiftImm { kind, dst, src, amount }));
+                    }
+                }
+            }
+            BasicInst::Wide128(Wide128Inst::Load { dst, base, offset }) => {
+                if let RegValue::DataAddress(base) = self.get_reg(base) {
+                    // The whole address is known, so the base register goes away with it. The
+                    // offset is the one the decoder recovered, with the width flag already
+                    // masked off, so no flag bit can reach the address.
+                    return Some(BasicInst::Wide128LoadAbsolute {
+                        dst,
+                        target: base.map_offset_i64(|base| base.wrapping_add(cast(offset).to_i64_sign_extend())),
+                    });
+                }
+            }
+            BasicInst::Wide128(Wide128Inst::FromReg { kind, dst, src }) => {
+                if let RegValue::Constant(value) = self.get_reg(src) {
+                    if let Ok(imm) = i32::try_from(value) {
+                        return Some(BasicInst::Wide128(Wide128Inst::LoadImm { kind, dst, imm }));
+                    }
+                }
+            }
             BasicInst::RegReg { kind, dst, src1, src2 } => {
                 let src1_value = self.get_reg(src1);
                 let src2_value = self.get_reg(src2);
@@ -9112,6 +9372,14 @@ fn emit_code(
                     };
                     Instruction::wide_load_absolute(dst.raw(), get_data_address(source, target)?)
                 }
+                BasicInst::Wide128LoadAbsolute { dst, target } => {
+                    use polkavm_common::program::VecReg as PVecReg;
+
+                    let Some(dst) = PVecReg::from_raw(u32::from(dst.index())) else {
+                        unreachable!("internal error: unknown vector register")
+                    };
+                    Instruction::wide_load_absolute_128(dst.raw(), get_data_address(source, target)?)
+                }
                 BasicInst::LoadImmediate { dst, imm } => Instruction::load_imm(conv_reg(dst), imm),
                 BasicInst::LoadImmediate64 { dst, imm } => {
                     if !is_rv64 {
@@ -9579,6 +9847,91 @@ fn emit_code(
                         }
                         WideInst::Load { dst, base, offset } => Instruction::wide_load(conv_wide(dst), conv_reg(base), offset),
                         WideInst::Store { src, base, offset } => Instruction::wide_store(conv_wide(src), conv_reg(base), offset),
+                    }
+                }
+                BasicInst::Wide128(instruction) => {
+                    use polkavm_common::program::VecReg as PVecReg;
+
+                    fn conv_vec(reg: VecReg) -> polkavm_common::program::RawVecReg {
+                        let Some(reg) = PVecReg::from_raw(u32::from(reg.index())) else {
+                            unreachable!("internal error: unknown vector register")
+                        };
+                        reg.raw()
+                    }
+
+                    match instruction {
+                        Wide128Inst::RegReg { kind, dst, src1, src2 } => {
+                            let (dst, src1, src2) = (conv_vec(dst), conv_vec(src1), conv_vec(src2));
+                            match kind {
+                                Wide128RegRegKind::Add => Instruction::wide_add_128(dst, src1, src2),
+                                Wide128RegRegKind::Sub => Instruction::wide_sub_128(dst, src1, src2),
+                                Wide128RegRegKind::Mul => Instruction::wide_mul_128(dst, src1, src2),
+                                Wide128RegRegKind::And => Instruction::wide_and_128(dst, src1, src2),
+                                Wide128RegRegKind::Or => Instruction::wide_or_128(dst, src1, src2),
+                                Wide128RegRegKind::Xor => Instruction::wide_xor_128(dst, src1, src2),
+                                Wide128RegRegKind::DivUnsigned => Instruction::wide_div_unsigned_128(dst, src1, src2),
+                                Wide128RegRegKind::DivSigned => Instruction::wide_div_signed_128(dst, src1, src2),
+                                Wide128RegRegKind::RemUnsigned => Instruction::wide_rem_unsigned_128(dst, src1, src2),
+                                Wide128RegRegKind::RemSigned => Instruction::wide_rem_signed_128(dst, src1, src2),
+                            }
+                        }
+                        Wide128Inst::Compare { kind, dst, src1, src2 } => {
+                            let (dst, src1, src2) = (conv_reg(dst), conv_vec(src1), conv_vec(src2));
+                            match kind {
+                                WideCompareKind::Equal => Instruction::wide_set_equal_128(dst, src1, src2),
+                                WideCompareKind::NotEqual => Instruction::wide_set_not_equal_128(dst, src1, src2),
+                                WideCompareKind::LessUnsigned => Instruction::wide_set_less_than_unsigned_128(dst, src1, src2),
+                                WideCompareKind::LessSigned => Instruction::wide_set_less_than_signed_128(dst, src1, src2),
+                            }
+                        }
+                        Wide128Inst::Shift { kind, dst, src, amount } => {
+                            let (dst, src, amount) = (conv_vec(dst), conv_vec(src), conv_reg(amount));
+                            match kind {
+                                WideShiftKind::LogicalLeft => Instruction::wide_shift_logical_left_128(dst, src, amount),
+                                WideShiftKind::LogicalRight => Instruction::wide_shift_logical_right_128(dst, src, amount),
+                                WideShiftKind::ArithmeticRight => Instruction::wide_shift_arithmetic_right_128(dst, src, amount),
+                            }
+                        }
+                        Wide128Inst::Move { kind, dst, src } => {
+                            let (dst, src) = (conv_vec(dst), conv_vec(src));
+                            match kind {
+                                WideMoveKind::Move => Instruction::wide_move_128(dst, src),
+                                WideMoveKind::ReverseBytes => Instruction::wide_reverse_bytes_128(dst, src),
+                            }
+                        }
+                        Wide128Inst::ToReg { dst, src } => Instruction::wide_to_reg_128(conv_vec(src), conv_reg(dst)),
+                        Wide128Inst::Count { kind, dst, src } => {
+                            let (dst, src) = (conv_reg(dst), conv_vec(src));
+                            match kind {
+                                WideCountKind::SetBits => Instruction::wide_count_set_bits_128(src, dst),
+                                WideCountKind::LeadingZeroBits => Instruction::wide_count_leading_zero_bits_128(src, dst),
+                                WideCountKind::TrailingZeroBits => Instruction::wide_count_trailing_zero_bits_128(src, dst),
+                            }
+                        }
+                        Wide128Inst::LoadImm { kind, dst, imm } => {
+                            let dst = conv_vec(dst);
+                            match kind {
+                                WideFromRegKind::Unsigned => Instruction::wide_load_imm_unsigned_128(dst, imm),
+                                WideFromRegKind::Signed => Instruction::wide_load_imm_signed_128(dst, imm),
+                            }
+                        }
+                        Wide128Inst::FromReg { kind, dst, src } => {
+                            let (dst, src) = (conv_vec(dst), conv_reg(src));
+                            match kind {
+                                WideFromRegKind::Unsigned => Instruction::wide_from_reg_unsigned_128(dst, src),
+                                WideFromRegKind::Signed => Instruction::wide_from_reg_signed_128(dst, src),
+                            }
+                        }
+                        Wide128Inst::ShiftImm { kind, dst, src, amount } => {
+                            let (dst, src) = (conv_vec(dst), conv_vec(src));
+                            match kind {
+                                WideShiftKind::LogicalLeft => Instruction::wide_shift_logical_left_imm_128(dst, src, amount),
+                                WideShiftKind::LogicalRight => Instruction::wide_shift_logical_right_imm_128(dst, src, amount),
+                                WideShiftKind::ArithmeticRight => Instruction::wide_shift_arithmetic_right_imm_128(dst, src, amount),
+                            }
+                        }
+                        Wide128Inst::Load { dst, base, offset } => Instruction::wide_load_128(conv_vec(dst), conv_reg(base), offset),
+                        Wide128Inst::Store { src, base, offset } => Instruction::wide_store_128(conv_vec(src), conv_reg(base), offset),
                     }
                 }
                 BasicInst::Vector(instruction) => {
