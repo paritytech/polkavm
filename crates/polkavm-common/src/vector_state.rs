@@ -1240,6 +1240,67 @@ mod tests {
     }
 
     #[test]
+    fn every_pair_position_aliases_its_own_two_halves_and_nothing_else() {
+        // A guest program publishes a handful of bytes per run, so the execution tests can
+        // only sample pair positions and cannot watch the rest of the file while one half is
+        // written. The invariant holds over the whole file, and this is where it is stated:
+        // every wide register gets a value of its own, so a half reached at the wrong stride
+        // lands on a neighbor's value rather than on a zero that could have come from
+        // anywhere.
+        let value_of = |index: usize| {
+            let base = (index as u64 + 1) * 0x1000;
+            U256([base, base + 1, base + 2, base + 3])
+        };
+        let filled = || {
+            let mut state = VectorState::new();
+            for (index, register) in WideReg::ALL.iter().enumerate() {
+                state.set_wide_reg(*register, value_of(index));
+            }
+            state
+        };
+
+        // Written wide, read narrow.
+        let state = filled();
+        for (index, register) in WideReg::ALL.iter().enumerate() {
+            let expected = value_of(index);
+            let low = VecReg::from_wide(*register);
+            let high = VecReg::from_raw(low.to_u32() + 1).unwrap();
+            assert_eq!(low.to_wide(), Some(*register));
+            assert_eq!(high.to_wide(), None);
+            assert_eq!(
+                state.wide_reg_128(low),
+                u128::from(expected.0[0]) | (u128::from(expected.0[1]) << 64),
+                "{register} low half"
+            );
+            assert_eq!(
+                state.wide_reg_128(high),
+                u128::from(expected.0[2]) | (u128::from(expected.0[3]) << 64),
+                "{register} high half"
+            );
+        }
+
+        // Written narrow, read wide: the write lands on the half its register names and no
+        // other register in the file moves.
+        for target in VecReg::ALL {
+            let mut state = filled();
+            state.set_wide_reg_128(target, u128::MAX);
+
+            for (index, register) in WideReg::ALL.iter().enumerate() {
+                let mut expected = value_of(index);
+                let low = VecReg::from_wide(*register);
+                if target == low {
+                    expected.0[0] = u64::MAX;
+                    expected.0[1] = u64::MAX;
+                } else if target.to_u32() == low.to_u32() + 1 {
+                    expected.0[2] = u64::MAX;
+                    expected.0[3] = u64::MAX;
+                }
+                assert_eq!(state.wide_reg(*register), expected, "{register} after writing {target}");
+            }
+        }
+    }
+
+    #[test]
     fn dispatch_runs_a_wide_addition() {
         let mut state = VectorState::new();
         state.set_wide_reg(WideReg::W1, U256([u64::MAX; 4]));

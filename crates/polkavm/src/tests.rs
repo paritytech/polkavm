@@ -6134,6 +6134,12 @@ run_wide_tests! {
     wide_128_memory_moves_sixteen_little_endian_bytes
     wide_128_access_past_the_end_of_memory_traps_with_nothing_moved
     wide_128_registers_alias_the_halves_of_a_wide_register
+    wide_128_reads_reach_both_halves_at_every_file_position
+    wide_128_writes_compose_a_wide_register_in_either_order
+    wide_128_writes_leave_the_sibling_half_untouched
+    wide_128_and_vector_instructions_share_the_register_file
+    wide_arithmetic_reads_a_pair_composed_by_128_bit_writes
+    wide_128_and_wide_memory_accesses_agree_on_the_half_order
 }
 
 /// The cycles the detailed cost model charges a basic block holding one instruction.
@@ -7078,6 +7084,281 @@ fn wide_128_registers_alias_the_halves_of_a_wide_register(config: Config) {
     let high = run_wide_128(&config, &[], &[asm::wide_load_imm_signed(W3, -2), asm::wide_store_128(V7, A0, 96)]);
     assert_eq!(low, u128::MAX - 1);
     assert_eq!(high, u128::MAX);
+}
+
+/// Thirty-two bytes that are all different, counting up from one.
+///
+/// The aliasing tests below all publish one of these rather than a round number: a swapped
+/// half, a byte order slip, or a register named one off then lands on a value that is not the
+/// expected one, whereas all ones and all zeroes read the same either way round.
+#[cfg(feature = "std")]
+const COUNTING_PATTERN: polkavm_common::wide::U256 = polkavm_common::wide::U256([
+    0x0807_0605_0403_0201,
+    0x100f_0e0d_0c0b_0a09,
+    0x1817_1615_1413_1211,
+    0x201f_1e1d_1c1b_1a19,
+]);
+
+/// A second pattern, sharing no byte with [`COUNTING_PATTERN`], for the value a write that is
+/// only supposed to reach one half brings with it.
+#[cfg(feature = "std")]
+const OTHER_COUNTING_PATTERN: polkavm_common::wide::U256 = polkavm_common::wide::U256([
+    0x2827_2625_2423_2221,
+    0x302f_2e2d_2c2b_2a29,
+    0x3837_3635_3433_3231,
+    0x403f_3e3d_3c3b_3a39,
+]);
+
+#[cfg(feature = "std")]
+fn wide_128_reads_reach_both_halves_at_every_file_position(config: Config) {
+    use polkavm_common::program::VecReg::*;
+    use polkavm_common::program::WideReg::*;
+
+    // A 256-bit write, then each of the two halves read back out through the 128-bit
+    // instructions. The pair position is the only thing that changes between the rounds, so a
+    // file offset computed with the wrong stride, or a bottom pair that is special cased,
+    // shows up as a wrong answer away from `w0` rather than everywhere.
+    let bytes = COUNTING_PATTERN.to_le_bytes();
+    for (wide, low, high) in [(W0, V0, V1), (W8, V16, V17), (W15, V30, V31)] {
+        let stored = run_wide_program(
+            &config,
+            &[COUNTING_PATTERN],
+            &[
+                asm::wide_load(wide, A0, 0),
+                asm::wide_store_128(low, A0, 96),
+                asm::wide_store_128(high, A0, 112),
+            ],
+        );
+        assert_eq!(stored[..16], bytes[..16], "{wide} low half stored");
+        assert_eq!(stored[16..], bytes[16..], "{wide} high half stored");
+
+        // The same two reads through a register to register move, which reaches the file by
+        // register number rather than by address, and has to land on the same two halves. The
+        // scratch register is not part of the pair being read, so a move that went to the
+        // sibling of its destination leaves the scratch holding nothing.
+        let stored = run_wide_program(
+            &config,
+            &[COUNTING_PATTERN],
+            &[
+                asm::wide_load(wide, A0, 0),
+                asm::wide_move_128(V4, low),
+                asm::wide_store_128(V4, A0, 96),
+                asm::wide_move_128(V4, high),
+                asm::wide_store_128(V4, A0, 112),
+            ],
+        );
+        assert_eq!(stored[..16], bytes[..16], "{wide} low half moved");
+        assert_eq!(stored[16..], bytes[16..], "{wide} high half moved");
+    }
+}
+
+#[cfg(feature = "std")]
+fn wide_128_writes_compose_a_wide_register_in_either_order(config: Config) {
+    use polkavm_common::program::VecReg::*;
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    // Filling both halves of `w3` one at a time has to leave it holding exactly what a single
+    // 256-bit write of the same bytes would, and the order the two writes happen in cannot
+    // matter. `w3` starts out holding all ones, so a half that never arrived reads as ones
+    // rather than as the zero it would have held anyway.
+    let low = asm::wide_load_128(V6, A0, 0);
+    let high = asm::wide_load_128(V7, A0, 16);
+    for (name, first, second) in [("low half first", low, high), ("high half first", high, low)] {
+        let body = [asm::wide_load_imm_signed(W3, -1), first, second, asm::wide_store(W3, A0, 96)];
+        assert_eq!(run_wide(&config, &[COUNTING_PATTERN], &body), COUNTING_PATTERN, "{name}");
+    }
+
+    // The same composition out of two general purpose registers holding different values,
+    // which is the shape a code generator that keeps a 256-bit value in two halves emits. The
+    // two sources differ, so a pair of writes that went to each other's half is visible.
+    let into_low = COUNTING_PATTERN.0[0];
+    let into_high = COUNTING_PATTERN.0[2];
+    let composed = run_wide(
+        &config,
+        &[],
+        &[
+            asm::load_imm64(A1, into_low),
+            asm::load_imm64(A2, into_high),
+            asm::wide_from_reg_unsigned_128(V6, A1),
+            asm::wide_from_reg_unsigned_128(V7, A2),
+            asm::wide_store(W3, A0, 96),
+        ],
+    );
+    assert_eq!(composed, U256([into_low, 0, into_high, 0]));
+}
+
+#[cfg(feature = "std")]
+fn wide_128_writes_leave_the_sibling_half_untouched(config: Config) {
+    use polkavm_common::program::VecReg::*;
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    // `w3` holds one pattern, and a 128-bit write drops the low half of another over one of
+    // its halves. The half that was not named has to survive bit for bit, and because neither
+    // pattern is symmetric a write that landed on the sibling, or on both, cannot produce the
+    // expected thirty-two bytes.
+    let kept = COUNTING_PATTERN.0;
+    let written = OTHER_COUNTING_PATTERN.0;
+    let low_written = U256([written[0], written[1], kept[2], kept[3]]);
+    let high_written = U256([kept[0], kept[1], written[0], written[1]]);
+
+    // `v2` is the low half of `w1`, which the harness loads the second pattern into.
+    for (name, write, expected) in [
+        ("moved into the low half", asm::wide_move_128(V6, V2), low_written),
+        ("moved into the high half", asm::wide_move_128(V7, V2), high_written),
+        ("loaded into the low half", asm::wide_load_128(V6, A0, 32), low_written),
+        ("loaded into the high half", asm::wide_load_128(V7, A0, 32), high_written),
+    ] {
+        let body = [asm::wide_load(W3, A0, 0), write, asm::wide_store(W3, A0, 96)];
+        assert_eq!(
+            run_wide(&config, &[COUNTING_PATTERN, OTHER_COUNTING_PATTERN], &body),
+            expected,
+            "{name}"
+        );
+    }
+}
+
+#[cfg(feature = "std")]
+fn wide_128_and_vector_instructions_share_the_register_file(config: Config) {
+    use polkavm_common::program::VecReg::*;
+
+    // A vector instruction writes a register and a 128-bit one reads it back, and the other
+    // way around. The halves are crossed on purpose: the vector load fills a high half with
+    // the low half of the pattern, and the 128-bit load fills a low half with the high half of
+    // it, so a read that went to the sibling swaps the two published values.
+    let bytes = COUNTING_PATTERN.to_le_bytes();
+    let stored = run_wide_program(
+        &config,
+        &[COUNTING_PATTERN],
+        &[
+            asm::vector_load(V7, A0, 0),
+            asm::wide_store_128(V7, A0, 96),
+            asm::wide_load_128(V6, A0, 16),
+            asm::vector_store(V6, A0, 112),
+        ],
+    );
+    assert_eq!(stored[..16], bytes[..16], "the 128-bit view of a vector load");
+    assert_eq!(stored[16..], bytes[16..], "the vector view of a 128-bit load");
+
+    // And a register a vector move wrote is one the 128-bit arithmetic computes with: `v1` is
+    // the high half of `w0`, so adding the copy of it to itself doubles that half rather than
+    // the low one.
+    let doubled = run_wide_program(
+        &config,
+        &[COUNTING_PATTERN],
+        &[
+            asm::vector_move(V6, V1),
+            asm::wide_add_128(V8, V6, V6),
+            asm::wide_store_128(V8, A0, 96),
+        ],
+    );
+    let high = u128::from_le_bytes(bytes[16..].try_into().unwrap());
+    assert_eq!(u128::from_le_bytes(doubled[..16].try_into().unwrap()), high.wrapping_add(high));
+}
+
+#[cfg(feature = "std")]
+fn wide_arithmetic_reads_a_pair_composed_by_128_bit_writes(config: Config) {
+    use polkavm_common::program::VecReg::*;
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    // A value a computation flows through has to be composed the same way as one that is only
+    // stored and loaded back, so the 256-bit arithmetic runs here on pairs that four 128-bit
+    // writes assembled. `v6` and `v7` are the halves of `w3`, `v8` and `v9` those of `w4`.
+    let store = asm::wide_store(W5, A0, 96);
+    let compose = [
+        asm::wide_load_128(V6, A0, 0),
+        asm::wide_load_128(V7, A0, 16),
+        asm::wide_load_128(V8, A0, 32),
+        asm::wide_load_128(V9, A0, 48),
+    ];
+    let operands = [COUNTING_PATTERN, OTHER_COUNTING_PATTERN];
+    for (name, operation, expected) in [
+        (
+            "add",
+            asm::wide_add(W5, W3, W4),
+            COUNTING_PATTERN.wrapping_add(OTHER_COUNTING_PATTERN),
+        ),
+        (
+            "mul",
+            asm::wide_mul(W5, W3, W4),
+            COUNTING_PATTERN.wrapping_mul(OTHER_COUNTING_PATTERN),
+        ),
+    ] {
+        let mut body = compose.to_vec();
+        body.extend_from_slice(&[operation, store]);
+        assert_eq!(run_wide(&config, &operands, &body), expected, "{name}");
+    }
+
+    // A carry out of the low half is where a composed pair differs most from a swapped one:
+    // the low half is all ones, so adding one leaves nothing behind and carries into the high
+    // half. Composing it from two immediates rather than from memory also pins the register
+    // numbers the writes name, because the two halves receive different values.
+    assert_eq!(
+        run_wide(
+            &config,
+            &[],
+            &[
+                asm::wide_load_imm_signed_128(V6, -1),
+                asm::wide_load_imm_unsigned_128(V7, 0),
+                asm::wide_load_imm_unsigned(W4, 1),
+                asm::wide_add(W5, W3, W4),
+                store,
+            ]
+        ),
+        U256([0, 0, 1, 0])
+    );
+
+    // A shift by the width of one half moves the composed low half into the high half, which
+    // is the plainest statement that the pair was assembled in the order the halves claim.
+    let mut body = compose.to_vec();
+    body.extend_from_slice(&[asm::load_imm(A1, 128), asm::wide_shift_logical_left(W5, W3, A1), store]);
+    assert_eq!(
+        run_wide(&config, &operands, &body),
+        U256([0, 0, COUNTING_PATTERN.0[0], COUNTING_PATTERN.0[1]])
+    );
+}
+
+#[cfg(feature = "std")]
+fn wide_128_and_wide_memory_accesses_agree_on_the_half_order(config: Config) {
+    use polkavm_common::program::VecReg::*;
+    use polkavm_common::program::WideReg::*;
+
+    // Bytes a 256-bit store left behind, read back as two halves. The low half of the register
+    // has to be the one at the lower address, which is what a guest that walks the same buffer
+    // with both widths depends on.
+    const SCRATCH: i32 = 160;
+    let bytes = COUNTING_PATTERN.to_le_bytes();
+    let stored = run_wide_program(
+        &config,
+        &[COUNTING_PATTERN],
+        &[
+            asm::wide_store(W0, A0, SCRATCH),
+            asm::wide_load_128(V8, A0, SCRATCH),
+            asm::wide_load_128(V9, A0, SCRATCH + 16),
+            asm::wide_store_128(V8, A0, 96),
+            asm::wide_store_128(V9, A0, 112),
+        ],
+    );
+    assert_eq!(stored[..16], bytes[..16], "the low half of a 256-bit store");
+    assert_eq!(stored[16..], bytes[16..], "the high half of a 256-bit store");
+
+    // And the other way around: two 128-bit stores side by side are one 256-bit store, so a
+    // single 256-bit load reads back the pair that wrote them.
+    assert_eq!(
+        run_wide(
+            &config,
+            &[COUNTING_PATTERN],
+            &[
+                asm::wide_store_128(V0, A0, SCRATCH),
+                asm::wide_store_128(V1, A0, SCRATCH + 16),
+                asm::wide_load(W3, A0, SCRATCH),
+                asm::wide_store(W3, A0, 96),
+            ]
+        ),
+        COUNTING_PATTERN
+    );
 }
 
 #[cfg(feature = "std")]
