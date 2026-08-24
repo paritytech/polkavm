@@ -2059,6 +2059,7 @@ impl super::Sandbox for Sandbox {
         for reg in &self.vmctx().regs {
             reg.store(0, Ordering::Relaxed);
         }
+        self.clear_vector_state();
 
         self.aux_data_address = module.memory_map().aux_data_address();
         self.aux_data_length = module.memory_map().aux_data_size();
@@ -2168,6 +2169,15 @@ impl super::Sandbox for Sandbox {
         }
 
         self.vmctx().regs[reg as usize].store(value, Ordering::Relaxed)
+    }
+
+    fn clear_vector_state(&mut self) {
+        let vector_state = self.vmctx().vector_state.get();
+        // SAFETY: Only recompiled code in the worker reaches the register file while the
+        // guest runs, and it is not running here.
+        unsafe {
+            (*vector_state).reset();
+        }
     }
 
     fn gas(&self) -> Gas {

@@ -1547,6 +1547,10 @@ impl InterpretedInstance {
         };
     }
 
+    pub fn clear_vector_state(&mut self) {
+        self.vector.reset();
+    }
+
     pub fn gas(&self) -> Gas {
         self.gas
     }

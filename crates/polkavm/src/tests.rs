@@ -5936,6 +5936,47 @@ fn every_wide_and_vector_instruction_matches_the_interpreter(config: Config) {
     assert_eq!(U256::from_le_bytes(actual), U256::from_le_bytes(expected));
 }
 
+#[cfg(feature = "std")]
+fn clearing_the_registers_also_clears_the_wide_registers(config: Config) {
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    const DATA_SIZE: u32 = 0x4000;
+
+    let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(DATA_SIZE).build().unwrap();
+    let base = memory_map.rw_data_address();
+
+    // Publishes whatever `W0` held on entry, then leaves a value behind in it.
+    let code = [
+        asm::load_imm(A0, cast(base).bitwise_as_i32()),
+        asm::wide_store(W0, A0, 0),
+        asm::wide_load_imm_signed(W0, -1),
+        asm::ret(),
+    ];
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::ReviveV1);
+    builder.set_rw_data_size(DATA_SIZE);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&code, &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
+    let mut instance = module.instantiate().unwrap();
+    let entry_point = module.exports().find(|export| export == "main").unwrap().program_counter();
+
+    // The first call dirties `W0`, and the second one is only ever allowed to see zero:
+    // reusing an instance must not leak the wide registers of the previous call into it.
+    for _ in 0..2 {
+        instance.prepare_call_untyped(entry_point, &[]);
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    }
+
+    let mut published = [0; 32];
+    instance.read_memory_into(base, &mut published[..]).unwrap();
+    assert_eq!(U256::from_le_bytes(published), U256::ZERO);
+}
+
 /// Generates per-backend wrappers for the wide and vector execution tests.
 ///
 /// These always build a `ReviveV1` blob, because no other instruction set holds the wide
@@ -6022,6 +6063,7 @@ run_wide_tests! {
     vector_loads_and_stores_reach_one_register
     vector_compares_produce_a_mask_the_population_count_reads
     every_wide_and_vector_instruction_matches_the_interpreter
+    clearing_the_registers_also_clears_the_wide_registers
 }
 
 fn run_wide_program(config: &Config, operands: &[polkavm_common::wide::U256], body: &[polkavm_common::program::Instruction]) -> [u8; 32] {

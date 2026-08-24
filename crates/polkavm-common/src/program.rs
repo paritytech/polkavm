@@ -3902,8 +3902,37 @@ define_instruction_set! {
 
 #[test]
 fn test_opcode_from_u8() {
-    assert_eq!(ISA_Latest64.opcode_from_u8(3), Some(Opcode::unlikely));
-    assert_eq!(ISA_ReviveV1.opcode_from_u8(3), None);
+    // The opcode table is the only source of truth here; a hardcoded list of expectations
+    // would silently drift from it whenever an instruction set gains a new opcode.
+    fn check_instruction_set(instruction_set: impl InstructionSet, table: &[Option<Opcode>; 256]) {
+        for (byte, expected_opcode) in table.iter().enumerate() {
+            let byte = byte as u8;
+            assert_eq!(instruction_set.opcode_from_u8(byte), *expected_opcode);
+
+            let instruction = instruction_set.parse_instruction(byte as usize, 0, 0, 0);
+            let Some(opcode) = *expected_opcode else {
+                assert_eq!(instruction, Instruction::invalid, "opcode {byte} is unassigned yet decodes");
+                continue;
+            };
+
+            assert_ne!(instruction, Instruction::invalid, "opcode {byte} ({opcode}) has no decoding");
+            assert_eq!(instruction.opcode(), opcode);
+            assert_eq!(instruction_set.opcode_to_u8(opcode), Some(byte));
+            assert!(instruction_set.supports_opcode(opcode));
+        }
+
+        let assigned_count = table.iter().filter(|opcode| opcode.is_some()).count();
+        let supported_count = Opcode::ALL
+            .iter()
+            .filter(|opcode| instruction_set.supports_opcode(**opcode))
+            .count();
+        assert_eq!(assigned_count, supported_count, "two opcodes share the same byte");
+    }
+
+    check_instruction_set(ISA_ReviveV1, &ISA_ReviveV1::RAW_OPCODE_TO_ENUM_CONST);
+    check_instruction_set(ISA_Latest32, &ISA_Latest32::RAW_OPCODE_TO_ENUM_CONST);
+    check_instruction_set(ISA_Latest64, &ISA_Latest64::RAW_OPCODE_TO_ENUM_CONST);
+    check_instruction_set(ISA_JamV1, &ISA_JamV1::RAW_OPCODE_TO_ENUM_CONST);
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]

@@ -969,6 +969,7 @@ impl Sandbox {
         self.vmctx_mut().heap_map_index = 0;
         self.vmctx_mut().page_size = 0;
         self.vmctx_mut().regs.fill(0);
+        <Self as crate::sandbox::Sandbox>::clear_vector_state(self);
         self.vmctx_mut().tmp_reg.store(0, Ordering::Relaxed);
         self.vmctx_mut().program_counter.store(0, Ordering::Relaxed);
         self.vmctx_mut().next_program_counter.store(0, Ordering::Relaxed);
@@ -1800,6 +1801,15 @@ impl super::Sandbox for Sandbox {
             value &= 0xffffffff;
         }
         self.vmctx_mut().regs[reg as usize] = value;
+    }
+
+    fn clear_vector_state(&mut self) {
+        let vector_state = self.vmctx_mut().vector_state.get();
+        // SAFETY: Only recompiled code reaches the register file while the guest runs, and
+        // it is not running here.
+        unsafe {
+            (*vector_state).reset();
+        }
     }
 
     fn gas(&self) -> Gas {

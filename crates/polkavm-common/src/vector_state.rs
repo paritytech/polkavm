@@ -82,6 +82,14 @@ impl VectorState {
         }
     }
 
+    /// Returns the file to what a freshly created one holds.
+    ///
+    /// An instance reused for another execution must go through this, otherwise the next
+    /// program can read a register the previous one left behind.
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
     /// The configuration the next vector instruction runs under.
     pub fn config(&self) -> VectorConfig {
         self.config
@@ -986,6 +994,24 @@ mod tests {
             immediate: i32::MIN,
         };
         assert_eq!(WideOperation::from_packed(operation.to_packed()), Some(operation));
+    }
+
+    #[test]
+    fn reset_leaves_nothing_of_the_previous_execution() {
+        // Every reset path an instance goes through relies on this leaving no register and
+        // no configuration for the next program to read.
+        let mut state = VectorState::new();
+        for register in WideReg::ALL {
+            state.set_wide_reg(register, U256([u64::MAX; 4]));
+        }
+        state.set_config(VectorConfig::new(0b011 << 3, 2));
+
+        state.reset();
+
+        for register in WideReg::ALL {
+            assert_eq!(state.wide_reg(register), U256::ZERO);
+        }
+        assert_eq!(state.config(), VectorState::new().config());
     }
 
     #[test]

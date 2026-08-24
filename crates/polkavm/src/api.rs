@@ -1426,10 +1426,19 @@ impl RawInstance {
     }
 
     /// A convenience function which sets all of the registers to zero.
+    ///
+    /// This covers the wide and vector register file too, so that an instance reused for
+    /// another call cannot see what the previous one left behind.
     pub fn clear_regs(&mut self) {
         for reg in Reg::ALL {
             self.set_reg(reg, 0);
         }
+
+        if let Some(ref mut crosscheck) = self.crosscheck_instance {
+            crosscheck.clear_vector_state();
+        }
+
+        access_backend!(self.backend, |mut backend| backend.clear_vector_state())
     }
 
     /// Sets the accessible region of the aux data, rounded up to the nearest page size.
