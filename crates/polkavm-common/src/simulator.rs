@@ -1763,6 +1763,292 @@ where
     }
 
     #[inline(always)]
+    fn wide_add_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_sub_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_and_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_or_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_xor_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_mul_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(
+            None,
+            None,
+            InstCost {
+                latency: 10,
+                decode_slots: MAX_DECODE_PER_CYCLE,
+                alu_slots: MAX_ALU_SLOTS,
+                mul_slots: MAX_MUL_SLOTS,
+                ..EMPTY_COST
+            },
+        )
+    }
+
+    #[inline(always)]
+    fn wide_div_unsigned_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(
+            None,
+            None,
+            InstCost {
+                latency: 60,
+                decode_slots: MAX_DECODE_PER_CYCLE,
+                alu_slots: MAX_ALU_SLOTS,
+                div_slots: MAX_DIV_SLOTS,
+                ..EMPTY_COST
+            },
+        )
+    }
+
+    #[inline(always)]
+    fn wide_div_signed_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(
+            None,
+            None,
+            InstCost {
+                latency: 60,
+                decode_slots: MAX_DECODE_PER_CYCLE,
+                alu_slots: MAX_ALU_SLOTS,
+                div_slots: MAX_DIV_SLOTS,
+                ..EMPTY_COST
+            },
+        )
+    }
+
+    #[inline(always)]
+    fn wide_rem_unsigned_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(
+            None,
+            None,
+            InstCost {
+                latency: 60,
+                decode_slots: MAX_DECODE_PER_CYCLE,
+                alu_slots: MAX_ALU_SLOTS,
+                div_slots: MAX_DIV_SLOTS,
+                ..EMPTY_COST
+            },
+        )
+    }
+
+    #[inline(always)]
+    fn wide_rem_signed_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(
+            None,
+            None,
+            InstCost {
+                latency: 60,
+                decode_slots: MAX_DECODE_PER_CYCLE,
+                alu_slots: MAX_ALU_SLOTS,
+                div_slots: MAX_DIV_SLOTS,
+                ..EMPTY_COST
+            },
+        )
+    }
+
+    #[inline(always)]
+    fn wide_set_equal_128(&mut self, _offset: u32, _args_length: u32, d: RawReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(Some(d), None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_set_not_equal_128(&mut self, _offset: u32, _args_length: u32, d: RawReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(Some(d), None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_set_less_than_unsigned_128(
+        &mut self,
+        _offset: u32,
+        _args_length: u32,
+        d: RawReg,
+        _s1: RawVecReg,
+        _s2: RawVecReg,
+    ) -> Self::ReturnTy {
+        self.dispatch_wide(Some(d), None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_set_less_than_signed_128(
+        &mut self,
+        _offset: u32,
+        _args_length: u32,
+        d: RawReg,
+        _s1: RawVecReg,
+        _s2: RawVecReg,
+    ) -> Self::ReturnTy {
+        self.dispatch_wide(Some(d), None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_shift_logical_left_128(
+        &mut self,
+        _offset: u32,
+        _args_length: u32,
+        _d: RawVecReg,
+        _s1: RawVecReg,
+        s2: RawReg,
+    ) -> Self::ReturnTy {
+        self.dispatch_wide(None, Some(s2), self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_shift_logical_right_128(
+        &mut self,
+        _offset: u32,
+        _args_length: u32,
+        _d: RawVecReg,
+        _s1: RawVecReg,
+        s2: RawReg,
+    ) -> Self::ReturnTy {
+        self.dispatch_wide(None, Some(s2), self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_shift_arithmetic_right_128(
+        &mut self,
+        _offset: u32,
+        _args_length: u32,
+        _d: RawVecReg,
+        _s1: RawVecReg,
+        s2: RawReg,
+    ) -> Self::ReturnTy {
+        self.dispatch_wide(None, Some(s2), self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_shift_logical_left_imm_128(
+        &mut self,
+        _offset: u32,
+        _args_length: u32,
+        _d: RawVecReg,
+        _s: RawVecReg,
+        _imm: i32,
+    ) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_shift_logical_right_imm_128(
+        &mut self,
+        _offset: u32,
+        _args_length: u32,
+        _d: RawVecReg,
+        _s: RawVecReg,
+        _imm: i32,
+    ) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_shift_arithmetic_right_imm_128(
+        &mut self,
+        _offset: u32,
+        _args_length: u32,
+        _d: RawVecReg,
+        _s: RawVecReg,
+        _imm: i32,
+    ) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_move_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_reverse_bytes_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_to_reg_128(&mut self, _offset: u32, _args_length: u32, _s: RawVecReg, d: RawReg) -> Self::ReturnTy {
+        self.dispatch_wide(Some(d), None, self.wide_alu_cost(1))
+    }
+
+    #[inline(always)]
+    fn wide_from_reg_unsigned_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, s: RawReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, Some(s), self.wide_alu_cost(1))
+    }
+
+    #[inline(always)]
+    fn wide_from_reg_signed_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, s: RawReg) -> Self::ReturnTy {
+        self.dispatch_wide(None, Some(s), self.wide_alu_cost(1))
+    }
+
+    #[inline(always)]
+    fn wide_count_set_bits_128(&mut self, _offset: u32, _args_length: u32, _s: RawVecReg, d: RawReg) -> Self::ReturnTy {
+        self.dispatch_wide(Some(d), None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_count_leading_zero_bits_128(&mut self, _offset: u32, _args_length: u32, _s: RawVecReg, d: RawReg) -> Self::ReturnTy {
+        self.dispatch_wide(Some(d), None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_count_trailing_zero_bits_128(&mut self, _offset: u32, _args_length: u32, _s: RawVecReg, d: RawReg) -> Self::ReturnTy {
+        self.dispatch_wide(Some(d), None, self.wide_alu_cost(2))
+    }
+
+    #[inline(always)]
+    fn wide_load_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, base: RawReg, _imm: i32) -> Self::ReturnTy {
+        let cost = InstCost {
+            load_slots: MAX_LOAD_SLOTS,
+            decode_slots: MAX_DECODE_PER_CYCLE,
+            ..self.load_cost()
+        };
+        self.dispatch_wide(None, Some(base), cost)
+    }
+
+    #[inline(always)]
+    fn wide_store_128(&mut self, _offset: u32, _args_length: u32, _s: RawVecReg, base: RawReg, _imm: i32) -> Self::ReturnTy {
+        let cost = InstCost {
+            store_slots: MAX_STORE_SLOTS,
+            decode_slots: MAX_DECODE_PER_CYCLE,
+            ..self.store_cost()
+        };
+        self.dispatch_wide(None, Some(base), cost)
+    }
+
+    #[inline(always)]
+    fn wide_load_absolute_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        let cost = InstCost {
+            load_slots: MAX_LOAD_SLOTS,
+            decode_slots: MAX_DECODE_PER_CYCLE,
+            ..self.load_cost()
+        };
+        self.dispatch_wide(None, None, cost)
+    }
+
+    #[inline(always)]
+    fn wide_load_imm_unsigned_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(1))
+    }
+
+    #[inline(always)]
+    fn wide_load_imm_signed_128(&mut self, _offset: u32, _args_length: u32, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.dispatch_wide(None, None, self.wide_alu_cost(1))
+    }
+
+    #[inline(always)]
     fn vector_arithmetic(&mut self, _offset: u32, _args_length: u32, _packed: i32) -> Self::ReturnTy {
         self.dispatch_wide(None, None, self.wide_alu_cost(4))
     }

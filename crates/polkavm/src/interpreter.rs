@@ -6387,6 +6387,142 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
         emit!(self, wide_store(self.program_counter, s, base, offset));
     }
 
+    // The 128-bit family is in the instruction table but has no semantics here yet, so it
+    // does what an instruction this executor cannot run already does. The next commit
+    // replaces these with the real handlers.
+
+    fn wide_add_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_sub_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_mul_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_and_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_or_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_xor_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_div_unsigned_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_div_signed_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_rem_unsigned_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_rem_signed_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_set_equal_128(&mut self, _d: RawReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_set_not_equal_128(&mut self, _d: RawReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_set_less_than_unsigned_128(&mut self, _d: RawReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_set_less_than_signed_128(&mut self, _d: RawReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_shift_logical_left_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_shift_logical_right_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_shift_arithmetic_right_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_shift_logical_left_imm_128(&mut self, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_shift_logical_right_imm_128(&mut self, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_shift_arithmetic_right_imm_128(&mut self, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_load_absolute_128(&mut self, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_load_imm_unsigned_128(&mut self, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_load_imm_signed_128(&mut self, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_move_128(&mut self, _d: RawVecReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_reverse_bytes_128(&mut self, _d: RawVecReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_to_reg_128(&mut self, _s: RawVecReg, _d: RawReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_count_set_bits_128(&mut self, _s: RawVecReg, _d: RawReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_count_leading_zero_bits_128(&mut self, _s: RawVecReg, _d: RawReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_count_trailing_zero_bits_128(&mut self, _s: RawVecReg, _d: RawReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_from_reg_unsigned_128(&mut self, _d: RawVecReg, _s: RawReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_from_reg_signed_128(&mut self, _d: RawVecReg, _s: RawReg) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_load_128(&mut self, _d: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.trap();
+    }
+
+    fn wide_store_128(&mut self, _s: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.trap();
+    }
+
     fn vector_arithmetic(&mut self, packed: i32) -> Self::ReturnTy {
         emit!(self, vector_arithmetic(packed));
     }

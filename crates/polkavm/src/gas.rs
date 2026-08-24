@@ -380,6 +380,39 @@ define_cost_model_struct! {
     wide_sub,
     wide_to_reg,
     wide_xor,
+    wide_add_128,
+    wide_and_128,
+    wide_count_leading_zero_bits_128,
+    wide_count_set_bits_128,
+    wide_count_trailing_zero_bits_128,
+    wide_div_signed_128,
+    wide_div_unsigned_128,
+    wide_from_reg_signed_128,
+    wide_from_reg_unsigned_128,
+    wide_load_128,
+    wide_load_absolute_128,
+    wide_load_imm_signed_128,
+    wide_load_imm_unsigned_128,
+    wide_move_128,
+    wide_mul_128,
+    wide_or_128,
+    wide_rem_signed_128,
+    wide_rem_unsigned_128,
+    wide_reverse_bytes_128,
+    wide_set_equal_128,
+    wide_set_less_than_signed_128,
+    wide_set_less_than_unsigned_128,
+    wide_set_not_equal_128,
+    wide_shift_arithmetic_right_128,
+    wide_shift_arithmetic_right_imm_128,
+    wide_shift_logical_left_128,
+    wide_shift_logical_left_imm_128,
+    wide_shift_logical_right_128,
+    wide_shift_logical_right_imm_128,
+    wide_store_128,
+    wide_sub_128,
+    wide_to_reg_128,
+    wide_xor_128,
     xnor,
     xor,
     xor_imm,
@@ -1323,6 +1356,171 @@ impl InstructionVisitor for GasVisitor {
     #[inline(always)]
     fn wide_store(&mut self, _d: RawWideReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
         self.cost += self.cost_model.wide_store;
+    }
+
+    #[inline(always)]
+    fn wide_add_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_add_128;
+    }
+
+    #[inline(always)]
+    fn wide_sub_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_sub_128;
+    }
+
+    #[inline(always)]
+    fn wide_mul_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_mul_128;
+    }
+
+    #[inline(always)]
+    fn wide_and_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_and_128;
+    }
+
+    #[inline(always)]
+    fn wide_or_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_or_128;
+    }
+
+    #[inline(always)]
+    fn wide_xor_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_xor_128;
+    }
+
+    #[inline(always)]
+    fn wide_div_unsigned_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_div_unsigned_128;
+    }
+
+    #[inline(always)]
+    fn wide_div_signed_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_div_signed_128;
+    }
+
+    #[inline(always)]
+    fn wide_rem_unsigned_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_rem_unsigned_128;
+    }
+
+    #[inline(always)]
+    fn wide_rem_signed_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_rem_signed_128;
+    }
+
+    #[inline(always)]
+    fn wide_set_equal_128(&mut self, _d: RawReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_set_equal_128;
+    }
+
+    #[inline(always)]
+    fn wide_set_not_equal_128(&mut self, _d: RawReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_set_not_equal_128;
+    }
+
+    #[inline(always)]
+    fn wide_set_less_than_unsigned_128(&mut self, _d: RawReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_set_less_than_unsigned_128;
+    }
+
+    #[inline(always)]
+    fn wide_set_less_than_signed_128(&mut self, _d: RawReg, _s1: RawVecReg, _s2: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_set_less_than_signed_128;
+    }
+
+    #[inline(always)]
+    fn wide_shift_logical_left_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_shift_logical_left_128;
+    }
+
+    #[inline(always)]
+    fn wide_shift_logical_right_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_shift_logical_right_128;
+    }
+
+    #[inline(always)]
+    fn wide_shift_arithmetic_right_128(&mut self, _d: RawVecReg, _s1: RawVecReg, _s2: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_shift_arithmetic_right_128;
+    }
+
+    #[inline(always)]
+    fn wide_shift_logical_left_imm_128(&mut self, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_shift_logical_left_imm_128;
+    }
+
+    #[inline(always)]
+    fn wide_shift_logical_right_imm_128(&mut self, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_shift_logical_right_imm_128;
+    }
+
+    #[inline(always)]
+    fn wide_shift_arithmetic_right_imm_128(&mut self, _d: RawVecReg, _s: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_shift_arithmetic_right_imm_128;
+    }
+
+    #[inline(always)]
+    fn wide_load_absolute_128(&mut self, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_load_absolute_128;
+    }
+
+    #[inline(always)]
+    fn wide_load_imm_unsigned_128(&mut self, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_load_imm_unsigned_128;
+    }
+
+    #[inline(always)]
+    fn wide_load_imm_signed_128(&mut self, _d: RawVecReg, _imm: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_load_imm_signed_128;
+    }
+
+    #[inline(always)]
+    fn wide_move_128(&mut self, _d: RawVecReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_move_128;
+    }
+
+    #[inline(always)]
+    fn wide_reverse_bytes_128(&mut self, _d: RawVecReg, _s: RawVecReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_reverse_bytes_128;
+    }
+
+    #[inline(always)]
+    fn wide_to_reg_128(&mut self, _s: RawVecReg, _d: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_to_reg_128;
+    }
+
+    #[inline(always)]
+    fn wide_count_set_bits_128(&mut self, _s: RawVecReg, _d: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_count_set_bits_128;
+    }
+
+    #[inline(always)]
+    fn wide_count_leading_zero_bits_128(&mut self, _s: RawVecReg, _d: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_count_leading_zero_bits_128;
+    }
+
+    #[inline(always)]
+    fn wide_count_trailing_zero_bits_128(&mut self, _s: RawVecReg, _d: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_count_trailing_zero_bits_128;
+    }
+
+    #[inline(always)]
+    fn wide_from_reg_unsigned_128(&mut self, _d: RawVecReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_from_reg_unsigned_128;
+    }
+
+    #[inline(always)]
+    fn wide_from_reg_signed_128(&mut self, _d: RawVecReg, _s: RawReg) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_from_reg_signed_128;
+    }
+
+    #[inline(always)]
+    fn wide_load_128(&mut self, _d: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_load_128;
+    }
+
+    #[inline(always)]
+    fn wide_store_128(&mut self, _s: RawVecReg, _base: RawReg, _offset: i32) -> Self::ReturnTy {
+        self.cost += self.cost_model.wide_store_128;
     }
 
     #[inline(always)]

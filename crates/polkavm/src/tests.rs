@@ -6066,6 +6066,71 @@ run_wide_tests! {
     clearing_the_registers_also_clears_the_wide_registers
 }
 
+/// The cycles the detailed cost model charges a basic block holding one instruction.
+#[cfg(feature = "std")]
+fn block_cost(instruction: polkavm_common::program::Instruction) -> i64 {
+    let engine = Engine::new(&Config::default()).unwrap();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::ReviveV1);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[instruction, asm::trap()], &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    module_config.set_cost_model(Some(crate::CostModelKind::Full(crate::CacheModel::L1Hit)));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    module.calculate_gas_cost_for(ProgramCounter(0)).unwrap()
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn wide_128_costs_follow_the_halved_width() {
+    use polkavm_common::program::{VecReg::*, WideReg::*};
+
+    // A block of one instruction followed by a trap is charged that instruction's latency,
+    // so these numbers are the prices the detailed cost model puts on the family. Half the
+    // width is half as many limbs to multiply and to divide, which is the only part of the
+    // family expensive enough for a contract to notice.
+    assert_eq!(block_cost(asm::wide_mul_128(V1, V2, V3)), 10);
+    assert_eq!(block_cost(asm::wide_mul(W1, W2, W3)), 20);
+
+    for divide in [
+        asm::wide_div_unsigned_128(V1, V2, V3),
+        asm::wide_div_signed_128(V1, V2, V3),
+        asm::wide_rem_unsigned_128(V1, V2, V3),
+        asm::wide_rem_signed_128(V1, V2, V3),
+    ] {
+        assert_eq!(block_cost(divide), 60);
+    }
+    assert_eq!(block_cost(asm::wide_div_unsigned(W1, W2, W3)), 127);
+
+    // The memory shapes are priced by the access rather than by the width, so halving the
+    // width buys nothing there and they cost what the 256-bit ones do.
+    assert_eq!(block_cost(asm::wide_load_128(V1, A0, 0)), block_cost(asm::wide_load(W1, A0, 0)));
+    assert_eq!(block_cost(asm::wide_store_128(V1, A0, 0)), block_cost(asm::wide_store(W1, A0, 0)));
+    assert_eq!(
+        block_cost(asm::wide_load_absolute_128(V1, 0)),
+        block_cost(asm::wide_load_absolute(W1, 0))
+    );
+
+    // Everything else is a pass over the limbs and stays cheaper than the multiply.
+    for cheap in [
+        asm::wide_add_128(V1, V2, V3),
+        asm::wide_and_128(V1, V2, V3),
+        asm::wide_set_equal_128(A1, V2, V3),
+        asm::wide_shift_logical_left_128(V1, V2, A0),
+        asm::wide_shift_logical_left_imm_128(V1, V2, 1),
+        asm::wide_move_128(V1, V2),
+        asm::wide_reverse_bytes_128(V1, V2),
+        asm::wide_count_set_bits_128(V1, A0),
+        asm::wide_to_reg_128(V1, A0),
+        asm::wide_from_reg_unsigned_128(V1, A0),
+        asm::wide_load_imm_unsigned_128(V1, 1),
+    ] {
+        assert!(block_cost(cheap) < block_cost(asm::wide_mul_128(V1, V2, V3)));
+    }
+}
+
 fn run_wide_program(config: &Config, operands: &[polkavm_common::wide::U256], body: &[polkavm_common::program::Instruction]) -> [u8; 32] {
     use polkavm_common::program::WideReg::*;
     use polkavm_common::wide::U256;
