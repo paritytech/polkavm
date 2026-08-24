@@ -1439,6 +1439,391 @@ where
     type ReturnTy = ();
 
     // Simple ALU instructions (3 op)
+    // The XReviveVec wide instructions. The simulator models the general purpose registers
+    // only, so it has no wide file to operate on; a program using them is out of its scope
+    // rather than something it can simulate wrongly.
+
+    fn wide_move(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_byte_swap(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_shift_left(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: RawReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_shift_right_logical(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: RawReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_shift_right_arithmetic(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: RawReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_set_equal(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: RawReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_set_not_equal(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: RawReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_set_less_than_unsigned(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: RawReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_set_less_than_signed(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: RawReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_widen_unsigned(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: RawReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_widen_signed(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: RawReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_truncate(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: RawReg,
+        _s1: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_add_mod(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+        _s3: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_mul_mod(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+        _s3: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_load(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: RawReg,
+        _imm: i32,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_store(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: RawReg,
+        _imm: i32,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+    fn wide_add(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_sub(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_mul(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_and(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_or(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_xor(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_div_unsigned(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_div_signed(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_rem_unsigned(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_rem_signed(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_exp(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_sign_extend(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_min_unsigned(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_min_signed(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_max_unsigned(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
+
+    fn wide_max_signed(
+        &mut self,
+        _offset: u32,
+        _length: u32,
+        _width: crate::program::WideWidth,
+        _d: crate::program::WideReg,
+        _s1: crate::program::WideReg,
+        _s2: crate::program::WideReg,
+    ) -> Self::ReturnTy {
+        unimplemented!("the simulator does not model the XReviveVec wide registers")
+    }
 
     #[inline(always)]
     fn xor(&mut self, _offset: u32, _length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {

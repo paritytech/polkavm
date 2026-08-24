@@ -37,6 +37,8 @@ enum OptLevel {
 enum Isa {
     #[clap(name = "revive_v1")]
     ReviveV1,
+    #[clap(name = "revive_v2")]
+    ReviveV2,
     #[clap(name = "jam_v1")]
     JamV1,
     #[clap(name = "latest32")]
@@ -46,9 +48,19 @@ enum Isa {
 }
 
 impl Isa {
+    fn target(self) -> TargetInstructionSet {
+        match self {
+            Isa::ReviveV1 => TargetInstructionSet::ReviveV1,
+            Isa::ReviveV2 => TargetInstructionSet::ReviveV2,
+            Isa::JamV1 => TargetInstructionSet::JamV1,
+            Isa::Latest32 | Isa::Latest64 => TargetInstructionSet::Latest,
+        }
+    }
+
     fn convert(self) -> InstructionSetKind {
         match self {
             Isa::ReviveV1 => InstructionSetKind::ReviveV1,
+            Isa::ReviveV2 => InstructionSetKind::ReviveV2,
             Isa::JamV1 => InstructionSetKind::JamV1,
             Isa::Latest32 => InstructionSetKind::Latest32,
             Isa::Latest64 => InstructionSetKind::Latest64,
@@ -93,6 +105,10 @@ enum Args {
         /// Exports to use to build a dispatch table, separated by a comma.
         #[clap(long)]
         dispatch_table: Option<String>,
+
+        /// The instruction set to target.
+        #[clap(long, value_enum, default_value = "latest64")]
+        isa: Isa,
 
         /// The input file.
         input: PathBuf,
@@ -173,6 +189,7 @@ fn main() {
             run_only_if_newer,
             min_stack_size,
             dispatch_table,
+            isa,
         } => main_link(
             input,
             output,
@@ -182,6 +199,7 @@ fn main() {
             run_only_if_newer,
             min_stack_size,
             dispatch_table,
+            isa,
         ),
         Args::Disassemble {
             output,
@@ -235,6 +253,7 @@ fn main_link(
     run_only_if_newer: bool,
     min_stack_size: Option<u32>,
     dispatch_table: Option<String>,
+    isa: Isa,
 ) -> Result<(), String> {
     if run_only_if_newer {
         if let Ok(output_mtime) = std::fs::metadata(&output).and_then(|m| m.modified()) {
@@ -275,7 +294,7 @@ fn main_link(
         }
     };
 
-    let blob = match polkavm_linker::program_from_elf(config, TargetInstructionSet::Latest, &data) {
+    let blob = match polkavm_linker::program_from_elf(config, isa.target(), &data) {
         Ok(blob) => blob,
         Err(error) => {
             bail!("failed to link {input:?}: {error}");

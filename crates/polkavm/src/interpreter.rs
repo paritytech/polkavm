@@ -6,6 +6,8 @@
 use crate::api::{MemoryAccessError, MemoryProtection, Module, RegValue, SetCacheSizeLimitArgs};
 use crate::error::Error;
 use crate::gas::{CostModelKind, GasVisitor};
+use polkavm_common::program::{WideReg, WideWidth};
+use polkavm_common::wide;
 use crate::utils::{FlatMap, InterruptKind, Segfault};
 use crate::{Gas, GasMeteringKind, ProgramCounter};
 use alloc::boxed::Box;
@@ -94,6 +96,22 @@ trait Memory {
         address: u32,
         value: i64,
     ) -> Target;
+
+    /// Reads a wide value's worth of bytes. The typed path above lands in a general purpose
+    /// register and the handler threading cannot loop over it, so a wide access needs its own
+    /// byte-range read.
+    fn read_wide(instance: &mut InterpretedInstance, address: u32, out: &mut [u8]) -> Result<(), WideFault>;
+
+    /// Writes a wide value's worth of bytes.
+    fn write_wide(instance: &mut InterpretedInstance, address: u32, data: &[u8]) -> Result<(), WideFault>;
+}
+
+/// Why a wide access could not be completed. The two memory kinds fail differently -- the
+/// standard one traps past its regions, the dynamic one faults on an absent page -- so the
+/// reason travels back to the handler rather than being decided here.
+enum WideFault {
+    Trap,
+    Segfault { page_address: u32, is_write: bool },
 }
 
 #[repr(align(64))]
@@ -795,6 +813,89 @@ impl Memory for StandardMemory {
         }
     }
 
+    fn read_wide(instance: &mut InterpretedInstance, address: u32, out: &mut [u8]) -> Result<(), WideFault> {
+        let state = Self::memory_state(instance);
+        let bytes = out.len();
+
+        // The stack is only partly resident and the absent part reads as zero, exactly as the
+        // scalar path does; everywhere else the range either fits a region or traps.
+        if address >= state.aux_data_address {
+            let offset = cast(address - state.aux_data_address).to_usize();
+            let subslice = state.aux.get(offset..offset + bytes).ok_or(WideFault::Trap)?;
+            out.copy_from_slice(subslice);
+        } else if address >= state.stack_address_low {
+            let offset = cast(address - state.stack_address_low).to_usize();
+            if offset + bytes > state.stack_size {
+                return Err(WideFault::Trap);
+            }
+            let resident_offset = state.stack_size - state.stack.len();
+            out.fill(0);
+            for index in 0..bytes {
+                if let Some(at) = (offset + index).checked_sub(resident_offset) {
+                    if let Some(&byte) = state.stack.get(at) {
+                        out[index] = byte;
+                    }
+                }
+            }
+        } else if address >= state.rw_data_address {
+            let offset = cast(address - state.rw_data_address).to_usize();
+            if offset + bytes > state.rw_data_size {
+                return Err(WideFault::Trap);
+            }
+            // Only the touched prefix is resident; the rest has never been written and reads
+            // as zero rather than faulting.
+            out.fill(0);
+            for index in 0..bytes {
+                if let Some(&byte) = state.rw_data.get(offset + index) {
+                    out[index] = byte;
+                }
+            }
+        } else if address >= state.ro_data_address {
+            let offset = cast(address - state.ro_data_address).to_usize();
+            let subslice = state.ro_data.get(offset..offset + bytes).ok_or(WideFault::Trap)?;
+            out.copy_from_slice(subslice);
+        } else {
+            return Err(WideFault::Trap);
+        }
+        Ok(())
+    }
+
+    fn write_wide(instance: &mut InterpretedInstance, address: u32, data: &[u8]) -> Result<(), WideFault> {
+        let bytes = data.len();
+        let state = Self::memory_state_mut(instance);
+        if address >= state.aux_data_address {
+            let offset = cast(address - state.aux_data_address).to_usize();
+            let subslice = state.aux.get_mut(offset..offset + bytes).ok_or(WideFault::Trap)?;
+            subslice.copy_from_slice(data);
+        } else if address >= state.stack_address_low {
+            // Growing the stack is the scalar path's job too, and it owns the limit checks.
+            match state.prepare_stack_write(cast(address).to_usize(), bytes) {
+                PrepareWriteResult::Ok(range) => {
+                    let subslice = state.stack.get_mut(range).ok_or(WideFault::Trap)?;
+                    subslice.copy_from_slice(data);
+                }
+                PrepareWriteResult::OutOfRangeAccess | PrepareWriteResult::MemoryLimitReached => {
+                    return Err(WideFault::Trap)
+                }
+            }
+        } else if address >= state.rw_data_address {
+            let offset = cast(address - state.rw_data_address).to_usize();
+            let end = offset + bytes;
+            // Read-write data is resident only as far as it has been touched, so grow it first.
+            if state.rw_data.len() < end {
+                if end > state.rw_data_size || !state.rw_data_resize(end) {
+                    return Err(WideFault::Trap);
+                }
+            }
+            let subslice = state.rw_data.get_mut(offset..end).ok_or(WideFault::Trap)?;
+            subslice.copy_from_slice(data);
+        } else {
+            // Read-only data and anything below it.
+            return Err(WideFault::Trap);
+        }
+        Ok(())
+    }
+
     #[cfg_attr(not(debug_assertions), inline(always))]
     fn store_impl<T: StoreTy, const DEBUG: bool>(
         instance: &mut InterpretedInstance,
@@ -1155,6 +1256,47 @@ impl Memory for DynamicMemory {
         }
     }
 
+    fn read_wide(instance: &mut InterpretedInstance, address: u32, out: &mut [u8]) -> Result<(), WideFault> {
+        let bytes = out.len();
+        let mut done = 0usize;
+        while done < bytes {
+            let at = address.wrapping_add(cast(done).to_u32_or_panic());
+            let page_address = Self::memory_state(instance).round_to_page_size_down(at);
+            let page_size = cast(Self::memory_state(instance).page_size).to_usize();
+            let within = cast(at - page_address).to_usize();
+            let take = core::cmp::min(page_size - within, bytes - done);
+            let state = Self::memory_state(instance);
+            let Some(page) = state.pages.get(&page_address) else {
+                return Err(WideFault::Segfault { page_address, is_write: false });
+            };
+            out[done..done + take].copy_from_slice(&page[within..within + take]);
+            done += take;
+        }
+        Ok(())
+    }
+
+    fn write_wide(instance: &mut InterpretedInstance, address: u32, data: &[u8]) -> Result<(), WideFault> {
+        let bytes = data.len();
+        let mut done = 0usize;
+        while done < bytes {
+            let at = address.wrapping_add(cast(done).to_u32_or_panic());
+            let page_address = Self::memory_state(instance).round_to_page_size_down(at);
+            let page_size = cast(Self::memory_state(instance).page_size).to_usize();
+            let within = cast(at - page_address).to_usize();
+            let take = core::cmp::min(page_size - within, bytes - done);
+            let state = Self::memory_state_mut(instance);
+            let Some(page) = state.pages.get_mut(&page_address) else {
+                return Err(WideFault::Segfault { page_address, is_write: true });
+            };
+            if page.is_read_only {
+                return Err(WideFault::Segfault { page_address, is_write: true });
+            }
+            page[within..within + take].copy_from_slice(&data[done..done + take]);
+            done += take;
+        }
+        Ok(())
+    }
+
     fn store_impl<T: StoreTy, const DEBUG: bool>(
         instance: &mut InterpretedInstance,
         compiled_offset: Target,
@@ -1490,6 +1632,9 @@ pub(crate) struct InterpretedInstance {
     standard_memory: StandardMemory,
     dynamic_memory: DynamicMemory,
     regs: [i64; Reg::ALL.len()],
+    /// The wide register file: one slot per 128 bits, so a wider register is a run of them and
+    /// the widths alias exactly as the guest's vector registers do.
+    wide: [u64; WideReg::FILE_BYTES / 8],
     program_counter: ProgramCounter,
     program_counter_valid: bool,
     charge_gas_on_entry: bool,
@@ -1523,6 +1668,7 @@ impl InterpretedInstance {
             standard_memory: StandardMemory::new(),
             dynamic_memory: DynamicMemory::new(),
             regs: [0; Reg::ALL.len()],
+            wide: [0; WideReg::FILE_BYTES / 8],
             program_counter: ProgramCounter(!0),
             program_counter_valid: false,
             charge_gas_on_entry: true,
@@ -2284,6 +2430,148 @@ impl InterpretedInstance {
     }
 
     #[inline(always)]
+    /// Reads a wide register into a limb buffer.
+    #[inline(always)]
+    fn wide_get(&self, reg: WideReg, width: WideWidth) -> [u64; wide::MAX_LIMBS] {
+        let mut out = [0u64; wide::MAX_LIMBS];
+        let n = width.limbs();
+        out[..n].copy_from_slice(&self.wide[reg.limb_offset()..reg.limb_offset() + n]);
+        out
+    }
+
+    /// Writes a limb buffer into a wide register.
+    #[inline(always)]
+    fn wide_set(&mut self, reg: WideReg, width: WideWidth, value: &[u64]) {
+        let n = width.limbs();
+        self.wide[reg.limb_offset()..reg.limb_offset() + n].copy_from_slice(&value[..n]);
+    }
+
+    /// A wide unary operation, where the second source of the encoding is unused.
+    #[inline(always)]
+    fn wide_unary<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        width: WideWidth,
+        d: WideReg,
+        s1: WideReg,
+        callback: impl Fn(&mut [u64], &[u64]),
+    ) -> Target {
+        let n = width.limbs();
+        let a = self.wide_get(s1, width);
+        let mut out = [0u64; wide::MAX_LIMBS];
+        callback(&mut out[..n], &a[..n]);
+        self.wide_set(d, width, &out);
+        self.go_to_next_instruction(compiled_offset)
+    }
+
+    /// A wide shift, whose amount comes from a general purpose register.
+    #[inline(always)]
+    fn wide_shift_op<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        width: WideWidth,
+        d: WideReg,
+        s1: WideReg,
+        s2: Reg,
+        callback: impl Fn(&mut [u64], &[u64], u32),
+    ) -> Target {
+        let n = width.limbs();
+        let a = self.wide_get(s1, width);
+        // Only the low bits of the amount can matter, and anything at or past the width
+        // saturates inside the shift itself.
+        let amount = cast(self.regs[s2.to_usize()]).bitwise_as_u64();
+        let amount = if amount > u64::from(u32::MAX) { u32::MAX } else { amount as u32 };
+        let mut out = [0u64; wide::MAX_LIMBS];
+        callback(&mut out[..n], &a[..n], amount);
+        self.wide_set(d, width, &out);
+        self.go_to_next_instruction(compiled_offset)
+    }
+
+    /// A wide comparison, whose result is a scalar boolean.
+    #[inline(always)]
+    fn wide_compare<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        width: WideWidth,
+        d: Reg,
+        s1: WideReg,
+        s2: WideReg,
+        callback: impl Fn(&[u64], &[u64]) -> bool,
+    ) -> Target {
+        let n = width.limbs();
+        let a = self.wide_get(s1, width);
+        let b = self.wide_get(s2, width);
+        let value = i64::from(callback(&a[..n], &b[..n]));
+        self.set_i64::<DEBUG>(d, value);
+        self.go_to_next_instruction(compiled_offset)
+    }
+
+    /// A modular operation over three wide sources.
+    #[inline(always)]
+    fn wide_ternary<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        width: WideWidth,
+        d: WideReg,
+        s1: WideReg,
+        s2: WideReg,
+        s3: WideReg,
+        callback: impl Fn(&mut [u64], &[u64], &[u64], &[u64]),
+    ) -> Target {
+        let n = width.limbs();
+        let a = self.wide_get(s1, width);
+        let b = self.wide_get(s2, width);
+        let m = self.wide_get(s3, width);
+        let mut out = [0u64; wide::MAX_LIMBS];
+        callback(&mut out[..n], &a[..n], &b[..n], &m[..n]);
+        self.wide_set(d, width, &out);
+        self.go_to_next_instruction(compiled_offset)
+    }
+
+    /// The address a wide access uses: a base register plus a sign-extended offset, truncated
+    /// to the guest's 32-bit address space exactly as the scalar accesses are.
+    #[inline(always)]
+    fn wide_address(&self, base: Reg, offset: i32) -> u32 {
+        let address = self.regs[base.to_usize()].wrapping_add(cast(offset).to_i64_sign_extend());
+        cast(cast(address).bitwise_as_u64()).truncate_to_u32()
+    }
+
+    /// Turns a failed wide access into the same outcome the scalar path would produce.
+    #[inline(always)]
+    fn wide_fault(&mut self, compiled_offset: Target, program_counter: ProgramCounter, fault: WideFault) -> Target {
+        match fault {
+            WideFault::Trap => trap_impl::<false>(self, program_counter),
+            WideFault::Segfault { page_address, is_write } => {
+                self.segfault_impl(compiled_offset, program_counter, page_address, is_write)
+            }
+        }
+    }
+
+    /// Runs a wide binary operation. Operands are copied out first, so a destination that
+    /// overlaps a source -- which the aliasing between widths makes easy -- still reads the
+    /// values the instruction was given.
+    #[inline(always)]
+    fn wide_binary<const DEBUG: bool>(
+        &mut self,
+        compiled_offset: Target,
+        width: WideWidth,
+        d: WideReg,
+        s1: WideReg,
+        s2: WideReg,
+        callback: impl Fn(&mut [u64], &[u64], &[u64]),
+    ) -> Target {
+        let n = width.limbs();
+        let mut a = [0u64; wide::MAX_LIMBS];
+        let mut b = [0u64; wide::MAX_LIMBS];
+        a[..n].copy_from_slice(&self.wide[s1.limb_offset()..s1.limb_offset() + n]);
+        b[..n].copy_from_slice(&self.wide[s2.limb_offset()..s2.limb_offset() + n]);
+
+        let mut out = [0u64; wide::MAX_LIMBS];
+        callback(&mut out[..n], &a[..n], &b[..n]);
+        self.wide[d.limb_offset()..d.limb_offset() + n].copy_from_slice(&out[..n]);
+        self.go_to_next_instruction(compiled_offset)
+    }
+
     fn set3_i64<const DEBUG: bool>(
         &mut self,
         compiled_offset: Target,
@@ -2868,6 +3156,27 @@ macro_rules! define_interpreter {
         $body
     }};
 
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: ProgramCounter, $a1:ident: WideWidth, $a2:ident: WideReg, $a3:ident: Reg, $a4:ident: i32) => {{
+        impl Args {
+            pub fn $handler_name(a0: ProgramCounter, a1: WideWidth, a2: WideReg, a3: impl Into<Reg>, a4: i32) -> Args {
+                Args {
+                    a0: a0.0,
+                    a1: a1.to_raw() | (a2.raw() << 2) | (a3.into().to_u32() << 7),
+                    a2: cast(a4).bitwise_as_u32(),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = ProgramCounter(args.a0);
+        let $a1 = WideWidth::from_raw(args.a1);
+        let $a2 = WideReg::from_raw(args.a1 >> 2, $a1);
+        let $a3 = transmute_reg((args.a1 >> 7) & 0b1111);
+        let $a4 = cast(args.a2).bitwise_as_i32();
+        $body
+    }};
+
     (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: ProgramCounter, $a1:ident: Reg, $a2:ident: Reg, $a3:ident: i32) => {{
         impl Args {
             #[allow(clippy::needless_update)]
@@ -2927,6 +3236,124 @@ macro_rules! define_interpreter {
         let args = $self.compiled_args[cast($compiled_offset).to_usize()];
         let $a0 = transmute_reg(args.a0);
         let $a1 = transmute_reg(args.a1);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideWidth, $a1:ident: WideReg, $a2:ident: WideReg, $a3:ident: Reg) => {{
+        impl Args {
+            pub fn $handler_name(a0: WideWidth, a1: WideReg, a2: WideReg, a3: impl Into<Reg>) -> Args {
+                Args { a0: a0.to_raw(), a1: a1.raw(), a2: a2.raw(), a3: a3.into().to_u32() }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = WideWidth::from_raw(args.a0);
+        let $a1 = WideReg::from_raw(args.a1, $a0);
+        let $a2 = WideReg::from_raw(args.a2, $a0);
+        let $a3 = transmute_reg(args.a3);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideWidth, $a1:ident: Reg, $a2:ident: WideReg, $a3:ident: WideReg) => {{
+        impl Args {
+            pub fn $handler_name(a0: WideWidth, a1: impl Into<Reg>, a2: WideReg, a3: WideReg) -> Args {
+                Args { a0: a0.to_raw(), a1: a1.into().to_u32(), a2: a2.raw(), a3: a3.raw() }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = WideWidth::from_raw(args.a0);
+        let $a1 = transmute_reg(args.a1);
+        let $a2 = WideReg::from_raw(args.a2, $a0);
+        let $a3 = WideReg::from_raw(args.a3, $a0);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideWidth, $a1:ident: WideReg, $a2:ident: Reg) => {{
+        impl Args {
+            pub fn $handler_name(a0: WideWidth, a1: WideReg, a2: impl Into<Reg>) -> Args {
+                Args { a0: a0.to_raw(), a1: a1.raw(), a2: a2.into().to_u32(), ..Args::default() }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = WideWidth::from_raw(args.a0);
+        let $a1 = WideReg::from_raw(args.a1, $a0);
+        let $a2 = transmute_reg(args.a2);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideWidth, $a1:ident: Reg, $a2:ident: WideReg) => {{
+        impl Args {
+            pub fn $handler_name(a0: WideWidth, a1: impl Into<Reg>, a2: WideReg) -> Args {
+                Args { a0: a0.to_raw(), a1: a1.into().to_u32(), a2: a2.raw(), ..Args::default() }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = WideWidth::from_raw(args.a0);
+        let $a1 = transmute_reg(args.a1);
+        let $a2 = WideReg::from_raw(args.a2, $a0);
+        $body
+    }};
+
+    // Four wide registers and the width pack into one slot: two bits and four five-bit indices.
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideWidth, $a1:ident: WideReg, $a2:ident: WideReg, $a3:ident: WideReg, $a4:ident: WideReg) => {{
+        impl Args {
+            pub fn $handler_name(a0: WideWidth, a1: WideReg, a2: WideReg, a3: WideReg, a4: WideReg) -> Args {
+                Args {
+                    a0: a0.to_raw() | (a1.raw() << 2) | (a2.raw() << 7) | (a3.raw() << 12) | (a4.raw() << 17),
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = WideWidth::from_raw(args.a0);
+        let $a1 = WideReg::from_raw(args.a0 >> 2, $a0);
+        let $a2 = WideReg::from_raw(args.a0 >> 7, $a0);
+        let $a3 = WideReg::from_raw(args.a0 >> 12, $a0);
+        let $a4 = WideReg::from_raw(args.a0 >> 17, $a0);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideWidth, $a1:ident: WideReg, $a2:ident: Reg, $a3:ident: i32) => {{
+        impl Args {
+            pub fn $handler_name(a0: WideWidth, a1: WideReg, a2: impl Into<Reg>, a3: i32) -> Args {
+                Args {
+                    a0: a0.to_raw(),
+                    a1: a1.raw(),
+                    a2: a2.into().to_u32(),
+                    a3: cast(a3).bitwise_as_u32(),
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = WideWidth::from_raw(args.a0);
+        let $a1 = WideReg::from_raw(args.a1, $a0);
+        let $a2 = transmute_reg(args.a2);
+        let $a3 = cast(args.a3).bitwise_as_i32();
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: WideWidth, $a1:ident: WideReg, $a2:ident: WideReg, $a3:ident: WideReg) => {{
+        impl Args {
+            pub fn $handler_name(a0: WideWidth, a1: WideReg, a2: WideReg, a3: WideReg) -> Args {
+                Args {
+                    a0: a0.to_raw(),
+                    a1: a1.raw(),
+                    a2: a2.raw(),
+                    a3: a3.raw(),
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = WideWidth::from_raw(args.a0);
+        let $a1 = WideReg::from_raw(args.a1, $a0);
+        let $a2 = WideReg::from_raw(args.a2, $a0);
+        let $a3 = WideReg::from_raw(args.a3, $a0);
         $body
     }};
 
@@ -3565,6 +3992,237 @@ define_interpreter! {
         visitor.set3_u32::<DEBUG>(compiled_offset, d, s1, s2, u32::wrapping_add)
     }
 
+    fn wide_move<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, _s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_move i{} {d}, {s1}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_unary::<DEBUG>(compiled_offset, width, d, s1, |dst, a| dst.copy_from_slice(a))
+    }
+
+    fn wide_byte_swap<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, _s2: WideReg) -> Target {
+        visitor.wide_unary::<DEBUG>(compiled_offset, width, d, s1, wide::byte_swap)
+    }
+
+    fn wide_shift_left<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: Reg) -> Target {
+        visitor.wide_shift_op::<DEBUG>(compiled_offset, width, d, s1, s2, wide::shift_left)
+    }
+
+    fn wide_shift_right_logical<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: Reg) -> Target {
+        visitor.wide_shift_op::<DEBUG>(compiled_offset, width, d, s1, s2, wide::shift_right_logical)
+    }
+
+    fn wide_shift_right_arithmetic<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: Reg) -> Target {
+        visitor.wide_shift_op::<DEBUG>(compiled_offset, width, d, s1, s2, wide::shift_right_arithmetic)
+    }
+
+    fn wide_set_equal<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: Reg, s1: WideReg, s2: WideReg) -> Target {
+        visitor.wide_compare::<DEBUG>(compiled_offset, width, d, s1, s2, |a, b| wide::cmp_unsigned(a, b).is_eq())
+    }
+
+    fn wide_set_not_equal<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: Reg, s1: WideReg, s2: WideReg) -> Target {
+        visitor.wide_compare::<DEBUG>(compiled_offset, width, d, s1, s2, |a, b| wide::cmp_unsigned(a, b).is_ne())
+    }
+
+    fn wide_set_less_than_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: Reg, s1: WideReg, s2: WideReg) -> Target {
+        visitor.wide_compare::<DEBUG>(compiled_offset, width, d, s1, s2, |a, b| wide::cmp_unsigned(a, b).is_lt())
+    }
+
+    fn wide_set_less_than_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: Reg, s1: WideReg, s2: WideReg) -> Target {
+        visitor.wide_compare::<DEBUG>(compiled_offset, width, d, s1, s2, |a, b| wide::cmp_signed(a, b).is_lt())
+    }
+
+    fn wide_widen_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: Reg) -> Target {
+        let value = cast(visitor.regs[s1.to_usize()]).bitwise_as_u64();
+        let mut out = [0u64; wide::MAX_LIMBS];
+        out[0] = value;
+        visitor.wide_set(d, width, &out);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_widen_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: Reg) -> Target {
+        let value = visitor.regs[s1.to_usize()];
+        let fill = if value < 0 { u64::MAX } else { 0 };
+        let mut out = [fill; wide::MAX_LIMBS];
+        out[0] = cast(value).bitwise_as_u64();
+        visitor.wide_set(d, width, &out);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_truncate<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: Reg, s1: WideReg) -> Target {
+        let value = visitor.wide_get(s1, width)[0];
+        visitor.set_i64::<DEBUG>(d, cast(value).bitwise_as_i64());
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_add_mod<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg, s3: WideReg) -> Target {
+        visitor.wide_ternary::<DEBUG>(compiled_offset, width, d, s1, s2, s3, wide::add_mod)
+    }
+
+    fn wide_mul_mod<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg, s3: WideReg) -> Target {
+        visitor.wide_ternary::<DEBUG>(compiled_offset, width, d, s1, s2, s3, wide::mul_mod)
+    }
+    fn wide_load<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, width: WideWidth, d: WideReg, base: Reg, offset: i32) -> Target {
+        visitor.program_counter = program_counter;
+        let address = visitor.wide_address(base, offset);
+        let mut bytes = [0u8; WideReg::SLOT_BYTES * 8];
+        let n = width.bytes();
+        if let Err(fault) = M::read_wide(visitor, address, &mut bytes[..n]) {
+            return visitor.wide_fault(compiled_offset, program_counter, fault);
+        }
+
+        let mut out = [0u64; wide::MAX_LIMBS];
+        for (index, limb) in out[..width.limbs()].iter_mut().enumerate() {
+            let at = index * 8;
+            *limb = u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+        }
+        visitor.wide_set(d, width, &out);
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_store<M: Memory, const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, width: WideWidth, s: WideReg, base: Reg, offset: i32) -> Target {
+        visitor.program_counter = program_counter;
+        let address = visitor.wide_address(base, offset);
+        let value = visitor.wide_get(s, width);
+        let mut bytes = [0u8; WideReg::SLOT_BYTES * 8];
+        for (index, limb) in value[..width.limbs()].iter().enumerate() {
+            bytes[index * 8..index * 8 + 8].copy_from_slice(&limb.to_le_bytes());
+        }
+
+        let n = width.bytes();
+        if let Err(fault) = M::write_wide(visitor, address, &bytes[..n]) {
+            return visitor.wide_fault(compiled_offset, program_counter, fault);
+        }
+        visitor.go_to_next_instruction(compiled_offset)
+    }
+
+    fn wide_add<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_add i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { wide::add(dst, a, b) })
+    }
+
+    fn wide_sub<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_sub i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { wide::sub(dst, a, b) })
+    }
+
+    fn wide_mul<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_mul i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { wide::mul(dst, a, b) })
+    }
+
+    fn wide_and<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_and i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { for i in 0..dst.len() { dst[i] = a[i] & b[i] } })
+    }
+
+    fn wide_or<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_or i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { for i in 0..dst.len() { dst[i] = a[i] | b[i] } })
+    }
+
+    fn wide_xor<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_xor i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { for i in 0..dst.len() { dst[i] = a[i] ^ b[i] } })
+    }
+
+    fn wide_div_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_div_unsigned i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { let mut r = [0u64; wide::MAX_LIMBS]; wide::div_rem_unsigned(dst, &mut r[..a.len()], a, b) })
+    }
+
+    fn wide_div_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_div_signed i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { let mut r = [0u64; wide::MAX_LIMBS]; wide::div_rem_signed(dst, &mut r[..a.len()], a, b) })
+    }
+
+    fn wide_rem_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_rem_unsigned i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { let mut q = [0u64; wide::MAX_LIMBS]; wide::div_rem_unsigned(&mut q[..a.len()], dst, a, b) })
+    }
+
+    fn wide_rem_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_rem_signed i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { let mut q = [0u64; wide::MAX_LIMBS]; wide::div_rem_signed(&mut q[..a.len()], dst, a, b) })
+    }
+
+    fn wide_exp<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_exp i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { wide::exp(dst, a, b) })
+    }
+
+    fn wide_sign_extend<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_sign_extend i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { wide::sign_extend(dst, a, b) })
+    }
+
+    fn wide_min_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_min_unsigned i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { dst.copy_from_slice(if wide::cmp_unsigned(a, b).is_le() { a } else { b }) })
+    }
+
+    fn wide_min_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_min_signed i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { dst.copy_from_slice(if wide::cmp_signed(a, b).is_le() { a } else { b }) })
+    }
+
+    fn wide_max_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_max_unsigned i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { dst.copy_from_slice(if wide::cmp_unsigned(a, b).is_ge() { a } else { b }) })
+    }
+
+    fn wide_max_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Target {
+        if DEBUG {
+            log::trace!("[{}]: wide_max_signed i{} {d}, {s1}, {s2}", compiled_offset, width.bits());
+        }
+
+        visitor.wide_binary::<DEBUG>(compiled_offset, width, d, s1, s2, |dst, a, b| { dst.copy_from_slice(if wide::cmp_signed(a, b).is_ge() { a } else { b }) })
+    }
     fn add_64<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, d: Reg, s1: Reg, s2: Reg) -> Target {
         if DEBUG {
             log::trace!("[{}]: {}", compiled_offset, asm::add_64(d, s1, s2));
@@ -4973,6 +5631,132 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
         emit!(self, add_32(d, s1, s2));
     }
 
+    fn wide_move(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_move(width, d, s1, s2));
+    }
+
+    fn wide_byte_swap(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_byte_swap(width, d, s1, s2));
+    }
+
+    fn wide_shift_left(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_shift_left(width, d, s1, s2));
+    }
+
+    fn wide_shift_right_logical(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_shift_right_logical(width, d, s1, s2));
+    }
+
+    fn wide_shift_right_arithmetic(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_shift_right_arithmetic(width, d, s1, s2));
+    }
+
+    fn wide_set_equal(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_set_equal(width, d, s1, s2));
+    }
+
+    fn wide_set_not_equal(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_set_not_equal(width, d, s1, s2));
+    }
+
+    fn wide_set_less_than_unsigned(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_set_less_than_unsigned(width, d, s1, s2));
+    }
+
+    fn wide_set_less_than_signed(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_set_less_than_signed(width, d, s1, s2));
+    }
+
+    fn wide_widen_unsigned(&mut self, width: WideWidth, d: WideReg, s1: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_widen_unsigned(width, d, s1));
+    }
+
+    fn wide_widen_signed(&mut self, width: WideWidth, d: WideReg, s1: RawReg) -> Self::ReturnTy {
+        emit!(self, wide_widen_signed(width, d, s1));
+    }
+
+    fn wide_truncate(&mut self, width: WideWidth, d: RawReg, s1: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_truncate(width, d, s1));
+    }
+
+    fn wide_add_mod(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg, s3: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_add_mod(width, d, s1, s2, s3));
+    }
+
+    fn wide_mul_mod(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg, s3: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_mul_mod(width, d, s1, s2, s3));
+    }
+
+    fn wide_load(&mut self, width: WideWidth, d: WideReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit_load_store!(self, wide_load(self.program_counter, width, d, base, offset));
+    }
+
+    fn wide_store(&mut self, width: WideWidth, s: WideReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit_load_store!(self, wide_store(self.program_counter, width, s, base, offset));
+    }
+    fn wide_add(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_add(width, d, s1, s2));
+    }
+
+    fn wide_sub(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_sub(width, d, s1, s2));
+    }
+
+    fn wide_mul(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_mul(width, d, s1, s2));
+    }
+
+    fn wide_and(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_and(width, d, s1, s2));
+    }
+
+    fn wide_or(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_or(width, d, s1, s2));
+    }
+
+    fn wide_xor(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_xor(width, d, s1, s2));
+    }
+
+    fn wide_div_unsigned(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_div_unsigned(width, d, s1, s2));
+    }
+
+    fn wide_div_signed(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_div_signed(width, d, s1, s2));
+    }
+
+    fn wide_rem_unsigned(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_rem_unsigned(width, d, s1, s2));
+    }
+
+    fn wide_rem_signed(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_rem_signed(width, d, s1, s2));
+    }
+
+    fn wide_exp(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_exp(width, d, s1, s2));
+    }
+
+    fn wide_sign_extend(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_sign_extend(width, d, s1, s2));
+    }
+
+    fn wide_min_unsigned(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_min_unsigned(width, d, s1, s2));
+    }
+
+    fn wide_min_signed(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_min_signed(width, d, s1, s2));
+    }
+
+    fn wide_max_unsigned(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_max_unsigned(width, d, s1, s2));
+    }
+
+    fn wide_max_signed(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit!(self, wide_max_signed(width, d, s1, s2));
+    }
     fn add_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         emit!(self, add_64(d, s1, s2));
     }

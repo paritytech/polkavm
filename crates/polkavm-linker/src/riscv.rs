@@ -39,16 +39,23 @@ pub enum Reg {
 
 pub struct DecoderConfig {
     pub(crate) rv64: bool,
+    /// Whether to decode the XReviveVec wide integer instructions in the custom-2 space.
+    pub(crate) xrevivevec: bool,
 }
 
 impl DecoderConfig {
     pub fn new_32bit() -> Self {
-        DecoderConfig { rv64: false }
+        DecoderConfig { rv64: false, xrevivevec: false }
     }
 
     #[cfg(test)]
     pub fn new_64bit() -> Self {
-        DecoderConfig { rv64: true }
+        DecoderConfig { rv64: true, xrevivevec: false }
+    }
+
+    pub fn set_xrevivevec(&mut self, value: bool) -> &mut Self {
+        self.xrevivevec = value;
+        self
     }
 
     pub fn set_rv64(&mut self, rv64: bool) -> &mut Self {
@@ -400,9 +407,114 @@ pub struct FenceFlags {
     write: bool,
 }
 
+/// The wide integer operations of the XReviveVec extension that take two wide sources.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum WideOp {
+    Add,
+    Sub,
+    Mul,
+    And,
+    Or,
+    Xor,
+    DivUnsigned,
+    DivSigned,
+    RemUnsigned,
+    RemSigned,
+    Exp,
+    SignExtend,
+    MinUnsigned,
+    MinSigned,
+    MaxUnsigned,
+    MaxSigned,
+}
+
+/// The wide comparisons, whose result is a scalar.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum WideCmpOp {
+    Equal,
+    NotEqual,
+    LessUnsigned,
+    LessSigned,
+}
+
+/// The wide shifts, whose amount is a scalar.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
+pub enum WideShiftOp {
+    Left,
+    RightLogical,
+    RightArithmetic,
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 #[repr(u32)]
 pub enum Inst {
+    /// A wide operation over two wide sources. Registers are vector register numbers, and `lmul`
+    /// is the width the instruction carries: 0 = 128, 1 = 256, 2 = 512, 3 = 1024 bits.
+    WideRegReg {
+        lmul: u8,
+        op: WideOp,
+        dst: u8,
+        src1: u8,
+        src2: u8,
+    },
+    WideShift {
+        lmul: u8,
+        op: WideShiftOp,
+        dst: u8,
+        src1: u8,
+        amount: Reg,
+    },
+    WideCmp {
+        lmul: u8,
+        op: WideCmpOp,
+        dst: Reg,
+        src1: u8,
+        src2: u8,
+    },
+    /// Widens a scalar into a wide register.
+    WideWiden {
+        lmul: u8,
+        signed: bool,
+        dst: u8,
+        src: Reg,
+    },
+    /// Narrows a wide register into a scalar.
+    WideNarrow {
+        lmul: u8,
+        dst: Reg,
+        src: u8,
+    },
+    WideByteSwap {
+        lmul: u8,
+        dst: u8,
+        src: u8,
+    },
+    /// A wide register copy.
+    WideMove {
+        lmul: u8,
+        dst: u8,
+        src: u8,
+    },
+    /// The modular operations, which take a third wide source.
+    WideModular {
+        multiply: bool,
+        dst: u8,
+        src1: u8,
+        src2: u8,
+        src3: u8,
+    },
+    WideLoad {
+        lmul: u8,
+        dst: u8,
+        base: Reg,
+        offset: i32,
+    },
+    WideStore {
+        lmul: u8,
+        src: u8,
+        base: Reg,
+        offset: i32,
+    },
     LoadUpperImmediate {
         dst: Reg,
         value: u32,
@@ -689,6 +801,7 @@ pub struct R(pub u32);
 
 // See chapter 19 of the RISC-V spec.
 pub const OPCODE_CUSTOM_0: u32 = 0b0001011;
+pub const OPCODE_CUSTOM_2: u32 = 0b1011011;
 
 impl R {
     pub fn opcode(self) -> u32 {
@@ -1482,6 +1595,99 @@ impl Inst {
             }
             // https://github.com/llvm/llvm-project/blob/e30e644266fbc9ba638ee2c6aa23b5691397163f/llvm/lib/Target/RISCV/RISCVInstrInfoXMips.td#L150
             // https://github.com/llvm/llvm-project/blob/e30e644266fbc9ba638ee2c6aa23b5691397163f/llvm/lib/Target/RISCV/RISCVInstrFormats.td#L388
+            0b1011011 if config.xrevivevec => {
+                // OPCODE_CUSTOM_2, the XReviveVec wide integer instructions. The width is a field
+                // of the instruction rather than of `vtype`, so each one says how wide it is.
+                //
+                //   funct3 = 000        compute, with funct7 = {width, operation}
+                //   funct3 = 001        the modular operations, 256-bit by definition
+                //   funct3 = 010..101   a load at 128, 256, 512 and 1024 bits
+                //   funct3 = 110        a store, with the width above the offset
+                let dst5 = ((op >> 7) & 0b11111) as u8;
+                let src1_5 = ((op >> 15) & 0b11111) as u8;
+                let src2_5 = ((op >> 20) & 0b11111) as u8;
+                let dst = Reg::decode(op >> 7);
+                let src1 = Reg::decode(op >> 15);
+                let src2 = Reg::decode(op >> 20);
+                let funct3 = (op >> 12) & 0b111;
+
+                match funct3 {
+                    0b000 => {
+                        let lmul = ((op >> 30) & 0b11) as u8;
+                        match (op >> 25) & 0b11111 {
+                            operation @ 0..=15 => {
+                                let op = match operation {
+                                    0 => WideOp::Add,
+                                    1 => WideOp::Sub,
+                                    2 => WideOp::Mul,
+                                    3 => WideOp::And,
+                                    4 => WideOp::Or,
+                                    5 => WideOp::Xor,
+                                    6 => WideOp::DivUnsigned,
+                                    7 => WideOp::DivSigned,
+                                    8 => WideOp::RemUnsigned,
+                                    9 => WideOp::RemSigned,
+                                    10 => WideOp::Exp,
+                                    11 => WideOp::SignExtend,
+                                    12 => WideOp::MinUnsigned,
+                                    13 => WideOp::MinSigned,
+                                    14 => WideOp::MaxUnsigned,
+                                    _ => WideOp::MaxSigned,
+                                };
+                                Some(Inst::WideRegReg { lmul, op, dst: dst5, src1: src1_5, src2: src2_5 })
+                            }
+                            operation @ 16..=18 => {
+                                let op = match operation {
+                                    16 => WideShiftOp::Left,
+                                    17 => WideShiftOp::RightLogical,
+                                    _ => WideShiftOp::RightArithmetic,
+                                };
+                                Some(Inst::WideShift { lmul, op, dst: dst5, src1: src1_5, amount: src2 })
+                            }
+                            operation @ 19..=22 => {
+                                let op = match operation {
+                                    19 => WideCmpOp::Equal,
+                                    20 => WideCmpOp::NotEqual,
+                                    21 => WideCmpOp::LessUnsigned,
+                                    _ => WideCmpOp::LessSigned,
+                                };
+                                Some(Inst::WideCmp { lmul, op, dst, src1: src1_5, src2: src2_5 })
+                            }
+                            23 => Some(Inst::WideNarrow { lmul, dst, src: src1_5 }),
+                            24 => Some(Inst::WideWiden { lmul, signed: false, dst: dst5, src: src1 }),
+                            25 => Some(Inst::WideWiden { lmul, signed: true, dst: dst5, src: src1 }),
+                            26 => Some(Inst::WideByteSwap { lmul, dst: dst5, src: src1_5 }),
+                            27 => Some(Inst::WideMove { lmul, dst: dst5, src: src1_5 }),
+                            _ => None,
+                        }
+                    }
+                    0b001 => {
+                        // The modular operations, whose third source is in the R4 field.
+                        let src3_5 = ((op >> 27) & 0b11111) as u8;
+                        let multiply = match (op >> 25) & 0b11 {
+                            0b00 => false,
+                            0b01 => true,
+                            _ => return None,
+                        };
+                        Some(Inst::WideModular { multiply, dst: dst5, src1: src1_5, src2: src2_5, src3: src3_5 })
+                    }
+                    0b010 | 0b011 | 0b100 | 0b101 => {
+                        // One funct3 per width, so the offset keeps all twelve bits and a constant
+                        // pool entry is still reachable through `%lo`.
+                        let lmul = (funct3 - 0b010) as u8;
+                        let offset = (op as i32) >> 20;
+                        Some(Inst::WideLoad { lmul, dst: dst5, base: src1, offset })
+                    }
+                    0b110 => {
+                        let lmul = ((op >> 30) & 0b11) as u8;
+                        // A ten-bit offset, split either side of the register fields.
+                        let offset = (((op >> 25) & 0b11111) << 5) | ((op >> 7) & 0b11111);
+                        let offset = ((offset as i32) << 22) >> 22;
+                        Some(Inst::WideStore { lmul, src: src2_5, base: src1, offset })
+                    }
+                    _ => None,
+                }
+            }
             0b0001011 if ((op >> 25) & 0b11) == 0b11 && ((op >> 12) & 0b111) == 0b011 => {
                 let dst = Reg::decode(op >> 7);
                 let src1 = Reg::decode(op >> 15);

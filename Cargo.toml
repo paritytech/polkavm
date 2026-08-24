@@ -12,6 +12,7 @@ members = [
     "crates/polkavm",
 
     "tools/polkatool",
+    "tools/runblob",
     "tools/polkavm-linux-raw-generate",
     "tools/spectool",
     "tools/gastool",

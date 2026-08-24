@@ -1,0 +1,9 @@
+[package]
+name = "runblob"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+polkavm = { workspace = true }
+env_logger = { workspace = true }

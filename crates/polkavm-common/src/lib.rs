@@ -24,6 +24,7 @@ pub mod abi;
 #[cfg(feature = "alloc")]
 pub mod elf;
 pub mod operation;
+pub mod wide;
 pub mod program;
 pub mod utils;
 pub mod varint;

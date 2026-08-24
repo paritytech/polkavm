@@ -6303,3 +6303,131 @@ assert_send_sync! {
     crate::ModuleConfig,
     crate::ProgramBlob,
 }
+
+/// The XReviveVec wide instructions, executed by the interpreter.
+///
+/// Everything is observed by truncating a wide register back into a general purpose one, since
+/// that is the only way out of the wide file, and the wide values are built with `widen` rather
+/// than loaded so the test does not depend on memory too.
+#[test]
+fn wide_instructions_interpreted() {
+    use polkavm_common::program::{WideReg, WideWidth};
+
+    fn wreg(index: u32, width: WideWidth) -> WideReg {
+        WideReg::from_raw(index, width)
+    }
+
+    // Each case builds two wide values from scalars, applies one instruction, and truncates the
+    // low limb back out. `expected` is what A0 should hold at the end.
+    struct Case {
+        name: &'static str,
+        width: WideWidth,
+        lhs: u64,
+        rhs: u64,
+        build: fn(WideWidth, WideReg, WideReg, WideReg) -> polkavm_common::program::Instruction,
+        expected: u64,
+    }
+
+    let cases = [
+        Case { name: "add", width: WideWidth::W256, lhs: 7, rhs: 5,
+               build: |w, d, a, b| asm::wide_add(w, d, a, b), expected: 12 },
+        Case { name: "sub", width: WideWidth::W256, lhs: 7, rhs: 5,
+               build: |w, d, a, b| asm::wide_sub(w, d, a, b), expected: 2 },
+        Case { name: "mul", width: WideWidth::W256, lhs: 0x1234_5678, rhs: 0x1_0001,
+               build: |w, d, a, b| asm::wide_mul(w, d, a, b), expected: 0x1234_5678u64 * 0x1_0001 },
+        Case { name: "div", width: WideWidth::W256, lhs: 1000, rhs: 7,
+               build: |w, d, a, b| asm::wide_div_unsigned(w, d, a, b), expected: 1000 / 7 },
+        Case { name: "rem", width: WideWidth::W256, lhs: 1000, rhs: 7,
+               build: |w, d, a, b| asm::wide_rem_unsigned(w, d, a, b), expected: 1000 % 7 },
+        Case { name: "and", width: WideWidth::W256, lhs: 0xff00, rhs: 0x0ff0,
+               build: |w, d, a, b| asm::wide_and(w, d, a, b), expected: 0x0f00 },
+        Case { name: "or", width: WideWidth::W256, lhs: 0xff00, rhs: 0x0ff0,
+               build: |w, d, a, b| asm::wide_or(w, d, a, b), expected: 0xfff0 },
+        Case { name: "xor", width: WideWidth::W256, lhs: 0xff00, rhs: 0x0ff0,
+               build: |w, d, a, b| asm::wide_xor(w, d, a, b), expected: 0xf0f0 },
+        Case { name: "minu", width: WideWidth::W256, lhs: 9, rhs: 4,
+               build: |w, d, a, b| asm::wide_min_unsigned(w, d, a, b), expected: 4 },
+        Case { name: "maxu", width: WideWidth::W256, lhs: 9, rhs: 4,
+               build: |w, d, a, b| asm::wide_max_unsigned(w, d, a, b), expected: 9 },
+        Case { name: "exp", width: WideWidth::W256, lhs: 3, rhs: 5,
+               build: |w, d, a, b| asm::wide_exp(w, d, a, b), expected: 243 },
+        // 128-bit, which only exists because the width comes from vtype on the guest side.
+        Case { name: "add at 128", width: WideWidth::W128, lhs: 100, rhs: 23,
+               build: |w, d, a, b| asm::wide_add(w, d, a, b), expected: 123 },
+        // 1024-bit, where a register spans eight slots.
+        Case { name: "mul at 1024", width: WideWidth::W1024, lhs: 1 << 40, rhs: 1 << 20,
+               build: |w, d, a, b| asm::wide_mul(w, d, a, b), expected: 1 << 60 },
+    ];
+
+    for case in cases {
+        let width = case.width;
+        // Indices are rounded to the width's alignment, so these name distinct registers at
+        // every width: slot 0, 8 and 16.
+        let (d, a, b) = (wreg(0, width), wreg(8, width), wreg(16, width));
+
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::ReviveV2);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(
+            &[
+                asm::load_imm64(A1, case.lhs),
+                asm::load_imm64(A2, case.rhs),
+                asm::wide_widen_unsigned(width, a, A1),
+                asm::wide_widen_unsigned(width, b, A2),
+                (case.build)(width, d, a, b),
+                asm::wide_truncate(width, A0, d),
+                asm::ret(),
+            ],
+            &[],
+        );
+
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let mut config = Config::default();
+        config.set_backend(Some(BackendKind::Interpreter));
+        let engine = Engine::new(&config).unwrap();
+        let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
+        let mut linker: Linker<(), ()> = Linker::new();
+        let instance_pre = linker.instantiate_pre(&module).unwrap();
+        let mut instance = instance_pre.instantiate().unwrap();
+        let result = instance.call_typed_and_get_result::<u64, ()>(&mut (), "main", ()).unwrap();
+        assert_eq!(result, case.expected, "{}", case.name);
+    }
+}
+
+/// Wide loads and stores round-trip a value through guest memory.
+#[test]
+fn wide_memory_interpreted() {
+    use polkavm_common::program::{WideReg, WideWidth};
+
+    let width = WideWidth::W256;
+    let value = 0xdead_beef_1234_5678u64;
+    let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(0x4000).build().unwrap();
+    let address = memory_map.rw_data_address();
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::ReviveV2);
+    builder.set_rw_data_size(0x4000);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::load_imm64(A1, value),
+            asm::load_imm(A2, address.try_into().unwrap()),
+            asm::wide_widen_unsigned(width, WideReg::from_raw(0, width), A1),
+            asm::wide_store(width, WideReg::from_raw(0, width), A2, 0),
+            // Read it back into a different register, so a no-op store would be caught.
+            asm::wide_load(width, WideReg::from_raw(8, width), A2, 0),
+            asm::wide_truncate(width, A0, WideReg::from_raw(8, width)),
+            asm::ret(),
+        ],
+        &[],
+    );
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut config = Config::default();
+    config.set_backend(Some(BackendKind::Interpreter));
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
+    let mut linker: Linker<(), ()> = Linker::new();
+    let instance_pre = linker.instantiate_pre(&module).unwrap();
+    let mut instance = instance_pre.instantiate().unwrap();
+    let result = instance.call_typed_and_get_result::<u64, ()>(&mut (), "main", ()).unwrap();
+    assert_eq!(result, value);
+}

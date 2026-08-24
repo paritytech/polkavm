@@ -180,6 +180,213 @@ impl core::fmt::Display for Reg {
     }
 }
 
+/// The width of a wide-integer operation, in bits.
+///
+/// One slot of the file per 128 bits, and a wider register is a run of them, so the same file backs
+/// every width and a 512-bit register overlaps the four 128-bit ones it is made of. This mirrors the
+/// RISC-V vector registers at LMUL 1, 2, 4 and 8, which is where these values live on the guest
+/// side. The width is not in the encoding there -- it comes from `vtype` -- so all four are reachable
+/// and the decoder has to handle each.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum WideWidth {
+    W128 = 0,
+    W256 = 1,
+    W512 = 2,
+    W1024 = 3,
+}
+
+impl WideWidth {
+    /// How many 256-bit slots of the wide register file one register of this width occupies.
+    #[inline]
+    pub const fn slots(self) -> usize {
+        1 << (self as usize)
+    }
+
+    /// The width in bits, which is what names the type in a disassembly.
+    #[inline]
+    pub const fn bits(self) -> usize {
+        self.bytes() * 8
+    }
+
+    /// The width in bytes.
+    #[inline]
+    pub const fn bytes(self) -> usize {
+        WideReg::SLOT_BYTES * self.slots()
+    }
+
+    /// The width in 64-bit limbs, which is the unit the interpreter and the recompiler work in.
+    #[inline]
+    pub const fn limbs(self) -> usize {
+        self.bytes() / 8
+    }
+
+    /// How many registers of this width the file holds.
+    #[inline]
+    pub const fn register_count(self) -> usize {
+        WideReg::SLOT_COUNT / self.slots()
+    }
+
+    /// Decodes an encoded width. Two bits, and every value names one, matching `vtype`'s
+    /// LMUL field over the range this extension defines.
+    #[inline]
+    pub const fn from_raw(value: u32) -> Self {
+        match value & 0b11 {
+            0 => WideWidth::W128,
+            1 => WideWidth::W256,
+            2 => WideWidth::W512,
+            _ => WideWidth::W1024,
+        }
+    }
+
+    /// The encoded form.
+    #[inline]
+    pub const fn to_raw(self) -> u32 {
+        self as u32
+    }
+
+}
+
+/// A wide register, holding a 128-, 256-, 512- or 1024-bit integer.
+///
+/// This is a separate type from [`Reg`] rather than a reuse of [`RawReg`] because the file has 32
+/// entries where the general purpose one has 13, and `RawReg` both clamps anything above 12 and
+/// compares through that clamp.
+///
+/// The index counts 128-bit slots and is always a multiple of the width's slot count, so the same
+/// number names the register at every width: slot 4 is the fourth 128-bit register, the second
+/// 256-bit one and the first 512-bit one. It is also the guest's vector register number, since a
+/// slot is exactly one vector register at VLEN=128.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
+pub struct WideReg(u8);
+
+impl WideReg {
+    /// The size of one slot of the file, which is also the narrowest wide register.
+    pub const SLOT_BYTES: usize = 16;
+
+    /// How many slots the file holds: one vector register each, so thirty-two at 128 bits,
+    /// sixteen at 256, eight at 512 and four at 1024.
+    pub const SLOT_COUNT: usize = 32;
+
+    /// The whole file, in bytes.
+    pub const FILE_BYTES: usize = Self::SLOT_BYTES * Self::SLOT_COUNT;
+
+    /// The number of bits of an instruction an index occupies.
+    pub const BITS: u32 = 5;
+
+    /// Builds a register from a raw encoded index, rounding down to the alignment `width` requires.
+    ///
+    /// Decoding cannot fail: every one of the sixteen values names a slot, and an index that is not
+    /// a multiple of the width's slot count would name a register that does not exist, so it is
+    /// rounded rather than rejected. That keeps a malformed program running deterministically
+    /// instead of trapping on a decode, which is what the rest of this decoder does.
+    #[inline]
+    pub const fn from_raw(value: u32, width: WideWidth) -> Self {
+        let index = (value as usize) & (Self::SLOT_COUNT - 1);
+        Self((index & !(width.slots() - 1)) as u8)
+    }
+
+    /// The index of the first 256-bit slot this register covers.
+    #[inline]
+    pub const fn slot(self) -> usize {
+        self.0 as usize
+    }
+
+    /// The byte offset of this register within the file.
+    #[inline]
+    pub const fn byte_offset(self) -> usize {
+        self.slot() * Self::SLOT_BYTES
+    }
+
+    /// The offset of this register within the file, in 64-bit limbs.
+    #[inline]
+    pub const fn limb_offset(self) -> usize {
+        self.byte_offset() / 8
+    }
+
+    /// The raw index, for re-encoding.
+    #[inline]
+    pub const fn raw(self) -> u32 {
+        self.0 as u32
+    }
+
+    /// The vector register this maps to on the guest, which is the slot itself.
+    #[inline]
+    pub const fn vector_register(self) -> usize {
+        self.slot()
+    }
+}
+
+impl core::fmt::Display for WideReg {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(fmt, "v{}", self.vector_register())
+    }
+}
+
+#[test]
+fn test_read_args_wide3() {
+    // Built the way `serialize_wide3` writes it: the opcode byte, then three argument bytes,
+    // so the decoder's own shift past the opcode is exercised too.
+    let chunk = |reg1: u32, reg2: u32, reg3: u32, width: u32| -> u128 {
+        let packed = reg2 | (reg3 << 5) | (reg1 << 10) | (width << 15);
+        (0xff | (packed << 8)) as u128
+    };
+
+    // At 128 bits every slot is its own register, so all thirty-two indices survive.
+    let (width, reg1, reg2, reg3) = read_args_wide3::<false>(chunk(31, 1, 30, 0));
+    assert_eq!(width, WideWidth::W128);
+    assert_eq!((reg1.slot(), reg2.slot(), reg3.slot()), (31, 1, 30));
+
+    // At 256 a register spans two slots, so an odd index names the pair it sits in.
+    let (width, reg1, reg2, reg3) = read_args_wide3::<false>(chunk(31, 1, 30, 1));
+    assert_eq!(width, WideWidth::W256);
+    assert_eq!((reg1.slot(), reg2.slot(), reg3.slot()), (30, 0, 30));
+
+    // Four slots at 512, eight at 1024.
+    let (width, reg1, ..) = read_args_wide3::<false>(chunk(31, 0, 0, 2));
+    assert_eq!(width, WideWidth::W512);
+    assert_eq!(reg1.slot(), 28);
+    let (width, reg1, ..) = read_args_wide3::<false>(chunk(31, 0, 0, 3));
+    assert_eq!(width, WideWidth::W1024);
+    assert_eq!(reg1.slot(), 24);
+
+    // Nothing above the fields it owns leaks in.
+    let (width, reg1, reg2, reg3) = read_args_wide3::<false>(chunk(31, 31, 31, 1) | (0xffff << 32));
+    assert_eq!(width, WideWidth::W256);
+    assert_eq!((reg1.slot(), reg2.slot(), reg3.slot()), (30, 30, 30));
+}
+
+#[test]
+fn test_wide_reg_aliasing() {
+    // One vector register per slot, so the count halves as the width doubles.
+    assert_eq!(WideWidth::W128.register_count(), 32);
+    assert_eq!(WideWidth::W256.register_count(), 16);
+    assert_eq!(WideWidth::W512.register_count(), 8);
+    assert_eq!(WideWidth::W1024.register_count(), 4);
+    assert_eq!(WideWidth::W128.limbs(), 2);
+    assert_eq!(WideWidth::W256.limbs(), 4);
+    assert_eq!(WideWidth::W1024.bytes(), 128);
+    assert_eq!(WideReg::FILE_BYTES, 512);
+
+    // An unaligned index rounds down to a register that exists, at every width.
+    assert_eq!(WideReg::from_raw(5, WideWidth::W128).slot(), 5);
+    assert_eq!(WideReg::from_raw(5, WideWidth::W256).slot(), 4);
+    assert_eq!(WideReg::from_raw(5, WideWidth::W512).slot(), 4);
+    assert_eq!(WideReg::from_raw(5, WideWidth::W1024).slot(), 0);
+    assert_eq!(WideReg::from_raw(31, WideWidth::W1024).slot(), 24);
+
+    // The index is taken modulo the file, so no encoding escapes it.
+    assert_eq!(WideReg::from_raw(0xffff_ffff, WideWidth::W128).slot(), 31);
+
+    // Slot 8 is the same storage seen four ways.
+    for width in [WideWidth::W128, WideWidth::W256, WideWidth::W512, WideWidth::W1024] {
+        assert_eq!(WideReg::from_raw(8, width).byte_offset(), 128);
+    }
+
+    // A slot is one vector register, so the index is the guest's register number.
+    assert_eq!(WideReg::from_raw(6, WideWidth::W128).vector_register(), 6);
+}
+
 #[inline(never)]
 #[cold]
 fn find_next_offset_legacy_unbounded(bitmask: &[u8], code_len: u32, mut offset: u32) -> u32 {
@@ -818,6 +1025,96 @@ pub fn read_args_regs3<const EXT: bool>(chunk: u128) -> (RawReg, RawReg, RawReg)
     (reg1, reg2, reg3)
 }
 
+/// Three wide registers and the width they are read at.
+///
+/// Three five-bit indices and a two-bit width, so seventeen bits over three argument bytes.
+/// The index needs five bits because a slot is one vector register and there are thirty-two
+/// of them; four would only reach half the file, which 128-bit values can name individually.
+#[inline(always)]
+pub fn read_args_wide3<const EXT: bool>(chunk: u128) -> (WideWidth, WideReg, WideReg, WideReg) {
+    let chunk = chunk_into_u32::<EXT, 0>(chunk);
+    let width = WideWidth::from_raw(chunk >> 15);
+    (
+        width,
+        WideReg::from_raw(chunk >> 10, width),
+        WideReg::from_raw(chunk, width),
+        WideReg::from_raw(chunk >> 5, width),
+    )
+}
+
+/// A wide destination and source plus a general purpose shift amount: only its low bits can
+/// matter, so it stays a scalar register.
+#[inline(always)]
+pub fn read_args_wide_shift<const EXT: bool>(chunk: u128) -> (WideWidth, WideReg, WideReg, RawReg) {
+    let chunk = chunk_into_u32::<EXT, 0>(chunk);
+    let width = WideWidth::from_raw(chunk);
+    (
+        width,
+        WideReg::from_raw(chunk >> 2, width),
+        WideReg::from_raw(chunk >> 7, width),
+        RawReg(chunk >> 12),
+    )
+}
+
+/// A comparison: the operands are wide and the result is a scalar boolean.
+#[inline(always)]
+pub fn read_args_wide_cmp<const EXT: bool>(chunk: u128) -> (WideWidth, RawReg, WideReg, WideReg) {
+    let chunk = chunk_into_u32::<EXT, 0>(chunk);
+    let width = WideWidth::from_raw(chunk);
+    (
+        width,
+        RawReg(chunk >> 2),
+        WideReg::from_raw(chunk >> 6, width),
+        WideReg::from_raw(chunk >> 11, width),
+    )
+}
+
+/// Widening a scalar into a wide register.
+#[inline(always)]
+pub fn read_args_wide_from_gpr<const EXT: bool>(chunk: u128) -> (WideWidth, WideReg, RawReg) {
+    let chunk = chunk_into_u32::<EXT, 0>(chunk);
+    let width = WideWidth::from_raw(chunk);
+    (width, WideReg::from_raw(chunk >> 2, width), RawReg(chunk >> 7))
+}
+
+/// Narrowing a wide register into a scalar.
+#[inline(always)]
+pub fn read_args_wide_to_gpr<const EXT: bool>(chunk: u128) -> (WideWidth, RawReg, WideReg) {
+    let chunk = chunk_into_u32::<EXT, 0>(chunk);
+    let width = WideWidth::from_raw(chunk);
+    (width, RawReg(chunk >> 2), WideReg::from_raw(chunk >> 6, width))
+}
+
+/// Four wide registers, for the modular operations, over three argument bytes.
+#[inline(always)]
+pub fn read_args_wide4<const EXT: bool>(chunk: u128) -> (WideWidth, WideReg, WideReg, WideReg, WideReg) {
+    let chunk = chunk_into_u32::<EXT, 0>(chunk);
+    let width = WideWidth::from_raw(chunk);
+    (
+        width,
+        WideReg::from_raw(chunk >> 2, width),
+        WideReg::from_raw(chunk >> 7, width),
+        WideReg::from_raw(chunk >> 12, width),
+        WideReg::from_raw(chunk >> 17, width),
+    )
+}
+
+/// A wide access: the value's register, a scalar base and a signed offset.
+///
+/// Two argument bytes then the offset, so the length left for the varint is two less than the
+/// one-byte-prefix forms have.
+#[inline(always)]
+pub fn read_args_wide_mem<const EXT: bool>(chunk: u128, length: u32) -> (WideWidth, WideReg, RawReg, i32) {
+    let prefix = chunk_into_u32::<EXT, 0>(chunk);
+    let width = WideWidth::from_raw(prefix);
+    let reg = WideReg::from_raw(prefix >> 2, width);
+    let base = RawReg(prefix >> 7);
+
+    let length = fixup_length::<EXT>(length).saturating_sub(2);
+    let imm = crate::varint::read_simple_varint(chunk_into_u32::<EXT, 16>(chunk), length);
+    (width, reg, base, cast(imm).bitwise_as_i32())
+}
+
 #[inline(always)]
 pub fn read_args_regs2<const EXT: bool>(chunk: u128) -> (RawReg, RawReg) {
     let chunk = chunk_into_u32::<EXT, 0>(chunk);
@@ -1197,6 +1494,13 @@ macro_rules! define_all_instructions {
         [$($name_reg_reg_imm:ident,)+]
         [$($name_reg_reg_offset:ident,)+]
         [$($name_reg_reg_reg:ident,)+]
+        [$($name_wide3:ident,)*]
+        [$($name_wide_mem:ident,)*]
+        [$($name_wide4:ident,)*]
+        [$($name_wide_to_gpr:ident,)*]
+        [$($name_wide_from_gpr:ident,)*]
+        [$($name_wide_cmp:ident,)*]
+        [$($name_wide_shift:ident,)*]
         [$($name_offset:ident,)+]
         [$($name_imm:ident,)+]
         [$($name_imm_imm:ident,)+]
@@ -1213,6 +1517,13 @@ macro_rules! define_all_instructions {
             $($name_reg_reg_imm,)+
             $($name_reg_reg_offset,)+
             $($name_reg_reg_reg,)+
+            $($name_wide3,)*
+            $($name_wide_mem,)*
+            $($name_wide4,)*
+            $($name_wide_to_gpr,)*
+            $($name_wide_from_gpr,)*
+            $($name_wide_cmp,)*
+            $($name_wide_shift,)*
             $($name_offset,)+
             $($name_imm,)+
             $($name_imm_imm,)+
@@ -1234,6 +1545,13 @@ macro_rules! define_all_instructions {
                     $(fn $name_reg_reg_imm(&mut self, _offset: u32, _length: u32, reg1: RawReg, reg2: RawReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_imm(self, reg1, reg2, imm) })+
                     $(fn $name_reg_reg_offset(&mut self, _offset: u32, _length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_offset(self, reg1, reg2, imm) })+
                     $(fn $name_reg_reg_reg(&mut self, _offset: u32, _length: u32, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_reg_reg_reg(self, reg1, reg2, reg3) })+
+                    $(fn $name_wide3(&mut self, _offset: u32, _length: u32, width: $crate::program::WideWidth, reg1: $crate::program::WideReg, reg2: $crate::program::WideReg, reg3: $crate::program::WideReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_wide3(self, width, reg1, reg2, reg3) })*
+                    $(fn $name_wide_mem(&mut self, _offset: u32, _length: u32, width: $crate::program::WideWidth, reg1: $crate::program::WideReg, reg2: RawReg, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_wide_mem(self, width, reg1, reg2, imm) })*
+                    $(fn $name_wide4(&mut self, _offset: u32, _length: u32, width: $crate::program::WideWidth, reg1: $crate::program::WideReg, reg2: $crate::program::WideReg, reg3: $crate::program::WideReg, reg4: $crate::program::WideReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_wide4(self, width, reg1, reg2, reg3, reg4) })*
+                    $(fn $name_wide_to_gpr(&mut self, _offset: u32, _length: u32, width: $crate::program::WideWidth, reg1: RawReg, reg2: $crate::program::WideReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_wide_to_gpr(self, width, reg1, reg2) })*
+                    $(fn $name_wide_from_gpr(&mut self, _offset: u32, _length: u32, width: $crate::program::WideWidth, reg1: $crate::program::WideReg, reg2: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_wide_from_gpr(self, width, reg1, reg2) })*
+                    $(fn $name_wide_cmp(&mut self, _offset: u32, _length: u32, width: $crate::program::WideWidth, reg1: RawReg, reg2: $crate::program::WideReg, reg3: $crate::program::WideReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_wide_cmp(self, width, reg1, reg2, reg3) })*
+                    $(fn $name_wide_shift(&mut self, _offset: u32, _length: u32, width: $crate::program::WideWidth, reg1: $crate::program::WideReg, reg2: $crate::program::WideReg, reg3: RawReg) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_wide_shift(self, width, reg1, reg2, reg3) })*
                     $(fn $name_offset(&mut self, _offset: u32, _length: u32, imm: u32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_offset(self, imm) })+
                     $(fn $name_imm(&mut self, _offset: u32, _length: u32, imm: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm(self, imm) })+
                     $(fn $name_imm_imm(&mut self, _offset: u32, _length: u32, imm1: i32, imm2: i32) -> Self::ReturnTy { $crate::program::InstructionVisitor::$name_imm_imm(self, imm1, imm2) })+
@@ -1256,6 +1574,13 @@ macro_rules! define_all_instructions {
             $(fn $name_reg_reg_imm(&mut self, offset: u32, length: u32, reg1: RawReg, reg2: RawReg, imm: i32) -> Self::ReturnTy;)+
             $(fn $name_reg_reg_offset(&mut self, offset: u32, length: u32, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy;)+
             $(fn $name_reg_reg_reg(&mut self, offset: u32, length: u32, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> Self::ReturnTy;)+
+            $(fn $name_wide3(&mut self, offset: u32, length: u32, width: WideWidth, reg1: WideReg, reg2: WideReg, reg3: WideReg) -> Self::ReturnTy;)*
+            $(fn $name_wide_mem(&mut self, offset: u32, length: u32, width: WideWidth, reg1: WideReg, reg2: RawReg, imm: i32) -> Self::ReturnTy;)*
+            $(fn $name_wide4(&mut self, offset: u32, length: u32, width: WideWidth, reg1: WideReg, reg2: WideReg, reg3: WideReg, reg4: WideReg) -> Self::ReturnTy;)*
+            $(fn $name_wide_to_gpr(&mut self, offset: u32, length: u32, width: WideWidth, reg1: RawReg, reg2: WideReg) -> Self::ReturnTy;)*
+            $(fn $name_wide_from_gpr(&mut self, offset: u32, length: u32, width: WideWidth, reg1: WideReg, reg2: RawReg) -> Self::ReturnTy;)*
+            $(fn $name_wide_cmp(&mut self, offset: u32, length: u32, width: WideWidth, reg1: RawReg, reg2: WideReg, reg3: WideReg) -> Self::ReturnTy;)*
+            $(fn $name_wide_shift(&mut self, offset: u32, length: u32, width: WideWidth, reg1: WideReg, reg2: WideReg, reg3: RawReg) -> Self::ReturnTy;)*
             $(fn $name_offset(&mut self, offset: u32, length: u32, imm: u32) -> Self::ReturnTy;)+
             $(fn $name_imm(&mut self, offset: u32, length: u32, imm: i32) -> Self::ReturnTy;)+
             $(fn $name_imm_imm(&mut self, offset: u32, length: u32, imm1: i32, imm2: i32) -> Self::ReturnTy;)+
@@ -1276,6 +1601,13 @@ macro_rules! define_all_instructions {
             $(fn $name_reg_reg_imm(&mut self, reg1: RawReg, reg2: RawReg, imm: i32) -> Self::ReturnTy;)+
             $(fn $name_reg_reg_offset(&mut self, reg1: RawReg, reg2: RawReg, imm: u32) -> Self::ReturnTy;)+
             $(fn $name_reg_reg_reg(&mut self, reg1: RawReg, reg2: RawReg, reg3: RawReg) -> Self::ReturnTy;)+
+            $(fn $name_wide3(&mut self, width: WideWidth, reg1: WideReg, reg2: WideReg, reg3: WideReg) -> Self::ReturnTy;)*
+            $(fn $name_wide_mem(&mut self, width: WideWidth, reg1: WideReg, reg2: RawReg, imm: i32) -> Self::ReturnTy;)*
+            $(fn $name_wide4(&mut self, width: WideWidth, reg1: WideReg, reg2: WideReg, reg3: WideReg, reg4: WideReg) -> Self::ReturnTy;)*
+            $(fn $name_wide_to_gpr(&mut self, width: WideWidth, reg1: RawReg, reg2: WideReg) -> Self::ReturnTy;)*
+            $(fn $name_wide_from_gpr(&mut self, width: WideWidth, reg1: WideReg, reg2: RawReg) -> Self::ReturnTy;)*
+            $(fn $name_wide_cmp(&mut self, width: WideWidth, reg1: RawReg, reg2: WideReg, reg3: WideReg) -> Self::ReturnTy;)*
+            $(fn $name_wide_shift(&mut self, width: WideWidth, reg1: WideReg, reg2: WideReg, reg3: RawReg) -> Self::ReturnTy;)*
             $(fn $name_offset(&mut self, imm: u32) -> Self::ReturnTy;)+
             $(fn $name_imm(&mut self, imm: i32) -> Self::ReturnTy;)+
             $(fn $name_imm_imm(&mut self, imm1: i32, imm2: i32) -> Self::ReturnTy;)+
@@ -1298,6 +1630,13 @@ macro_rules! define_all_instructions {
             $($name_reg_reg_imm(RawReg, RawReg, i32),)+
             $($name_reg_reg_offset(RawReg, RawReg, u32),)+
             $($name_reg_reg_reg(RawReg, RawReg, RawReg),)+
+            $($name_wide3(WideWidth, WideReg, WideReg, WideReg),)*
+            $($name_wide_mem(WideWidth, WideReg, RawReg, i32),)*
+            $($name_wide4(WideWidth, WideReg, WideReg, WideReg, WideReg),)*
+            $($name_wide_to_gpr(WideWidth, RawReg, WideReg),)*
+            $($name_wide_from_gpr(WideWidth, WideReg, RawReg),)*
+            $($name_wide_cmp(WideWidth, RawReg, WideReg, WideReg),)*
+            $($name_wide_shift(WideWidth, WideReg, WideReg, RawReg),)*
             $($name_offset(u32),)+
             $($name_imm(i32),)+
             $($name_imm_imm(i32, i32),)+
@@ -1317,6 +1656,13 @@ macro_rules! define_all_instructions {
                     $(Self::$name_reg_reg_imm(reg1, reg2, imm) => visitor.$name_reg_reg_imm(reg1, reg2, imm),)+
                     $(Self::$name_reg_reg_offset(reg1, reg2, imm) => visitor.$name_reg_reg_offset(reg1, reg2, imm),)+
                     $(Self::$name_reg_reg_reg(reg1, reg2, reg3) => visitor.$name_reg_reg_reg(reg1, reg2, reg3),)+
+                    $(Self::$name_wide3(width, reg1, reg2, reg3) => visitor.$name_wide3(width, reg1, reg2, reg3),)*
+                    $(Self::$name_wide_mem(width, reg1, reg2, imm) => visitor.$name_wide_mem(width, reg1, reg2, imm),)*
+                    $(Self::$name_wide4(width, reg1, reg2, reg3, reg4) => visitor.$name_wide4(width, reg1, reg2, reg3, reg4),)*
+                    $(Self::$name_wide_to_gpr(width, reg1, reg2) => visitor.$name_wide_to_gpr(width, reg1, reg2),)*
+                    $(Self::$name_wide_from_gpr(width, reg1, reg2) => visitor.$name_wide_from_gpr(width, reg1, reg2),)*
+                    $(Self::$name_wide_cmp(width, reg1, reg2, reg3) => visitor.$name_wide_cmp(width, reg1, reg2, reg3),)*
+                    $(Self::$name_wide_shift(width, reg1, reg2, reg3) => visitor.$name_wide_shift(width, reg1, reg2, reg3),)*
                     $(Self::$name_offset(imm) => visitor.$name_offset(imm),)+
                     $(Self::$name_imm(imm) => visitor.$name_imm(imm),)+
                     $(Self::$name_imm_imm(imm1, imm2) => visitor.$name_imm_imm(imm1, imm2),)+
@@ -1336,6 +1682,13 @@ macro_rules! define_all_instructions {
                     $(Self::$name_reg_reg_imm(reg1, reg2, imm) => visitor.$name_reg_reg_imm(offset, length, reg1, reg2, imm),)+
                     $(Self::$name_reg_reg_offset(reg1, reg2, imm) => visitor.$name_reg_reg_offset(offset, length, reg1, reg2, imm),)+
                     $(Self::$name_reg_reg_reg(reg1, reg2, reg3) => visitor.$name_reg_reg_reg(offset, length, reg1, reg2, reg3),)+
+                    $(Self::$name_wide3(width, reg1, reg2, reg3) => visitor.$name_wide3(offset, length, width, reg1, reg2, reg3),)*
+                    $(Self::$name_wide_mem(width, reg1, reg2, imm) => visitor.$name_wide_mem(offset, length, width, reg1, reg2, imm),)*
+                    $(Self::$name_wide4(width, reg1, reg2, reg3, reg4) => visitor.$name_wide4(offset, length, width, reg1, reg2, reg3, reg4),)*
+                    $(Self::$name_wide_to_gpr(width, reg1, reg2) => visitor.$name_wide_to_gpr(offset, length, width, reg1, reg2),)*
+                    $(Self::$name_wide_from_gpr(width, reg1, reg2) => visitor.$name_wide_from_gpr(offset, length, width, reg1, reg2),)*
+                    $(Self::$name_wide_cmp(width, reg1, reg2, reg3) => visitor.$name_wide_cmp(offset, length, width, reg1, reg2, reg3),)*
+                    $(Self::$name_wide_shift(width, reg1, reg2, reg3) => visitor.$name_wide_shift(offset, length, width, reg1, reg2, reg3),)*
                     $(Self::$name_offset(imm) => visitor.$name_offset(offset, length, imm),)+
                     $(Self::$name_imm(imm) => visitor.$name_imm(offset, length, imm),)+
                     $(Self::$name_imm_imm(imm1, imm2) => visitor.$name_imm_imm(offset, length, imm1, imm2),)+
@@ -1355,6 +1708,13 @@ macro_rules! define_all_instructions {
                     $(Self::$name_reg_reg_imm(reg1, reg2, imm) => Self::serialize_reg_reg_imm(isa, buffer, Opcode::$name_reg_reg_imm, reg1, reg2, imm),)+
                     $(Self::$name_reg_reg_offset(reg1, reg2, imm) => Self::serialize_reg_reg_offset(isa, buffer, position, Opcode::$name_reg_reg_offset, reg1, reg2, imm),)+
                     $(Self::$name_reg_reg_reg(reg1, reg2, reg3) => Self::serialize_reg_reg_reg(isa, buffer, Opcode::$name_reg_reg_reg, reg1, reg2, reg3),)+
+                    $(Self::$name_wide3(width, reg1, reg2, reg3) => Self::serialize_wide3(isa, buffer, Opcode::$name_wide3, width, reg1, reg2, reg3),)*
+                    $(Self::$name_wide_mem(width, reg1, reg2, imm) => Self::serialize_wide_mem(isa, buffer, Opcode::$name_wide_mem, width, reg1, reg2, imm),)*
+                    $(Self::$name_wide4(width, reg1, reg2, reg3, reg4) => Self::serialize_wide4(isa, buffer, Opcode::$name_wide4, width, reg1, reg2, reg3, reg4),)*
+                    $(Self::$name_wide_to_gpr(width, reg1, reg2) => Self::serialize_wide_to_gpr(isa, buffer, Opcode::$name_wide_to_gpr, width, reg1, reg2),)*
+                    $(Self::$name_wide_from_gpr(width, reg1, reg2) => Self::serialize_wide_from_gpr(isa, buffer, Opcode::$name_wide_from_gpr, width, reg1, reg2),)*
+                    $(Self::$name_wide_cmp(width, reg1, reg2, reg3) => Self::serialize_wide_cmp(isa, buffer, Opcode::$name_wide_cmp, width, reg1, reg2, reg3),)*
+                    $(Self::$name_wide_shift(width, reg1, reg2, reg3) => Self::serialize_wide_shift(isa, buffer, Opcode::$name_wide_shift, width, reg1, reg2, reg3),)*
                     $(Self::$name_offset(imm) => Self::serialize_offset(isa, buffer, position, Opcode::$name_offset, imm),)+
                     $(Self::$name_imm(imm) => Self::serialize_imm(isa, buffer, Opcode::$name_imm, imm),)+
                     $(Self::$name_imm_imm(imm1, imm2) => Self::serialize_imm_imm(isa, buffer, Opcode::$name_imm_imm, imm1, imm2),)+
@@ -1374,6 +1734,13 @@ macro_rules! define_all_instructions {
                     $(Self::$name_reg_reg_imm(..) => Opcode::$name_reg_reg_imm,)+
                     $(Self::$name_reg_reg_offset(..) => Opcode::$name_reg_reg_offset,)+
                     $(Self::$name_reg_reg_reg(..) => Opcode::$name_reg_reg_reg,)+
+                    $(Self::$name_wide3(..) => Opcode::$name_wide3,)*
+                    $(Self::$name_wide_mem(..) => Opcode::$name_wide_mem,)*
+                    $(Self::$name_wide4(..) => Opcode::$name_wide4,)*
+                    $(Self::$name_wide_to_gpr(..) => Opcode::$name_wide_to_gpr,)*
+                    $(Self::$name_wide_from_gpr(..) => Opcode::$name_wide_from_gpr,)*
+                    $(Self::$name_wide_cmp(..) => Opcode::$name_wide_cmp,)*
+                    $(Self::$name_wide_shift(..) => Opcode::$name_wide_shift,)*
                     $(Self::$name_offset(..) => Opcode::$name_offset,)+
                     $(Self::$name_imm(..) => Opcode::$name_imm,)+
                     $(Self::$name_imm_imm(..) => Opcode::$name_imm_imm,)+
@@ -1429,6 +1796,48 @@ macro_rules! define_all_instructions {
                     Instruction::$name_reg_reg_reg(reg1.into(), reg2.into(), reg3.into())
                 }
             )+
+
+            $(
+                pub fn $name_wide3(width: $crate::program::WideWidth, reg1: $crate::program::WideReg, reg2: $crate::program::WideReg, reg3: $crate::program::WideReg) -> Instruction {
+                    Instruction::$name_wide3(width, reg1, reg2, reg3)
+                }
+            )*
+
+            $(
+                pub fn $name_wide_mem(width: $crate::program::WideWidth, reg1: $crate::program::WideReg, reg2: $crate::program::Reg, imm: i32) -> Instruction {
+                    Instruction::$name_wide_mem(width, reg1, reg2.into(), imm)
+                }
+            )*
+
+            $(
+                pub fn $name_wide4(width: $crate::program::WideWidth, reg1: $crate::program::WideReg, reg2: $crate::program::WideReg, reg3: $crate::program::WideReg, reg4: $crate::program::WideReg) -> Instruction {
+                    Instruction::$name_wide4(width, reg1, reg2, reg3, reg4)
+                }
+            )*
+
+            $(
+                pub fn $name_wide_to_gpr(width: $crate::program::WideWidth, reg1: $crate::program::Reg, reg2: $crate::program::WideReg) -> Instruction {
+                    Instruction::$name_wide_to_gpr(width, reg1.into(), reg2)
+                }
+            )*
+
+            $(
+                pub fn $name_wide_from_gpr(width: $crate::program::WideWidth, reg1: $crate::program::WideReg, reg2: $crate::program::Reg) -> Instruction {
+                    Instruction::$name_wide_from_gpr(width, reg1, reg2.into())
+                }
+            )*
+
+            $(
+                pub fn $name_wide_cmp(width: $crate::program::WideWidth, reg1: $crate::program::Reg, reg2: $crate::program::WideReg, reg3: $crate::program::WideReg) -> Instruction {
+                    Instruction::$name_wide_cmp(width, reg1.into(), reg2, reg3)
+                }
+            )*
+
+            $(
+                pub fn $name_wide_shift(width: $crate::program::WideWidth, reg1: $crate::program::WideReg, reg2: $crate::program::WideReg, reg3: $crate::program::Reg) -> Instruction {
+                    Instruction::$name_wide_shift(width, reg1, reg2, reg3.into())
+                }
+            )*
 
             $(
                 pub fn $name_offset(imm: u32) -> Instruction {
@@ -1536,6 +1945,13 @@ macro_rules! define_legacy_instruction_set {
         [$($name_reg_reg_imm:ident = $value_reg_reg_imm:expr,)+]
         [$($name_reg_reg_offset:ident = $value_reg_reg_offset:expr,)+]
         [$($name_reg_reg_reg:ident = $value_reg_reg_reg:expr,)+]
+        [$($name_wide3:ident = $value_wide3:expr,)*]
+        [$($name_wide_mem:ident = $value_wide_mem:expr,)*]
+        [$($name_wide4:ident = $value_wide4:expr,)*]
+        [$($name_wide_to_gpr:ident = $value_wide_to_gpr:expr,)*]
+        [$($name_wide_from_gpr:ident = $value_wide_from_gpr:expr,)*]
+        [$($name_wide_cmp:ident = $value_wide_cmp:expr,)*]
+        [$($name_wide_shift:ident = $value_wide_shift:expr,)*]
         [$($name_offset:ident = $value_offset:expr,)+]
         [$($name_imm:ident = $value_imm:expr,)+]
         [$($name_imm_imm:ident = $value_imm_imm:expr,)+]
@@ -1553,6 +1969,13 @@ macro_rules! define_legacy_instruction_set {
             $($name_reg_reg_imm = $value_reg_reg_imm,)+
             $($name_reg_reg_offset = $value_reg_reg_offset,)+
             $($name_reg_reg_reg = $value_reg_reg_reg,)+
+            $($name_wide3 = $value_wide3,)*
+            $($name_wide_mem = $value_wide_mem,)*
+            $($name_wide4 = $value_wide4,)*
+            $($name_wide_to_gpr = $value_wide_to_gpr,)*
+            $($name_wide_from_gpr = $value_wide_from_gpr,)*
+            $($name_wide_cmp = $value_wide_cmp,)*
+            $($name_wide_shift = $value_wide_shift,)*
             $($name_offset = $value_offset,)+
             $($name_imm = $value_imm,)+
             $($name_imm_imm = $value_imm_imm,)+
@@ -1593,6 +2016,13 @@ macro_rules! define_legacy_instruction_set {
                     $(Opcode::$name_reg_reg_imm => true,)+
                     $(Opcode::$name_reg_reg_offset => true,)+
                     $(Opcode::$name_reg_reg_reg => true,)+
+                    $(Opcode::$name_wide3 => true,)*
+                    $(Opcode::$name_wide_mem => true,)*
+                    $(Opcode::$name_wide4 => true,)*
+                    $(Opcode::$name_wide_to_gpr => true,)*
+                    $(Opcode::$name_wide_from_gpr => true,)*
+                    $(Opcode::$name_wide_cmp => true,)*
+                    $(Opcode::$name_wide_shift => true,)*
                     $(Opcode::$name_offset => true,)+
                     $(Opcode::$name_imm => true,)+
                     $(Opcode::$name_imm_imm => true,)+
@@ -1645,6 +2075,48 @@ macro_rules! define_legacy_instruction_set {
                             Instruction::$name_reg_reg_reg(reg1, reg2, reg3)
                         }
                     )+
+                    $(
+                        $value_wide3 => {
+                            let (width, reg1, reg2, reg3) = $crate::program::read_args_wide3::<false>(chunk);
+                            Instruction::$name_wide3(width, reg1, reg2, reg3)
+                        }
+                    )*
+                    $(
+                        $value_wide_mem => {
+                            let (width, reg1, reg2, imm) = $crate::program::read_args_wide_mem::<false>(chunk, length);
+                            Instruction::$name_wide_mem(width, reg1, reg2, imm)
+                        }
+                    )*
+                    $(
+                        $value_wide4 => {
+                            let (width, reg1, reg2, reg3, reg4) = $crate::program::read_args_wide4::<false>(chunk);
+                            Instruction::$name_wide4(width, reg1, reg2, reg3, reg4)
+                        }
+                    )*
+                    $(
+                        $value_wide_to_gpr => {
+                            let (width, reg1, reg2) = $crate::program::read_args_wide_to_gpr::<false>(chunk);
+                            Instruction::$name_wide_to_gpr(width, reg1, reg2)
+                        }
+                    )*
+                    $(
+                        $value_wide_from_gpr => {
+                            let (width, reg1, reg2) = $crate::program::read_args_wide_from_gpr::<false>(chunk);
+                            Instruction::$name_wide_from_gpr(width, reg1, reg2)
+                        }
+                    )*
+                    $(
+                        $value_wide_cmp => {
+                            let (width, reg1, reg2, reg3) = $crate::program::read_args_wide_cmp::<false>(chunk);
+                            Instruction::$name_wide_cmp(width, reg1, reg2, reg3)
+                        }
+                    )*
+                    $(
+                        $value_wide_shift => {
+                            let (width, reg1, reg2, reg3) = $crate::program::read_args_wide_shift::<false>(chunk);
+                            Instruction::$name_wide_shift(width, reg1, reg2, reg3)
+                        }
+                    )*
                     $(
                         $value_offset => {
                             let imm = $crate::program::read_args_offset::<false>(chunk, offset, length);
@@ -1805,6 +2277,83 @@ macro_rules! define_legacy_instruction_set {
                             table[$value_reg_reg_reg] = $name_reg_reg_reg;
                         }
                     })*
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wide3<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (width, reg1, reg2, reg3) = $crate::program::read_args_wide3::<false>(chunk);
+                            state.$name_wide3(offset, length, width, reg1, reg2, reg3)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_wide3].is_some() {
+                            table[$value_wide3] = $name_wide3;
+                        }
+                    })*
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wide_mem<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (width, reg1, reg2, imm) = $crate::program::read_args_wide_mem::<false>(chunk, length);
+                            state.$name_wide_mem(offset, length, width, reg1, reg2, imm)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_wide_mem].is_some() {
+                            table[$value_wide_mem] = $name_wide_mem;
+                        }
+                    })*
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wide4<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (width, reg1, reg2, reg3, reg4) = $crate::program::read_args_wide4::<false>(chunk);
+                            state.$name_wide4(offset, length, width, reg1, reg2, reg3, reg4)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_wide4].is_some() {
+                            table[$value_wide4] = $name_wide4;
+                        }
+                    })*
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wide_to_gpr<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (width, reg1, reg2) = $crate::program::read_args_wide_to_gpr::<false>(chunk);
+                            state.$name_wide_to_gpr(offset, length, width, reg1, reg2)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_wide_to_gpr].is_some() {
+                            table[$value_wide_to_gpr] = $name_wide_to_gpr;
+                        }
+                    })*
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wide_from_gpr<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (width, reg1, reg2) = $crate::program::read_args_wide_from_gpr::<false>(chunk);
+                            state.$name_wide_from_gpr(offset, length, width, reg1, reg2)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_wide_from_gpr].is_some() {
+                            table[$value_wide_from_gpr] = $name_wide_from_gpr;
+                        }
+                    })*
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wide_cmp<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (width, reg1, reg2, reg3) = $crate::program::read_args_wide_cmp::<false>(chunk);
+                            state.$name_wide_cmp(offset, length, width, reg1, reg2, reg3)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_wide_cmp].is_some() {
+                            table[$value_wide_cmp] = $name_wide_cmp;
+                        }
+                    })*
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wide_shift<$d($visitor_ty_params),*>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (width, reg1, reg2, reg3) = $crate::program::read_args_wide_shift::<false>(chunk);
+                            state.$name_wide_shift(offset, length, width, reg1, reg2, reg3)
+                        }
+
+                        if $crate::program::$isa_name::RAW_OPCODE_TO_ENUM_CONST[$value_wide_shift].is_some() {
+                            table[$value_wide_shift] = $name_wide_shift;
+                        }
+                    })*
 
                     $({
                         #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
@@ -1915,6 +2464,13 @@ macro_rules! define_extended_instruction_set {
         [$($name_reg_reg_imm:ident = [$($length_reg_reg_imm:literal: $value_reg_reg_imm:expr),+],)+]
         [$($name_reg_reg_offset:ident = [$($length_reg_reg_offset:literal: $value_reg_reg_offset:expr),+],)+]
         [$($name_reg_reg_reg:ident = [$($length_reg_reg_reg:literal: $value_reg_reg_reg:expr),+],)+]
+        [$($name_wide3:ident = [$($length_wide3:literal: $value_wide3:expr),+],)*]
+        [$($name_wide_mem:ident = [$($length_wide_mem:literal: $value_wide_mem:expr),+],)*]
+        [$($name_wide4:ident = [$($length_wide4:literal: $value_wide4:expr),+],)*]
+        [$($name_wide_to_gpr:ident = [$($length_wide_to_gpr:literal: $value_wide_to_gpr:expr),+],)*]
+        [$($name_wide_from_gpr:ident = [$($length_wide_from_gpr:literal: $value_wide_from_gpr:expr),+],)*]
+        [$($name_wide_cmp:ident = [$($length_wide_cmp:literal: $value_wide_cmp:expr),+],)*]
+        [$($name_wide_shift:ident = [$($length_wide_shift:literal: $value_wide_shift:expr),+],)*]
         [$($name_offset:ident = [$($length_offset:literal: $value_offset:expr),+],)+]
         [$($name_imm:ident = [$($length_imm:literal: $value_imm:expr),+],)+]
         [$($name_imm_imm:ident = [$($length_imm_imm:literal: $value_imm_imm:expr),+],)+]
@@ -1935,6 +2491,13 @@ macro_rules! define_extended_instruction_set {
                 $($( $d callback!($name_reg_reg_imm, $value_reg_reg_imm, $length_reg_reg_imm); )+)+
                 $($( $d callback!($name_reg_reg_offset, $value_reg_reg_offset, $length_reg_reg_offset); )+)+
                 $($( $d callback!($name_reg_reg_reg, $value_reg_reg_reg, $length_reg_reg_reg); )+)+
+                $($( $d callback!($name_wide3, $value_wide3, $length_wide3); )+)*
+                $($( $d callback!($name_wide_mem, $value_wide_mem, $length_wide_mem); )+)*
+                $($( $d callback!($name_wide4, $value_wide4, $length_wide4); )+)*
+                $($( $d callback!($name_wide_to_gpr, $value_wide_to_gpr, $length_wide_to_gpr); )+)*
+                $($( $d callback!($name_wide_from_gpr, $value_wide_from_gpr, $length_wide_from_gpr); )+)*
+                $($( $d callback!($name_wide_cmp, $value_wide_cmp, $length_wide_cmp); )+)*
+                $($( $d callback!($name_wide_shift, $value_wide_shift, $length_wide_shift); )+)*
                 $($( $d callback!($name_offset, $value_offset, $length_offset); )+)+
                 $($( $d callback!($name_imm, $value_imm, $length_imm); )+)+
                 $($( $d callback!($name_imm_imm, $value_imm_imm, $length_imm_imm); )+)+
@@ -2127,6 +2690,48 @@ macro_rules! define_extended_instruction_set {
                         }
                     )+
                     $(
+                        $($value_wide3)|+ => {
+                            let (width, reg1, reg2, reg3) = args!(read_args_wide3(chunk));
+                            Instruction::$name_wide3(width, reg1, reg2, reg3)
+                        }
+                    )*
+                    $(
+                        $($value_wide_mem)|+ => {
+                            let (width, reg1, reg2, imm) = args!(read_args_wide_mem(chunk, length));
+                            Instruction::$name_wide_mem(width, reg1, reg2, imm)
+                        }
+                    )*
+                    $(
+                        $($value_wide4)|+ => {
+                            let (width, reg1, reg2, reg3, reg4) = args!(read_args_wide4(chunk));
+                            Instruction::$name_wide4(width, reg1, reg2, reg3, reg4)
+                        }
+                    )*
+                    $(
+                        $($value_wide_to_gpr)|+ => {
+                            let (width, reg1, reg2) = args!(read_args_wide_to_gpr(chunk));
+                            Instruction::$name_wide_to_gpr(width, reg1, reg2)
+                        }
+                    )*
+                    $(
+                        $($value_wide_from_gpr)|+ => {
+                            let (width, reg1, reg2) = args!(read_args_wide_from_gpr(chunk));
+                            Instruction::$name_wide_from_gpr(width, reg1, reg2)
+                        }
+                    )*
+                    $(
+                        $($value_wide_cmp)|+ => {
+                            let (width, reg1, reg2, reg3) = args!(read_args_wide_cmp(chunk));
+                            Instruction::$name_wide_cmp(width, reg1, reg2, reg3)
+                        }
+                    )*
+                    $(
+                        $($value_wide_shift)|+ => {
+                            let (width, reg1, reg2, reg3) = args!(read_args_wide_shift(chunk));
+                            Instruction::$name_wide_shift(width, reg1, reg2, reg3)
+                        }
+                    )*
+                    $(
                         $($value_offset)|+ => {
                             let imm = args!(read_args_offset(chunk, offset, length));
                             Instruction::$name_offset(imm)
@@ -2276,6 +2881,69 @@ macro_rules! define_extended_instruction_set {
                         }
 
                         $(table[$value_reg_reg_reg] = $name_reg_reg_reg::<{ ($value_reg_reg_reg) >= 255 }>;)+
+                    })*
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wide3<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (width, reg1, reg2, reg3) = $crate::program::read_args_wide3::<EXT>(chunk);
+                            state.$name_wide3(offset, length, width, reg1, reg2, reg3)
+                        }
+
+                        $(table[$value_wide3] = $name_wide3::<{ ($value_wide3) >= 255 }>;)+
+                    })*
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wide_mem<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (width, reg1, reg2, imm) = $crate::program::read_args_wide_mem::<EXT>(chunk, length);
+                            state.$name_wide_mem(offset, length, width, reg1, reg2, imm)
+                        }
+
+                        $(table[$value_wide_mem] = $name_wide_mem::<{ ($value_wide_mem) >= 255 }>;)+
+                    })*
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wide4<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (width, reg1, reg2, reg3, reg4) = $crate::program::read_args_wide4::<EXT>(chunk);
+                            state.$name_wide4(offset, length, width, reg1, reg2, reg3, reg4)
+                        }
+
+                        $(table[$value_wide4] = $name_wide4::<{ ($value_wide4) >= 255 }>;)+
+                    })*
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wide_to_gpr<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (width, reg1, reg2) = $crate::program::read_args_wide_to_gpr::<EXT>(chunk);
+                            state.$name_wide_to_gpr(offset, length, width, reg1, reg2)
+                        }
+
+                        $(table[$value_wide_to_gpr] = $name_wide_to_gpr::<{ ($value_wide_to_gpr) >= 255 }>;)+
+                    })*
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wide_from_gpr<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (width, reg1, reg2) = $crate::program::read_args_wide_from_gpr::<EXT>(chunk);
+                            state.$name_wide_from_gpr(offset, length, width, reg1, reg2)
+                        }
+
+                        $(table[$value_wide_from_gpr] = $name_wide_from_gpr::<{ ($value_wide_from_gpr) >= 255 }>;)+
+                    })*
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wide_cmp<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (width, reg1, reg2, reg3) = $crate::program::read_args_wide_cmp::<EXT>(chunk);
+                            state.$name_wide_cmp(offset, length, width, reg1, reg2, reg3)
+                        }
+
+                        $(table[$value_wide_cmp] = $name_wide_cmp::<{ ($value_wide_cmp) >= 255 }>;)+
+                    })*
+                    $({
+                        #[cfg_attr(target_os = "linux", link_section = concat!(".text.", stringify!($table_name)))]
+                        fn $name_wide_shift<$d($visitor_ty_params),*, const EXT: bool>(state: &mut $visitor_ty<$d($visitor_ty_params),*>, chunk: u128, offset: u32, length: u32) -> ReturnTy<$d($visitor_ty_params),*>{
+                            let (width, reg1, reg2, reg3) = $crate::program::read_args_wide_shift::<EXT>(chunk);
+                            state.$name_wide_shift(offset, length, width, reg1, reg2, reg3)
+                        }
+
+                        $(table[$value_wide_shift] = $name_wide_shift::<{ ($value_wide_shift) >= 255 }>;)+
                     })*
 
 
@@ -2541,6 +3209,54 @@ define_all_instructions! {
         rotate_right_64,
     ]
 
+    // wide3: three wide registers, width from the encoding
+    [
+        wide_add,
+        wide_sub,
+        wide_mul,
+        wide_and,
+        wide_or,
+        wide_xor,
+        wide_div_unsigned,
+        wide_div_signed,
+        wide_rem_unsigned,
+        wide_rem_signed,
+        wide_exp,
+        wide_sign_extend,
+        wide_min_unsigned,
+        wide_min_signed,
+        wide_max_unsigned,
+        wide_max_signed,
+        wide_byte_swap,
+        wide_move,
+    ]
+    [
+        wide_load,
+        wide_store,
+    ]
+    [
+        wide_add_mod,
+        wide_mul_mod,
+    ]
+    [
+        wide_truncate,
+    ]
+    [
+        wide_widen_unsigned,
+        wide_widen_signed,
+    ]
+    [
+        wide_set_equal,
+        wide_set_not_equal,
+        wide_set_less_than_unsigned,
+        wide_set_less_than_signed,
+    ]
+    [
+        wide_shift_left,
+        wide_shift_right_logical,
+        wide_shift_right_arithmetic,
+    ]
+
     // Instructions with args: offset
     [
         jump,
@@ -2727,6 +3443,237 @@ define_legacy_instruction_set! {
         rotate_right_32                          = 223,
         rotate_right_64                          = 222,
     ]
+
+    []
+    []
+    []
+    []
+    []
+    []
+    []
+    [
+        jump                                     = 40,
+    ]
+    [
+        ecalli                                   = 10,
+    ]
+    [
+        store_imm_u8                             = 30,
+        store_imm_u16                            = 31,
+        store_imm_u32                            = 32,
+        store_imm_u64                            = 33,
+    ]
+    [
+        move_reg                                 = 100,
+        count_leading_zero_bits_32               = 105,
+        count_leading_zero_bits_64               = 104,
+        count_trailing_zero_bits_32              = 107,
+        count_trailing_zero_bits_64              = 106,
+        count_set_bits_32                        = 103,
+        count_set_bits_64                        = 102,
+        sign_extend_8                            = 108,
+        sign_extend_16                           = 109,
+        zero_extend_16                           = 110,
+        reverse_byte                             = 111,
+    ]
+    [
+        load_imm_and_jump_indirect               = 180,
+    ]
+    [
+        load_imm64                               = 20,
+    ]
+}
+
+// The revive ISA with the wide integer instructions of the XReviveVec extension. Identical to
+// ReviveV1 otherwise, so a blob that uses none of them decodes the same either way.
+define_legacy_instruction_set! {
+    ($)
+
+    ISA_ReviveV2,
+    build_static_dispatch_table_revive_v2,
+
+    [
+        trap                                     = 0,
+        fallthrough                              = 1,
+        // MISSING: memset
+        // MISSING: unlikely
+    ]
+    [
+        jump_indirect                            = 50,
+        load_imm                                 = 51,
+        load_u8                                  = 52,
+        load_i8                                  = 53,
+        load_u16                                 = 54,
+        load_i16                                 = 55,
+        load_i32                                 = 57,
+        load_u32                                 = 56,
+        load_u64                                 = 58,
+        store_u8                                 = 59,
+        store_u16                                = 60,
+        store_u32                                = 61,
+        store_u64                                = 62,
+    ]
+    [
+        load_imm_and_jump                        = 80,
+        branch_eq_imm                            = 81,
+        branch_not_eq_imm                        = 82,
+        branch_less_unsigned_imm                 = 83,
+        branch_less_signed_imm                   = 87,
+        branch_greater_or_equal_unsigned_imm     = 85,
+        branch_greater_or_equal_signed_imm       = 89,
+        branch_less_or_equal_signed_imm          = 88,
+        branch_less_or_equal_unsigned_imm        = 84,
+        branch_greater_signed_imm                = 90,
+        branch_greater_unsigned_imm              = 86,
+    ]
+    [
+        store_imm_indirect_u8                    = 70,
+        store_imm_indirect_u16                   = 71,
+        store_imm_indirect_u32                   = 72,
+        store_imm_indirect_u64                   = 73,
+    ]
+    [
+        store_indirect_u8                        = 120,
+        store_indirect_u16                       = 121,
+        store_indirect_u32                       = 122,
+        store_indirect_u64                       = 123,
+        load_indirect_u8                         = 124,
+        load_indirect_i8                         = 125,
+        load_indirect_u16                        = 126,
+        load_indirect_i16                        = 127,
+        load_indirect_i32                        = 129,
+        load_indirect_u32                        = 128,
+        load_indirect_u64                        = 130,
+        add_imm_32                               = 131,
+        add_imm_64                               = 149,
+        and_imm                                  = 132,
+        xor_imm                                  = 133,
+        or_imm                                   = 134,
+        mul_imm_32                               = 135,
+        mul_imm_64                               = 150,
+        set_less_than_unsigned_imm               = 136,
+        set_less_than_signed_imm                 = 137,
+        shift_logical_left_imm_32                = 138,
+        shift_logical_left_imm_64                = 151,
+        shift_logical_right_imm_32               = 139,
+        shift_logical_right_imm_64               = 152,
+        shift_arithmetic_right_imm_32            = 140,
+        shift_arithmetic_right_imm_64            = 153,
+        negate_and_add_imm_32                    = 141,
+        negate_and_add_imm_64                    = 154,
+        set_greater_than_unsigned_imm            = 142,
+        set_greater_than_signed_imm              = 143,
+        shift_logical_right_imm_alt_32           = 145,
+        shift_logical_right_imm_alt_64           = 156,
+        shift_arithmetic_right_imm_alt_32        = 146,
+        shift_arithmetic_right_imm_alt_64        = 157,
+        shift_logical_left_imm_alt_32            = 144,
+        shift_logical_left_imm_alt_64            = 155,
+        cmov_if_zero_imm                         = 147,
+        cmov_if_not_zero_imm                     = 148,
+        rotate_right_imm_32                      = 160,
+        rotate_right_imm_alt_32                  = 161,
+        rotate_right_imm_64                      = 158,
+        rotate_right_imm_alt_64                  = 159,
+    ]
+    [
+        branch_eq                                = 170,
+        branch_not_eq                            = 171,
+        branch_less_unsigned                     = 172,
+        branch_less_signed                       = 173,
+        branch_greater_or_equal_unsigned         = 174,
+        branch_greater_or_equal_signed           = 175,
+    ]
+    [
+        add_32                                   = 190,
+        add_64                                   = 200,
+        sub_32                                   = 191,
+        sub_64                                   = 201,
+        and                                      = 210,
+        xor                                      = 211,
+        or                                       = 212,
+        mul_32                                   = 192,
+        mul_64                                   = 202,
+        mul_upper_signed_signed                  = 213,
+        mul_upper_unsigned_unsigned              = 214,
+        mul_upper_signed_unsigned                = 215,
+        set_less_than_unsigned                   = 216,
+        set_less_than_signed                     = 217,
+        shift_logical_left_32                    = 197,
+        shift_logical_left_64                    = 207,
+        shift_logical_right_32                   = 198,
+        shift_logical_right_64                   = 208,
+        shift_arithmetic_right_32                = 199,
+        shift_arithmetic_right_64                = 209,
+        div_unsigned_32                          = 193,
+        div_unsigned_64                          = 203,
+        div_signed_32                            = 194,
+        div_signed_64                            = 204,
+        rem_unsigned_32                          = 195,
+        rem_unsigned_64                          = 205,
+        rem_signed_32                            = 196,
+        rem_signed_64                            = 206,
+        cmov_if_zero                             = 218,
+        cmov_if_not_zero                         = 219,
+        and_inverted                             = 224,
+        or_inverted                              = 225,
+        xnor                                     = 226,
+        maximum                                  = 227,
+        maximum_unsigned                         = 228,
+        minimum                                  = 229,
+        minimum_unsigned                         = 230,
+        rotate_left_32                           = 221,
+        rotate_left_64                           = 220,
+        rotate_right_32                          = 223,
+        rotate_right_64                          = 222,
+    ]
+
+    [
+        wide_add                                 = 231,
+        wide_sub                                 = 232,
+        wide_mul                                 = 233,
+        wide_and                                 = 234,
+        wide_or                                  = 235,
+        wide_xor                                 = 236,
+        wide_div_unsigned                        = 237,
+        wide_div_signed                          = 238,
+        wide_rem_unsigned                        = 239,
+        wide_rem_signed                          = 240,
+        wide_exp                                 = 241,
+        wide_sign_extend                         = 242,
+        wide_min_unsigned                        = 243,
+        wide_min_signed                          = 244,
+        wide_max_unsigned                        = 245,
+        wide_max_signed                          = 246,
+        wide_byte_swap                           = 247,
+        wide_move                                = 19,
+    ]
+    [
+        wide_load                                = 16,
+        wide_store                               = 17,
+    ]
+    [
+        wide_add_mod                             = 14,
+        wide_mul_mod                             = 15,
+    ]
+    [
+        wide_truncate                            = 13,
+    ]
+    [
+        wide_widen_unsigned                      = 11,
+        wide_widen_signed                        = 12,
+    ]
+    [
+        wide_set_equal                           = 251,
+        wide_set_not_equal                       = 252,
+        wide_set_less_than_unsigned              = 253,
+        wide_set_less_than_signed                = 18,
+    ]
+    [
+        wide_shift_left                          = 248,
+        wide_shift_right_logical                 = 249,
+        wide_shift_right_arithmetic              = 250,
+    ]
     [
         jump                                     = 40,
     ]
@@ -2871,6 +3818,14 @@ define_legacy_instruction_set! {
         rotate_left_32                           = 221,
         rotate_right_32                          = 223,
     ]
+
+    []
+    []
+    []
+    []
+    []
+    []
+    []
     [
         jump                                     = 40,
     ]
@@ -3048,6 +4003,14 @@ define_extended_instruction_set! {
         rotate_right_32                          = [2: 306],
         rotate_right_64                          = [2: 307],
     ]
+
+    []
+    []
+    []
+    []
+    []
+    []
+    []
     // offset
     [
         jump                                     = [1: 217, 2: 218, 3: 219, 4: 220],
@@ -3228,6 +4191,14 @@ define_legacy_instruction_set! {
         rotate_right_32                          = 223,
         rotate_right_64                          = 222,
     ]
+
+    []
+    []
+    []
+    []
+    []
+    []
+    []
     [
         jump                                     = 40,
     ]
@@ -3277,6 +4248,7 @@ fn test_opcode_from_raw() {
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum InstructionSetKind {
     ReviveV1,
+    ReviveV2,
     JamV1,
     Latest32,
     Latest64,
@@ -3286,6 +4258,7 @@ impl InstructionSetKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::ReviveV1 => "revive_v1",
+            Self::ReviveV2 => "revive_v2",
             Self::JamV1 => "jam_v1",
             Self::Latest32 => "latest32",
             Self::Latest64 => "latest64",
@@ -3297,6 +4270,7 @@ impl InstructionSetKind {
         match self {
             Self::ReviveV1 => 0,
             Self::Latest32 => 1,
+            Self::ReviveV2 => 4,
             Self::Latest64 => 2,
             Self::JamV1 => 3,
         }
@@ -3308,6 +4282,7 @@ impl InstructionSetKind {
             1 => Some(Self::Latest32),
             2 => Some(Self::Latest64),
             3 => Some(Self::JamV1),
+            4 => Some(Self::ReviveV2),
             _ => None,
         }
     }
@@ -3316,7 +4291,10 @@ impl InstructionSetKind {
     pub fn is_64_bit(&self) -> bool {
         match self {
             InstructionSetKind::Latest32 => false,
-            InstructionSetKind::ReviveV1 | InstructionSetKind::JamV1 | InstructionSetKind::Latest64 => true,
+            InstructionSetKind::ReviveV1
+            | InstructionSetKind::ReviveV2
+            | InstructionSetKind::JamV1
+            | InstructionSetKind::Latest64 => true,
         }
     }
 }
@@ -3326,6 +4304,10 @@ macro_rules! dispatch_isa {
         match $self {
             Self::ReviveV1 => {
                 let $isa = ISA_ReviveV1;
+                $e
+            }
+            Self::ReviveV2 => {
+                let $isa = ISA_ReviveV2;
                 $e
             }
             Self::Latest32 => {
@@ -3561,6 +4543,125 @@ impl Instruction {
         position += 1;
         buffer[position] = reg1.0 as u8;
         position + 1
+    }
+
+    fn serialize_wide3(
+        isa: impl InstructionSet,
+        buffer: &mut [u8],
+        opcode: Opcode,
+        width: WideWidth,
+        reg1: WideReg,
+        reg2: WideReg,
+        reg3: WideReg,
+    ) -> usize {
+        let packed = reg2.raw() | (reg3.raw() << 5) | (reg1.raw() << 10) | (width.to_raw() << 15);
+        let (mut position, _) = Self::serialize_opcode(isa, buffer, opcode, 3);
+        for shift in [0, 8, 16] {
+            buffer[position] = (packed >> shift) as u8;
+            position += 1;
+        }
+        position
+    }
+
+    fn serialize_wide_shift(
+        isa: impl InstructionSet,
+        buffer: &mut [u8],
+        opcode: Opcode,
+        width: WideWidth,
+        reg1: WideReg,
+        reg2: WideReg,
+        reg3: RawReg,
+    ) -> usize {
+        let packed = width.to_raw() | (reg1.raw() << 2) | (reg2.raw() << 7) | ((reg3.0 & 0b1111) << 12);
+        Self::serialize_wide_prefix(isa, buffer, opcode, packed, 2)
+    }
+
+    fn serialize_wide_cmp(
+        isa: impl InstructionSet,
+        buffer: &mut [u8],
+        opcode: Opcode,
+        width: WideWidth,
+        reg1: RawReg,
+        reg2: WideReg,
+        reg3: WideReg,
+    ) -> usize {
+        let packed = width.to_raw() | ((reg1.0 & 0b1111) << 2) | (reg2.raw() << 6) | (reg3.raw() << 11);
+        Self::serialize_wide_prefix(isa, buffer, opcode, packed, 2)
+    }
+
+    fn serialize_wide_from_gpr(
+        isa: impl InstructionSet,
+        buffer: &mut [u8],
+        opcode: Opcode,
+        width: WideWidth,
+        reg1: WideReg,
+        reg2: RawReg,
+    ) -> usize {
+        let packed = width.to_raw() | (reg1.raw() << 2) | ((reg2.0 & 0b1111) << 7);
+        Self::serialize_wide_prefix(isa, buffer, opcode, packed, 2)
+    }
+
+    fn serialize_wide_to_gpr(
+        isa: impl InstructionSet,
+        buffer: &mut [u8],
+        opcode: Opcode,
+        width: WideWidth,
+        reg1: RawReg,
+        reg2: WideReg,
+    ) -> usize {
+        let packed = width.to_raw() | ((reg1.0 & 0b1111) << 2) | (reg2.raw() << 6);
+        Self::serialize_wide_prefix(isa, buffer, opcode, packed, 2)
+    }
+
+    fn serialize_wide4(
+        isa: impl InstructionSet,
+        buffer: &mut [u8],
+        opcode: Opcode,
+        width: WideWidth,
+        reg1: WideReg,
+        reg2: WideReg,
+        reg3: WideReg,
+        reg4: WideReg,
+    ) -> usize {
+        let packed =
+            width.to_raw() | (reg1.raw() << 2) | (reg2.raw() << 7) | (reg3.raw() << 12) | (reg4.raw() << 17);
+        Self::serialize_wide_prefix(isa, buffer, opcode, packed, 3)
+    }
+
+    /// Writes `bytes` little-endian argument bytes of an already packed wide operand field.
+    fn serialize_wide_prefix(
+        isa: impl InstructionSet,
+        buffer: &mut [u8],
+        opcode: Opcode,
+        packed: u32,
+        bytes: u32,
+    ) -> usize {
+        let (mut position, _) = Self::serialize_opcode(isa, buffer, opcode, bytes);
+        for index in 0..bytes {
+            buffer[position] = (packed >> (index * 8)) as u8;
+            position += 1;
+        }
+        position
+    }
+
+    fn serialize_wide_mem(
+        isa: impl InstructionSet,
+        buffer: &mut [u8],
+        opcode: Opcode,
+        width: WideWidth,
+        reg: WideReg,
+        base: RawReg,
+        imm: i32,
+    ) -> usize {
+        let packed = width.to_raw() | (reg.raw() << 2) | ((base.0 & 0b1111) << 7);
+        let imm = cast(imm).bitwise_as_u32();
+        let imm_length = simple_varint_length(imm);
+        let (mut position, length_delta) = Self::serialize_opcode(isa, buffer, opcode, 2 + imm_length);
+        let imm_length = Self::adjust_length(imm_length, length_delta);
+        buffer[position] = packed as u8;
+        buffer[position + 1] = (packed >> 8) as u8;
+        position += 2;
+        position + write_simple_varint_with_length(imm, imm_length, &mut buffer[position..])
     }
 
     fn serialize_reg_reg_imm(isa: impl InstructionSet, buffer: &mut [u8], opcode: Opcode, reg1: RawReg, reg2: RawReg, imm: i32) -> usize {
@@ -3860,6 +4961,132 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         }
     }
 
+    fn wide_move(&mut self, width: WideWidth, d: WideReg, s1: WideReg, _s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1}", bits = width.bits())
+    }
+
+    fn wide_byte_swap(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = bswap({s1})", bits = width.bits())
+    }
+
+    fn wide_shift_left(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: RawReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} << {s2}", bits = width.bits())
+    }
+
+    fn wide_shift_right_logical(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: RawReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} >> {s2}", bits = width.bits())
+    }
+
+    fn wide_shift_right_arithmetic(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: RawReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} >>a {s2}", bits = width.bits())
+    }
+
+    fn wide_set_equal(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} == {s2}", bits = width.bits())
+    }
+
+    fn wide_set_not_equal(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} != {s2}", bits = width.bits())
+    }
+
+    fn wide_set_less_than_unsigned(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} <u {s2}", bits = width.bits())
+    }
+
+    fn wide_set_less_than_signed(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} <s {s2}", bits = width.bits())
+    }
+
+    fn wide_widen_unsigned(&mut self, width: WideWidth, d: WideReg, s1: RawReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = zext({s1})", bits = width.bits())
+    }
+
+    fn wide_widen_signed(&mut self, width: WideWidth, d: WideReg, s1: RawReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = sext({s1})", bits = width.bits())
+    }
+
+    fn wide_truncate(&mut self, width: WideWidth, d: RawReg, s1: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = trunc({s1})", bits = width.bits())
+    }
+
+    fn wide_add_mod(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg, s3: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = addmod({s1}, {s2}, {s3})", bits = width.bits())
+    }
+
+    fn wide_mul_mod(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg, s3: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = mulmod({s1}, {s2}, {s3})", bits = width.bits())
+    }
+
+    fn wide_load(&mut self, width: WideWidth, d: WideReg, s1: RawReg, imm: i32) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = [{s1} + {imm}]", bits = width.bits())
+    }
+
+    fn wide_store(&mut self, width: WideWidth, d: WideReg, s1: RawReg, imm: i32) -> Self::ReturnTy {
+        write!(self, "i{bits}: [{s1} + {imm}] = {d}", bits = width.bits())
+    }
+    fn wide_add(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} + {s2}", bits = width.bits())
+    }
+
+    fn wide_sub(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} - {s2}", bits = width.bits())
+    }
+
+    fn wide_mul(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} * {s2}", bits = width.bits())
+    }
+
+    fn wide_and(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} & {s2}", bits = width.bits())
+    }
+
+    fn wide_or(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} | {s2}", bits = width.bits())
+    }
+
+    fn wide_xor(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} ^ {s2}", bits = width.bits())
+    }
+
+    fn wide_div_unsigned(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} /u {s2}", bits = width.bits())
+    }
+
+    fn wide_div_signed(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} /s {s2}", bits = width.bits())
+    }
+
+    fn wide_rem_unsigned(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} %u {s2}", bits = width.bits())
+    }
+
+    fn wide_rem_signed(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} %s {s2}", bits = width.bits())
+    }
+
+    fn wide_exp(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = {s1} ** {s2}", bits = width.bits())
+    }
+
+    fn wide_sign_extend(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = signext({s1}, {s2})", bits = width.bits())
+    }
+
+    fn wide_min_unsigned(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = minu({s1}, {s2})", bits = width.bits())
+    }
+
+    fn wide_min_signed(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = min({s1}, {s2})", bits = width.bits())
+    }
+
+    fn wide_max_unsigned(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = maxu({s1}, {s2})", bits = width.bits())
+    }
+
+    fn wide_max_signed(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        write!(self, "i{bits}: {d} = max({s1}, {s2})", bits = width.bits())
+    }
     fn add_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);

@@ -1,7 +1,7 @@
 #![deny(clippy::arithmetic_side_effects)]
 use polkavm_common::abi::{MemoryMapBuilder, VM_CODE_ADDRESS_ALIGNMENT, VM_MAX_PAGE_SIZE, VM_MIN_PAGE_SIZE};
 use polkavm_common::cast::cast;
-use polkavm_common::program::{
+use polkavm_common::program::{WideReg, WideWidth, 
     self, FrameKind, Instruction, InstructionFormat, InstructionSet, InstructionSetKind, LineProgramConfig, LineProgramOp, Opcode,
     ProgramBlob, ProgramCounter, ProgramSymbol,
 };
@@ -571,8 +571,41 @@ impl From<i32> for RegImm {
     }
 }
 
+/// Which wide instruction a [`BasicInst::Wide`] is. Keeping the shape in one enum lets the whole
+/// family travel through the linker as a single instruction kind.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum WideForm {
+    RegReg(crate::riscv::WideOp),
+    Shift(crate::riscv::WideShiftOp),
+    Cmp(crate::riscv::WideCmpOp),
+    Widen { signed: bool },
+    Narrow,
+    ByteSwap,
+    Move,
+    Modular { multiply: bool },
+    Load,
+    Store,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum BasicInst<T> {
+    /// An XReviveVec wide instruction, with its width already resolved from `vtype`.
+    ///
+    /// One variant rather than ten, because these operate on the wide register file: the
+    /// linker's register allocation and liveness only care about the few scalar operands, which
+    /// `scalar_src` and `scalar_dst` expose. The wide register numbers travel through untouched.
+    Wide {
+        op: WideForm,
+        width: WideWidth,
+        /// Wide destination, or the wide source for a store.
+        wide_dst: u8,
+        wide_src1: u8,
+        wide_src2: u8,
+        wide_src3: u8,
+        scalar_src: Option<Reg>,
+        scalar_dst: Option<Reg>,
+        offset: i32,
+    },
     LoadAbsolute {
         kind: LoadKind,
         dst: Reg,
@@ -689,6 +722,8 @@ impl<T> BasicInst<T> {
             BasicInst::MoveReg { src, .. } | BasicInst::Reg { src, .. } => RegMask::from(src),
             BasicInst::StoreAbsolute { src, .. } => RegMask::from(src),
             BasicInst::LoadIndirect { base, .. } => RegMask::from(base),
+            // Only the scalar operands matter here; the wide file is not allocated.
+            BasicInst::Wide { scalar_src, .. } => scalar_src.map_or(RegMask::empty(), RegMask::from),
             BasicInst::StoreIndirect { src, base, .. } => RegMask::from(src) | RegMask::from(base),
             BasicInst::RegReg { src1, src2, .. } => RegMask::from(src1) | RegMask::from(src2),
             BasicInst::AnyAny { src1, src2, .. } => RegMask::from(src1) | RegMask::from(src2),
@@ -703,6 +738,7 @@ impl<T> BasicInst<T> {
 
     fn dst_mask(&self, imports: &[Import]) -> RegMask {
         match *self {
+            BasicInst::Wide { scalar_dst, .. } => scalar_dst.map_or(RegMask::empty(), RegMask::from),
             BasicInst::Nop | BasicInst::StoreAbsolute { .. } | BasicInst::StoreIndirect { .. } => RegMask::empty(),
             BasicInst::MoveReg { dst, .. }
             | BasicInst::LoadHeapBase { dst }
@@ -726,6 +762,8 @@ impl<T> BasicInst<T> {
 
     fn has_side_effects(&self, config: &Config) -> bool {
         match *self {
+            // Only the accesses touch anything outside the wide file.
+            BasicInst::Wide { op, .. } => matches!(op, WideForm::Load | WideForm::Store),
             BasicInst::Sbrk { .. }
             | BasicInst::Prologue { .. }
             | BasicInst::Ecalli { .. }
@@ -751,6 +789,27 @@ impl<T> BasicInst<T> {
     fn map_register(self, mut map: impl FnMut(Reg, OpKind) -> Reg) -> Option<Self> {
         // Note: ALWAYS map the inputs first; otherwise `regalloc2` might break!
         match self {
+            BasicInst::Wide {
+                op,
+                width,
+                wide_dst,
+                wide_src1,
+                wide_src2,
+                wide_src3,
+                scalar_src,
+                scalar_dst,
+                offset,
+            } => Some(BasicInst::Wide {
+                op,
+                width,
+                wide_dst,
+                wide_src1,
+                wide_src2,
+                wide_src3,
+                scalar_src: scalar_src.map(|reg| map(reg, OpKind::Read)),
+                scalar_dst: scalar_dst.map(|reg| map(reg, OpKind::Write)),
+                offset,
+            }),
             BasicInst::LoadImmediate { dst, imm } => Some(BasicInst::LoadImmediate {
                 dst: map(dst, OpKind::Write),
                 imm,
@@ -901,6 +960,27 @@ impl<T> BasicInst<T> {
 
     fn map_target<U, E>(self, map: impl Fn(T) -> Result<U, E>) -> Result<BasicInst<U>, E> {
         Ok(match self {
+            BasicInst::Wide {
+                op,
+                width,
+                wide_dst,
+                wide_src1,
+                wide_src2,
+                wide_src3,
+                scalar_src,
+                scalar_dst,
+                offset,
+            } => BasicInst::Wide {
+                op,
+                width,
+                wide_dst,
+                wide_src1,
+                wide_src2,
+                wide_src3,
+                scalar_src,
+                scalar_dst,
+                offset,
+            },
             BasicInst::MoveReg { dst, src } => BasicInst::MoveReg { dst, src },
             BasicInst::LoadImmediate { dst, imm } => BasicInst::LoadImmediate { dst, imm },
             BasicInst::LoadImmediate64 { dst, imm } => BasicInst::LoadImmediate64 { dst, imm },
@@ -929,6 +1009,8 @@ impl<T> BasicInst<T> {
         T: Copy,
     {
         match self {
+            // Nothing to relocate: the operands are registers and a literal offset.
+            BasicInst::Wide { .. } => (None, None),
             BasicInst::LoadAbsolute { target, .. } | BasicInst::StoreAbsolute { target, .. } => (Some(*target), None),
             BasicInst::LoadAddress { target, .. } | BasicInst::LoadAddressIndirect { target, .. } => (None, Some(*target)),
             BasicInst::Nop
@@ -1922,13 +2004,6 @@ fn emit_or_combine_byte(
         emit(InstExt::Basic(BasicInst::MoveReg { dst, src }));
     }
 
-    // Loop:
-    // mov tmp, op
-    // shl mask, 8
-    // or tmp, mask
-    // test op, mask
-    // cmov.neq op, tmp
-
     for iter in range.step_by(8) {
         emit(InstExt::Basic(BasicInst::MoveReg { dst: tmp_reg, src: op_reg }));
 
@@ -1970,6 +2045,35 @@ fn emit_or_combine_byte(
     }
 }
 
+/// Emits one wide instruction. Its width comes from the instruction itself, so there is nothing
+/// to work out from the surrounding code.
+#[allow(clippy::too_many_arguments)]
+fn emit_wide(
+    emit: &mut impl FnMut(InstExt<SectionTarget, SectionTarget>),
+    lmul: u8,
+    op: WideForm,
+    wide_dst: u8,
+    wide_src1: u8,
+    wide_src2: u8,
+    wide_src3: u8,
+    scalar_src: Option<Reg>,
+    scalar_dst: Option<Reg>,
+    offset: i32,
+) -> Result<(), ProgramFromElfError> {
+    emit(InstExt::Basic(BasicInst::Wide {
+        op,
+        width: WideWidth::from_raw(u32::from(lmul)),
+        wide_dst,
+        wide_src1,
+        wide_src2,
+        wide_src3,
+        scalar_src,
+        scalar_dst,
+        offset,
+    }));
+    Ok(())
+}
+
 fn convert_instruction(
     elf: &Elf,
     section: &Section,
@@ -1980,6 +2084,51 @@ fn convert_instruction(
     mut emit: impl FnMut(InstExt<SectionTarget, SectionTarget>),
 ) -> Result<(), ProgramFromElfError> {
     match instruction {
+        Inst::WideRegReg { lmul, op, dst, src1, src2 } => {
+            emit_wide(&mut emit, lmul, WideForm::RegReg(op), dst, src1, src2, 0, None, None, 0)
+        }
+        Inst::WideShift { lmul, op, dst, src1, amount } => {
+            // A shift by a register that reads as zero is the identity, which the instruction
+            // already does, so the register does not have to be mapped away.
+            let amount = cast_reg_non_zero(amount)?.unwrap_or(Reg::A0);
+            emit_wide(&mut emit, lmul, WideForm::Shift(op), dst, src1, 0, 0, Some(amount), None, 0)
+        }
+        Inst::WideCmp { lmul, op, dst, src1, src2 } => {
+            let Some(dst) = cast_reg_non_zero(dst)? else {
+                emit(InstExt::nop());
+                return Ok(());
+            };
+            emit_wide(&mut emit, lmul, WideForm::Cmp(op), 0, src1, src2, 0, None, Some(dst), 0)
+        }
+        Inst::WideWiden { lmul, signed, dst, src } => {
+            let src = cast_reg_non_zero(src)?;
+            emit_wide(&mut emit, lmul, WideForm::Widen { signed }, dst, 0, 0, 0, src, None, 0)
+        }
+        Inst::WideNarrow { lmul, dst, src } => {
+            let Some(dst) = cast_reg_non_zero(dst)? else {
+                emit(InstExt::nop());
+                return Ok(());
+            };
+            emit_wide(&mut emit, lmul, WideForm::Narrow, 0, src, 0, 0, None, Some(dst), 0)
+        }
+        Inst::WideByteSwap { lmul, dst, src } => {
+            emit_wide(&mut emit, lmul, WideForm::ByteSwap, dst, src, 0, 0, None, None, 0)
+        }
+        Inst::WideMove { lmul, dst, src } => {
+            emit_wide(&mut emit, lmul, WideForm::Move, dst, src, 0, 0, None, None, 0)
+        }
+        Inst::WideModular { multiply, dst, src1, src2, src3 } => {
+            // The modular operations are 256-bit by definition, so their width is not encoded.
+            emit_wide(&mut emit, 1, WideForm::Modular { multiply }, dst, src1, src2, src3, None, None, 0)
+        }
+        Inst::WideLoad { lmul, dst, base, offset } => {
+            let base = cast_reg_non_zero(base)?.unwrap_or(Reg::A0);
+            emit_wide(&mut emit, lmul, WideForm::Load, dst, 0, 0, 0, Some(base), None, offset)
+        }
+        Inst::WideStore { lmul, src, base, offset } => {
+            let base = cast_reg_non_zero(base)?.unwrap_or(Reg::A0);
+            emit_wide(&mut emit, lmul, WideForm::Store, src, 0, 0, 0, Some(base), None, offset)
+        }
         Inst::LoadUpperImmediate { dst, value } => {
             let Some(dst) = cast_reg_non_zero(dst)? else {
                 emit(InstExt::nop());
@@ -2988,6 +3137,7 @@ fn parse_code_section(
     output: &mut Vec<(Source, InstExt<SectionTarget, SectionTarget>)>,
     opt_level: OptLevel,
 ) -> Result<(), ProgramFromElfError> {
+
     let section_index = section.index();
     let section_name = section.name();
     let text = &section.data();
@@ -3284,9 +3434,17 @@ fn parse_code_section(
             }
 
             let original_length = output.len();
-            convert_instruction(elf, section, current_location, original_inst, inst_size, elf.is_64(), |inst| {
-                output.push((source, inst));
-            })?;
+            convert_instruction(
+                elf,
+                section,
+                current_location,
+                original_inst,
+                inst_size,
+                elf.is_64(),
+                |inst| {
+                    output.push((source, inst));
+                },
+            )?;
 
             // We need to always emit at least one instruction (even if it's a NOP) to handle potential jumps.
             assert_ne!(
@@ -8380,6 +8538,95 @@ fn emit_code(
 
         for (source, op) in &block.ops {
             let op = match *op {
+                BasicInst::Wide {
+                    op,
+                    width,
+                    wide_dst,
+                    wide_src1,
+                    wide_src2,
+                    wide_src3,
+                    scalar_src,
+                    scalar_dst,
+                    offset,
+                } => {
+                    // The wide register numbers are the guest's vector register numbers, which is
+                    // exactly what a wide register index is.
+                    let d = WideReg::from_raw(u32::from(wide_dst), width);
+                    let s1 = WideReg::from_raw(u32::from(wide_src1), width);
+                    let s2 = WideReg::from_raw(u32::from(wide_src2), width);
+                    let s3 = WideReg::from_raw(u32::from(wide_src3), width);
+                    match op {
+                        WideForm::RegReg(kind) => {
+                            use crate::riscv::WideOp as O;
+                            match kind {
+                                O::Add => Instruction::wide_add(width, d, s1, s2),
+                                O::Sub => Instruction::wide_sub(width, d, s1, s2),
+                                O::Mul => Instruction::wide_mul(width, d, s1, s2),
+                                O::And => Instruction::wide_and(width, d, s1, s2),
+                                O::Or => Instruction::wide_or(width, d, s1, s2),
+                                O::Xor => Instruction::wide_xor(width, d, s1, s2),
+                                O::DivUnsigned => Instruction::wide_div_unsigned(width, d, s1, s2),
+                                O::DivSigned => Instruction::wide_div_signed(width, d, s1, s2),
+                                O::RemUnsigned => Instruction::wide_rem_unsigned(width, d, s1, s2),
+                                O::RemSigned => Instruction::wide_rem_signed(width, d, s1, s2),
+                                O::Exp => Instruction::wide_exp(width, d, s1, s2),
+                                O::SignExtend => Instruction::wide_sign_extend(width, d, s1, s2),
+                                O::MinUnsigned => Instruction::wide_min_unsigned(width, d, s1, s2),
+                                O::MinSigned => Instruction::wide_min_signed(width, d, s1, s2),
+                                O::MaxUnsigned => Instruction::wide_max_unsigned(width, d, s1, s2),
+                                O::MaxSigned => Instruction::wide_max_signed(width, d, s1, s2),
+                            }
+                        }
+                        WideForm::Shift(kind) => {
+                            use crate::riscv::WideShiftOp as O;
+                            let amount = conv_reg(scalar_src.expect("a wide shift has an amount"));
+                            match kind {
+                                O::Left => Instruction::wide_shift_left(width, d, s1, amount),
+                                O::RightLogical => Instruction::wide_shift_right_logical(width, d, s1, amount),
+                                O::RightArithmetic => Instruction::wide_shift_right_arithmetic(width, d, s1, amount),
+                            }
+                        }
+                        WideForm::Cmp(kind) => {
+                            use crate::riscv::WideCmpOp as O;
+                            let out = conv_reg(scalar_dst.expect("a wide compare has a result"));
+                            match kind {
+                                O::Equal => Instruction::wide_set_equal(width, out, s1, s2),
+                                O::NotEqual => Instruction::wide_set_not_equal(width, out, s1, s2),
+                                O::LessUnsigned => Instruction::wide_set_less_than_unsigned(width, out, s1, s2),
+                                O::LessSigned => Instruction::wide_set_less_than_signed(width, out, s1, s2),
+                            }
+                        }
+                        WideForm::Widen { signed } => {
+                            let src = conv_reg(scalar_src.expect("a widen has a source"));
+                            if signed {
+                                Instruction::wide_widen_signed(width, d, src)
+                            } else {
+                                Instruction::wide_widen_unsigned(width, d, src)
+                            }
+                        }
+                        WideForm::Narrow => {
+                            let out = conv_reg(scalar_dst.expect("a narrow has a result"));
+                            Instruction::wide_truncate(width, out, s1)
+                        }
+                        WideForm::Move => Instruction::wide_move(width, d, s1, s1),
+                        WideForm::ByteSwap => Instruction::wide_byte_swap(width, d, s1, s1),
+                        WideForm::Modular { multiply } => {
+                            if multiply {
+                                Instruction::wide_mul_mod(width, d, s1, s2, s3)
+                            } else {
+                                Instruction::wide_add_mod(width, d, s1, s2, s3)
+                            }
+                        }
+                        WideForm::Load => {
+                            let base = conv_reg(scalar_src.expect("a wide load has a base"));
+                            Instruction::wide_load(width, d, base, offset)
+                        }
+                        WideForm::Store => {
+                            let base = conv_reg(scalar_src.expect("a wide store has a base"));
+                            Instruction::wide_store(width, d, base, offset)
+                        }
+                    }
+                }
                 BasicInst::LoadImmediate { dst, imm } => Instruction::load_imm(conv_reg(dst), imm),
                 BasicInst::LoadImmediate64 { dst, imm } => {
                     if !is_rv64 {
@@ -10083,6 +10330,8 @@ impl Config {
 #[non_exhaustive]
 pub enum TargetInstructionSet {
     ReviveV1,
+    /// ReviveV1 plus the XReviveVec wide integer instructions.
+    ReviveV2,
     JamV1,
     Latest,
 }
@@ -10091,6 +10340,7 @@ impl From<InstructionSetKind> for TargetInstructionSet {
     fn from(kind: InstructionSetKind) -> Self {
         match kind {
             InstructionSetKind::ReviveV1 => TargetInstructionSet::ReviveV1,
+            InstructionSetKind::ReviveV2 => TargetInstructionSet::ReviveV2,
             InstructionSetKind::JamV1 => TargetInstructionSet::JamV1,
             InstructionSetKind::Latest32 | InstructionSetKind::Latest64 => TargetInstructionSet::Latest,
         }
@@ -10120,6 +10370,13 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
 
             InstructionSetKind::ReviveV1
         }
+        TargetInstructionSet::ReviveV2 => {
+            if !is_rv64 {
+                return Err(ProgramFromElfError::other("the ReviveV2 ISA only supports 64-bit"));
+            }
+
+            InstructionSetKind::ReviveV2
+        }
         TargetInstructionSet::JamV1 => {
             if !is_rv64 {
                 return Err(ProgramFromElfError::other("the JamV1 ISA only supports 64-bit"));
@@ -10142,6 +10399,9 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
 
     let mut decoder_config = DecoderConfig::new_32bit();
     decoder_config.set_rv64(elf.is_64());
+    // Only the ISA that has somewhere to put them decodes the wide instructions; for every other
+    // target a custom-2 encoding stays an unsupported instruction, as it was before.
+    decoder_config.set_xrevivevec(isa == InstructionSetKind::ReviveV2);
 
     let mut sections_ro_data = Vec::new();
     let mut sections_rw_data = Vec::new();
