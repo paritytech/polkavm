@@ -6309,8 +6309,7 @@ assert_send_sync! {
 /// Everything is observed by truncating a wide register back into a general purpose one, since
 /// that is the only way out of the wide file, and the wide values are built with `widen` rather
 /// than loaded so the test does not depend on memory too.
-#[test]
-fn wide_instructions_interpreted() {
+fn wide_instructions_on(backend: BackendKind) {
     use polkavm_common::program::{WideReg, WideWidth};
 
     fn wreg(index: u32, width: WideWidth) -> WideReg {
@@ -6382,7 +6381,9 @@ fn wide_instructions_interpreted() {
 
         let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
         let mut config = Config::default();
-        config.set_backend(Some(BackendKind::Interpreter));
+        config.set_backend(Some(backend));
+    config.set_allow_experimental(true);
+        config.set_allow_experimental(true);
         let engine = Engine::new(&config).unwrap();
         let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
         let mut linker: Linker<(), ()> = Linker::new();
@@ -6394,8 +6395,7 @@ fn wide_instructions_interpreted() {
 }
 
 /// Wide loads and stores round-trip a value through guest memory.
-#[test]
-fn wide_memory_interpreted() {
+fn wide_memory_on(backend: BackendKind) {
     use polkavm_common::program::{WideReg, WideWidth};
 
     let width = WideWidth::W256;
@@ -6422,7 +6422,8 @@ fn wide_memory_interpreted() {
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let mut config = Config::default();
-    config.set_backend(Some(BackendKind::Interpreter));
+    config.set_backend(Some(backend));
+    config.set_allow_experimental(true);
     let engine = Engine::new(&config).unwrap();
     let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
     let mut linker: Linker<(), ()> = Linker::new();
@@ -6430,4 +6431,32 @@ fn wide_memory_interpreted() {
     let mut instance = instance_pre.instantiate().unwrap();
     let result = instance.call_typed_and_get_result::<u64, ()>(&mut (), "main", ()).unwrap();
     assert_eq!(result, value);
+}
+
+#[test]
+fn wide_instructions_interpreted() {
+    wide_instructions_on(BackendKind::Interpreter);
+}
+
+#[test]
+fn wide_memory_interpreted() {
+    wide_memory_on(BackendKind::Interpreter);
+}
+
+/// The same programs through the recompiler, so it is held to the interpreter's results rather
+/// than to a separately written expectation.
+#[test]
+fn wide_instructions_compiled() {
+    if !BackendKind::Compiler.is_supported() {
+        return;
+    }
+    wide_instructions_on(BackendKind::Compiler);
+}
+
+#[test]
+fn wide_memory_compiled() {
+    if !BackendKind::Compiler.is_supported() {
+        return;
+    }
+    wide_memory_on(BackendKind::Compiler);
 }

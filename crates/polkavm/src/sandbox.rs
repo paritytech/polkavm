@@ -83,6 +83,8 @@ pub struct OffsetTable {
     pub next_program_counter: usize,
     pub program_counter: usize,
     pub regs: usize,
+    pub wide: usize,
+    pub wide_scalar: usize,
     pub futex: usize,
 }
 

@@ -1519,6 +1519,18 @@ pub mod inst {
             None,
             (display_with_operands(fmt, "add", self.0)),
 
+        // https://www.felixcloutier.com/x86/adc
+        adc(Operands) =>
+            alu_impl(0x10, 0x12, 0b010, self.0),
+            None,
+            (display_with_operands(fmt, "adc", self.0)),
+
+        // https://www.felixcloutier.com/x86/sbb
+        sbb(Operands) =>
+            alu_impl(0x18, 0x1a, 0b011, self.0),
+            None,
+            (display_with_operands(fmt, "sbb", self.0)),
+
         // https://www.felixcloutier.com/x86/inc
         inc(Size, RegMem) =>
             new_rm(0xfe, self.0, self.1, None),
@@ -2503,6 +2515,8 @@ mod tests {
 
     generate_tests! {
         add,
+        adc,
+        sbb,
         and,
         bts,
         call_rel32,

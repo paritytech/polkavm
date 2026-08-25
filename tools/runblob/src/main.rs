@@ -8,7 +8,13 @@ fn main() {
     let blob = polkavm::ProgramBlob::parse(bytes.into()).expect("parse blob");
 
     let mut config = polkavm::Config::default();
-    config.set_backend(Some(polkavm::BackendKind::Interpreter));
+    // `RUNBLOB_BACKEND=compiler` runs the blob through the recompiler instead.
+    let backend = match std::env::var("RUNBLOB_BACKEND").as_deref() {
+        Ok("compiler") => polkavm::BackendKind::Compiler,
+        _ => polkavm::BackendKind::Interpreter,
+    };
+    config.set_backend(Some(backend));
+    config.set_allow_experimental(true);
     let engine = polkavm::Engine::new(&config).expect("engine");
     let module = polkavm::Module::from_blob(&engine, &Default::default(), blob).expect("module");
 

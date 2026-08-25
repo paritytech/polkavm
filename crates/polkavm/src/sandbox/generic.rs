@@ -633,6 +633,9 @@ struct VmCtx {
     exit_reason: ExitReason,
 
     regs: CacheAligned<[RegValue; REG_COUNT]>,
+    /// The wide register file of the XReviveVec extension, addressed directly by compiled code.
+    wide: [u64; polkavm_common::zygote::WIDE_REG_LIMBS],
+    wide_scalar: u64,
     tmp_reg: AtomicU64,
     sandbox: *mut Sandbox,
     program_counter: AtomicU32,
@@ -668,6 +671,8 @@ impl VmCtx {
             next_program_counter: AtomicU32::new(0),
             next_native_program_counter: AtomicU64::new(0),
             memset_continuation: AtomicU64::new(0),
+            wide: [0; polkavm_common::zygote::WIDE_REG_LIMBS],
+            wide_scalar: 0,
         }
     }
 }
@@ -743,6 +748,29 @@ unsafe extern "C" fn syscall_return() -> ! {
     let vmctx = unsafe { conjure_vmctx() };
 
     sysreturn(vmctx);
+}
+
+/// Runs one wide instruction of the XReviveVec extension.
+///
+/// The compute operations come through here rather than being generated inline: they share an
+/// implementation with the interpreter, so the two backends cannot disagree about what an
+/// instruction means. Loads and stores do not -- those are generated inline so that a bad address
+/// faults through the same guard pages as a scalar access.
+unsafe extern "C" fn syscall_wide(descriptor: u64) -> u64 {
+    // SAFETY: We were called from the inside of the guest program, so vmctx must be valid.
+    let vmctx = unsafe { conjure_vmctx() };
+    let scalar = vmctx.wide_scalar;
+
+    match polkavm_common::wide::dispatch::run(
+        &mut vmctx.wide,
+        descriptor,
+        scalar,
+        |_, _| false,
+        |_, _| false,
+    ) {
+        Ok(result) => result,
+        Err(()) => trigger_exit(vmctx, ExitReason::Error),
+    }
 }
 
 unsafe extern "C" fn syscall_sbrk(pending_heap_top: u64) -> u32 {
@@ -2097,6 +2125,7 @@ impl super::Sandbox for Sandbox {
             syscall_step,
             syscall_sbrk,
             syscall_not_enough_gas,
+            syscall_wide,
         })
     }
 
@@ -2110,6 +2139,8 @@ impl super::Sandbox for Sandbox {
             next_program_counter: get_field_offset!(VmCtx::new(), |base| base.next_program_counter.as_ptr()),
             program_counter: get_field_offset!(VmCtx::new(), |base| base.program_counter.as_ptr()),
             regs: get_field_offset!(VmCtx::new(), |base| &base.regs),
+            wide: get_field_offset!(VmCtx::new(), |base| &base.wide),
+            wide_scalar: get_field_offset!(VmCtx::new(), |base| &base.wide_scalar),
             futex: usize::MAX,
         }
     }

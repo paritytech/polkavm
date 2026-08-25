@@ -2607,6 +2607,8 @@ impl super::Sandbox for Sandbox {
             next_program_counter: get_field_offset!(VmCtx::new(), |base| base.next_program_counter.as_ptr()),
             program_counter: get_field_offset!(VmCtx::new(), |base| base.program_counter.as_ptr()),
             regs: get_field_offset!(VmCtx::new(), |base| base.regs.as_ptr()),
+            wide: get_field_offset!(VmCtx::new(), |base| base.wide.as_ptr()),
+            wide_scalar: get_field_offset!(VmCtx::new(), |base| base.wide_scalar.as_ptr()),
             futex: get_field_offset!(VmCtx::new(), |base| base.futex.as_ptr()),
         }
     }

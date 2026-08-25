@@ -5,7 +5,7 @@ use std::sync::Arc;
 use polkavm_assembler::{Assembler, Label};
 use polkavm_common::abi::VM_CODE_ADDRESS_ALIGNMENT;
 use polkavm_common::cast::cast;
-use polkavm_common::program::{scan_is_jump_target_valid, InstructionSetKind, JumpTable, ProgramCounter, ProgramExport, RawReg};
+use polkavm_common::program::{WideReg, WideWidth, scan_is_jump_target_valid, InstructionSetKind, JumpTable, ProgramCounter, ProgramExport, RawReg};
 use polkavm_common::utils::{Bitness, BitnessT, GasVisitorT};
 use polkavm_common::zygote::VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH;
 
@@ -95,6 +95,7 @@ where
     gas_metering_stub_offsets: Vec<u32>,
     gas_cost_for_basic_block: Vec<u32>,
     sbrk_label: Label,
+    wide_label: Label,
     step_label: Label,
     trap_label: Label,
     memset_label: Label,
@@ -223,6 +224,7 @@ where
         let step_label = asm.forward_declare_label();
         let jump_table_label = asm.forward_declare_label();
         let sbrk_label = asm.forward_declare_label();
+        let wide_label = asm.forward_declare_label();
         let memset_label = asm.forward_declare_label();
         let div32u_label = asm.forward_declare_label();
         let div32s_label = asm.forward_declare_label();
@@ -258,6 +260,7 @@ where
             step_label,
             jump_table_label,
             sbrk_label,
+            wide_label,
             memset_label,
             div32u_label,
             div32s_label,
@@ -285,6 +288,7 @@ where
         ArchVisitor(&mut visitor).emit_trap_trampoline();
         ArchVisitor(&mut visitor).emit_ecall_trampoline();
         ArchVisitor(&mut visitor).emit_sbrk_trampoline();
+        ArchVisitor(&mut visitor).emit_wide_trampoline();
         ArchVisitor(&mut visitor).emit_divrem_trampoline();
 
         if config.gas_metering.is_some() {
@@ -806,6 +810,141 @@ where
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, add_32(d, s1, s2));
     }
 
+    #[inline(always)]
+
+    // The XReviveVec wide instructions.
+    #[inline(always)]
+    fn wide_add(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_add(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_sub(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_sub(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_mul(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_mul(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_and(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_and(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_or(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_or(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_xor(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_xor(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_div_unsigned(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_div_unsigned(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_div_signed(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_div_signed(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_rem_unsigned(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_rem_unsigned(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_rem_signed(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_rem_signed(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_exp(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_exp(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_sign_extend(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_sign_extend(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_min_unsigned(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_min_unsigned(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_min_signed(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_min_signed(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_max_unsigned(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_max_unsigned(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_max_signed(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_max_signed(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_byte_swap(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_byte_swap(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_move(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_move(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_shift_left(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_shift_left(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_shift_right_logical(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_shift_right_logical(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_shift_right_arithmetic(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_shift_right_arithmetic(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_set_equal(&mut self, code_offset: u32, length: u32, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_set_equal(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_set_not_equal(&mut self, code_offset: u32, length: u32, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_set_not_equal(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_set_less_than_unsigned(&mut self, code_offset: u32, length: u32, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_set_less_than_unsigned(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_set_less_than_signed(&mut self, code_offset: u32, length: u32, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_set_less_than_signed(width, d, s1, s2));
+    }
+    #[inline(always)]
+    fn wide_add_mod(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg, s3: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_add_mod(width, d, s1, s2, s3));
+    }
+    #[inline(always)]
+    fn wide_mul_mod(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg, s3: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_mul_mod(width, d, s1, s2, s3));
+    }
+    #[inline(always)]
+    fn wide_truncate(&mut self, code_offset: u32, length: u32, width: WideWidth, d: RawReg, s1: WideReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_truncate(width, d, s1));
+    }
+
+    #[inline(always)]
+    fn wide_widen_unsigned(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_widen_unsigned(width, d, s1));
+    }
+
+    #[inline(always)]
+    fn wide_widen_signed(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, s1: RawReg) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_widen_signed(width, d, s1));
+    }
+
+    #[inline(always)]
+    fn wide_load(&mut self, code_offset: u32, length: u32, width: WideWidth, d: WideReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_load(width, d, base, offset));
+    }
+
+    #[inline(always)]
+    fn wide_store(&mut self, code_offset: u32, length: u32, width: WideWidth, s: WideReg, base: RawReg, offset: i32) -> Self::ReturnTy {
+        emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, wide_store(width, s, base, offset));
+    }
     #[inline(always)]
     fn add_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         assert_eq!(B::BITNESS, Bitness::B64);

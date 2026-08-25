@@ -9,7 +9,8 @@ use polkavm_assembler::amd64::{Condition, LoadKind, MemOp, RegSize, Size};
 use polkavm_assembler::{Label, NonZero, ReservedAssembler, U1, U2, U3, U4};
 
 use polkavm_common::cast::cast;
-use polkavm_common::program::{ProgramCounter, RawReg, Reg};
+use polkavm_common::wide::wide_call;
+use polkavm_common::program::{ProgramCounter, RawReg, Reg, WideReg, WideWidth};
 use polkavm_common::utils::GasVisitorT;
 use polkavm_common::zygote::{VmCtx, VM_ADDR_VMCTX};
 
@@ -19,6 +20,16 @@ use crate::sandbox::Sandbox;
 
 /// The register used for the embedded sandbox to hold the base address of the guest's linear memory.
 const GENERIC_SANDBOX_MEMORY_REG: NativeReg = AUX_TMP_REG;
+
+/// The loop counter of a wide access wide enough to need one, and a pointer into the wide file;
+/// both saved around the access like the scratch below.
+const WIDE_INDEX_REG: NativeReg = polkavm_common::regmap::to_native_reg(Reg::T0);
+const WIDE_PTR_REG: NativeReg = polkavm_common::regmap::to_native_reg(Reg::T1);
+
+/// A wide access moves its limbs through this, saved and restored around the access. It is a guest
+/// register rather than a temporary because the address computation may want the temporary itself.
+const WIDE_SCRATCH_REG: NativeReg = polkavm_common::regmap::to_native_reg(Reg::T2);
+
 
 /// The register used for the linux sandbox to hold the address of the VM context.
 const LINUX_SANDBOX_VMCTX_REG: NativeReg = AUX_TMP_REG;
@@ -733,6 +744,304 @@ where
         self.push(jmp(TMP_REG));
     }
 
+    /// The vmctx slot holding limb `index` of a wide register.
+    fn wide_limb(reg: WideReg, index: usize) -> MemOp {
+        Self::vmctx_field(S::offset_table().wide + (reg.limb_offset() + index) * 8)
+    }
+
+
+
+    // The XReviveVec wide instructions. The compute ones go through the trampoline, sharing an
+    // implementation with the interpreter; the accesses are generated here so that a bad address
+    // faults through the same guard pages a scalar access does.
+
+    pub fn wide_add(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::ADD, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_sub(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::SUB, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_mul(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::MUL, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_and(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::AND, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_or(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::OR, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_xor(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::XOR, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_div_unsigned(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::DIVU, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_div_signed(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::DIV, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_rem_unsigned(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::REMU, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_rem_signed(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::REM, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_exp(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::EXP, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_sign_extend(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::SIGNEXTEND, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_min_unsigned(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::MINU, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_min_signed(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::MIN, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_max_unsigned(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::MAXU, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_max_signed(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::MAX, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_byte_swap(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::BSWAP, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_move(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::MV, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_shift_left(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: RawReg) {
+        let descriptor = wide_call::pack(wide_call::SLL, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, 0, 0);
+        self.wide_op(descriptor, Some(conv_reg(s2)), None);
+    }
+
+    pub fn wide_shift_right_logical(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: RawReg) {
+        let descriptor = wide_call::pack(wide_call::SRL, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, 0, 0);
+        self.wide_op(descriptor, Some(conv_reg(s2)), None);
+    }
+
+    pub fn wide_shift_right_arithmetic(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: RawReg) {
+        let descriptor = wide_call::pack(wide_call::SRA, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, 0, 0);
+        self.wide_op(descriptor, Some(conv_reg(s2)), None);
+    }
+
+    pub fn wide_set_equal(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::SEQ, width.to_raw() as u8, 0, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, Some(conv_reg(d)));
+    }
+
+    pub fn wide_set_not_equal(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::SNE, width.to_raw() as u8, 0, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, Some(conv_reg(d)));
+    }
+
+    pub fn wide_set_less_than_unsigned(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::SLTU, width.to_raw() as u8, 0, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, Some(conv_reg(d)));
+    }
+
+    pub fn wide_set_less_than_signed(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) {
+        let descriptor = wide_call::pack(wide_call::SLT, width.to_raw() as u8, 0, s1.raw() as u8, s2.raw() as u8, 0);
+        self.wide_op(descriptor, None, Some(conv_reg(d)));
+    }
+
+    pub fn wide_add_mod(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg, s3: WideReg) {
+        let descriptor = wide_call::pack(wide_call::ADDMOD, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, s3.raw() as u8);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_mul_mod(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg, s3: WideReg) {
+        let descriptor = wide_call::pack(wide_call::MULMOD, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, s3.raw() as u8);
+        self.wide_op(descriptor, None, None);
+    }
+
+    pub fn wide_truncate(&mut self, width: WideWidth, d: RawReg, s1: WideReg) {
+        let descriptor = wide_call::pack(wide_call::TRUNC, width.to_raw() as u8, 0, s1.raw() as u8, 0, 0);
+        self.wide_op(descriptor, None, Some(conv_reg(d)));
+    }
+
+    pub fn wide_widen_unsigned(&mut self, width: WideWidth, d: WideReg, s1: RawReg) {
+        let descriptor = wide_call::pack(wide_call::ZEXT, width.to_raw() as u8, d.raw() as u8, 0, 0, 0);
+        self.wide_op(descriptor, Some(conv_reg(s1)), None);
+    }
+
+    pub fn wide_widen_signed(&mut self, width: WideWidth, d: WideReg, s1: RawReg) {
+        let descriptor = wide_call::pack(wide_call::SEXT, width.to_raw() as u8, d.raw() as u8, 0, 0, 0);
+        self.wide_op(descriptor, Some(conv_reg(s1)), None);
+    }
+
+    /// The vmctx base register and the offset a wide register's limb zero sits at.
+    fn wide_file_base(reg: WideReg) -> (NativeReg, i32) {
+        let offset = S::offset_table().wide + reg.limb_offset() * 8;
+        match S::KIND {
+            SandboxKind::Linux => (LINUX_SANDBOX_VMCTX_REG, offset as i32),
+            SandboxKind::Generic => {
+                #[cfg(feature = "generic-sandbox")]
+                {
+                    (
+                        GENERIC_SANDBOX_MEMORY_REG,
+                        crate::sandbox::generic::GUEST_MEMORY_TO_VMCTX_OFFSET as i32 + offset as i32,
+                    )
+                }
+
+                #[cfg(not(feature = "generic-sandbox"))]
+                {
+                    unreachable!();
+                }
+            }
+        }
+    }
+
+    /// A wide access, moving the limbs between guest memory and the wide file.
+    ///
+    /// The guest address is materialised once with `lea` and the limbs are indexed off it, because
+    /// a wide access has to fit the compiler's per-instruction byte budget. Narrow widths are
+    /// unrolled; anything wider walks a generated loop, whose size does not grow with the width.
+    fn wide_access(&mut self, width: WideWidth, reg: WideReg, base: RawReg, offset: i32, is_load: bool) {
+        let limbs = width.limbs();
+        let scratch = WIDE_SCRATCH_REG;
+        let base = Some(base);
+        let (file_reg, file_offset) = Self::wide_file_base(reg);
+
+        self.push(push(scratch));
+        load_store_operand!(self, S::KIND, base, offset, |address| {
+            self.push(lea(RegSize::R64, TMP_REG, address));
+        });
+
+        // Four limbs unrolled is about sixty bytes, which fits; eight is not.
+        if limbs <= 4 {
+            for index in 0..limbs {
+                let guest = reg_indirect(RegSize::R64, TMP_REG + (index * 8) as i32);
+                let file = reg_indirect(RegSize::R64, file_reg + (file_offset + (index * 8) as i32));
+                if is_load {
+                    self.push(rex(load(LoadKind::U64, scratch, guest)));
+                    self.push(store(Size::U64, file, scratch));
+                } else {
+                    self.push(rex(load(LoadKind::U64, scratch, file)));
+                    self.push(store(Size::U64, guest, scratch));
+                }
+            }
+            self.push(pop(scratch));
+            return;
+        }
+
+        // Wider than that, walk a loop: two pointers and a counter, so its size does not grow
+        // with the width. Pointers rather than an indexed operand, because every access is then a
+        // plain register indirect.
+        let counter = WIDE_INDEX_REG;
+        let file_ptr = WIDE_PTR_REG;
+        self.push(push(counter));
+        self.push(push(file_ptr));
+        self.push(lea(RegSize::R64, file_ptr, reg_indirect(RegSize::R64, file_reg + file_offset)));
+        self.push(mov_imm(counter, imm32(limbs as u32)));
+
+        let body = self.asm.create_label();
+        let guest = reg_indirect(RegSize::R64, TMP_REG);
+        let file = reg_indirect(RegSize::R64, file_ptr);
+        if is_load {
+            self.push(rex(load(LoadKind::U64, scratch, guest)));
+            self.push(store(Size::U64, file, scratch));
+        } else {
+            self.push(rex(load(LoadKind::U64, scratch, file)));
+            self.push(store(Size::U64, guest, scratch));
+        }
+        self.push(rex(add((TMP_REG, imm32(8)))));
+        self.push(rex(add((file_ptr, imm32(8)))));
+        self.push(rex(sub((counter, imm32(1)))));
+        self.push(jcc_label8(Condition::NotEqual, body));
+
+        self.push(pop(file_ptr));
+        self.push(pop(counter));
+        self.push(pop(scratch));
+    }
+
+    pub fn wide_load(&mut self, width: WideWidth, d: WideReg, base: RawReg, offset: i32) {
+        self.wide_access(width, d, base, offset, true);
+    }
+
+    pub fn wide_store(&mut self, width: WideWidth, s: WideReg, base: RawReg, offset: i32) {
+        self.wide_access(width, s, base, offset, false);
+    }
+
+    /// The trampoline every wide compute instruction calls.
+    ///
+    /// Shaped exactly like the sbrk one: the argument arrives in the temporary register and the
+    /// result comes back in it, so the native stack at the call is aligned the same way. Anything
+    /// else the instruction needs travels through `wide_scalar`.
+    pub(crate) fn emit_wide_trampoline(&mut self) {
+        log::trace!("Emitting trampoline: wide");
+        let label = self.wide_label;
+        self.define_label(label);
+
+        self.push(push(TMP_REG));
+        self.save_registers_to_vmctx();
+        self.push(mov_imm64(TMP_REG, S::address_table().syscall_wide));
+        self.push(pop(rdi));
+        self.push(call(TMP_REG));
+        self.push(push(rax));
+        self.restore_registers_from_vmctx();
+        self.push(pop(TMP_REG));
+        self.push(ret());
+    }
+
+    /// Emits one wide compute instruction.
+    fn wide_op(&mut self, descriptor: u64, scalar: Option<NativeReg>, result: Option<NativeReg>) {
+        if let Some(scalar) = scalar {
+            self.push(store(
+                Size::U64,
+                Self::vmctx_field(S::offset_table().wide_scalar),
+                scalar,
+            ));
+        }
+
+        self.push(mov_imm64(TMP_REG, descriptor));
+        let label = self.wide_label;
+        self.call_to_label(label);
+
+        if let Some(result) = result {
+            self.push(mov(RegSize::R64, result, TMP_REG));
+        }
+    }
+
+    /// A wide load, one limb at a time.
+    ///
+    /// Generated rather than routed through the trampoline so that a bad address faults through
+    /// the same guard pages a scalar access does. The limbs move through a saved general purpose
     pub(crate) fn emit_sbrk_trampoline(&mut self) {
         log::trace!("Emitting trampoline: sbrk");
         let label = self.sbrk_label;

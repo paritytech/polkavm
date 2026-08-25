@@ -56,6 +56,9 @@ macro_rules! define_address_table {
 }
 
 // These are the addresses exported from the zygote.
+//
+// `syscall_wide` is one entry point for every wide instruction of the XReviveVec extension; see
+// `crate::wide::wide_call` for how one is described.
 define_address_table! {
     AddressTableRaw, AddressTablePacked, AddressTable,
     syscall_hostcall: unsafe extern "C" fn() -> !,
@@ -64,6 +67,7 @@ define_address_table! {
     syscall_step: unsafe extern "C" fn() -> !,
     syscall_sbrk: unsafe extern "C" fn(u64) -> u32,
     syscall_not_enough_gas: unsafe extern "C" fn() -> !,
+    syscall_wide: unsafe extern "C" fn(u64) -> u64,
 }
 
 define_address_table! {
@@ -312,7 +316,21 @@ pub struct VmCtx {
     pub message_length: UnsafeCell<u32>,
     /// A buffer used to marshal error messages.
     pub message_buffer: UnsafeCell<[u8; MESSAGE_BUFFER_SIZE]>,
+
+    /// The wide register file of the XReviveVec extension: one 128-bit slot per vector register,
+    /// a wider value spanning a run of them. Compiled code addresses it directly, so it lives
+    /// here beside the general purpose registers rather than in the instance.
+    pub wide: [AtomicU64; WIDE_REG_LIMBS],
+
+    /// Whatever a wide instruction needs from outside the wide file: a shift amount, the value to
+    /// widen, or an address. Passed here rather than on the stack so a wide call site is shaped
+    /// exactly like the others and the alignment at the call is unchanged.
+    pub wide_scalar: AtomicU64,
 }
+
+/// The wide register file, in 64-bit limbs: thirty-two slots of 128 bits.
+pub const WIDE_REG_LIMBS: usize = 64;
+
 
 #[test]
 fn test_gas_offset() {
@@ -375,6 +393,8 @@ impl VmCtx {
             tmp_reg: AtomicU64::new(0),
             rip: AtomicU64::new(0),
             regs: [ATOMIC_U64_ZERO; REG_COUNT],
+            wide: [ATOMIC_U64_ZERO; WIDE_REG_LIMBS],
+            wide_scalar: AtomicU64::new(0),
             jump_into: AtomicU64::new(0),
             next_native_program_counter: AtomicU64::new(0),
 

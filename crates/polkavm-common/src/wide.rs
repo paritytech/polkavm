@@ -9,6 +9,70 @@
 //! the most negative value divided by minus one is itself. These are RISC-V instructions, so
 //! matching that is what keeps the wide and narrow forms consistent.
 
+/// How a wide instruction is handed to `syscall_wide`.
+///
+/// Everything but a memory address fits in one word, so a wide instruction costs the compiled code
+/// two pushes and a call rather than an entry point of its own.
+pub mod wide_call {
+    /// Packs an instruction into the descriptor word.
+    #[inline]
+    pub const fn pack(op: u8, width: u8, dst: u8, src1: u8, src2: u8, src3: u8) -> u64 {
+        (op as u64)
+            | ((width as u64) << 8)
+            | ((dst as u64) << 10)
+            | ((src1 as u64) << 16)
+            | ((src2 as u64) << 22)
+            | ((src3 as u64) << 28)
+    }
+
+    /// The operation, the width, and the four register fields.
+    #[inline]
+    pub const fn unpack(descriptor: u64) -> (u8, u8, u8, u8, u8, u8) {
+        (
+            (descriptor & 0xff) as u8,
+            ((descriptor >> 8) & 0b11) as u8,
+            ((descriptor >> 10) & 0b11_1111) as u8,
+            ((descriptor >> 16) & 0b11_1111) as u8,
+            ((descriptor >> 22) & 0b11_1111) as u8,
+            ((descriptor >> 28) & 0b11_1111) as u8,
+        )
+    }
+
+    // The operations, in the order the instruction set defines them.
+    pub const ADD: u8 = 0;
+    pub const SUB: u8 = 1;
+    pub const MUL: u8 = 2;
+    pub const AND: u8 = 3;
+    pub const OR: u8 = 4;
+    pub const XOR: u8 = 5;
+    pub const DIVU: u8 = 6;
+    pub const DIV: u8 = 7;
+    pub const REMU: u8 = 8;
+    pub const REM: u8 = 9;
+    pub const EXP: u8 = 10;
+    pub const SIGNEXTEND: u8 = 11;
+    pub const MINU: u8 = 12;
+    pub const MIN: u8 = 13;
+    pub const MAXU: u8 = 14;
+    pub const MAX: u8 = 15;
+    pub const SLL: u8 = 16;
+    pub const SRL: u8 = 17;
+    pub const SRA: u8 = 18;
+    pub const SEQ: u8 = 19;
+    pub const SNE: u8 = 20;
+    pub const SLTU: u8 = 21;
+    pub const SLT: u8 = 22;
+    pub const TRUNC: u8 = 23;
+    pub const ZEXT: u8 = 24;
+    pub const SEXT: u8 = 25;
+    pub const BSWAP: u8 = 26;
+    pub const MV: u8 = 27;
+    pub const ADDMOD: u8 = 28;
+    pub const MULMOD: u8 = 29;
+    pub const LOAD: u8 = 30;
+    pub const STORE: u8 = 31;
+}
+
 /// The widest value, in limbs: 1024 bits.
 pub const MAX_LIMBS: usize = 16;
 
@@ -539,5 +603,156 @@ mod tests {
         let mut sum = [0u64; 16];
         add(&mut sum, &back, &rem);
         assert_eq!(sum, big, "q * 3 + r reconstructs the dividend");
+    }
+}
+
+/// Runs one wide instruction against a register file and, for the memory forms, a guest memory
+/// accessor.
+///
+/// Shared by the interpreter's compiled counterpart and both sandboxes, so that the recompiler and
+/// the interpreter cannot disagree about what an instruction means.
+pub mod dispatch {
+    use super::*;
+    use super::wide_call as op;
+
+    /// How wide a value the encoded width names, in 64-bit limbs.
+    #[inline]
+    pub const fn limbs_for(width: u8) -> usize {
+        1 << (width as usize + 1)
+    }
+
+    /// The first limb of a register, given the encoded width.
+    #[inline]
+    pub const fn limb_offset(reg: u8, _width: u8) -> usize {
+        (reg as usize) * 2
+    }
+
+    /// Runs `descriptor` against `file`.
+    ///
+    /// `scalar` carries whatever the instruction needs from outside the wide file: a shift amount,
+    /// the value to widen, or the address of a memory access. The return value carries whatever it
+    /// produces outside the file: a comparison result, a truncated low limb, or nothing.
+    ///
+    /// Memory is reached through `read` and `write`, which return false on a fault; a faulting
+    /// access leaves the file untouched and is reported by `Err`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run(
+        file: &mut [u64],
+        descriptor: u64,
+        scalar: u64,
+        mut read: impl FnMut(u64, &mut [u8]) -> bool,
+        mut write: impl FnMut(u64, &[u8]) -> bool,
+    ) -> Result<u64, ()> {
+        let (operation, width, dst, src1, src2, src3) = super::wide_call::unpack(descriptor);
+        let n = limbs_for(width);
+        let at = |reg: u8| limb_offset(reg, width);
+
+        let mut a = [0u64; MAX_LIMBS];
+        let mut b = [0u64; MAX_LIMBS];
+        let mut c = [0u64; MAX_LIMBS];
+        a[..n].copy_from_slice(&file[at(src1)..at(src1) + n]);
+        b[..n].copy_from_slice(&file[at(src2)..at(src2) + n]);
+        c[..n].copy_from_slice(&file[at(src3)..at(src3) + n]);
+
+        let mut out = [0u64; MAX_LIMBS];
+        let mut result = 0u64;
+        let mut writes_file = true;
+
+        match operation {
+            op::ADD => add(&mut out[..n], &a[..n], &b[..n]),
+            op::SUB => sub(&mut out[..n], &a[..n], &b[..n]),
+            op::MUL => mul(&mut out[..n], &a[..n], &b[..n]),
+            op::AND => for i in 0..n { out[i] = a[i] & b[i] },
+            op::OR => for i in 0..n { out[i] = a[i] | b[i] },
+            op::XOR => for i in 0..n { out[i] = a[i] ^ b[i] },
+            op::DIVU => {
+                let mut rem = [0u64; MAX_LIMBS];
+                div_rem_unsigned(&mut out[..n], &mut rem[..n], &a[..n], &b[..n]);
+            }
+            op::DIV => {
+                let mut rem = [0u64; MAX_LIMBS];
+                div_rem_signed(&mut out[..n], &mut rem[..n], &a[..n], &b[..n]);
+            }
+            op::REMU => {
+                let mut quot = [0u64; MAX_LIMBS];
+                div_rem_unsigned(&mut quot[..n], &mut out[..n], &a[..n], &b[..n]);
+            }
+            op::REM => {
+                let mut quot = [0u64; MAX_LIMBS];
+                div_rem_signed(&mut quot[..n], &mut out[..n], &a[..n], &b[..n]);
+            }
+            op::EXP => exp(&mut out[..n], &a[..n], &b[..n]),
+            op::SIGNEXTEND => sign_extend(&mut out[..n], &a[..n], &b[..n]),
+            op::MINU => out[..n].copy_from_slice(if cmp_unsigned(&a[..n], &b[..n]).is_le() { &a[..n] } else { &b[..n] }),
+            op::MIN => out[..n].copy_from_slice(if cmp_signed(&a[..n], &b[..n]).is_le() { &a[..n] } else { &b[..n] }),
+            op::MAXU => out[..n].copy_from_slice(if cmp_unsigned(&a[..n], &b[..n]).is_ge() { &a[..n] } else { &b[..n] }),
+            op::MAX => out[..n].copy_from_slice(if cmp_signed(&a[..n], &b[..n]).is_ge() { &a[..n] } else { &b[..n] }),
+            op::SLL => shift_left(&mut out[..n], &a[..n], scalar_shift(scalar)),
+            op::SRL => shift_right_logical(&mut out[..n], &a[..n], scalar_shift(scalar)),
+            op::SRA => shift_right_arithmetic(&mut out[..n], &a[..n], scalar_shift(scalar)),
+            op::BSWAP => byte_swap(&mut out[..n], &a[..n]),
+            op::MV => out[..n].copy_from_slice(&a[..n]),
+            op::ADDMOD => add_mod(&mut out[..n], &a[..n], &b[..n], &c[..n]),
+            op::MULMOD => mul_mod(&mut out[..n], &a[..n], &b[..n], &c[..n]),
+            op::ZEXT => out[0] = scalar,
+            op::SEXT => {
+                let fill = if (scalar as i64) < 0 { u64::MAX } else { 0 };
+                out[..n].fill(fill);
+                out[0] = scalar;
+            }
+            op::SEQ | op::SNE | op::SLTU | op::SLT => {
+                writes_file = false;
+                result = u64::from(match operation {
+                    op::SEQ => cmp_unsigned(&a[..n], &b[..n]).is_eq(),
+                    op::SNE => cmp_unsigned(&a[..n], &b[..n]).is_ne(),
+                    op::SLTU => cmp_unsigned(&a[..n], &b[..n]).is_lt(),
+                    _ => cmp_signed(&a[..n], &b[..n]).is_lt(),
+                });
+            }
+            op::TRUNC => {
+                writes_file = false;
+                result = a[0];
+            }
+            op::LOAD => {
+                let mut bytes = [0u8; MAX_LIMBS * 8];
+                if !read(scalar, &mut bytes[..n * 8]) {
+                    return Err(());
+                }
+                for i in 0..n {
+                    let mut limb = [0u8; 8];
+                    limb.copy_from_slice(&bytes[i * 8..i * 8 + 8]);
+                    out[i] = u64::from_le_bytes(limb);
+                }
+            }
+            op::STORE => {
+                writes_file = false;
+                // The value is in the destination field: a store reads the register it names.
+                let value = &file[at(dst)..at(dst) + n];
+                let mut bytes = [0u8; MAX_LIMBS * 8];
+                for (i, limb) in value.iter().enumerate() {
+                    bytes[i * 8..i * 8 + 8].copy_from_slice(&limb.to_le_bytes());
+                }
+                if !write(scalar, &bytes[..n * 8]) {
+                    return Err(());
+                }
+            }
+            _ => return Err(()),
+        }
+
+        if writes_file {
+            file[at(dst)..at(dst) + n].copy_from_slice(&out[..n]);
+        }
+        Ok(result)
+    }
+
+    /// Only the low bits of a shift amount can matter, and anything past the width saturates
+    /// inside the shift itself.
+    #[inline]
+    fn scalar_shift(scalar: u64) -> u32 {
+        if scalar > u64::from(u32::MAX) {
+            u32::MAX
+        } else {
+            scalar as u32
+        }
     }
 }
