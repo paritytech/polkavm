@@ -251,22 +251,23 @@ fn metadata_hash_is_embedded_in_blob() {
     assert_eq!(blob.metadata_hash(), metadata_hash);
 }
 
-// The words below are custom-2 instructions, `.i128` being the 128-bit spelling of a mnemonic.
-// The first two are what the compiler's own tests pin; the rest follow the same encoding. Every
-// fold is exercised at both widths, which differ in one bit, so each case also shows that
-// neither width is translated as the other.
+// The words below are custom-2 instructions as the compiler assembles them, `.i128` being the
+// 128-bit spelling of a mnemonic, so a change on either side shows up here. Every fold is
+// exercised at both widths, and the two words of a pair differ in a single bit -- the top of
+// `funct7` for a register shape, the middle of `funct3` for a memory one -- so each case also
+// shows that neither width is translated as the other.
 const WIDE_ADD_128: u32 = 0x80a4045b; // revive.wadd.i128 v8, v8, v10
-const WIDE_LOAD_128: u32 = 0x0115445b; // revive.wld.i128 v8, 16(a0)
+const WIDE_LOAD_128: u32 = 0x0105645b; // revive.wld.i128 v8, 16(a0)
 const WIDE_LESS_THAN_128: u32 = 0x84a4155b; // revive.wsltu.i128 a0, v8, v10
-const WIDE_MOVE_128: u32 = 0x800464db; // revive.wmv.i128 v9, v8
-const WIDE_TO_REG_128: u32 = 0x8204655b; // revive.wtrunc.i128 a0, v8
-const WIDE_COUNT_128: u32 = 0x8804655b; // revive.wclz.i128 a0, v8
-const WIDE_STORE_128: u32 = 0x008558db; // revive.wst.i128 v8, 16(a0)
+const WIDE_MOVE_128: u32 = 0x980404db; // revive.wmv.i128 v9, v8
+const WIDE_TO_REG_128: u32 = 0x9a04055b; // revive.wtrunc.i128 a0, v8
+const WIDE_COUNT_128: u32 = 0xa004055b; // revive.wclz.i128 a0, v8
+const WIDE_STORE_128: u32 = 0x0085785b; // revive.wst.i128 v8, 16(a0)
 const WIDE_SHIFT_128: u32 = 0x80a4245b; // revive.wsll.i128 v8, v8, a0
 const WIDE_SHIFT: u32 = 0x00a4245b; // revive.wsll w4, w4, a0
-const WIDE_FROM_REG_128: u32 = 0x8005745b; // revive.wzext.i128 v8, a0
-const WIDE_FROM_REG: u32 = 0x0005745b; // revive.wzext w4, a0
-const WIDE_LOAD_128_A1: u32 = 0x0115c45b; // revive.wld.i128 v8, 16(a1)
+const WIDE_FROM_REG_128: u32 = 0xa405045b; // revive.wzext.i128 v8, a0
+const WIDE_FROM_REG: u32 = 0x2405045b; // revive.wzext v8, a0
+const WIDE_LOAD_128_A1: u32 = 0x0105e45b; // revive.wld.i128 v8, 16(a1)
 const WIDE_LOAD_A1: u32 = 0x0105c45b; // revive.wld w4, 16(a1)
 const LOAD_UPPER_A1: u32 = 0x000005b7; // lui a1, 0
 const ADD_UPPER_TO_PC_A1: u32 = 0x00000597; // auipc a1, 0
@@ -291,8 +292,7 @@ fn assert_disassembly(disassembly: &str, expected: &str) {
 #[test]
 fn the_128_bit_instructions_translate_to_their_own_opcodes() {
     // One case per operand shape a 128-bit instruction has, so an operand order transposed on
-    // the way through the encoding shows up here rather than silently. The load's offset is
-    // the 16 the field encodes as 17, its lowest bit being the width flag.
+    // the way through the encoding shows up here rather than silently.
     let disassembly = link_revive(
         &[
             WIDE_ADD_128,
@@ -355,9 +355,9 @@ fn widening_a_known_value_folds_at_either_width() {
 
 #[test]
 fn a_load_from_a_known_address_folds_with_the_reconstructed_offset() {
-    // The datum is at 0x10000 and both loads ask for sixteen bytes past it. The 128-bit one
-    // encodes that offset as seventeen, so an address built from the raw field would come out
-    // one byte too high -- and would still be a valid instruction.
+    // The datum is at 0x10000 and both loads ask for sixteen bytes past it, so both fold to the
+    // same address. The two widths reach it through different instructions, and an address the
+    // fold got wrong would still be a valid instruction.
     let disassembly = link_revive(
         &[LOAD_UPPER_A1, WIDE_LOAD_128_A1, WIDE_LOAD_A1, RETURN],
         &[(0, object::elf::R_RISCV_HI20, RelocationTarget::Datum)],
@@ -377,9 +377,10 @@ fn a_load_from_a_known_address_folds_with_the_reconstructed_offset() {
 
 #[test]
 fn a_relocation_against_a_wide_instruction_is_a_link_error() {
-    // The compiler never emits one, and the linker never quietly accepts one: an immediate it
-    // would have to patch is where the width flag lives, so patching it would change the
-    // width. Both widths are rejected the same way.
+    // The compiler never emits one, and the linker never quietly accepts one: patching a low
+    // twelve bits means replacing the whole instruction with one built for a known address, and
+    // only the instructions on an allowlist have such a form. No wide access is on it, so both
+    // widths are rejected the same way.
     for (word, instruction) in [(WIDE_LOAD_128_A1, "Wide128Load"), (WIDE_LOAD_A1, "WideLoad")] {
         let bytes = create_elf_with_code_relocations(&[word, RETURN], &[(0, object::elf::R_RISCV_LO12_I, RelocationTarget::Datum)]);
 

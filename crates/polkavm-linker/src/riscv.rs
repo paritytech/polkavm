@@ -900,14 +900,14 @@ pub enum Inst {
         dst: VecReg,
         src: Reg,
     },
-    /// A 128-bit load, whose offset is what is left of the immediate field once the width
-    /// flag the encoding keeps in its bit 0 is masked off.
+    /// A 128-bit load, whose width is in its `funct3` and whose offset is therefore the whole
+    /// immediate field: a byte count like the 256-bit form's.
     Wide128Load {
         dst: VecReg,
         base: Reg,
         offset: i32,
     },
-    /// A 128-bit store, whose offset is masked in the same way as [`Inst::Wide128Load`]'s.
+    /// A 128-bit store, whose offset is the whole field as [`Inst::Wide128Load`]'s is.
     Wide128Store {
         src: VecReg,
         base: Reg,
@@ -2209,6 +2209,89 @@ impl Inst {
                 let is_128_bit = funct7 & 0b1000000 != 0;
                 let funct6 = funct7 & 0b111111;
                 match (funct3, is_128_bit) {
+                    // The one-source operations share their `funct3` with the arithmetic ones
+                    // and sit above them, so `funct6` alone tells the two apart. They read one
+                    // source, leaving `rs2` with nothing to name: a word that sets it anyway is
+                    // not an instruction. The compiler's own decoder rejects those too, and
+                    // agreeing with it here is what keeps a malformed word loud instead of
+                    // decoding as a well formed one with an operand nobody wrote.
+                    (0b000, _) if matches!(funct6, 12..=19) => {
+                        if (op >> 20) & 0b11111 != 0 {
+                            return None;
+                        }
+
+                        if is_128_bit {
+                            match funct6 {
+                                12 => Some(Inst::Wide128Move {
+                                    kind: WideMoveKind::Move,
+                                    dst: VecReg::decode(op >> 7),
+                                    src: VecReg::decode(op >> 15),
+                                }),
+                                13 => Some(Inst::Wide128ToReg {
+                                    dst: Reg::decode(op >> 7),
+                                    src: VecReg::decode(op >> 15),
+                                }),
+                                14 => Some(Inst::Wide128Move {
+                                    kind: WideMoveKind::ReverseBytes,
+                                    dst: VecReg::decode(op >> 7),
+                                    src: VecReg::decode(op >> 15),
+                                }),
+                                15 | 16 | 17 => Some(Inst::Wide128Count {
+                                    kind: match funct6 {
+                                        15 => WideCountKind::SetBits,
+                                        16 => WideCountKind::LeadingZeroBits,
+                                        _ => WideCountKind::TrailingZeroBits,
+                                    },
+                                    dst: Reg::decode(op >> 7),
+                                    src: VecReg::decode(op >> 15),
+                                }),
+                                18 | 19 => Some(Inst::Wide128FromReg {
+                                    kind: match funct6 {
+                                        18 => WideFromRegKind::Unsigned,
+                                        _ => WideFromRegKind::Signed,
+                                    },
+                                    dst: VecReg::decode(op >> 7),
+                                    src: Reg::decode(op >> 15),
+                                }),
+                                _ => None,
+                            }
+                        } else {
+                            match funct6 {
+                                12 => Some(Inst::WideMove {
+                                    kind: WideMoveKind::Move,
+                                    dst: WideReg::decode(op >> 7)?,
+                                    src: WideReg::decode(op >> 15)?,
+                                }),
+                                13 => Some(Inst::WideToReg {
+                                    dst: Reg::decode(op >> 7),
+                                    src: WideReg::decode(op >> 15)?,
+                                }),
+                                14 => Some(Inst::WideMove {
+                                    kind: WideMoveKind::ReverseBytes,
+                                    dst: WideReg::decode(op >> 7)?,
+                                    src: WideReg::decode(op >> 15)?,
+                                }),
+                                15 | 16 | 17 => Some(Inst::WideCount {
+                                    kind: match funct6 {
+                                        15 => WideCountKind::SetBits,
+                                        16 => WideCountKind::LeadingZeroBits,
+                                        _ => WideCountKind::TrailingZeroBits,
+                                    },
+                                    dst: Reg::decode(op >> 7),
+                                    src: WideReg::decode(op >> 15)?,
+                                }),
+                                18 | 19 => Some(Inst::WideFromReg {
+                                    kind: match funct6 {
+                                        18 => WideFromRegKind::Unsigned,
+                                        _ => WideFromRegKind::Signed,
+                                    },
+                                    dst: WideReg::decode(op >> 7)?,
+                                    src: Reg::decode(op >> 15),
+                                }),
+                                _ => None,
+                            }
+                        }
+                    }
                     (0b000, false) => Some(Inst::WideRegReg {
                         kind: WideRegRegKind::decode(funct7)?,
                         dst: WideReg::decode(op >> 7)?,
@@ -2260,114 +2343,29 @@ impl Inst {
                         src2: WideReg::decode(op >> 20)?,
                         src3: WideReg::decode(op >> 27)?,
                     }),
-                    // The memory shapes have no `funct7` to spend on a width: theirs is part
-                    // of the immediate. Bit 0 of the immediate field carries it instead --
-                    // clear for 256 bits, whose offset is then the whole field, and set for
-                    // 128 bits, whose offset is the field without that bit. The offset is
-                    // even at either width, which is what leaves the bit free to say so.
-                    (0b100, _) => {
-                        let field = bits(0, 11, op, 20);
-                        let base = Reg::decode(op >> 15);
-                        if field & 1 == 0 {
-                            Some(Inst::WideLoad {
-                                dst: WideReg::decode(op >> 7)?,
-                                base,
-                                offset: sign_ext(field, 12),
-                            })
-                        } else {
-                            Some(Inst::Wide128Load {
-                                dst: VecReg::decode(op >> 7),
-                                base,
-                                offset: sign_ext(field, 12) & !1,
-                            })
-                        }
-                    }
-                    (0b101, _) => {
-                        let field = bits(0, 4, op, 7) | bits(5, 11, op, 25);
-                        let base = Reg::decode(op >> 15);
-                        if field & 1 == 0 {
-                            Some(Inst::WideStore {
-                                src: WideReg::decode(op >> 20)?,
-                                base,
-                                offset: sign_ext(field, 12),
-                            })
-                        } else {
-                            Some(Inst::Wide128Store {
-                                src: VecReg::decode(op >> 20),
-                                base,
-                                offset: sign_ext(field, 12) & !1,
-                            })
-                        }
-                    }
-                    (0b110, false) => match funct7 {
-                        0 => Some(Inst::WideMove {
-                            kind: WideMoveKind::Move,
-                            dst: WideReg::decode(op >> 7)?,
-                            src: WideReg::decode(op >> 15)?,
-                        }),
-                        1 => Some(Inst::WideToReg {
-                            dst: Reg::decode(op >> 7),
-                            src: WideReg::decode(op >> 15)?,
-                        }),
-                        2 => Some(Inst::WideMove {
-                            kind: WideMoveKind::ReverseBytes,
-                            dst: WideReg::decode(op >> 7)?,
-                            src: WideReg::decode(op >> 15)?,
-                        }),
-                        3 | 4 | 5 => Some(Inst::WideCount {
-                            kind: match funct7 {
-                                3 => WideCountKind::SetBits,
-                                4 => WideCountKind::LeadingZeroBits,
-                                _ => WideCountKind::TrailingZeroBits,
-                            },
-                            dst: Reg::decode(op >> 7),
-                            src: WideReg::decode(op >> 15)?,
-                        }),
-                        _ => None,
-                    },
-                    (0b110, true) => match funct6 {
-                        0 => Some(Inst::Wide128Move {
-                            kind: WideMoveKind::Move,
-                            dst: VecReg::decode(op >> 7),
-                            src: VecReg::decode(op >> 15),
-                        }),
-                        1 => Some(Inst::Wide128ToReg {
-                            dst: Reg::decode(op >> 7),
-                            src: VecReg::decode(op >> 15),
-                        }),
-                        2 => Some(Inst::Wide128Move {
-                            kind: WideMoveKind::ReverseBytes,
-                            dst: VecReg::decode(op >> 7),
-                            src: VecReg::decode(op >> 15),
-                        }),
-                        3 | 4 | 5 => Some(Inst::Wide128Count {
-                            kind: match funct6 {
-                                3 => WideCountKind::SetBits,
-                                4 => WideCountKind::LeadingZeroBits,
-                                _ => WideCountKind::TrailingZeroBits,
-                            },
-                            dst: Reg::decode(op >> 7),
-                            src: VecReg::decode(op >> 15),
-                        }),
-                        _ => None,
-                    },
-                    (0b111, false) => Some(Inst::WideFromReg {
-                        kind: match funct7 {
-                            0 => WideFromRegKind::Unsigned,
-                            1 => WideFromRegKind::Signed,
-                            _ => return None,
-                        },
+                    // The memory shapes have no `funct7` to spend on a width, so `funct3`
+                    // carries it: one value per width and direction. That leaves the whole
+                    // immediate field to the offset, which is a plain byte count at either
+                    // width -- an odd one included.
+                    (0b100, _) => Some(Inst::WideLoad {
                         dst: WideReg::decode(op >> 7)?,
-                        src: Reg::decode(op >> 15),
+                        base: Reg::decode(op >> 15),
+                        offset: sign_ext(bits(0, 11, op, 20), 12),
                     }),
-                    (0b111, true) => Some(Inst::Wide128FromReg {
-                        kind: match funct6 {
-                            0 => WideFromRegKind::Unsigned,
-                            1 => WideFromRegKind::Signed,
-                            _ => return None,
-                        },
+                    (0b101, _) => Some(Inst::WideStore {
+                        src: WideReg::decode(op >> 20)?,
+                        base: Reg::decode(op >> 15),
+                        offset: sign_ext(bits(0, 4, op, 7) | bits(5, 11, op, 25), 12),
+                    }),
+                    (0b110, _) => Some(Inst::Wide128Load {
                         dst: VecReg::decode(op >> 7),
-                        src: Reg::decode(op >> 15),
+                        base: Reg::decode(op >> 15),
+                        offset: sign_ext(bits(0, 11, op, 20), 12),
+                    }),
+                    (0b111, _) => Some(Inst::Wide128Store {
+                        src: VecReg::decode(op >> 20),
+                        base: Reg::decode(op >> 15),
+                        offset: sign_ext(bits(0, 4, op, 7) | bits(5, 11, op, 25), 12),
                     }),
                     _ => None,
                 }
@@ -2538,14 +2536,39 @@ mod test_decode_custom_2 {
     const WIDE_ADD_128: u32 = 0x80a4045b; // revive.wadd.i128 v8, v8, v10
     const WIDE_ADD_128_ODD: u32 = 0x80d584db; // revive.wadd.i128 v9, v11, v13
     const WIDE_LOAD: u32 = 0x0105445b; // revive.wld v8, 16(a0)
-    const WIDE_LOAD_128: u32 = 0x0115445b; // revive.wld.i128 v8, 16(a0)
+    const WIDE_LOAD_128: u32 = 0x0105645b; // revive.wld.i128 v8, 16(a0)
     const WIDE_STORE: u32 = 0x0085585b; // revive.wst v8, 16(a0)
-    const WIDE_STORE_128: u32 = 0x008558db; // revive.wst.i128 v8, 16(a0)
+    const WIDE_STORE_128: u32 = 0x0085785b; // revive.wst.i128 v8, 16(a0)
     const WIDE_EXP_WITH_WIDTH_BIT: u32 = 0x94a4045b; // revive.wexp, width bit set
     const WIDE_SIGN_EXTEND_WITH_WIDTH_BIT: u32 = 0x96a4045b; // revive.wsignextend, width bit set
 
+    // The eight one-source operations at both widths. Each word names a different register in
+    // each of its fields, so a pair of them transposed anywhere shows up as a decode mismatch.
+    const WIDE_MOVE: u32 = 0x1804055b; // revive.wmv v10, v8
+    const WIDE_MOVE_128: u32 = 0x980404db; // revive.wmv.i128 v9, v8
+    const WIDE_TO_REG: u32 = 0x1a0405db; // revive.wtrunc a1, v8
+    const WIDE_TO_REG_128: u32 = 0x9a0485db; // revive.wtrunc.i128 a1, v9
+    const WIDE_REVERSE_BYTES: u32 = 0x1c04055b; // revive.wbswap v10, v8
+    const WIDE_REVERSE_BYTES_128: u32 = 0x9c0404db; // revive.wbswap.i128 v9, v8
+    const WIDE_SET_BITS: u32 = 0x1e0405db; // revive.wcpop a1, v8
+    const WIDE_SET_BITS_128: u32 = 0x9e0485db; // revive.wcpop.i128 a1, v9
+    const WIDE_LEADING_ZEROS: u32 = 0x200405db; // revive.wclz a1, v8
+    const WIDE_LEADING_ZEROS_128: u32 = 0xa00485db; // revive.wclz.i128 a1, v9
+    const WIDE_TRAILING_ZEROS: u32 = 0x220405db; // revive.wctz a1, v8
+    const WIDE_TRAILING_ZEROS_128: u32 = 0xa20485db; // revive.wctz.i128 a1, v9
+    const WIDE_FROM_REG_UNSIGNED: u32 = 0x2405855b; // revive.wzext v10, a1
+    const WIDE_FROM_REG_UNSIGNED_128: u32 = 0xa40584db; // revive.wzext.i128 v9, a1
+    const WIDE_FROM_REG_SIGNED: u32 = 0x2605855b; // revive.wsext v10, a1
+    const WIDE_FROM_REG_SIGNED_128: u32 = 0xa60584db; // revive.wsext.i128 v9, a1
+
     /// The width bit of a register shape, which is the top bit of `funct7`.
     const WIDTH: u32 = 0b1000000;
+
+    /// The `funct3` of each memory shape, which is where a memory shape keeps its width.
+    const LOAD_256_BIT: u32 = 0b100;
+    const STORE_256_BIT: u32 = 0b101;
+    const LOAD_128_BIT: u32 = 0b110;
+    const STORE_128_BIT: u32 = 0b111;
 
     fn decode(op: u32) -> Option<Inst> {
         Inst::decode(&DecoderConfig::new_64bit(), op)
@@ -2556,15 +2579,15 @@ mod test_decode_custom_2 {
         (funct7 << 25) | (rs2 << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | 0b1011011
     }
 
-    /// `revive.wld v8, 16(a0)` with its twelve-bit immediate field replaced.
-    const fn load_with_imm_field(field: u32) -> u32 {
-        (WIDE_LOAD & !(0xfff << 20)) | (field << 20)
+    /// `revive.wld v8, 16(a0)` with its `funct3` and its twelve-bit immediate field replaced.
+    const fn load_with_imm_field(funct3: u32, field: u32) -> u32 {
+        (WIDE_LOAD & !((0xfff << 20) | (0b111 << 12))) | (field << 20) | (funct3 << 12)
     }
 
-    /// `revive.wst v8, 16(a0)` with its twelve-bit immediate field replaced. A store keeps
-    /// that field in two pieces: the low five bits and the high seven.
-    const fn store_with_imm_field(field: u32) -> u32 {
-        (WIDE_STORE & !((0x1f << 7) | (0x7f << 25))) | ((field & 0x1f) << 7) | ((field >> 5) << 25)
+    /// `revive.wst v8, 16(a0)` with its `funct3` and its twelve-bit immediate field replaced. A
+    /// store keeps that field in two pieces: the low five bits and the high seven.
+    const fn store_with_imm_field(funct3: u32, field: u32) -> u32 {
+        (WIDE_STORE & !((0x1f << 7) | (0x7f << 25) | (0b111 << 12))) | ((field & 0x1f) << 7) | ((field >> 5) << 25) | (funct3 << 12)
     }
 
     #[test]
@@ -2573,10 +2596,42 @@ mod test_decode_custom_2 {
         // against the compiler output it stands for before anything relies on it.
         assert_eq!(register_form(0, 10, 8, 0b000, 8), WIDE_ADD);
         assert_eq!(register_form(WIDTH, 10, 8, 0b000, 8), WIDE_ADD_128);
-        assert_eq!(load_with_imm_field(0x010), WIDE_LOAD);
-        assert_eq!(load_with_imm_field(0x011), WIDE_LOAD_128);
-        assert_eq!(store_with_imm_field(0x010), WIDE_STORE);
-        assert_eq!(store_with_imm_field(0x011), WIDE_STORE_128);
+        assert_eq!(load_with_imm_field(LOAD_256_BIT, 0x010), WIDE_LOAD);
+        assert_eq!(load_with_imm_field(LOAD_128_BIT, 0x010), WIDE_LOAD_128);
+        assert_eq!(store_with_imm_field(STORE_256_BIT, 0x010), WIDE_STORE);
+        assert_eq!(store_with_imm_field(STORE_128_BIT, 0x010), WIDE_STORE_128);
+
+        // The one-source operations, whose `funct6` is above the arithmetic range at either
+        // width and whose `rs2` is unused.
+        for (word, funct6, rs1, rd) in [
+            (WIDE_MOVE, 12, 8, 10),
+            (WIDE_TO_REG, 13, 8, 11),
+            (WIDE_REVERSE_BYTES, 14, 8, 10),
+            (WIDE_SET_BITS, 15, 8, 11),
+            (WIDE_LEADING_ZEROS, 16, 8, 11),
+            (WIDE_TRAILING_ZEROS, 17, 8, 11),
+            (WIDE_FROM_REG_UNSIGNED, 18, 11, 10),
+            (WIDE_FROM_REG_SIGNED, 19, 11, 10),
+        ] {
+            assert_eq!(register_form(funct6, 0, rs1, 0b000, rd), word, "funct6 {funct6}");
+        }
+
+        for (word, funct6, rs1, rd) in [
+            (WIDE_MOVE_128, 12, 8, 9),
+            (WIDE_TO_REG_128, 13, 9, 11),
+            (WIDE_REVERSE_BYTES_128, 14, 8, 9),
+            (WIDE_SET_BITS_128, 15, 9, 11),
+            (WIDE_LEADING_ZEROS_128, 16, 9, 11),
+            (WIDE_TRAILING_ZEROS_128, 17, 9, 11),
+            (WIDE_FROM_REG_UNSIGNED_128, 18, 11, 9),
+            (WIDE_FROM_REG_SIGNED_128, 19, 11, 9),
+        ] {
+            assert_eq!(
+                register_form(WIDTH | funct6, 0, rs1, 0b000, rd),
+                word,
+                "funct6 {funct6} at 128 bits"
+            );
+        }
     }
 
     #[test]
@@ -2693,61 +2748,144 @@ mod test_decode_custom_2 {
     }
 
     #[test]
-    fn the_128_bit_convert_shapes() {
-        // Two shapes share `funct3` 110: the ones writing a vector register and the ones
-        // writing a general purpose one, told apart by `funct6` alone.
+    fn the_one_source_shapes_at_both_widths() {
+        // Three operand shapes share `funct3` 000 with the arithmetic operations, told apart by
+        // `funct6` alone: wide to wide, wide to general purpose, and general purpose to wide.
+        // Each word below names a different register in each field, and each general purpose
+        // one is odd, so a field decoded as the wrong kind -- a pair where a general purpose
+        // register belongs, or the reverse -- fails here instead of quietly naming something
+        // else. This is the only place the operand types of these sixteen encodings are pinned.
         assert_eq!(
-            decode(register_form(WIDTH, 0, 8, 0b110, 10)),
+            decode(WIDE_MOVE),
+            Some(Inst::WideMove {
+                kind: WideMoveKind::Move,
+                dst: WideReg::W5,
+                src: WideReg::W4,
+            })
+        );
+
+        assert_eq!(
+            decode(WIDE_MOVE_128),
             Some(Inst::Wide128Move {
                 kind: WideMoveKind::Move,
-                dst: VecReg::decode(10),
+                dst: VecReg::decode(9),
                 src: VecReg::decode(8),
             })
         );
 
         assert_eq!(
-            decode(register_form(WIDTH | 0b000010, 0, 8, 0b110, 10)),
+            decode(WIDE_REVERSE_BYTES),
+            Some(Inst::WideMove {
+                kind: WideMoveKind::ReverseBytes,
+                dst: WideReg::W5,
+                src: WideReg::W4,
+            })
+        );
+
+        assert_eq!(
+            decode(WIDE_REVERSE_BYTES_128),
             Some(Inst::Wide128Move {
                 kind: WideMoveKind::ReverseBytes,
-                dst: VecReg::decode(10),
+                dst: VecReg::decode(9),
                 src: VecReg::decode(8),
             })
         );
 
         assert_eq!(
-            decode(register_form(WIDTH | 0b000001, 0, 8, 0b110, 10)),
-            Some(Inst::Wide128ToReg {
-                dst: Reg::A0,
-                src: VecReg::decode(8),
+            decode(WIDE_TO_REG),
+            Some(Inst::WideToReg {
+                dst: Reg::A1,
+                src: WideReg::W4,
             })
         );
 
-        for (funct6, kind) in [
-            (0b000011, WideCountKind::SetBits),
-            (0b000100, WideCountKind::LeadingZeroBits),
-            (0b000101, WideCountKind::TrailingZeroBits),
+        assert_eq!(
+            decode(WIDE_TO_REG_128),
+            Some(Inst::Wide128ToReg {
+                dst: Reg::A1,
+                src: VecReg::decode(9),
+            })
+        );
+
+        for (word, kind) in [
+            (WIDE_SET_BITS, WideCountKind::SetBits),
+            (WIDE_LEADING_ZEROS, WideCountKind::LeadingZeroBits),
+            (WIDE_TRAILING_ZEROS, WideCountKind::TrailingZeroBits),
         ] {
             assert_eq!(
-                decode(register_form(WIDTH | funct6, 0, 8, 0b110, 10)),
-                Some(Inst::Wide128Count {
+                decode(word),
+                Some(Inst::WideCount {
                     kind,
-                    dst: Reg::A0,
-                    src: VecReg::decode(8),
+                    dst: Reg::A1,
+                    src: WideReg::W4,
                 }),
-                "funct6 {funct6:#08b}"
+                "{word:#010x}"
             );
         }
 
-        for (funct6, kind) in [(0b000000, WideFromRegKind::Unsigned), (0b000001, WideFromRegKind::Signed)] {
+        for (word, kind) in [
+            (WIDE_SET_BITS_128, WideCountKind::SetBits),
+            (WIDE_LEADING_ZEROS_128, WideCountKind::LeadingZeroBits),
+            (WIDE_TRAILING_ZEROS_128, WideCountKind::TrailingZeroBits),
+        ] {
             assert_eq!(
-                decode(register_form(WIDTH | funct6, 0, 10, 0b111, 8)),
+                decode(word),
+                Some(Inst::Wide128Count {
+                    kind,
+                    dst: Reg::A1,
+                    src: VecReg::decode(9),
+                }),
+                "{word:#010x}"
+            );
+        }
+
+        for (word, kind) in [
+            (WIDE_FROM_REG_UNSIGNED, WideFromRegKind::Unsigned),
+            (WIDE_FROM_REG_SIGNED, WideFromRegKind::Signed),
+        ] {
+            assert_eq!(
+                decode(word),
+                Some(Inst::WideFromReg {
+                    kind,
+                    dst: WideReg::W5,
+                    src: Reg::A1,
+                }),
+                "{word:#010x}"
+            );
+        }
+
+        for (word, kind) in [
+            (WIDE_FROM_REG_UNSIGNED_128, WideFromRegKind::Unsigned),
+            (WIDE_FROM_REG_SIGNED_128, WideFromRegKind::Signed),
+        ] {
+            assert_eq!(
+                decode(word),
                 Some(Inst::Wide128FromReg {
                     kind,
-                    dst: VecReg::decode(8),
-                    src: Reg::A0,
+                    dst: VecReg::decode(9),
+                    src: Reg::A1,
                 }),
-                "funct6 {funct6:#08b}"
+                "{word:#010x}"
             );
+        }
+    }
+
+    #[test]
+    fn a_one_source_operation_naming_a_second_source_is_not_an_encoding() {
+        // These operations read one source, so `rs2` names nothing. The compiler's decoder
+        // rejects a word that sets it, and so does this one: a decoder that ignored the field
+        // instead would accept a malformed word as a well formed instruction.
+        for (word, name) in [
+            (WIDE_MOVE, "wmv"),
+            (WIDE_MOVE_128, "wmv.i128"),
+            (WIDE_LEADING_ZEROS, "wclz"),
+            (WIDE_LEADING_ZEROS_128, "wclz.i128"),
+            (WIDE_FROM_REG_UNSIGNED, "wzext"),
+            (WIDE_FROM_REG_UNSIGNED_128, "wzext.i128"),
+        ] {
+            assert!(decode(word).is_some(), "{name} itself");
+            assert_eq!(decode(word | (1 << 20)), None, "{name} with rs2 set");
+            assert_eq!(decode(word | (0b11111 << 20)), None, "{name} with all of rs2 set");
         }
     }
 
@@ -2782,12 +2920,10 @@ mod test_decode_custom_2 {
         for (funct3, funct6) in [
             (0b000, 0b001010),
             (0b000, 0b001011),
-            (0b000, 0b001100),
+            (0b000, 0b010100),
             (0b000, 0b111111),
             (0b001, 0b000100),
             (0b010, 0b000011),
-            (0b110, 0b000110),
-            (0b111, 0b000010),
         ] {
             assert_eq!(
                 decode(register_form(WIDTH | funct6, 10, 8, funct3, 8)),
@@ -2795,6 +2931,34 @@ mod test_decode_custom_2 {
                 "funct3 {funct3:#05b} funct6 {funct6:#08b}"
             );
         }
+
+        // The one-source operations end at `funct6` 19, and the shape they take does not make
+        // the next value up an instruction: an unassigned operation stays unassigned however
+        // well formed the rest of the word is.
+        assert_eq!(decode(register_form(20, 0, 8, 0b000, 10)), None);
+        assert_eq!(decode(register_form(WIDTH | 20, 0, 8, 0b000, 10)), None);
+
+        // `funct3` 110 and 111 used to be the conversion shapes and are the 128-bit memory
+        // ones now, so the words that were nothing there mean something today. Reading them as
+        // memory is the whole of the renumbering, and getting it backwards would put a wide
+        // register where an offset belongs.
+        assert_eq!(
+            decode(register_form(WIDTH | 0b000110, 10, 8, 0b110, 8)),
+            Some(Inst::Wide128Load {
+                dst: VecReg::decode(8),
+                base: Reg::S0,
+                offset: -1846,
+            })
+        );
+
+        assert_eq!(
+            decode(register_form(WIDTH | 0b000010, 10, 8, 0b111, 8)),
+            Some(Inst::Wide128Store {
+                src: VecReg::decode(10),
+                base: Reg::S0,
+                offset: -1976,
+            })
+        );
     }
 
     #[test]
@@ -2815,7 +2979,9 @@ mod test_decode_custom_2 {
     }
 
     #[test]
-    fn the_immediate_bit_picks_the_memory_width() {
+    fn the_funct3_picks_the_memory_width() {
+        // All four words below carry the same immediate field and differ only in `funct3`, so
+        // each one's width and direction come from there and its offset is the same 16.
         assert_eq!(
             decode(WIDE_LOAD),
             Some(Inst::WideLoad {
@@ -2854,15 +3020,15 @@ mod test_decode_custom_2 {
     }
 
     #[test]
-    fn a_128_bit_memory_offset_is_the_field_without_the_width_flag() {
-        // The flag sits where an odd offset would, so masking it off is what recovers the
-        // offset -- for a negative one by borrowing rather than by truncating. The last pair
-        // has the top bit of the field set, which is the sign of the offset and not the
-        // width: these shapes take no width bit from `funct7`.
-        for (field_256_bit, field_128_bit, offset) in [(0x010, 0x011, 16), (0xff0, 0xff1, -16), (0x7fe, 0x7ff, 2046), (0x800, 0x801, -2048)]
-        {
+    fn a_memory_offset_is_the_plain_sign_extended_field_at_both_widths() {
+        // The field is a byte count with nothing else in it, so the same field means the same
+        // offset at either width. The odd values are the ones the old encoding could not name,
+        // and the negative ones -- the odd one included -- are where a decoder that took the
+        // offset apart would drift by a byte. The bounds are the whole reach of the field, and
+        // its top bit is the sign of the offset and nothing else.
+        for (field, offset) in [(0x010, 16), (0xff0, -16), (0x7fe, 2046), (0x800, -2048), (0x7ff, 2047), (0xffd, -3)] {
             assert_eq!(
-                decode(load_with_imm_field(field_256_bit)),
+                decode(load_with_imm_field(LOAD_256_BIT, field)),
                 Some(Inst::WideLoad {
                     dst: WideReg::W4,
                     base: Reg::A0,
@@ -2872,7 +3038,7 @@ mod test_decode_custom_2 {
             );
 
             assert_eq!(
-                decode(load_with_imm_field(field_128_bit)),
+                decode(load_with_imm_field(LOAD_128_BIT, field)),
                 Some(Inst::Wide128Load {
                     dst: VecReg::decode(8),
                     base: Reg::A0,
@@ -2882,7 +3048,7 @@ mod test_decode_custom_2 {
             );
 
             assert_eq!(
-                decode(store_with_imm_field(field_256_bit)),
+                decode(store_with_imm_field(STORE_256_BIT, field)),
                 Some(Inst::WideStore {
                     src: WideReg::W4,
                     base: Reg::A0,
@@ -2892,7 +3058,7 @@ mod test_decode_custom_2 {
             );
 
             assert_eq!(
-                decode(store_with_imm_field(field_128_bit)),
+                decode(store_with_imm_field(STORE_128_BIT, field)),
                 Some(Inst::Wide128Store {
                     src: VecReg::decode(8),
                     base: Reg::A0,
@@ -2905,8 +3071,8 @@ mod test_decode_custom_2 {
 
     #[test]
     fn a_128_bit_memory_access_can_name_an_odd_register() {
-        // revive.wld.i128 v9, 16(a0)
-        const LOAD_128_ODD: u32 = 0x011544db;
+        // A 128-bit value is a single register, so all thirty-two fields name one.
+        const LOAD_128_ODD: u32 = 0x010564db; // revive.wld.i128 v9, 16(a0)
 
         assert_eq!(
             decode(LOAD_128_ODD),
@@ -2917,8 +3083,10 @@ mod test_decode_custom_2 {
             })
         );
 
-        // The same word without the flag asks for a 256-bit pair, which cannot start here.
-        assert_eq!(decode(LOAD_128_ODD & !(1 << 20)), None);
+        // The same word at the 256-bit width -- `funct3` 100 rather than 110, everything else
+        // untouched -- asks for a register pair, and a pair cannot start at an odd register.
+        // This is the only place a memory shape is shown rejecting a register field.
+        assert_eq!(decode(LOAD_128_ODD & !(0b010 << 12)), None);
     }
 }
 

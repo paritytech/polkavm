@@ -809,8 +809,8 @@ enum Wide128Inst {
         dst: VecReg,
         imm: i32,
     },
-    /// A 128-bit load whose offset the decoder already reconstructed, so the width flag the
-    /// encoding keeps in the immediate's bit 0 is not part of it.
+    /// A 128-bit load, whose offset is a byte count: the encoding keeps the width in `funct3`,
+    /// so nothing else shares the immediate field with it.
     Load {
         dst: VecReg,
         base: Reg,
@@ -823,7 +823,7 @@ enum Wide128Inst {
         src: VecReg,
         amount: i32,
     },
-    /// A 128-bit store, whose offset is reconstructed as [`Wide128Inst::Load`]'s is.
+    /// A 128-bit store, whose offset means what [`Wide128Inst::Load`]'s does.
     Store {
         src: VecReg,
         base: Reg,
@@ -6214,8 +6214,8 @@ impl BlockRegs {
             BasicInst::Wide128(Wide128Inst::Load { dst, base, offset }) => {
                 if let RegValue::DataAddress(base) = self.get_reg(base) {
                     // The whole address is known, so the base register goes away with it. The
-                    // offset is the one the decoder recovered, with the width flag already
-                    // masked off, so no flag bit can reach the address.
+                    // offset the decoder produced is a plain byte count, so it folds into the
+                    // address as it stands.
                     return Some(BasicInst::Wide128LoadAbsolute {
                         dst,
                         target: base.map_offset_i64(|base| base.wrapping_add(cast(offset).to_i64_sign_extend())),
