@@ -652,7 +652,12 @@ pub mod dispatch {
         let mut c = [0u64; MAX_LIMBS];
         a[..n].copy_from_slice(&file[at(src1)..at(src1) + n]);
         b[..n].copy_from_slice(&file[at(src2)..at(src2) + n]);
-        c[..n].copy_from_slice(&file[at(src3)..at(src3) + n]);
+        // Only the fused modular operations read a third operand; the other thirty leave `src3`
+        // unused, so skip the copy for them. This also avoids indexing the file with an `src3`
+        // field the encoder never meant as a register.
+        if matches!(operation, op::ADDMOD | op::MULMOD) {
+            c[..n].copy_from_slice(&file[at(src3)..at(src3) + n]);
+        }
 
         let mut out = [0u64; MAX_LIMBS];
         let mut result = 0u64;

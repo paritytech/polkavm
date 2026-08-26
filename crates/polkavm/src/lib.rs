@@ -163,6 +163,9 @@ pub const RETURN_TO_HOST: u64 = polkavm_common::abi::VM_ADDR_RETURN_TO_HOST as u
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod wide_microbench;
+
 // These need to be toplevel for the macros to work.
 #[cfg(feature = "export-internals-for-testing")]
 pub mod generic_allocator;

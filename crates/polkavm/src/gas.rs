@@ -100,20 +100,29 @@ macro_rules! define_cost_model_struct {
         }
 
         impl CostModel {
-            /// A naive gas cost model where every instruction costs one gas.
+            /// A naive gas cost model: every scalar instruction costs one gas, while the
+            /// XReviveVec wide instructions carry work-proportional costs (see
+            /// [`CostModel::with_wide_costs`]) so that a 256-bit `mulmod` is not metered like a
+            /// register move. gastool's measured Simple model overrides these when it is loaded.
             pub const fn naive() -> Self {
-                CostModel {
+                let model = CostModel {
                     $(
                         $field: 1,
                     )+
 
                     invalid: 1,
-                }
+                };
+
+                model.with_wide_costs()
             }
 
             /// Serializes the cost model into a byte blob.
+            ///
+            /// The layout is the version word, then every cost field, then `invalid`: one `u32`
+            /// per value, so `COST_MODEL_FIELDS + 1` words in all (the version plus the
+            /// `COST_MODEL_FIELDS` values, `invalid` being counted among them).
             pub fn serialize(&self) -> Vec<u8> {
-                let mut output = Vec::with_capacity((COST_MODEL_FIELDS + 2) * 4);
+                let mut output = Vec::with_capacity((COST_MODEL_FIELDS + 1) * 4);
                 let version: u32 = $version;
                 output.extend_from_slice(&version.to_le_bytes());
 
@@ -126,7 +135,7 @@ macro_rules! define_cost_model_struct {
 
             /// Deserializes the cost model from a byte blob.
             pub fn deserialize(blob: &[u8]) -> Option<CostModel> {
-                if (blob.len() % 4) != 0 || blob.len() / 4 != (COST_MODEL_FIELDS + 2) {
+                if (blob.len() % 4) != 0 || blob.len() / 4 != (COST_MODEL_FIELDS + 1) {
                     return None;
                 }
 
@@ -142,8 +151,9 @@ macro_rules! define_cost_model_struct {
                 )+
 
                 model.invalid = u32::from_le_bytes([blob[position], blob[position + 1], blob[position + 2], blob[position + 3]]);
+                position += 4;
 
-                assert_eq!(position, (COST_MODEL_FIELDS + 2) * 4);
+                assert_eq!(position, (COST_MODEL_FIELDS + 1) * 4);
                 Some(model)
             }
 
@@ -343,6 +353,81 @@ define_cost_model_struct! {
     wide_mul_mod,
     wide_load,
     wide_store,
+}
+
+// Work-proportional gas for the XReviveVec wide instructions, as small multiples of a scalar
+// operation. They are derived from the primitive 64-bit operations the shared `wide::dispatch`
+// implementation runs at 256 bits (four limbs, the width the EVM lowering uses), plus a fixed
+// amount for marshalling the operands through the trampoline. These are deliberately
+// order-of-magnitude relative figures rather than measured cycles: they keep the naive model's
+// metering honest -- an iterative division or modular multiply costs a thousandfold a move,
+// because it is -- while gastool's per-target Simple model supplies exact costs when loaded.
+const WIDE_MARSHAL: Cost = 8;
+/// O(n) limb passes: add, sub, bitwise, min/max, compares, shifts, byte swap, sign extend, move.
+const WIDE_LINEAR: Cost = WIDE_MARSHAL + 16;
+/// Widen from or truncate to a scalar: a limb or two of work.
+const WIDE_CONVERT: Cost = WIDE_MARSHAL + 4;
+/// A load or store of the whole value, limb by limb through guest memory.
+const WIDE_MEMORY: Cost = WIDE_MARSHAL + 16;
+/// Schoolbook multiply, O(n^2) limb products.
+const WIDE_MULTIPLY: Cost = WIDE_MARSHAL + 56;
+/// Shift-and-subtract division/remainder, n*64 iterations each doing O(n) work.
+const WIDE_DIVIDE: Cost = 3100;
+/// The signed forms add sign handling around the unsigned division.
+const WIDE_DIVIDE_SIGNED: Cost = 3200;
+/// Modular add/multiply: form a 2n-limb intermediate, then reduce it bit by bit.
+const WIDE_MODULAR: Cost = 6300;
+/// Square-and-multiply exponentiation, up to n*64 iterations of two multiplies.
+const WIDE_EXPONENTIATE: Cost = 8000;
+
+impl CostModel {
+    /// Overlays work-proportional costs for the 32 XReviveVec wide instructions onto an otherwise
+    /// uniform model, so the default naive model does not meter an iterative wide operation like a
+    /// register move. The magnitudes are relative estimates of the work the shared
+    /// `polkavm_common::wide::dispatch` implementation performs at 256 bits; see the `WIDE_*`
+    /// constants above.
+    const fn with_wide_costs(mut self) -> Self {
+        self.wide_add = WIDE_LINEAR;
+        self.wide_sub = WIDE_LINEAR;
+        self.wide_and = WIDE_LINEAR;
+        self.wide_or = WIDE_LINEAR;
+        self.wide_xor = WIDE_LINEAR;
+        self.wide_min_unsigned = WIDE_LINEAR;
+        self.wide_min_signed = WIDE_LINEAR;
+        self.wide_max_unsigned = WIDE_LINEAR;
+        self.wide_max_signed = WIDE_LINEAR;
+        self.wide_byte_swap = WIDE_LINEAR;
+        self.wide_move = WIDE_LINEAR;
+        self.wide_sign_extend = WIDE_LINEAR;
+        self.wide_shift_left = WIDE_LINEAR;
+        self.wide_shift_right_logical = WIDE_LINEAR;
+        self.wide_shift_right_arithmetic = WIDE_LINEAR;
+        self.wide_set_equal = WIDE_LINEAR;
+        self.wide_set_not_equal = WIDE_LINEAR;
+        self.wide_set_less_than_unsigned = WIDE_LINEAR;
+        self.wide_set_less_than_signed = WIDE_LINEAR;
+
+        self.wide_widen_unsigned = WIDE_CONVERT;
+        self.wide_widen_signed = WIDE_CONVERT;
+        self.wide_truncate = WIDE_CONVERT;
+
+        self.wide_load = WIDE_MEMORY;
+        self.wide_store = WIDE_MEMORY;
+
+        self.wide_mul = WIDE_MULTIPLY;
+
+        self.wide_div_unsigned = WIDE_DIVIDE;
+        self.wide_rem_unsigned = WIDE_DIVIDE;
+        self.wide_div_signed = WIDE_DIVIDE_SIGNED;
+        self.wide_rem_signed = WIDE_DIVIDE_SIGNED;
+
+        self.wide_add_mod = WIDE_MODULAR;
+        self.wide_mul_mod = WIDE_MODULAR;
+
+        self.wide_exp = WIDE_EXPONENTIATE;
+
+        self
+    }
 }
 
 static NAIVE_COST_MODEL: CostModel = CostModel::naive();
@@ -1312,5 +1397,72 @@ where
         // We've ended out of bounds, so assume there's an implicit trap there.
         visitor.trap(0, 0); // TODO: Currently it doesn't matter, but pass correct offsets.
         (visitor.take_block_cost().unwrap(), started_out_of_bounds)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use polkavm_common::program::Opcode;
+
+    #[test]
+    fn naive_scalar_costs_are_one() {
+        let model = CostModel::naive();
+        // A representative scalar instruction stays at the naive baseline of one gas.
+        assert_eq!(model.add_32, 1);
+        assert_eq!(model.mul_64, 1);
+        assert_eq!(model.load_u64, 1);
+        assert_eq!(model.invalid, 1);
+    }
+
+    #[test]
+    fn naive_wide_costs_reflect_work() {
+        let model = CostModel::naive();
+
+        // Every wide instruction costs more than a scalar op.
+        for opcode in [
+            Opcode::wide_add, Opcode::wide_mul, Opcode::wide_div_unsigned,
+            Opcode::wide_mul_mod, Opcode::wide_exp, Opcode::wide_load, Opcode::wide_truncate,
+        ] {
+            assert!(model.cost_for_opcode(opcode) > 1, "{opcode:?} should cost more than a move");
+        }
+
+        // The ordering tracks the algorithmic work: a linear pass < multiply < division <
+        // modular multiply < exponentiation.
+        assert!(model.wide_add < model.wide_mul);
+        assert!(model.wide_mul < model.wide_div_unsigned);
+        assert!(model.wide_div_unsigned <= model.wide_div_signed);
+        assert!(model.wide_div_signed < model.wide_mul_mod);
+        assert!(model.wide_mul_mod < model.wide_exp);
+
+        // The fused modular operations are the ones the handoff called out as mismetered; they
+        // must dwarf a register move.
+        assert!(model.wide_mul_mod > 1000);
+    }
+
+    #[test]
+    fn serialize_round_trips_at_current_version() {
+        let mut model = CostModel::naive();
+        // Perturb a few fields so the round-trip proves values survive, not just the naive defaults.
+        model.wide_mul_mod = 1234;
+        model.add_32 = 7;
+        let blob = model.serialize();
+
+        // The version word plus every cost value (with `invalid` counted among them).
+        assert_eq!(blob.len(), (COST_MODEL_FIELDS + 1) * 4);
+
+        let restored = CostModel::deserialize(&blob).expect("a freshly serialized model round-trips");
+        assert_eq!(restored.wide_mul_mod, 1234);
+        assert_eq!(restored.wide_add, model.wide_add);
+        assert_eq!(restored.add_32, 7);
+        assert_eq!(restored.invalid, model.invalid);
+    }
+
+    #[test]
+    fn deserialize_rejects_a_stale_version() {
+        let mut blob = CostModel::naive().serialize();
+        // Corrupt the leading version word; a model from an older version must be refused.
+        blob[0] = blob[0].wrapping_add(1);
+        assert!(CostModel::deserialize(&blob).is_none());
     }
 }

@@ -98,6 +98,14 @@ fn conv_reg(reg: RawReg) -> NativeReg {
     native_reg
 }
 
+/// Whether a native register is caller-saved on the System V AMD64 ABI, so a call into a Rust
+/// helper may clobber it. The callee-saved ones (`rbx`, `rbp`, `r12`-`r15`) survive a call
+/// untouched, which is what lets a trampoline that only calls a pure helper leave the guest
+/// registers mapped to them in place.
+const fn native_reg_is_caller_saved(reg: NativeReg) -> bool {
+    matches!(reg, rax | rcx | rdx | rsi | rdi | r8 | r9 | r10 | r11)
+}
+
 #[test]
 fn test_conv_reg() {
     for reg in Reg::ALL {
@@ -110,6 +118,20 @@ fn test_conv_reg() {
         assert_eq!(reg.raw_unparsed(), nibble);
         assert_eq!(conv_reg(reg), conv_reg_const(OUT_OF_BOUNDS_REG));
     }
+}
+
+#[test]
+fn wide_trampoline_saves_only_caller_saved_guest_registers() {
+    // The wide compute trampoline saves the guest registers mapped to caller-saved native
+    // registers and leaves the rest to the C ABI. Pin the split so a change to the register map
+    // that shifts a guest register between the two classes is caught here rather than silently
+    // altering which registers the trampoline preserves.
+    let caller_saved = Reg::ALL
+        .iter()
+        .filter(|reg| native_reg_is_caller_saved(conv_reg((**reg).into())))
+        .count();
+    assert_eq!(caller_saved, 8, "expected eight guest registers in caller-saved native registers");
+    assert_eq!(Reg::ALL.len() - caller_saved, 5, "expected five in callee-saved native registers");
 }
 
 macro_rules! with_sandbox_kind {
@@ -646,6 +668,51 @@ where
         }
     }
 
+    /// Saves only the guest registers a call into a Rust helper can clobber: those mapped to
+    /// caller-saved native registers. The rest live in callee-saved registers and the ABI keeps
+    /// them across the call, so a trampoline whose helper is pure -- it neither reads the guest
+    /// registers nor hands control back to the host to resume execution -- can skip them. The wide
+    /// compute trampoline is exactly that; the sbrk and memset ones are not, so they still save the
+    /// full set. (An async signal reads the true values from the signal context, not the vmctx, so
+    /// the partial save does not affect it -- exactly as during ordinary recompiled execution,
+    /// where the vmctx copy is already stale.)
+    fn save_caller_saved_registers_to_vmctx(&mut self) {
+        let kind = match B::BITNESS {
+            Bitness::B32 => Size::U32,
+            Bitness::B64 => Size::U64,
+        };
+
+        for (nth, reg) in Reg::ALL.iter().copied().enumerate() {
+            if !native_reg_is_caller_saved(conv_reg(reg.into())) {
+                continue;
+            }
+            self.push(store(
+                kind,
+                Self::vmctx_field(S::offset_table().regs + nth * 8),
+                conv_reg(reg.into()),
+            ));
+        }
+    }
+
+    /// The counterpart to [`Self::save_caller_saved_registers_to_vmctx`].
+    fn restore_caller_saved_registers_from_vmctx(&mut self) {
+        let kind = match B::BITNESS {
+            Bitness::B32 => LoadKind::U32,
+            Bitness::B64 => LoadKind::U64,
+        };
+
+        for (nth, reg) in Reg::ALL.iter().copied().enumerate() {
+            if !native_reg_is_caller_saved(conv_reg(reg.into())) {
+                continue;
+            }
+            self.push(load(
+                kind,
+                conv_reg(reg.into()),
+                Self::vmctx_field(S::offset_table().regs + nth * 8),
+            ));
+        }
+    }
+
     fn save_return_address_to_vmctx(&mut self) {
         self.push(load(LoadKind::U64, TMP_REG, reg_indirect(RegSize::R64, rsp)));
         self.push(store(
@@ -1009,12 +1076,17 @@ where
         self.define_label(label);
 
         self.push(push(TMP_REG));
-        self.save_registers_to_vmctx();
+        // `syscall_wide` is a pure helper over the wide file: it never reads the guest general
+        // purpose registers and never resumes the guest through the host, so only the ones a C
+        // call clobbers -- those in caller-saved native registers -- need to round-trip the vmctx.
+        // The rest (including `AUX_TMP_REG`, which the existing code already trusts the ABI to
+        // preserve here) are kept by the callee across the call.
+        self.save_caller_saved_registers_to_vmctx();
         self.push(mov_imm64(TMP_REG, S::address_table().syscall_wide));
         self.push(pop(rdi));
         self.push(call(TMP_REG));
         self.push(push(rax));
-        self.restore_registers_from_vmctx();
+        self.restore_caller_saved_registers_from_vmctx();
         self.push(pop(TMP_REG));
         self.push(ret());
     }

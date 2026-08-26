@@ -6460,3 +6460,67 @@ fn wide_memory_compiled() {
     }
     wide_memory_on(BackendKind::Compiler);
 }
+
+/// The wide compute trampoline saves only the guest registers mapped to caller-saved native
+/// registers, trusting the C ABI to preserve the rest across the call into `syscall_wide`. This
+/// holds sentinels in the registers mapped to callee-saved natives (A3->r14, T0->r15, T1->rbp,
+/// T2->r12) live across two wide ops and folds them back in, so a trampoline that clobbered any of
+/// them would give the wrong answer. (RA->rbx is covered implicitly: every wide test returns after
+/// a wide op.)
+fn wide_preserves_callee_saved_registers_on(backend: BackendKind) {
+    use polkavm_common::program::{WideReg, WideWidth};
+
+    let width = WideWidth::W256;
+    let (d, a, b) = (WideReg::from_raw(0, width), WideReg::from_raw(8, width), WideReg::from_raw(16, width));
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::ReviveV2);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::load_imm64(A1, 7),
+            asm::load_imm64(A2, 5),
+            asm::load_imm(A3, 0x11), // r14
+            asm::load_imm(T0, 0x22), // r15
+            asm::load_imm(T1, 0x33), // rbp
+            asm::load_imm(T2, 0x44), // r12
+            asm::wide_widen_unsigned(width, a, A1),
+            asm::wide_widen_unsigned(width, b, A2),
+            // Two trips through the trampoline; the sentinels must survive both.
+            asm::wide_add(width, d, a, b),
+            asm::wide_mul(width, d, a, b),
+            asm::wide_truncate(width, A0, d), // 35
+            asm::add_64(A0, A0, A3),
+            asm::add_64(A0, A0, T0),
+            asm::add_64(A0, A0, T1),
+            asm::add_64(A0, A0, T2),
+            asm::ret(),
+        ],
+        &[],
+    );
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut config = Config::default();
+    config.set_backend(Some(backend));
+    config.set_allow_experimental(true);
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
+    let mut linker: Linker<(), ()> = Linker::new();
+    let instance_pre = linker.instantiate_pre(&module).unwrap();
+    let mut instance = instance_pre.instantiate().unwrap();
+    let result = instance.call_typed_and_get_result::<u64, ()>(&mut (), "main", ()).unwrap();
+    // 7 * 5 + 0x11 + 0x22 + 0x33 + 0x44
+    assert_eq!(result, 35 + 0x11 + 0x22 + 0x33 + 0x44);
+}
+
+#[test]
+fn wide_preserves_callee_saved_registers_interpreted() {
+    wide_preserves_callee_saved_registers_on(BackendKind::Interpreter);
+}
+
+#[test]
+fn wide_preserves_callee_saved_registers_compiled() {
+    if !BackendKind::Compiler.is_supported() {
+        return;
+    }
+    wide_preserves_callee_saved_registers_on(BackendKind::Compiler);
+}

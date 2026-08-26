@@ -980,6 +980,29 @@ pub unsafe extern "C" fn syscall_sbrk(pending_heap_top: u64) -> u32 {
     pending_heap_top as u32
 }
 
+/// Runs one wide instruction of the XReviveVec extension.
+///
+/// Only the compute operations arrive here: they share their implementation with the interpreter so
+/// the two backends cannot disagree about what an instruction means. Loads and stores are generated
+/// inline by the recompiler so a bad address faults through the same guard pages a scalar access
+/// does, so the memory accessors handed to the shared dispatcher always refuse -- a memory form
+/// reaching this point would be a malformed descriptor, which traps like any other.
+#[inline(never)]
+#[no_mangle]
+pub unsafe extern "C" fn syscall_wide(descriptor: u64) -> u64 {
+    trace!("syscall: wide");
+
+    let scalar = VMCTX.wide_scalar.load(Ordering::Relaxed);
+    // SAFETY: The guest is suspended in this call, so nothing else touches the wide file, and
+    // `AtomicU64` has the same layout as `u64`.
+    let file = core::slice::from_raw_parts_mut(core::ptr::addr_of!(VMCTX.wide) as *mut u64, zygote::WIDE_REG_LIMBS);
+
+    match polkavm_common::wide::dispatch::run(file, descriptor, scalar, |_, _| false, |_, _| false) {
+        Ok(result) => result,
+        Err(()) => signal_host_and_longjmp(VMCTX_FUTEX_GUEST_TRAP),
+    }
+}
+
 // A table for functions which can be called from *within* the VM (by the guest program).
 #[link_section = ".address_table"]
 #[no_mangle]
@@ -990,6 +1013,7 @@ pub static ADDRESS_TABLE: AddressTableRaw = AddressTableRaw {
     syscall_step,
     syscall_sbrk,
     syscall_not_enough_gas,
+    syscall_wide,
 };
 
 // A table for functions which can be called from *outside* the VM (by the host).

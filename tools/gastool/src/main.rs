@@ -986,6 +986,7 @@ impl Context {
             dynamic_paging: false,
             gas_metering: false,
             jump_table: Vec::new(),
+            isa: InstructionSetKind::Latest64,
         }
     }
 }
@@ -1015,6 +1016,7 @@ struct BenchmarkBuilder<'a, C> {
     dynamic_paging: bool,
     gas_metering: bool,
     jump_table: Vec<u32>,
+    isa: InstructionSetKind,
 }
 
 struct BenchmarkResult {
@@ -1134,6 +1136,13 @@ impl<'a, C> BenchmarkBuilder<'a, C> {
         self
     }
 
+    /// Selects the instruction set the benchmarked blob is built with. Defaults to `Latest64`;
+    /// the XReviveVec wide instructions require `ReviveV2`.
+    fn isa(mut self, isa: InstructionSetKind) -> Self {
+        self.isa = isa;
+        self
+    }
+
     fn run(mut self) -> BenchmarkResult
     where
         C: FnMut(InstructionBuffer),
@@ -1192,7 +1201,7 @@ impl<'a, C> BenchmarkBuilder<'a, C> {
         code.push(ecalli(cast(ECALLI_BENCHMARK_ON_FINISH).bitwise_as_i32()));
         code.push(ret());
 
-        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+        let mut builder = ProgramBlobBuilder::new(self.isa);
         builder.add_export_by_basic_block(0, b"main");
         builder.set_stack_size(4096 + stack_space_used);
         builder.set_rw_data_size(self.rw_data_size);
@@ -1511,6 +1520,38 @@ macro_rules! weights_io {
             xor,
             xor_imm,
             zero_extend_16,
+            wide_add,
+            wide_sub,
+            wide_mul,
+            wide_and,
+            wide_or,
+            wide_xor,
+            wide_div_unsigned,
+            wide_div_signed,
+            wide_rem_unsigned,
+            wide_rem_signed,
+            wide_exp,
+            wide_sign_extend,
+            wide_min_unsigned,
+            wide_min_signed,
+            wide_max_unsigned,
+            wide_max_signed,
+            wide_byte_swap,
+            wide_move,
+            wide_shift_left,
+            wide_shift_right_logical,
+            wide_shift_right_arithmetic,
+            wide_set_equal,
+            wide_set_not_equal,
+            wide_set_less_than_unsigned,
+            wide_set_less_than_signed,
+            wide_widen_unsigned,
+            wide_widen_signed,
+            wide_truncate,
+            wide_add_mod,
+            wide_mul_mod,
+            wide_load,
+            wide_store,
         }
     };
 }
@@ -2681,6 +2722,166 @@ fn main_generate_model(
         store_u64
     }
 
+    // ---- XReviveVec wide instructions (ISA ReviveV2) ----
+    //
+    // Benchmarked at 256 bits, the width the EVM lowering uses. The compute operations run through
+    // the `syscall_wide` trampoline into the shared `wide::dispatch` implementation, so measuring
+    // one instruction of a given algorithm measures every instruction that shares it; the naive
+    // model groups them the same way. Loads and stores are generated inline as `n` scalar accesses,
+    // so they are derived from the measured scalar memory costs rather than benchmarked separately.
+    {
+        use polkavm_common::program::{WideReg, WideWidth};
+
+        const WIDTH: WideWidth = WideWidth::W256;
+        // A 256-bit value spans two 128-bit slots; these indices keep the four registers disjoint.
+        let d = WideReg::from_raw(0, WIDTH);
+        let a = WideReg::from_raw(8, WIDTH);
+        let b = WideReg::from_raw(16, WIDTH);
+        let m = WideReg::from_raw(24, WIDTH);
+
+        // Widen the operands into the wide file once, before the measured loop. A3 is an odd value
+        // so the modulus for add/mul-mod is non-trivial; A4 is a shift amount.
+        let wide_setup = |code: &mut Vec<Instruction>| {
+            code.push(load_imm64(A1, 0x1234_5678_9abc_def0));
+            code.push(load_imm64(A2, 0x0fed_cba9_8765_4321));
+            code.push(load_imm64(A3, 0x8000_0000_0000_002b));
+            code.push(load_imm(A4, 37));
+            code.push(wide_widen_unsigned(WIDTH, a, A1));
+            code.push(wide_widen_unsigned(WIDTH, b, A2));
+            code.push(wide_widen_unsigned(WIDTH, m, A3));
+        };
+
+        // O(n) linear pass: `wide_add` stands in for add/sub/logic/min/max/byte-swap/move/sign-extend.
+        let linear = ctx
+            .benchmark("wide_add", |mut code| code.push(wide_add(WIDTH, d, a, b)))
+            .isa(InstructionSetKind::ReviveV2)
+            .repeat_code(100000)
+            .setup_code(|mut code| wide_setup(code.code))
+            .run()
+            .cost_per_operation;
+        model.wide_add = linear;
+        model.wide_sub = linear;
+        model.wide_and = linear;
+        model.wide_or = linear;
+        model.wide_xor = linear;
+        model.wide_min_unsigned = linear;
+        model.wide_min_signed = linear;
+        model.wide_max_unsigned = linear;
+        model.wide_max_signed = linear;
+        model.wide_byte_swap = linear;
+        model.wide_move = linear;
+        model.wide_sign_extend = linear;
+
+        // Shifts read the amount from a general purpose register.
+        let shift = ctx
+            .benchmark("wide_shift_left", |mut code| code.push(wide_shift_left(WIDTH, d, a, A4)))
+            .isa(InstructionSetKind::ReviveV2)
+            .repeat_code(100000)
+            .setup_code(|mut code| wide_setup(code.code))
+            .run()
+            .cost_per_operation;
+        model.wide_shift_left = shift;
+        model.wide_shift_right_logical = shift;
+        model.wide_shift_right_arithmetic = shift;
+
+        // Compares return their boolean result to a general purpose register.
+        let compare = ctx
+            .benchmark("wide_set_less_than_unsigned", |mut code| {
+                code.push(wide_set_less_than_unsigned(WIDTH, A0, a, b))
+            })
+            .isa(InstructionSetKind::ReviveV2)
+            .repeat_code(100000)
+            .setup_code(|mut code| wide_setup(code.code))
+            .run()
+            .cost_per_operation;
+        model.wide_set_equal = compare;
+        model.wide_set_not_equal = compare;
+        model.wide_set_less_than_unsigned = compare;
+        model.wide_set_less_than_signed = compare;
+
+        // Widen from a general purpose register into the wide file.
+        let widen = ctx
+            .benchmark("wide_widen_unsigned", |mut code| code.push(wide_widen_unsigned(WIDTH, d, A1)))
+            .isa(InstructionSetKind::ReviveV2)
+            .repeat_code(100000)
+            .setup_code(|mut code| wide_setup(code.code))
+            .run()
+            .cost_per_operation;
+        model.wide_widen_unsigned = widen;
+        model.wide_widen_signed = widen;
+
+        // Truncate the low limb back out to a general purpose register.
+        model.wide_truncate = ctx
+            .benchmark("wide_truncate", |mut code| code.push(wide_truncate(WIDTH, A0, a)))
+            .isa(InstructionSetKind::ReviveV2)
+            .repeat_code(100000)
+            .setup_code(|mut code| wide_setup(code.code))
+            .run()
+            .cost_per_operation;
+
+        // Schoolbook multiply, O(n^2) limb products.
+        model.wide_mul = ctx
+            .benchmark("wide_mul", |mut code| code.push(wide_mul(WIDTH, d, a, b)))
+            .isa(InstructionSetKind::ReviveV2)
+            .repeat_code(50000)
+            .setup_code(|mut code| wide_setup(code.code))
+            .run()
+            .cost_per_operation;
+
+        // Shift-and-subtract division; the unsigned quotient and remainder share the algorithm.
+        let divide_unsigned = ctx
+            .benchmark("wide_div_unsigned", |mut code| code.push(wide_div_unsigned(WIDTH, d, a, b)))
+            .isa(InstructionSetKind::ReviveV2)
+            .repeat_code(10000)
+            .setup_code(|mut code| wide_setup(code.code))
+            .run()
+            .cost_per_operation;
+        model.wide_div_unsigned = divide_unsigned;
+        model.wide_rem_unsigned = divide_unsigned;
+
+        // The signed forms wrap sign handling around the unsigned division.
+        let divide_signed = ctx
+            .benchmark("wide_div_signed", |mut code| code.push(wide_div_signed(WIDTH, d, a, b)))
+            .isa(InstructionSetKind::ReviveV2)
+            .repeat_code(10000)
+            .setup_code(|mut code| wide_setup(code.code))
+            .run()
+            .cost_per_operation;
+        model.wide_div_signed = divide_signed;
+        model.wide_rem_signed = divide_signed;
+
+        model.wide_add_mod = ctx
+            .benchmark("wide_add_mod", |mut code| code.push(wide_add_mod(WIDTH, d, a, b, m)))
+            .isa(InstructionSetKind::ReviveV2)
+            .repeat_code(10000)
+            .setup_code(|mut code| wide_setup(code.code))
+            .run()
+            .cost_per_operation;
+
+        model.wide_mul_mod = ctx
+            .benchmark("wide_mul_mod", |mut code| code.push(wide_mul_mod(WIDTH, d, a, b, m)))
+            .isa(InstructionSetKind::ReviveV2)
+            .repeat_code(10000)
+            .setup_code(|mut code| wide_setup(code.code))
+            .run()
+            .cost_per_operation;
+
+        // Square-and-multiply exponentiation; cost tracks the exponent's bit length.
+        model.wide_exp = ctx
+            .benchmark("wide_exp", |mut code| code.push(wide_exp(WIDTH, d, a, b)))
+            .isa(InstructionSetKind::ReviveV2)
+            .repeat_code(10000)
+            .setup_code(|mut code| wide_setup(code.code))
+            .run()
+            .cost_per_operation;
+
+        // A wide load or store is generated inline as `n` scalar accesses -- four at 256 bits --
+        // so scale the measured scalar memory costs rather than timing a separate blob.
+        const LIMBS: u32 = 256 / 64;
+        model.wide_load = model.load_u64.saturating_mul(LIMBS);
+        model.wide_store = model.store_u64.saturating_mul(LIMBS);
+    }
+
     if let Some(output_model_code) = output_model_code {
         log::info!("Writing model code to {}...", output_model_code.display());
         let model_code = serialize_cost_model_to_code(&model);
@@ -2991,6 +3192,41 @@ impl Category {
             xor => Compute,
             xor_imm => Compute,
             zero_extend_16 => Compute,
+
+            // XReviveVec wide instructions: the linear passes and conversions are Compute, the
+            // iterative arithmetic joins the DivMul bucket, and the two memory forms their own.
+            wide_add => Compute,
+            wide_sub => Compute,
+            wide_and => Compute,
+            wide_or => Compute,
+            wide_xor => Compute,
+            wide_min_unsigned => Compute,
+            wide_min_signed => Compute,
+            wide_max_unsigned => Compute,
+            wide_max_signed => Compute,
+            wide_byte_swap => Compute,
+            wide_move => Compute,
+            wide_sign_extend => Compute,
+            wide_shift_left => Compute,
+            wide_shift_right_logical => Compute,
+            wide_shift_right_arithmetic => Compute,
+            wide_set_equal => Compute,
+            wide_set_not_equal => Compute,
+            wide_set_less_than_unsigned => Compute,
+            wide_set_less_than_signed => Compute,
+            wide_widen_unsigned => Compute,
+            wide_widen_signed => Compute,
+            wide_truncate => Compute,
+            wide_mul => DivMul,
+            wide_div_unsigned => DivMul,
+            wide_div_signed => DivMul,
+            wide_rem_unsigned => DivMul,
+            wide_rem_signed => DivMul,
+            wide_exp => DivMul,
+            wide_add_mod => DivMul,
+            wide_mul_mod => DivMul,
+            wide_load => MemoryLoad,
+            wide_store => MemoryStore,
 
             _NonExhaustive(()) => unreachable!(),
         }
