@@ -589,14 +589,21 @@ enum WideForm {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum BasicInst<T> {
-    /// An XReviveVec wide instruction, with its width already resolved from `vtype`.
+    /// A `vtype` configuration. This is not an instruction PolkaVM runs: it exists only between
+    /// basic-block construction and `resolve_wide_widths`, which reads it to work out how wide the
+    /// wide instructions reaching it are and then removes it.
+    SetVtype {
+        lmul: u8,
+    },
+    /// An XReviveVec wide instruction. `width` is `None` until `resolve_wide_widths` recovers it
+    /// from the `vtype` configuration reaching the instruction.
     ///
     /// One variant rather than ten, because these operate on the wide register file: the
     /// linker's register allocation and liveness only care about the few scalar operands, which
     /// `scalar_src` and `scalar_dst` expose. The wide register numbers travel through untouched.
     Wide {
         op: WideForm,
-        width: WideWidth,
+        width: Option<WideWidth>,
         /// Wide destination, or the wide source for a store.
         wide_dst: u8,
         wide_src1: u8,
@@ -712,7 +719,8 @@ impl<T> BasicInst<T> {
 
     fn src_mask(&self, imports: &[Import]) -> RegMask {
         match *self {
-            BasicInst::Nop
+            BasicInst::SetVtype { .. }
+            | BasicInst::Nop
             | BasicInst::LoadHeapBase { .. }
             | BasicInst::LoadImmediate { .. }
             | BasicInst::LoadImmediate64 { .. }
@@ -739,7 +747,9 @@ impl<T> BasicInst<T> {
     fn dst_mask(&self, imports: &[Import]) -> RegMask {
         match *self {
             BasicInst::Wide { scalar_dst, .. } => scalar_dst.map_or(RegMask::empty(), RegMask::from),
-            BasicInst::Nop | BasicInst::StoreAbsolute { .. } | BasicInst::StoreIndirect { .. } => RegMask::empty(),
+            BasicInst::SetVtype { .. } | BasicInst::Nop | BasicInst::StoreAbsolute { .. } | BasicInst::StoreIndirect { .. } => {
+                RegMask::empty()
+            }
             BasicInst::MoveReg { dst, .. }
             | BasicInst::LoadHeapBase { dst }
             | BasicInst::LoadImmediate { dst, .. }
@@ -762,6 +772,7 @@ impl<T> BasicInst<T> {
 
     fn has_side_effects(&self, config: &Config) -> bool {
         match *self {
+            BasicInst::SetVtype { .. } => true,
             // Only the accesses touch anything outside the wide file.
             BasicInst::Wide { op, .. } => matches!(op, WideForm::Load | WideForm::Store),
             BasicInst::Sbrk { .. }
@@ -789,6 +800,7 @@ impl<T> BasicInst<T> {
     fn map_register(self, mut map: impl FnMut(Reg, OpKind) -> Reg) -> Option<Self> {
         // Note: ALWAYS map the inputs first; otherwise `regalloc2` might break!
         match self {
+            BasicInst::SetVtype { .. } => Some(self),
             BasicInst::Wide {
                 op,
                 width,
@@ -960,6 +972,7 @@ impl<T> BasicInst<T> {
 
     fn map_target<U, E>(self, map: impl Fn(T) -> Result<U, E>) -> Result<BasicInst<U>, E> {
         Ok(match self {
+            BasicInst::SetVtype { lmul } => BasicInst::SetVtype { lmul },
             BasicInst::Wide {
                 op,
                 width,
@@ -1010,7 +1023,7 @@ impl<T> BasicInst<T> {
     {
         match self {
             // Nothing to relocate: the operands are registers and a literal offset.
-            BasicInst::Wide { .. } => (None, None),
+            BasicInst::SetVtype { .. } | BasicInst::Wide { .. } => (None, None),
             BasicInst::LoadAbsolute { target, .. } | BasicInst::StoreAbsolute { target, .. } => (Some(*target), None),
             BasicInst::LoadAddress { target, .. } | BasicInst::LoadAddressIndirect { target, .. } => (None, Some(*target)),
             BasicInst::Nop
@@ -2045,12 +2058,13 @@ fn emit_or_combine_byte(
     }
 }
 
-/// Emits one wide instruction. Its width comes from the instruction itself, so there is nothing
-/// to work out from the surrounding code.
+/// Emits one wide instruction. `width` is `None` for the instructions that take theirs from
+/// `vtype`, which is almost all of them; `resolve_wide_widths` fills those in once the basic
+/// blocks exist and the configuration reaching each one can be worked out.
 #[allow(clippy::too_many_arguments)]
 fn emit_wide(
     emit: &mut impl FnMut(InstExt<SectionTarget, SectionTarget>),
-    lmul: u8,
+    width: Option<WideWidth>,
     op: WideForm,
     wide_dst: u8,
     wide_src1: u8,
@@ -2062,7 +2076,7 @@ fn emit_wide(
 ) -> Result<(), ProgramFromElfError> {
     emit(InstExt::Basic(BasicInst::Wide {
         op,
-        width: WideWidth::from_raw(u32::from(lmul)),
+        width,
         wide_dst,
         wide_src1,
         wide_src2,
@@ -2084,50 +2098,55 @@ fn convert_instruction(
     mut emit: impl FnMut(InstExt<SectionTarget, SectionTarget>),
 ) -> Result<(), ProgramFromElfError> {
     match instruction {
-        Inst::WideRegReg { lmul, op, dst, src1, src2 } => {
-            emit_wide(&mut emit, lmul, WideForm::RegReg(op), dst, src1, src2, 0, None, None, 0)
+        Inst::SetVtype { lmul } => {
+            emit(InstExt::Basic(BasicInst::SetVtype { lmul }));
+            Ok(())
         }
-        Inst::WideShift { lmul, op, dst, src1, amount } => {
+        Inst::WideRegReg { op, dst, src1, src2 } => {
+            emit_wide(&mut emit, None, WideForm::RegReg(op), dst, src1, src2, 0, None, None, 0)
+        }
+        Inst::WideShift { op, dst, src1, amount } => {
             // A shift by a register that reads as zero is the identity, which the instruction
             // already does, so the register does not have to be mapped away.
             let amount = cast_reg_non_zero(amount)?.unwrap_or(Reg::A0);
-            emit_wide(&mut emit, lmul, WideForm::Shift(op), dst, src1, 0, 0, Some(amount), None, 0)
+            emit_wide(&mut emit, None, WideForm::Shift(op), dst, src1, 0, 0, Some(amount), None, 0)
         }
-        Inst::WideCmp { lmul, op, dst, src1, src2 } => {
+        Inst::WideCmp { op, dst, src1, src2 } => {
             let Some(dst) = cast_reg_non_zero(dst)? else {
                 emit(InstExt::nop());
                 return Ok(());
             };
-            emit_wide(&mut emit, lmul, WideForm::Cmp(op), 0, src1, src2, 0, None, Some(dst), 0)
+            emit_wide(&mut emit, None, WideForm::Cmp(op), 0, src1, src2, 0, None, Some(dst), 0)
         }
-        Inst::WideWiden { lmul, signed, dst, src } => {
+        Inst::WideWiden { signed, dst, src } => {
             let src = cast_reg_non_zero(src)?;
-            emit_wide(&mut emit, lmul, WideForm::Widen { signed }, dst, 0, 0, 0, src, None, 0)
+            emit_wide(&mut emit, None, WideForm::Widen { signed }, dst, 0, 0, 0, src, None, 0)
         }
-        Inst::WideNarrow { lmul, dst, src } => {
+        Inst::WideNarrow { dst, src } => {
             let Some(dst) = cast_reg_non_zero(dst)? else {
                 emit(InstExt::nop());
                 return Ok(());
             };
-            emit_wide(&mut emit, lmul, WideForm::Narrow, 0, src, 0, 0, None, Some(dst), 0)
+            emit_wide(&mut emit, None, WideForm::Narrow, 0, src, 0, 0, None, Some(dst), 0)
         }
-        Inst::WideByteSwap { lmul, dst, src } => {
-            emit_wide(&mut emit, lmul, WideForm::ByteSwap, dst, src, 0, 0, None, None, 0)
+        Inst::WideByteSwap { dst, src } => {
+            emit_wide(&mut emit, None, WideForm::ByteSwap, dst, src, 0, 0, None, None, 0)
         }
-        Inst::WideMove { lmul, dst, src } => {
-            emit_wide(&mut emit, lmul, WideForm::Move, dst, src, 0, 0, None, None, 0)
+        Inst::WideMoveN { lmul, dst, src } => {
+            // The only wide instruction that names its own width.
+            emit_wide(&mut emit, Some(WideWidth::from_raw(u32::from(lmul))), WideForm::Move, dst, src, 0, 0, None, None, 0)
         }
         Inst::WideModular { multiply, dst, src1, src2, src3 } => {
             // The modular operations are 256-bit by definition, so their width is not encoded.
-            emit_wide(&mut emit, 1, WideForm::Modular { multiply }, dst, src1, src2, src3, None, None, 0)
+            emit_wide(&mut emit, Some(WideWidth::W256), WideForm::Modular { multiply }, dst, src1, src2, src3, None, None, 0)
         }
-        Inst::WideLoad { lmul, dst, base, offset } => {
+        Inst::WideLoad { dst, base, offset } => {
             let base = cast_reg_non_zero(base)?.unwrap_or(Reg::A0);
-            emit_wide(&mut emit, lmul, WideForm::Load, dst, 0, 0, 0, Some(base), None, offset)
+            emit_wide(&mut emit, None, WideForm::Load, dst, 0, 0, 0, Some(base), None, offset)
         }
-        Inst::WideStore { lmul, src, base, offset } => {
+        Inst::WideStore { src, base, offset } => {
             let base = cast_reg_non_zero(base)?.unwrap_or(Reg::A0);
-            emit_wide(&mut emit, lmul, WideForm::Store, src, 0, 0, 0, Some(base), None, offset)
+            emit_wide(&mut emit, None, WideForm::Store, src, 0, 0, 0, Some(base), None, offset)
         }
         Inst::LoadUpperImmediate { dst, value } => {
             let Some(dst) = cast_reg_non_zero(dst)? else {
@@ -3606,6 +3625,251 @@ fn split_code_into_basic_blocks(
     }
 
     Ok(blocks)
+}
+
+/// How wide the wide instructions reaching a point are.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum VtypeState {
+    /// Nothing reaches here yet; the identity of the meet.
+    Unreached,
+    Width(WideWidth),
+    /// Configurations disagree, or the point can be entered from somewhere the graph cannot show.
+    Unknown,
+}
+
+impl VtypeState {
+    fn meet(self, other: VtypeState) -> VtypeState {
+        match (self, other) {
+            (VtypeState::Unreached, x) | (x, VtypeState::Unreached) => x,
+            (VtypeState::Width(a), VtypeState::Width(b)) if a == b => VtypeState::Width(a),
+            _ => VtypeState::Unknown,
+        }
+    }
+}
+
+/// Recovers the width of every wide instruction from the `vtype` configuration reaching it.
+///
+/// XReviveVec encodes no width: `vsetivli` selects one and every wide instruction after it is that
+/// wide. So the width is a dataflow property, and this is the forward dataflow that recovers it,
+/// meeting at joins.
+///
+/// A block that can be entered from somewhere the graph does not show -- a function entry, or a
+/// block whose address escapes into data -- starts `Unknown`. That is sound rather than merely
+/// conservative: the compiler establishes a configuration before the first wide instruction of
+/// every function, so an unknown entry is always overwritten before it is read.
+///
+/// `vtype` is callee-saved, so a call passes its state straight to the return block.
+fn resolve_wide_widths(
+    all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>],
+    externally_entered: &HashSet<BlockTarget>,
+) -> Result<(), ProgramFromElfError> {
+    if !all_blocks.iter().any(|block| {
+        block.ops.iter().any(|(_, op)| matches!(op, BasicInst::SetVtype { .. } | BasicInst::Wide { .. }))
+    }) {
+        return Ok(());
+    }
+
+    let count = all_blocks.len();
+    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (index, block) in all_blocks.iter().enumerate() {
+        match block.next.instruction {
+            ControlInst::Jump { target } => successors[index].push(target.index()),
+            ControlInst::Branch {
+                target_true, target_false, ..
+            } => {
+                successors[index].push(target_true.index());
+                successors[index].push(target_false.index());
+            }
+            // A call transfers no `vtype` along a normal edge. What flows into the callee and what
+            // comes back out is modelled interprocedurally below.
+            ControlInst::Call { .. } | ControlInst::CallIndirect { .. } => {}
+            ControlInst::JumpIndirect { .. } | ControlInst::Unimplemented => {}
+        }
+    }
+
+    // Which function each block belongs to. Blocks are in address order, so a block belongs to the
+    // nearest entry at or before it.
+    let mut owner = vec![0usize; count];
+    let mut current_owner = 0usize;
+    for index in 0..count {
+        if all_blocks[index].is_function {
+            current_owner = index;
+        }
+        owner[index] = current_owner;
+    }
+
+    // A return is an indirect jump through a link register. `ra` is the ordinary one; the machine
+    // outliner links through `t0` instead, and outlined bodies are exactly the functions whose
+    // configuration has to come from their callers.
+    let is_return: Vec<bool> = all_blocks
+        .iter()
+        .map(|block| {
+            matches!(
+                block.next.instruction,
+                ControlInst::JumpIndirect {
+                    base: Reg::RA | Reg::T0,
+                    ..
+                }
+            )
+        })
+        .collect();
+
+    // Call sites, as (caller block, callee entry, the block the call returns to).
+    let mut call_sites: Vec<(usize, usize, usize)> = Vec::new();
+    // A call whose callee is not known statically tells us nothing about what comes back.
+    let mut return_unknown = vec![false; count];
+    for (index, block) in all_blocks.iter().enumerate() {
+        match block.next.instruction {
+            ControlInst::Call { target, target_return, .. } => {
+                call_sites.push((index, target.index(), target_return.index()))
+            }
+            ControlInst::CallIndirect { target_return, .. } => return_unknown[target_return.index()] = true,
+            _ => {}
+        }
+    }
+
+    // A function entered from somewhere unseen -- exported, or its address taken -- can be entered
+    // under any configuration, so its entry cannot be the meet of the call sites we can see.
+    let entry_unknown: Vec<bool> = (0..count)
+        .map(|index| externally_entered.contains(&BlockTarget::from_raw(index)))
+        .collect();
+
+    // The calls returning into each block, so the block can pick up what its callee left behind.
+    let mut call_returns_into: Vec<Vec<(usize, usize, usize)>> = vec![Vec::new(); count];
+    for &site in &call_sites {
+        call_returns_into[site.2].push(site);
+    }
+    let is_call_return: Vec<bool> = call_returns_into.iter().map(|list| !list.is_empty()).collect();
+
+    let mut has_callers = vec![false; count];
+    for &(_, callee, _) in &call_sites {
+        has_callers[callee] = true;
+    }
+
+    // Predecessors, built once: the dataflow below reads them every round, and rediscovering them
+    // by scanning every successor list would make the pass quadratic in the number of blocks.
+    let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); count];
+    for (index, list) in successors.iter().enumerate() {
+        for &next in list {
+            predecessors[next].push(index);
+        }
+    }
+    // A block with no predecessor in the graph is entered from somewhere unseen.
+    let has_predecessor: Vec<bool> = predecessors.iter().map(|list| !list.is_empty()).collect();
+
+    let transfer = |state: VtypeState, block: &BasicBlock<AnyTarget, BlockTarget>| {
+        let mut state = state;
+        for (_, op) in &block.ops {
+            if let BasicInst::SetVtype { lmul } = *op {
+                state = VtypeState::Width(WideWidth::from_raw(u32::from(lmul)));
+            }
+        }
+        state
+    };
+
+    let mut state_in = vec![VtypeState::Unreached; count];
+    let mut state_out = vec![VtypeState::Unreached; count];
+    // What each function is entered under, and what it leaves behind. A callee that never
+    // reconfigures -- an outlined body is exactly that -- passes its caller's configuration
+    // straight through, which is the case the intraprocedural analysis cannot see.
+    let mut function_entry = vec![VtypeState::Unreached; count];
+    let mut function_exit = vec![VtypeState::Unreached; count];
+
+    // Monotone over a lattice of height two, so this settles; the bound only guards a bug.
+    let mut changed = true;
+    let mut rounds = 0;
+    while changed && rounds < 4 * count + 16 {
+        changed = false;
+        rounds += 1;
+
+        for index in 0..count {
+            let mut incoming = VtypeState::Unreached;
+            if entry_unknown[index] || return_unknown[index] {
+                incoming = VtypeState::Unknown;
+            } else {
+                // A function entry takes what its callers were configured as. It can also be
+                // reached by a plain jump: the outliner tail-calls a body that ends in a return,
+                // which is an edge in the graph rather than a call.
+                if has_callers[index] {
+                    incoming = incoming.meet(function_entry[index]);
+                }
+                for &predecessor in &predecessors[index] {
+                    incoming = incoming.meet(state_out[predecessor]);
+                }
+                // What a call leaves behind is what its callee leaves behind.
+                for &(_, callee, _) in call_returns_into[index].iter() {
+                    incoming = incoming.meet(function_exit[callee]);
+                }
+                // Nothing at all reaches it, so it is entered from somewhere unseen.
+                if !has_callers[index] && !has_predecessor[index] && !is_call_return[index] {
+                    incoming = VtypeState::Unknown;
+                }
+            }
+            if incoming != state_in[index] {
+                state_in[index] = incoming;
+                changed = true;
+            }
+            let outgoing = transfer(state_in[index], &all_blocks[index]);
+            if outgoing != state_out[index] {
+                state_out[index] = outgoing;
+                changed = true;
+            }
+        }
+
+        let mut next_entry = vec![VtypeState::Unreached; count];
+        let mut next_exit = vec![VtypeState::Unreached; count];
+        for &(caller, callee, _) in &call_sites {
+            next_entry[callee] = next_entry[callee].meet(state_out[caller]);
+        }
+        for index in 0..count {
+            if is_return[index] {
+                let f = owner[index];
+                next_exit[f] = next_exit[f].meet(state_out[index]);
+            }
+        }
+        for index in 0..count {
+            if next_entry[index] != function_entry[index] {
+                function_entry[index] = next_entry[index];
+                changed = true;
+            }
+            if next_exit[index] != function_exit[index] {
+                function_exit[index] = next_exit[index];
+                changed = true;
+            }
+        }
+    }
+
+    for index in 0..count {
+        let mut state = state_in[index];
+        let block = &mut all_blocks[index];
+        for (source, op) in &mut block.ops {
+            match op {
+                BasicInst::SetVtype { lmul } => {
+                    state = VtypeState::Width(WideWidth::from_raw(u32::from(*lmul)));
+                }
+                BasicInst::Wide { width, .. } if width.is_none() => {
+                    let VtypeState::Width(resolved) = state else {
+                        // Not a limitation of this analysis: it means the code really can arrive
+                        // here under more than one configuration, or under none. Reporting it beats
+                        // picking a width and silently building a program that reads the wrong
+                        // number of bytes.
+                        return Err(ProgramFromElfError::other(format!(
+                            "could not determine the width of the wide instruction at {source:?}: \
+                             no single vtype configuration reaches it (block {index} of the \
+                             function entered at block {owner_block}, reached as {state:?})",
+                            owner_block = owner[index],
+                        )));
+                    };
+                    *width = Some(resolved);
+                }
+                _ => {}
+            }
+        }
+        // The configurations have been read; PolkaVM has no such instruction to run.
+        block.ops.retain(|(_, op)| !matches!(op, BasicInst::SetVtype { .. }));
+    }
+
+    Ok(())
 }
 
 fn build_section_to_block_map(
@@ -8538,6 +8802,11 @@ fn emit_code(
 
         for (source, op) in &block.ops {
             let op = match *op {
+                BasicInst::SetVtype { .. } => {
+                    return Err(ProgramFromElfError::other(
+                        "internal error: a vtype configuration survived to code emission",
+                    ))
+                }
                 BasicInst::Wide {
                     op,
                     width,
@@ -8549,6 +8818,15 @@ fn emit_code(
                     scalar_dst,
                     offset,
                 } => {
+                    // Every width must have been resolved by now. Reaching here without one means
+                    // no `vtype` configuration could be attributed to the instruction, which would
+                    // otherwise silently pick a width and corrupt the program.
+                    let Some(width) = width else {
+                        return Err(ProgramFromElfError::other(format!(
+                            "could not determine the width of a wide instruction at {source:?}: no \
+                             vtype configuration reaches it"
+                        )));
+                    };
                     // The wide register numbers are the guest's vector register numbers, which is
                     // exactly what a wide register index is.
                     let d = WideReg::from_raw(u32::from(wide_dst), width);
@@ -9921,6 +10199,21 @@ fn harvest_code_relocations(
                                     InstExt::nop()
                                 }
                             }
+                            // A relocated wide access. Unlike the scalar case there is no absolute
+                            // form to switch to, but none is needed: the `%hi` half has already
+                            // become a load of the whole address into the base register, so
+                            // dropping the displacement leaves the access pointing at the symbol.
+                            Inst::WideLoad { dst, base, offset: _ } => InstExt::Basic(BasicInst::Wide {
+                                op: WideForm::Load,
+                                width: None,
+                                wide_dst: dst,
+                                wide_src1: 0,
+                                wide_src2: 0,
+                                wide_src3: 0,
+                                scalar_src: Some(cast_reg_non_zero(base)?.unwrap_or(Reg::A0)),
+                                scalar_dst: None,
+                                offset: 0,
+                            }),
                             _ => {
                                 return Err(ProgramFromElfError::other(format!(
                                     "R_RISCV_LO12_I for an unsupported instruction: 0x{inst_raw:08} ({inst:?}) (at {loc})",
@@ -9946,6 +10239,17 @@ fn harvest_code_relocations(
                         };
 
                         let new_instruction = match inst {
+                            Inst::WideStore { src, base, offset: _ } => InstExt::Basic(BasicInst::Wide {
+                                op: WideForm::Store,
+                                width: None,
+                                wide_dst: src,
+                                wide_src1: 0,
+                                wide_src2: 0,
+                                wide_src3: 0,
+                                scalar_src: Some(cast_reg_non_zero(base)?.unwrap_or(Reg::A0)),
+                                scalar_dst: None,
+                                offset: 0,
+                            }),
                             Inst::Store {
                                 kind,
                                 src,
@@ -10637,6 +10941,24 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
 
     let mut section_to_block = build_section_to_block_map(&all_blocks)?;
     let mut all_blocks = resolve_basic_block_references(&data_sections_set, &section_to_block, &all_blocks)?;
+
+    {
+        // A block whose address is taken by data -- a jump table entry, a function pointer -- can be
+        // entered without an edge in the graph, so it cannot inherit a `vtype` from its layout
+        // neighbours.
+        let mut externally_entered = HashSet::new();
+        for (location, relocation) in &relocations {
+            if !data_sections_set.contains(&location.section_index) {
+                continue;
+            }
+            for target in relocation.targets().into_iter().flatten() {
+                if let Some(&block) = section_to_block.get(&target) {
+                    externally_entered.insert(block);
+                }
+            }
+        }
+        resolve_wide_widths(&mut all_blocks, &externally_entered)?;
+    }
     let mut reachability_graph;
     let mut used_blocks;
 

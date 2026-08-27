@@ -16,7 +16,11 @@ fn main() {
     config.set_backend(Some(backend));
     config.set_allow_experimental(true);
     let engine = polkavm::Engine::new(&config).expect("engine");
-    let module = polkavm::Module::from_blob(&engine, &Default::default(), blob).expect("module");
+    // Gas metering is what makes the run measurable: the count is deterministic and identical on
+    // both backends, so it compares the work two builds do without wall-clock noise.
+    let mut module_config = polkavm::ModuleConfig::default();
+    module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
+    let module = polkavm::Module::from_blob(&engine, &module_config, blob).expect("module");
 
     let mut linker: polkavm::Linker<(), ()> = polkavm::Linker::new();
     linker.define_fallback(|_caller: polkavm::Caller<()>, _num: u32| -> Result<(), ()> { Ok(()) });
@@ -26,7 +30,8 @@ fn main() {
     let exports: Vec<_> = module.exports().map(|e| (e.symbol().to_string(), e.program_counter())).collect();
     println!("{} exports", exports.len());
     for (name, pc) in exports {
-        instance.set_gas(2_000_000);
+        const BUDGET: i64 = 2_000_000;
+        instance.set_gas(BUDGET);
         instance.set_reg(polkavm::Reg::SP, module.default_sp());
         instance.set_next_program_counter(pc);
         let mut steps = 0u64;
@@ -38,6 +43,9 @@ fn main() {
                 Err(error) => break format!("error: {error}"),
             }
         };
-        println!("  {name}: {outcome}");
+        // Gas is the deterministic measure of work done, and it is identical across backends, so
+        // it compares execution cost between builds without depending on wall-clock noise.
+        let used = BUDGET - instance.gas();
+        println!("  {name}: {outcome} gas={used} steps={steps}");
     }
 }

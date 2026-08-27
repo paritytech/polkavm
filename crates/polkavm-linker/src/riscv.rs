@@ -448,24 +448,21 @@ pub enum WideShiftOp {
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
 #[repr(u32)]
 pub enum Inst {
-    /// A wide operation over two wide sources. Registers are vector register numbers, and `lmul`
-    /// is the width the instruction carries: 0 = 128, 1 = 256, 2 = 512, 3 = 1024 bits.
+    /// A wide operation over two wide sources. Registers are vector register numbers. No width is
+    /// encoded: it comes from `vtype`, which the linker recovers by dataflow over the code.
     WideRegReg {
-        lmul: u8,
         op: WideOp,
         dst: u8,
         src1: u8,
         src2: u8,
     },
     WideShift {
-        lmul: u8,
         op: WideShiftOp,
         dst: u8,
         src1: u8,
         amount: Reg,
     },
     WideCmp {
-        lmul: u8,
         op: WideCmpOp,
         dst: Reg,
         src1: u8,
@@ -473,24 +470,22 @@ pub enum Inst {
     },
     /// Widens a scalar into a wide register.
     WideWiden {
-        lmul: u8,
         signed: bool,
         dst: u8,
         src: Reg,
     },
     /// Narrows a wide register into a scalar.
     WideNarrow {
-        lmul: u8,
         dst: Reg,
         src: u8,
     },
     WideByteSwap {
-        lmul: u8,
         dst: u8,
         src: u8,
     },
-    /// A wide register copy.
-    WideMove {
+    /// A wide register copy. Alone among the wide instructions it names its own width, because it
+    /// is expanded after the `vtype` configurations are placed and so cannot read one.
+    WideMoveN {
         lmul: u8,
         dst: u8,
         src: u8,
@@ -504,16 +499,19 @@ pub enum Inst {
         src3: u8,
     },
     WideLoad {
-        lmul: u8,
         dst: u8,
         base: Reg,
         offset: i32,
     },
     WideStore {
-        lmul: u8,
         src: u8,
         base: Reg,
         offset: i32,
+    },
+    /// `vsetivli`/`vsetvli`, which selects the width of every wide instruction that follows.
+    /// `lmul` is 0 = 128, 1 = 256, 2 = 512, 3 = 1024 bits.
+    SetVtype {
+        lmul: u8,
     },
     LoadUpperImmediate {
         dst: Reg,
@@ -1596,13 +1594,14 @@ impl Inst {
             // https://github.com/llvm/llvm-project/blob/e30e644266fbc9ba638ee2c6aa23b5691397163f/llvm/lib/Target/RISCV/RISCVInstrInfoXMips.td#L150
             // https://github.com/llvm/llvm-project/blob/e30e644266fbc9ba638ee2c6aa23b5691397163f/llvm/lib/Target/RISCV/RISCVInstrFormats.td#L388
             0b1011011 if config.xrevivevec => {
-                // OPCODE_CUSTOM_2, the XReviveVec wide integer instructions. The width is a field
-                // of the instruction rather than of `vtype`, so each one says how wide it is.
+                // OPC_CUSTOM_2, the XReviveVec wide integer instructions. None of them encodes a
+                // width: one `revive.wadd` covers 128, 256, 512 and 1024 bits, and which one it is
+                // comes from `vtype`. `funct3` picks the operand shape, `funct7` the operation.
                 //
-                //   funct3 = 000        compute, with funct7 = {width, operation}
-                //   funct3 = 001        the modular operations, 256-bit by definition
-                //   funct3 = 010..101   a load at 128, 256, 512 and 1024 bits
-                //   funct3 = 110        a store, with the width above the offset
+                //   000  wide, wide -> wide          100  load
+                //   001  wide, wide -> scalar        101  store
+                //   010  wide, scalar -> wide        110  wide -> scalar, and the register moves
+                //   011  the modular operations      111  scalar -> wide
                 let dst5 = ((op >> 7) & 0b11111) as u8;
                 let src1_5 = ((op >> 15) & 0b11111) as u8;
                 let src2_5 = ((op >> 20) & 0b11111) as u8;
@@ -1610,58 +1609,51 @@ impl Inst {
                 let src1 = Reg::decode(op >> 15);
                 let src2 = Reg::decode(op >> 20);
                 let funct3 = (op >> 12) & 0b111;
+                let funct7 = (op >> 25) & 0b1111111;
 
                 match funct3 {
                     0b000 => {
-                        let lmul = ((op >> 30) & 0b11) as u8;
-                        match (op >> 25) & 0b11111 {
-                            operation @ 0..=15 => {
-                                let op = match operation {
-                                    0 => WideOp::Add,
-                                    1 => WideOp::Sub,
-                                    2 => WideOp::Mul,
-                                    3 => WideOp::And,
-                                    4 => WideOp::Or,
-                                    5 => WideOp::Xor,
-                                    6 => WideOp::DivUnsigned,
-                                    7 => WideOp::DivSigned,
-                                    8 => WideOp::RemUnsigned,
-                                    9 => WideOp::RemSigned,
-                                    10 => WideOp::Exp,
-                                    11 => WideOp::SignExtend,
-                                    12 => WideOp::MinUnsigned,
-                                    13 => WideOp::MinSigned,
-                                    14 => WideOp::MaxUnsigned,
-                                    _ => WideOp::MaxSigned,
-                                };
-                                Some(Inst::WideRegReg { lmul, op, dst: dst5, src1: src1_5, src2: src2_5 })
-                            }
-                            operation @ 16..=18 => {
-                                let op = match operation {
-                                    16 => WideShiftOp::Left,
-                                    17 => WideShiftOp::RightLogical,
-                                    _ => WideShiftOp::RightArithmetic,
-                                };
-                                Some(Inst::WideShift { lmul, op, dst: dst5, src1: src1_5, amount: src2 })
-                            }
-                            operation @ 19..=22 => {
-                                let op = match operation {
-                                    19 => WideCmpOp::Equal,
-                                    20 => WideCmpOp::NotEqual,
-                                    21 => WideCmpOp::LessUnsigned,
-                                    _ => WideCmpOp::LessSigned,
-                                };
-                                Some(Inst::WideCmp { lmul, op, dst, src1: src1_5, src2: src2_5 })
-                            }
-                            23 => Some(Inst::WideNarrow { lmul, dst, src: src1_5 }),
-                            24 => Some(Inst::WideWiden { lmul, signed: false, dst: dst5, src: src1 }),
-                            25 => Some(Inst::WideWiden { lmul, signed: true, dst: dst5, src: src1 }),
-                            26 => Some(Inst::WideByteSwap { lmul, dst: dst5, src: src1_5 }),
-                            27 => Some(Inst::WideMove { lmul, dst: dst5, src: src1_5 }),
-                            _ => None,
-                        }
+                        let op = match funct7 {
+                            0 => WideOp::Add,
+                            1 => WideOp::Sub,
+                            2 => WideOp::Mul,
+                            3 => WideOp::And,
+                            4 => WideOp::Or,
+                            5 => WideOp::Xor,
+                            6 => WideOp::DivUnsigned,
+                            7 => WideOp::DivSigned,
+                            8 => WideOp::RemUnsigned,
+                            9 => WideOp::RemSigned,
+                            10 => WideOp::Exp,
+                            11 => WideOp::SignExtend,
+                            12 => WideOp::MinUnsigned,
+                            13 => WideOp::MinSigned,
+                            14 => WideOp::MaxUnsigned,
+                            15 => WideOp::MaxSigned,
+                            _ => return None,
+                        };
+                        Some(Inst::WideRegReg { op, dst: dst5, src1: src1_5, src2: src2_5 })
                     }
                     0b001 => {
+                        let op = match funct7 {
+                            0 => WideCmpOp::Equal,
+                            1 => WideCmpOp::NotEqual,
+                            2 => WideCmpOp::LessUnsigned,
+                            3 => WideCmpOp::LessSigned,
+                            _ => return None,
+                        };
+                        Some(Inst::WideCmp { op, dst, src1: src1_5, src2: src2_5 })
+                    }
+                    0b010 => {
+                        let op = match funct7 {
+                            0 => WideShiftOp::Left,
+                            1 => WideShiftOp::RightLogical,
+                            2 => WideShiftOp::RightArithmetic,
+                            _ => return None,
+                        };
+                        Some(Inst::WideShift { op, dst: dst5, src1: src1_5, amount: src2 })
+                    }
+                    0b011 => {
                         // The modular operations, whose third source is in the R4 field.
                         let src3_5 = ((op >> 27) & 0b11111) as u8;
                         let multiply = match (op >> 25) & 0b11 {
@@ -1671,20 +1663,52 @@ impl Inst {
                         };
                         Some(Inst::WideModular { multiply, dst: dst5, src1: src1_5, src2: src2_5, src3: src3_5 })
                     }
-                    0b010 | 0b011 | 0b100 | 0b101 => {
-                        // One funct3 per width, so the offset keeps all twelve bits and a constant
-                        // pool entry is still reachable through `%lo`.
-                        let lmul = (funct3 - 0b010) as u8;
+                    0b100 => {
                         let offset = (op as i32) >> 20;
-                        Some(Inst::WideLoad { lmul, dst: dst5, base: src1, offset })
+                        Some(Inst::WideLoad { dst: dst5, base: src1, offset })
                     }
-                    0b110 => {
-                        let lmul = ((op >> 30) & 0b11) as u8;
-                        // A ten-bit offset, split either side of the register fields.
-                        let offset = (((op >> 25) & 0b11111) << 5) | ((op >> 7) & 0b11111);
-                        let offset = ((offset as i32) << 22) >> 22;
-                        Some(Inst::WideStore { lmul, src: src2_5, base: src1, offset })
+                    0b101 => {
+                        // A twelve-bit offset, split either side of the register fields.
+                        let offset = (((op >> 25) & 0b1111111) << 5) | ((op >> 7) & 0b11111);
+                        let offset = ((offset as i32) << 20) >> 20;
+                        Some(Inst::WideStore { src: src2_5, base: src1, offset })
                     }
+                    0b110 => match funct7 {
+                        // A register move names the number of registers it moves rather than
+                        // reading `vtype`: it is expanded after the configuration is placed, so
+                        // there is none in force for it to read.
+                        0b0000000 => Some(Inst::WideMoveN { lmul: 0, dst: dst5, src: src1_5 }),
+                        0b0100000 => Some(Inst::WideMoveN { lmul: 1, dst: dst5, src: src1_5 }),
+                        0b1000000 => Some(Inst::WideMoveN { lmul: 2, dst: dst5, src: src1_5 }),
+                        0b1100000 => Some(Inst::WideMoveN { lmul: 3, dst: dst5, src: src1_5 }),
+                        0b0000001 => Some(Inst::WideNarrow { dst, src: src1_5 }),
+                        0b0000010 => Some(Inst::WideByteSwap { dst: dst5, src: src1_5 }),
+                        _ => None,
+                    },
+                    0b111 => match funct7 {
+                        0 => Some(Inst::WideWiden { signed: false, dst: dst5, src: src1 }),
+                        1 => Some(Inst::WideWiden { signed: true, dst: dst5, src: src1 }),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            // OP-V, of which only the `vtype` configurations are relevant: they carry the width
+            // of every wide instruction that follows.
+            0b1010111 if config.xrevivevec && ((op >> 12) & 0b111) == 0b111 => {
+                let zimm = if (op >> 30) == 0b11 {
+                    // vsetivli: a ten-bit immediate vtype, with the AVL as a five-bit immediate.
+                    (op >> 20) & 0b1111111111
+                } else if (op >> 31) == 0 {
+                    // vsetvli: an eleven-bit immediate vtype.
+                    (op >> 20) & 0b11111111111
+                } else {
+                    // vsetvl takes vtype from a register, so no width can be read off the code.
+                    return None;
+                };
+                // vlmul is the low three bits; the fractional encodings cannot name a wide integer.
+                match zimm & 0b111 {
+                    lmul @ 0..=3 => Some(Inst::SetVtype { lmul: lmul as u8 }),
                     _ => None,
                 }
             }
