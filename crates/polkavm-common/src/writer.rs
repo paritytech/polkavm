@@ -320,9 +320,9 @@ impl ProgramBlobBuilder {
         for &target in &self.jump_table {
             let target = target + basic_block_shift;
             let target_nth_instruction = basic_block_to_instruction_index[target as usize];
-            let offset = instructions[target_nth_instruction].position.to_le_bytes();
-            jump_table_entries.push(offset);
-            jump_table_entry_size = core::cmp::max(jump_table_entry_size, offset.iter().take_while(|&&b| b != 0).count());
+            let position = instructions[target_nth_instruction].position;
+            jump_table_entries.push(position.to_le_bytes());
+            jump_table_entry_size = core::cmp::max(jump_table_entry_size, 4 - position.leading_zeros() as usize / 8);
         }
 
         let mut output = SerializedCode {
@@ -609,7 +609,9 @@ impl<'a> Writer<'a> {
 #[cfg(test)]
 mod tests {
     use super::ProgramBlobBuilder;
-    use crate::program::{Instruction, InstructionSetKind, ProgramBlob, SECTION_OPT_METADATA_HASH};
+    use crate::program::{Instruction, InstructionSetKind, ProgramBlob, Reg, SECTION_OPT_METADATA_HASH};
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     fn build_minimal(metadata_hash: Option<&[u8]>) -> ProgramBlob {
         let mut builder = ProgramBlobBuilder::new(InstructionSetKind::ReviveV1);
@@ -631,5 +633,57 @@ mod tests {
     fn metadata_hash_is_empty_when_absent() {
         let blob = build_minimal(None);
         assert!(blob.metadata_hash().is_empty());
+    }
+
+    fn build_with_jump_table(code: &[Instruction], jump_table: &[u32]) -> ProgramBlob {
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::ReviveV1);
+        builder.set_code(code, jump_table);
+        ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap()
+    }
+
+    fn jump_table_targets(blob: &ProgramBlob) -> Vec<u32> {
+        blob.jump_table().iter().map(|target| target.0).collect()
+    }
+
+    /// Every `fallthrough` is one byte and starts a new basic block, so a basic block index is also
+    /// its byte offset and the requested jump table targets are exact.
+    fn fallthroughs(count: usize) -> Vec<Instruction> {
+        vec![Instruction::fallthrough; count]
+    }
+
+    /// 65626 = 0x01005a keeps its most significant non-zero byte above a zero byte.
+    #[test]
+    fn jump_table_target_with_an_interior_zero_byte_is_not_truncated() {
+        let blob = build_with_jump_table(&fallthroughs(70000), &[65328, 65626]);
+        assert_eq!(jump_table_targets(&blob), [65328, 65626]);
+    }
+
+    /// 256 = 0x000100 has nothing but a zero byte below its most significant one.
+    #[test]
+    fn jump_table_target_that_is_a_multiple_of_256_is_not_truncated() {
+        let blob = build_with_jump_table(&fallthroughs(300), &[100, 256]);
+        assert_eq!(jump_table_targets(&blob), [100, 256]);
+    }
+
+    /// A target past 2^24 needs all four bytes, so the reader has to accept an entry size of 4. A
+    /// basic block that far in needs over 16 MiB of code, which the ten byte padding instruction
+    /// provides without starting any basic block of its own.
+    #[test]
+    fn jump_table_target_needing_four_bytes_is_not_truncated() {
+        let padding = Instruction::store_imm_indirect_u64(Reg::A0.raw(), i32::MIN, i32::MIN);
+        let mut code = vec![padding; (1 << 24) / 10 + 1];
+        code.extend(fallthroughs(2));
+        let blob = build_with_jump_table(&code, &[1]);
+        let target = blob.code().len() as u32 - 1;
+        assert!(target >= 1 << 24, "the target must need all four bytes: {target}");
+        assert_eq!(jump_table_targets(&blob), [target]);
+    }
+
+    /// 66066 = 0x010212 has no zero byte below its most significant one, the shape which was always
+    /// sized correctly.
+    #[test]
+    fn jump_table_target_without_an_interior_zero_byte_round_trips() {
+        let blob = build_with_jump_table(&fallthroughs(70000), &[65585, 66066]);
+        assert_eq!(jump_table_targets(&blob), [65585, 66066]);
     }
 }
