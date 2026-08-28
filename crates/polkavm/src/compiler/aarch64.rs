@@ -20,6 +20,10 @@ use polkavm_common::regmap::{AUX_TMP_REG, TMP_REG};
 
 polkavm_common::static_assert!(polkavm_common::regmap::to_guest_reg(TMP_REG).is_none());
 polkavm_common::static_assert!(polkavm_common::regmap::to_guest_reg(AUX_TMP_REG).is_none());
+polkavm_common::static_assert!(polkavm_common::regmap::to_guest_reg(x9).is_none());
+polkavm_common::static_assert!(polkavm_common::regmap::to_guest_reg(x10).is_none());
+polkavm_common::static_assert!(polkavm_common::regmap::to_guest_reg(x11).is_none());
+polkavm_common::static_assert!(polkavm_common::regmap::to_guest_reg(x12).is_none());
 
 type NativeReg = polkavm_assembler::aarch64::Reg;
 
@@ -44,7 +48,7 @@ impl From<i32> for RegImm {
 }
 
 static REG_MAP: [NativeReg; 16] = {
-    let mut output = [conv_reg_const(Reg::T2); 16];
+    let mut output = [conv_reg_const(Reg::A5); 16];
     let mut index = 0;
     while index < Reg::ALL.len() {
         assert!(Reg::ALL[index] as usize == index);
@@ -383,9 +387,27 @@ where
         log::trace!("Emitting trampoline: sysenter");
         let label = self.asm.create_label();
         self.restore_registers_from_vmctx();
-        // Jump to the address stored in vmctx.next_native_program_counter
-        self.load_vmctx_field_u64(TMP_REG, S::offset_table().next_native_program_counter);
-        self.push(br(TMP_REG));
+        match S::KIND {
+            SandboxKind::Linux => {
+                self.load_vmctx_field_u64(TMP_REG, S::offset_table().next_native_program_counter);
+                self.push(br(TMP_REG));
+            }
+            SandboxKind::Generic => {
+                let vmctx_base = self.load_vmctx_base();
+                let (tmp_reg_offset, aux_tmp_reg_offset) = crate::sandbox::generic::vmctx_scratch_offsets();
+                self.push(ldr_imm(
+                    MemSize::B64,
+                    x10,
+                    vmctx_base,
+                    S::offset_table().next_native_program_counter as u32,
+                ));
+                self.push(ldr_imm(MemSize::B64, x11, vmctx_base, tmp_reg_offset as u32));
+                self.push(ldr_imm(MemSize::B64, x12, vmctx_base, aux_tmp_reg_offset as u32));
+                self.push(mov_reg(RegSize::X64, TMP_REG, x11));
+                self.push(mov_reg(RegSize::X64, x9, x12));
+                self.push(br(x10));
+            }
+        }
         label
     }
 
@@ -1981,7 +2003,7 @@ where
     // ── Special ───────────────────────────────────────────────────────────
 
     #[inline(always)]
-    pub fn ecalli(&mut self, code_offset: u32, args_length: u32, imm: i32) {
+    pub fn ecalli(&mut self, code_offset: u32, length: u32, imm: i32) {
         if let Some(ref custom_codegen) = self.0.custom_codegen {
             if !custom_codegen.should_emit_ecalli(cast(imm).bitwise_as_u32(), &mut self.0.asm) {
                 return;
@@ -1997,7 +2019,7 @@ where
         self.push(str_imm(MemSize::B32, x9, vmctx_base, S::offset_table().arg as u32));
         emit_load_imm32(&mut self.0.asm, x9, code_offset);
         self.push(str_imm(MemSize::B32, x9, vmctx_base, S::offset_table().program_counter as u32));
-        emit_load_imm32(&mut self.0.asm, x9, code_offset + args_length + 1);
+        emit_load_imm32(&mut self.0.asm, x9, code_offset + length);
         self.push(str_imm(MemSize::B32, x9, vmctx_base, S::offset_table().next_program_counter as u32));
         self.call_to_label(ecall_label);
     }
@@ -2054,7 +2076,12 @@ where
         self.push(adr_label(x9, label_repeat));
         self.store_vmctx_field_u64(x9, S::offset_table().next_native_program_counter);
 
-        // Zero-extend count to 64 bits
+        if matches!(S::KIND, SandboxKind::Generic) {
+            self.store_vmctx_field_u64(x9, S::offset_table().memset_continuation);
+        }
+
+        // Guest memory addresses and counts are 32-bit even for 64-bit guests.
+        self.push(mov_reg(RegSize::W32, dst, dst));
         self.push(mov_reg(RegSize::W32, count, count));
 
         // Memory base register for sandbox-relative addressing

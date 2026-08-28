@@ -255,32 +255,6 @@ pub(crate) enum MemsetKind {
     Trampoline,
 }
 
-#[cfg(feature = "generic-sandbox")]
-pub(crate) fn indirect_memory_operand(instruction: polkavm_common::program::Instruction) -> Option<(RawReg, i32)> {
-    use polkavm_common::program::Instruction;
-
-    match instruction {
-        Instruction::store_imm_indirect_u8(base, offset, _)
-        | Instruction::store_imm_indirect_u16(base, offset, _)
-        | Instruction::store_imm_indirect_u32(base, offset, _)
-        | Instruction::store_imm_indirect_u64(base, offset, _) => Some((base, offset)),
-
-        Instruction::store_indirect_u8(_, base, offset)
-        | Instruction::store_indirect_u16(_, base, offset)
-        | Instruction::store_indirect_u32(_, base, offset)
-        | Instruction::store_indirect_u64(_, base, offset)
-        | Instruction::load_indirect_u8(_, base, offset)
-        | Instruction::load_indirect_i8(_, base, offset)
-        | Instruction::load_indirect_u16(_, base, offset)
-        | Instruction::load_indirect_i16(_, base, offset)
-        | Instruction::load_indirect_u32(_, base, offset)
-        | Instruction::load_indirect_i32(_, base, offset)
-        | Instruction::load_indirect_u64(_, base, offset) => Some((base, offset)),
-
-        _ => None,
-    }
-}
-
 pub(crate) fn are_we_executing_memset<S>(
     compiled_module: &crate::compiler::CompiledModule<S>,
     machine_code_offset: u64,

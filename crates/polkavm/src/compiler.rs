@@ -24,7 +24,7 @@ mod amd64;
 pub use crate::compiler::amd64::{extract_gas_cost, on_page_fault, on_signal_trap, step_prelude_length};
 
 #[cfg(all(target_arch = "x86_64", feature = "generic-sandbox"))]
-pub(crate) use crate::compiler::amd64::{are_we_executing_memset, indirect_memory_operand, MemsetKind};
+pub(crate) use crate::compiler::amd64::{are_we_executing_memset, MemsetKind};
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
@@ -34,6 +34,31 @@ pub use crate::compiler::aarch64::{extract_gas_cost, on_page_fault, on_signal_tr
 
 #[cfg(all(target_arch = "aarch64", feature = "generic-sandbox"))]
 pub(crate) use crate::compiler::aarch64::{are_we_executing_memset, MemsetKind};
+#[cfg(feature = "generic-sandbox")]
+pub(crate) fn indirect_memory_operand(instruction: polkavm_common::program::Instruction) -> Option<(RawReg, i32)> {
+    use polkavm_common::program::Instruction;
+
+    match instruction {
+        Instruction::store_imm_indirect_u8(base, offset, _)
+        | Instruction::store_imm_indirect_u16(base, offset, _)
+        | Instruction::store_imm_indirect_u32(base, offset, _)
+        | Instruction::store_imm_indirect_u64(base, offset, _) => Some((base, offset)),
+
+        Instruction::store_indirect_u8(_, base, offset)
+        | Instruction::store_indirect_u16(_, base, offset)
+        | Instruction::store_indirect_u32(_, base, offset)
+        | Instruction::store_indirect_u64(_, base, offset)
+        | Instruction::load_indirect_u8(_, base, offset)
+        | Instruction::load_indirect_i8(_, base, offset)
+        | Instruction::load_indirect_u16(_, base, offset)
+        | Instruction::load_indirect_i16(_, base, offset)
+        | Instruction::load_indirect_u32(_, base, offset)
+        | Instruction::load_indirect_i32(_, base, offset)
+        | Instruction::load_indirect_u64(_, base, offset) => Some((base, offset)),
+
+        _ => None,
+    }
+}
 
 /// The address to which to jump to for invalid dynamic jumps.
 ///
@@ -599,6 +624,9 @@ where
             None => {
                 // The map's length is `code_length + 2`, so a target equal to its length is also out of range. (See #392.)
                 if program_counter >= self.program_counter_to_label.len() {
+                    return None;
+                }
+                if !self.scan_is_jump_target_valid(program_counter) {
                     return None;
                 }
 

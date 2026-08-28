@@ -625,6 +625,7 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
                 // x16 is TMP_REG on AArch64
                 polkavm_common::static_assert!(polkavm_common::regmap::TMP_REG as u32 == NativeReg::x16 as u32);
                 vmctx.tmp_reg.store(fetch_aarch64_reg!(16), Ordering::Relaxed);
+                vmctx.aux_tmp_reg.store(fetch_aarch64_reg!(9), Ordering::Relaxed);
 
                 // During a memset (arg != 0), next_native_program_counter already
                 // points to the inline repeat label (set by the memset instruction).
@@ -814,6 +815,7 @@ struct VmCtx {
 
     regs: CacheAligned<[RegValue; REG_COUNT]>,
     tmp_reg: AtomicU64,
+    aux_tmp_reg: AtomicU64,
     sandbox: *mut Sandbox,
     program_counter: AtomicU32,
     next_program_counter: AtomicU32,
@@ -843,6 +845,7 @@ impl VmCtx {
             gas: AtomicI64::new(0),
             regs: CacheAligned([0; REG_COUNT]),
             tmp_reg: AtomicU64::new(0),
+            aux_tmp_reg: AtomicU64::new(0),
             sandbox: core::ptr::null_mut(),
             program_counter: AtomicU32::new(0),
             next_program_counter: AtomicU32::new(0),
@@ -850,6 +853,13 @@ impl VmCtx {
             memset_continuation: AtomicU64::new(0),
         }
     }
+}
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn vmctx_scratch_offsets() -> (usize, usize) {
+    (
+        get_field_offset!(VmCtx::new(), |base| base.tmp_reg.as_ptr()),
+        get_field_offset!(VmCtx::new(), |base| base.aux_tmp_reg.as_ptr()),
+    )
 }
 
 // Make sure it fits within a single page on amd64.
@@ -1311,22 +1321,42 @@ impl Sandbox {
     }
 
     fn fixup_memset_registers(&mut self, kind: crate::compiler::MemsetKind) {
-        let bytes_remaining = self.vmctx().tmp_reg.load(Ordering::Relaxed);
-        let guest_memory_base = self.memory.as_ptr() as u64 + self.guest_memory_offset as u64;
-        if self.gas_metering.is_some() {
-            self.vmctx()
-                .gas
-                .fetch_add(cast(bytes_remaining).to_i64_or_panic(), Ordering::Relaxed);
-        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            let bytes_remaining = self.vmctx().tmp_reg.load(Ordering::Relaxed);
+            let guest_memory_base = self.memory.as_ptr() as u64 + self.guest_memory_offset as u64;
+            if self.gas_metering.is_some() {
+                self.vmctx()
+                    .gas
+                    .fetch_add(cast(bytes_remaining).to_i64_or_panic(), Ordering::Relaxed);
+            }
 
-        let vmctx = self.vmctx_mut();
-        let count = &mut vmctx.regs[Reg::A2 as usize];
-        *count = match kind {
-            crate::compiler::MemsetKind::Inline => bytes_remaining,
-            crate::compiler::MemsetKind::Trampoline => count.wrapping_add(bytes_remaining),
-        };
-        let pointer = &mut vmctx.regs[Reg::A0 as usize];
-        *pointer = pointer.wrapping_sub(guest_memory_base);
+            let vmctx = self.vmctx_mut();
+            let count = &mut vmctx.regs[Reg::A2 as usize];
+            *count = match kind {
+                crate::compiler::MemsetKind::Inline => bytes_remaining,
+                crate::compiler::MemsetKind::Trampoline => count.wrapping_add(bytes_remaining),
+            };
+            let pointer = &mut vmctx.regs[Reg::A0 as usize];
+            *pointer = pointer.wrapping_sub(guest_memory_base);
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let is_gas_metered = self.gas_metering.is_some();
+            let vmctx = self.vmctx_mut();
+            let bytes_remaining = match kind {
+                crate::compiler::MemsetKind::Inline => vmctx.regs[Reg::A2 as usize],
+                crate::compiler::MemsetKind::Trampoline => {
+                    let remaining = vmctx.tmp_reg.load(Ordering::Relaxed);
+                    vmctx.regs[Reg::A2 as usize] = vmctx.regs[Reg::A2 as usize].wrapping_add(remaining);
+                    remaining
+                }
+            };
+            if is_gas_metered {
+                vmctx.gas.fetch_add(cast(bytes_remaining).to_i64_or_panic(), Ordering::Relaxed);
+            }
+            vmctx.arg.store(0, Ordering::Relaxed);
+        }
     }
 
     fn handle_guest_pagefault(&mut self, fault_address: u64) -> Result<InterruptKind, Error> {
@@ -1340,7 +1370,15 @@ impl Sandbox {
             return Err(Error::from("internal error: address underflow after a trap"));
         };
 
-        let memset = crate::compiler::are_we_executing_memset(compiled_module, machine_code_offset);
+        let mut memset = crate::compiler::are_we_executing_memset(compiled_module, machine_code_offset);
+        #[cfg(target_arch = "aarch64")]
+        {
+            memset = match self.vmctx().arg.load(Ordering::Relaxed) {
+                1 => Some(crate::compiler::MemsetKind::Inline),
+                2 => Some(crate::compiler::MemsetKind::Trampoline),
+                _ => memset,
+            };
+        }
         let memset_continuation = self.vmctx().memset_continuation.load(Ordering::Relaxed);
         let program_counter_offset = if memset.is_some() {
             memset_continuation.wrapping_sub(native_code_origin)
@@ -1388,32 +1426,6 @@ impl Sandbox {
                 is_write_protected,
             }))
         } else {
-            // On AArch64, if a page fault occurs during a gas-metered memset,
-            // the gas was pre-charged by the full count. Refund the remaining
-            // bytes since the loop was interrupted partway through.
-            // arg=1: inline memset (A2 is the loop counter, already correct)
-            // arg=2: trampoline memset (A2 = pre-computed remainder, tmp_reg = loop remaining; total = A2 + tmp_reg)
-            #[cfg(target_arch = "aarch64")]
-            if self.gas_metering.is_some() {
-                let vmctx = self.vmctx_mut();
-                let memset_flag = vmctx.arg.load(Ordering::Relaxed);
-                if memset_flag == 1 {
-                    // Inline memset: A2 is the remaining count (loop counter)
-                    let remaining = vmctx.regs.0[polkavm_common::program::Reg::A2 as usize];
-                    vmctx.gas.fetch_add(remaining as i64, Ordering::Relaxed);
-                    vmctx.arg.store(0, Ordering::Relaxed);
-                } else if memset_flag == 2 {
-                    // Trampoline memset: A2 has pre-computed remainder (gas-unaffordable bytes),
-                    // tmp_reg has loop remaining (bytes that were affordable but not yet written).
-                    // Update A2 = A2 + tmp_reg (total unwritten bytes) for the caller.
-                    // Refund gas only by tmp_reg (the affordable-but-unwritten portion).
-                    let loop_remaining = vmctx.tmp_reg.load(Ordering::Relaxed);
-                    vmctx.regs.0[polkavm_common::program::Reg::A2 as usize] += loop_remaining;
-                    vmctx.gas.fetch_add(loop_remaining as i64, Ordering::Relaxed);
-                    vmctx.arg.store(0, Ordering::Relaxed);
-                }
-            }
-
             self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
             Ok(InterruptKind::Trap)
         }
@@ -1432,7 +1444,10 @@ impl Sandbox {
 
         let base = cast(self.vmctx().regs[base.get() as usize]).truncate_to_u32();
         let address = base.wrapping_add(cast(offset).bitwise_as_u32());
+        #[cfg(target_arch = "x86_64")]
         self.vmctx_mut().tmp_reg.store(u64::from(address), Ordering::Relaxed);
+        #[cfg(target_arch = "aarch64")]
+        self.vmctx_mut().aux_tmp_reg.store(u64::from(address), Ordering::Relaxed);
     }
 
     fn set_aux_data_permission_for_host(&mut self) -> Result<(), Error> {
@@ -2223,35 +2238,23 @@ impl super::Sandbox for Sandbox {
                         });
                     }
                 }
-                Some(MemoryProtection::Read) => {
-                    if !self.page_set_present.is_whole_region_empty((page_start, page_end)) {
-                        self.madvise_remove(address, length)
-                            .map_err(|error| MemoryAccessError::Error(error.into()))?;
-                        self.page_set_writable.remove((page_start, page_end));
-                    }
-
-                    if let Err(error) = self.mprotect_guest_memory(address, length, MemoryProtection::Read) {
+                Some(protection) => {
+                    let native_protection = match protection {
+                        MemoryProtection::Read => PROT_READ,
+                        MemoryProtection::ReadWrite => PROT_READ | PROT_WRITE,
+                    };
+                    let offset = self.guest_memory_offset + address as usize;
+                    if let Err(error) = self.memory.mmap_within(offset, length as usize, native_protection) {
                         self.page_set_present.remove((page_start, page_end));
-                        return Err(error);
+                        self.page_set_writable.remove((page_start, page_end));
+                        return Err(MemoryAccessError::Error(error.into()));
                     }
 
                     self.page_set_present.insert((page_start, page_end));
-                    return Ok(());
-                }
-                Some(MemoryProtection::ReadWrite) => {
-                    if !self.page_set_present.is_whole_region_empty((page_start, page_end)) {
-                        self.madvise_remove(address, length)
-                            .map_err(|error| MemoryAccessError::Error(error.into()))?;
+                    match protection {
+                        MemoryProtection::Read => self.page_set_writable.remove((page_start, page_end)),
+                        MemoryProtection::ReadWrite => self.page_set_writable.insert((page_start, page_end)),
                     }
-
-                    if let Err(error) = self.mprotect_guest_memory(address, length, MemoryProtection::ReadWrite) {
-                        self.page_set_present.remove((page_start, page_end));
-                        self.page_set_writable.remove((page_start, page_end));
-                        return Err(error);
-                    }
-
-                    self.page_set_present.insert((page_start, page_end));
-                    self.page_set_writable.insert((page_start, page_end));
                     return Ok(());
                 }
             }
