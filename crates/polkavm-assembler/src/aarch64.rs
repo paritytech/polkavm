@@ -1,3 +1,7 @@
+// Encoding literals are grouped by architectural bitfields; explicit zero
+// fields document the instruction layout.
+#![allow(clippy::identity_op, clippy::unusual_byte_groupings)]
+
 // AArch64 (ARM64) instruction encoding for PolkaVM JIT backend.
 //
 // AArch64 instructions are fixed 32-bit wide, little-endian.
@@ -188,7 +192,7 @@ fn encode32(bits: u32) -> InstBuf {
 /// We store the instruction template in the opcode field. During finalize,
 /// we need custom patching logic for AArch64 which is handled by the assembler's
 /// finalize_aarch64 method.
-
+///
 /// Create a FixupKind for AArch64 branch fixups.
 /// The instruction template (with offset bits zeroed) is stored in the code bytes.
 /// During finalize, the assembler detects the instruction type and patches the offset
@@ -253,7 +257,7 @@ fn inst_fixup(mnemonic: &'static str, bits: u32, label: Label, kind: FixupKind) 
 /// ADD Rd, Rn, Rm (shifted register)
 #[inline(always)]
 pub fn add(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b0001011_00_0 << 21) | (rm.index() << 16) | (0b000000 << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b0001011_00_0 << 21) | (rm.index() << 16)) | (rn.index() << 5) | rd.index();
     inst("add", bits)
 }
 
@@ -262,21 +266,21 @@ pub fn add(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst>
 pub fn add_imm(size: RegSize, rd: Reg, rn: Reg, imm12: u32) -> Instruction<AArch64Inst> {
     debug_assert!(imm12 < 4096, "add_imm: immediate out of range");
     // sf=size | 00 | 100010 | sh=0 | imm12 | Rn | Rd
-    let bits = (size.sf() << 31) | (0b0010001 << 24) | (0 << 22) | (imm12 << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b0010001 << 24)) | (imm12 << 10) | (rn.index() << 5) | rd.index();
     inst("add", bits)
 }
 
 /// ADDS (setting flags) Rd, Rn, Rm — used for CMN
 #[inline(always)]
 pub fn adds(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b0101011_00_0 << 21) | (rm.index() << 16) | (0b000000 << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b0101011_00_0 << 21) | (rm.index() << 16)) | (rn.index() << 5) | rd.index();
     inst("adds", bits)
 }
 
 /// SUB Rd, Rn, Rm
 #[inline(always)]
 pub fn sub(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b1001011_00_0 << 21) | (rm.index() << 16) | (0b000000 << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b1001011_00_0 << 21) | (rm.index() << 16)) | (rn.index() << 5) | rd.index();
     inst("sub", bits)
 }
 
@@ -285,7 +289,7 @@ pub fn sub(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst>
 pub fn sub_imm(size: RegSize, rd: Reg, rn: Reg, imm12: u32) -> Instruction<AArch64Inst> {
     debug_assert!(imm12 < 4096, "sub_imm: immediate out of range");
     // sf=size | 10 | 100010 | sh=0 | imm12 | Rn | Rd
-    let bits = (size.sf() << 31) | (0b1010001 << 24) | (0 << 22) | (imm12 << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b1010001 << 24)) | (imm12 << 10) | (rn.index() << 5) | rd.index();
     inst("sub", bits)
 }
 
@@ -301,7 +305,7 @@ pub fn sub_imm_lsl12(size: RegSize, rd: Reg, rn: Reg, imm12: u32) -> Instruction
 /// SUBS Rd, Rn, Rm (sets flags)
 #[inline(always)]
 pub fn subs(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b1101011_00_0 << 21) | (rm.index() << 16) | (0b000000 << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b1101011_00_0 << 21) | (rm.index() << 16)) | (rn.index() << 5) | rd.index();
     inst("subs", bits)
 }
 
@@ -310,7 +314,7 @@ pub fn subs(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst
 pub fn subs_imm(size: RegSize, rd: Reg, rn: Reg, imm12: u32) -> Instruction<AArch64Inst> {
     debug_assert!(imm12 < 4096, "subs_imm: immediate out of range");
     // sf=size | 11 | 100010 | sh=0 | imm12 | Rn | Rd
-    let bits = (size.sf() << 31) | (0b1110001 << 24) | (0 << 22) | (imm12 << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b1110001 << 24)) | (imm12 << 10) | (rn.index() << 5) | rd.index();
     inst("subs", bits)
 }
 
@@ -347,8 +351,7 @@ pub fn mul(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst>
 /// MADD Rd, Rn, Rm, Ra  (Rd = Ra + Rn*Rm)
 #[inline(always)]
 pub fn madd(size: RegSize, rd: Reg, rn: Reg, rm: Reg, ra: Reg) -> Instruction<AArch64Inst> {
-    let bits =
-        (size.sf() << 31) | (0b00_11011_000 << 21) | (rm.index() << 16) | (0 << 15) | (ra.index() << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b00_11011_000 << 21) | (rm.index() << 16)) | (ra.index() << 10) | (rn.index() << 5) | rd.index();
     inst("madd", bits)
 }
 
@@ -384,7 +387,7 @@ pub fn umulh(rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
 #[inline(always)]
 pub fn smull(rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
     // SMADDL Xd, Wn, Wm, XZR
-    let bits = (0b10011011_001 << 21) | (rm.index() << 16) | (0 << 15) | (ZR.index() << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((0b10011011_001 << 21) | (rm.index() << 16)) | (ZR.index() << 10) | (rn.index() << 5) | rd.index();
     inst("smull", bits)
 }
 
@@ -392,7 +395,7 @@ pub fn smull(rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
 #[inline(always)]
 pub fn umull(rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
     // UMADDL Xd, Wn, Wm, XZR
-    let bits = (0b10011011_101 << 21) | (rm.index() << 16) | (0 << 15) | (ZR.index() << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((0b10011011_101 << 21) | (rm.index() << 16)) | (ZR.index() << 10) | (rn.index() << 5) | rd.index();
     inst("umull", bits)
 }
 
@@ -415,14 +418,14 @@ pub fn udiv(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst
 /// AND Rd, Rn, Rm (shifted register)
 #[inline(always)]
 pub fn and(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b0001010_00_0 << 21) | (rm.index() << 16) | (0b000000 << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b0001010_00_0 << 21) | (rm.index() << 16)) | (rn.index() << 5) | rd.index();
     inst("and", bits)
 }
 
 /// ANDS Rd, Rn, Rm (sets flags) — TST when Rd=xzr
 #[inline(always)]
 pub fn ands(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b1101010_00_0 << 21) | (rm.index() << 16) | (0b000000 << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b1101010_00_0 << 21) | (rm.index() << 16)) | (rn.index() << 5) | rd.index();
     inst("ands", bits)
 }
 
@@ -435,35 +438,35 @@ pub fn tst(size: RegSize, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
 /// ORR Rd, Rn, Rm
 #[inline(always)]
 pub fn orr(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b0101010_00_0 << 21) | (rm.index() << 16) | (0b000000 << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b0101010_00_0 << 21) | (rm.index() << 16)) | (rn.index() << 5) | rd.index();
     inst("orr", bits)
 }
 
 /// ORN Rd, Rn, Rm  (Rd = Rn | ~Rm)
 #[inline(always)]
 pub fn orn(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b0101010_00_1 << 21) | (rm.index() << 16) | (0b000000 << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b0101010_00_1 << 21) | (rm.index() << 16)) | (rn.index() << 5) | rd.index();
     inst("orn", bits)
 }
 
 /// EOR Rd, Rn, Rm
 #[inline(always)]
 pub fn eor(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b1001010_00_0 << 21) | (rm.index() << 16) | (0b000000 << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b1001010_00_0 << 21) | (rm.index() << 16)) | (rn.index() << 5) | rd.index();
     inst("eor", bits)
 }
 
 /// EON Rd, Rn, Rm  (Rd = Rn ^ ~Rm)
 #[inline(always)]
 pub fn eon(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b1001010_00_1 << 21) | (rm.index() << 16) | (0b000000 << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b1001010_00_1 << 21) | (rm.index() << 16)) | (rn.index() << 5) | rd.index();
     inst("eon", bits)
 }
 
 /// BIC Rd, Rn, Rm  (Rd = Rn & ~Rm)
 #[inline(always)]
 pub fn bic(size: RegSize, rd: Reg, rn: Reg, rm: Reg) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31) | (0b0001010_00_1 << 21) | (rm.index() << 16) | (0b000000 << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b0001010_00_1 << 21) | (rm.index() << 16)) | (rn.index() << 5) | rd.index();
     inst("bic", bits)
 }
 
@@ -490,7 +493,7 @@ pub fn encode_logical_imm(size: RegSize, value: u64) -> Option<(u32, u32, u32)> 
             if v == 0 || v == !0 {
                 return None;
             }
-            (v as u64) | ((v as u64) << 32)
+            u64::from(v) | (u64::from(v) << 32)
         }
         RegSize::X64 => {
             if value == 0 || value == !0u64 {
@@ -529,14 +532,14 @@ pub fn encode_logical_imm(size: RegSize, value: u64) -> Option<(u32, u32, u32)> 
             // Rotate away trailing ones to get all ones at the top,
             // then check the result has exactly (element_size - ones) trailing zeros
             // followed by `ones` ones and nothing else.
-            let trailing_ones = (element & mask).trailing_ones() as u32;
+            let trailing_ones = (element & mask).trailing_ones();
             let rotated_elem = if trailing_ones > 0 && trailing_ones < element_size {
                 ((element >> trailing_ones) | (element << (element_size - trailing_ones))) & mask
             } else {
                 element & mask
             };
             // After rotating away trailing ones, should have zeros at bottom, then ones at top
-            let tz = rotated_elem.trailing_zeros() as u32;
+            let tz = rotated_elem.trailing_zeros();
             if tz + ones != element_size {
                 // Not a contiguous run of ones
                 element_size *= 2;
@@ -550,7 +553,7 @@ pub fn encode_logical_imm(size: RegSize, value: u64) -> Option<(u32, u32, u32)> 
             } else {
                 // Non-wrapping case: contiguous block of ones in the middle/top.
                 // The ones start at trailing_zeros; immr = element_size - start.
-                (element_size - element.trailing_zeros() as u32) % element_size
+                (element_size - element.trailing_zeros()) % element_size
             };
             let imms = {
                 let len_encoding = match element_size {
@@ -708,8 +711,7 @@ pub fn bfm(size: RegSize, rd: Reg, rn: Reg, immr: u32, imms: u32) -> Instruction
 #[inline(always)]
 pub fn extr(size: RegSize, rd: Reg, rn: Reg, rm: Reg, lsb: u32) -> Instruction<AArch64Inst> {
     let n = size.sf();
-    let bits =
-        (size.sf() << 31) | (0b00_100111 << 23) | (n << 22) | (0 << 21) | (rm.index() << 16) | (lsb << 10) | (rn.index() << 5) | rd.index();
+    let bits = ((size.sf() << 31) | (0b00_100111 << 23) | (n << 22)) | (rm.index() << 16) | (lsb << 10) | (rn.index() << 5) | rd.index();
     inst("extr", bits)
 }
 
@@ -777,10 +779,8 @@ pub fn rbit(size: RegSize, rd: Reg, rn: Reg) -> Instruction<AArch64Inst> {
     inst("rbit", bits)
 }
 
-/// CTZ via RBIT + CLZ
-/// AArch64 doesn't have native CTZ; use RBIT + CLZ.
-/// We provide a helper that emits two instructions, but for the single-instruction
-/// pattern, callers should emit rbit() then clz() separately.
+// CTZ via RBIT + CLZ.
+// AArch64 has no native CTZ; callers emit RBIT followed by CLZ.
 
 // ── Move instructions ─────────────────────────────────────────────────────────
 
@@ -789,7 +789,7 @@ pub fn rbit(size: RegSize, rd: Reg, rn: Reg) -> Instruction<AArch64Inst> {
 pub fn movz(size: RegSize, rd: Reg, imm16: u16, shift: u32) -> Instruction<AArch64Inst> {
     debug_assert!(shift == 0 || shift == 16 || shift == 32 || shift == 48);
     let hw = shift / 16;
-    let bits = (size.sf() << 31) | (0b10_100101 << 23) | (hw << 21) | ((imm16 as u32) << 5) | rd.index();
+    let bits = (size.sf() << 31) | (0b10_100101 << 23) | (hw << 21) | (u32::from(imm16) << 5) | rd.index();
     inst("movz", bits)
 }
 
@@ -798,7 +798,7 @@ pub fn movz(size: RegSize, rd: Reg, imm16: u16, shift: u32) -> Instruction<AArch
 pub fn movk(size: RegSize, rd: Reg, imm16: u16, shift: u32) -> Instruction<AArch64Inst> {
     debug_assert!(shift == 0 || shift == 16 || shift == 32 || shift == 48);
     let hw = shift / 16;
-    let bits = (size.sf() << 31) | (0b11_100101 << 23) | (hw << 21) | ((imm16 as u32) << 5) | rd.index();
+    let bits = (size.sf() << 31) | (0b11_100101 << 23) | (hw << 21) | (u32::from(imm16) << 5) | rd.index();
     inst("movk", bits)
 }
 
@@ -807,7 +807,7 @@ pub fn movk(size: RegSize, rd: Reg, imm16: u16, shift: u32) -> Instruction<AArch
 pub fn movn(size: RegSize, rd: Reg, imm16: u16, shift: u32) -> Instruction<AArch64Inst> {
     debug_assert!(shift == 0 || shift == 16 || shift == 32 || shift == 48);
     let hw = shift / 16;
-    let bits = (size.sf() << 31) | (0b00_100101 << 23) | (hw << 21) | ((imm16 as u32) << 5) | rd.index();
+    let bits = (size.sf() << 31) | (0b00_100101 << 23) | (hw << 21) | (u32::from(imm16) << 5) | rd.index();
     inst("movn", bits)
 }
 
@@ -816,13 +816,7 @@ pub fn movn(size: RegSize, rd: Reg, imm16: u16, shift: u32) -> Instruction<AArch
 /// CSEL Rd, Rn, Rm, cond  (Rd = cond ? Rn : Rm)
 #[inline(always)]
 pub fn csel(size: RegSize, rd: Reg, rn: Reg, rm: Reg, cond: Condition) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31)
-        | (0b00_11010100 << 21)
-        | (rm.index() << 16)
-        | (cond.code() << 12)
-        | (0b00 << 10)
-        | (rn.index() << 5)
-        | rd.index();
+    let bits = ((size.sf() << 31) | (0b00_11010100 << 21) | (rm.index() << 16) | (cond.code() << 12)) | (rn.index() << 5) | rd.index();
     inst("csel", bits)
 }
 
@@ -842,13 +836,7 @@ pub fn csinc(size: RegSize, rd: Reg, rn: Reg, rm: Reg, cond: Condition) -> Instr
 /// CSINV Rd, Rn, Rm, cond  (Rd = cond ? Rn : ~Rm)
 #[inline(always)]
 pub fn csinv(size: RegSize, rd: Reg, rn: Reg, rm: Reg, cond: Condition) -> Instruction<AArch64Inst> {
-    let bits = (size.sf() << 31)
-        | (0b10_11010100 << 21)
-        | (rm.index() << 16)
-        | (cond.code() << 12)
-        | (0b00 << 10)
-        | (rn.index() << 5)
-        | rd.index();
+    let bits = ((size.sf() << 31) | (0b10_11010100 << 21) | (rm.index() << 16) | (cond.code() << 12)) | (rn.index() << 5) | rd.index();
     inst("csinv", bits)
 }
 
@@ -947,7 +935,7 @@ pub fn str_reg_uxtw(size: MemSize, rt: Reg, rn: Reg, rm: Reg) -> Instruction<AAr
 pub fn ldur(size: MemSize, rt: Reg, rn: Reg, offset: i32) -> Instruction<AArch64Inst> {
     debug_assert!(offset >= -256 && offset <= 255, "ldur: offset out of range");
     let imm9 = (offset as u32) & 0x1FF;
-    let bits = (size as u32) << 30 | (0b11_1000_01_0 << 21) | (imm9 << 12) | (0b00 << 10) | (rn.index() << 5) | rt.index();
+    let bits = ((size as u32) << 30 | (0b11_1000_01_0 << 21) | (imm9 << 12)) | (rn.index() << 5) | rt.index();
     inst("ldur", bits)
 }
 
@@ -956,11 +944,11 @@ pub fn ldur(size: MemSize, rt: Reg, rn: Reg, offset: i32) -> Instruction<AArch64
 pub fn stur(size: MemSize, rt: Reg, rn: Reg, offset: i32) -> Instruction<AArch64Inst> {
     debug_assert!(offset >= -256 && offset <= 255, "stur: offset out of range");
     let imm9 = (offset as u32) & 0x1FF;
-    let bits = (size as u32) << 30 | (0b11_1000_00_0 << 21) | (imm9 << 12) | (0b00 << 10) | (rn.index() << 5) | rt.index();
+    let bits = ((size as u32) << 30 | (0b11_1000_00_0 << 21) | (imm9 << 12)) | (rn.index() << 5) | rt.index();
     inst("stur", bits)
 }
 
-/// Sign-extending loads
+// Sign-extending loads
 
 /// LDRSB Rt, [Xn, Xm]  (sign-extend byte to 32 or 64 bit)
 #[inline(always)]
@@ -1205,21 +1193,21 @@ pub fn b_cond_label(cond: Condition, label: Label) -> Instruction<AArch64Inst> {
 /// BR Xn  (branch to register)
 #[inline(always)]
 pub fn br(rn: Reg) -> Instruction<AArch64Inst> {
-    let bits = (0b1101011_0000_11111_000000 << 10) | (rn.index() << 5) | 0b00000;
+    let bits = (0b1101011_0000_11111_000000 << 10) | (rn.index() << 5);
     inst("br", bits)
 }
 
 /// BLR Xn  (branch with link to register)
 #[inline(always)]
 pub fn blr(rn: Reg) -> Instruction<AArch64Inst> {
-    let bits = (0b1101011_0001_11111_000000 << 10) | (rn.index() << 5) | 0b00000;
+    let bits = (0b1101011_0001_11111_000000 << 10) | (rn.index() << 5);
     inst("blr", bits)
 }
 
 /// RET Xn  (return, default Xn=x30/lr)
 #[inline(always)]
 pub fn ret(rn: Reg) -> Instruction<AArch64Inst> {
-    let bits = (0b1101011_0010_11111_000000 << 10) | (rn.index() << 5) | 0b00000;
+    let bits = (0b1101011_0010_11111_000000 << 10) | (rn.index() << 5);
     inst("ret", bits)
 }
 
@@ -1266,14 +1254,14 @@ pub fn cbnz_label(size: RegSize, rt: Reg, label: Label) -> Instruction<AArch64In
 /// BRK #imm16  (breakpoint / trap)
 #[inline(always)]
 pub fn brk(imm16: u16) -> Instruction<AArch64Inst> {
-    let bits = (0b11010100_001 << 21) | ((imm16 as u32) << 5) | 0b00000;
+    let bits = (0b11010100_001 << 21) | (u32::from(imm16) << 5);
     inst("brk", bits)
 }
 
 /// UDF — permanently undefined instruction (generates SIGILL)
 #[inline(always)]
 pub fn udf(imm16: u16) -> Instruction<AArch64Inst> {
-    let bits = (imm16 as u32) & 0xFFFF;
+    let bits = u32::from(imm16) & 0xFFFF;
     inst("udf", bits)
 }
 
@@ -1346,12 +1334,8 @@ pub fn mov_sp(size: RegSize, rd: Reg, rn: Reg) -> Instruction<AArch64Inst> {
 
 // ── Immediate loading helpers ─────────────────────────────────────────────────
 
-/// Load a 32-bit immediate into a W-register using MOVZ + MOVK.
-/// Returns 1 or 2 instructions worth of bytes packed, but since we need
-/// to call `push` for each instruction, we provide separate helpers.
-///
-/// For the compiler, use `load_imm32` and `load_imm64` which handle the
-/// multi-instruction sequence.
+// Immediate loads can require multiple MOVZ/MOVK instructions. The compiler's
+// load_imm32 and load_imm64 helpers emit the full sequence.
 
 /// Count of MOVZ/MOVK instructions needed for a 64-bit immediate.
 pub fn count_imm64_instructions(value: u64) -> u32 {
