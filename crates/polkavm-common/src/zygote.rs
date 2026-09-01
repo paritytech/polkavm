@@ -127,8 +127,11 @@ pub const VM_SHARED_MEMORY_SIZE: u64 = u32::MAX as u64;
 /// The maximum number of native code bytes that can be emitted by a single VM instruction.
 ///
 /// This does *not* affect the VM ABI and can be changed at will,
-/// but should be high enough that it's never hit.
-pub const VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH: u32 = 69;
+/// but should be high enough that it's never hit. Raised from 69 to 96 to admit the inline
+/// lowerings of the XReviveVec wide instructions: an i256 distinct-register add/sub/bitwise is a
+/// 12-memory-op chain (~88 bytes) and an i256 `seq`/`sne` is an XOR-OR fold (~74 bytes). The
+/// reserved native-code arena below is sized to match (32 MiB code x 96).
+pub const VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH: u32 = 96;
 
 /// The maximum number of bytes the jump table can be.
 pub const VM_SANDBOX_MAXIMUM_JUMP_TABLE_SIZE: u64 = (crate::abi::VM_MAXIMUM_JUMP_TABLE_ENTRIES as u64 + 1)
@@ -139,8 +142,13 @@ pub const VM_SANDBOX_MAXIMUM_JUMP_TABLE_SIZE: u64 = (crate::abi::VM_MAXIMUM_JUMP
 pub const VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE: u64 = 0x100000000 * core::mem::size_of::<u64>() as u64;
 
 // TODO: Make this smaller.
-/// The maximum number of bytes the native code can be.
-pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = 2303 * 1024 * 1024 - 1;
+/// The maximum number of bytes the native code can be. Starts at VM_ADDR_NATIVE_CODE = 4 GiB and
+/// must fit below 8 GiB: the zygote's `recycle()` munmaps the first 8 GiB of user-accessible memory,
+/// and asserts `VM_ADDR_NATIVE_CODE + VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE < 0x200000000`, so the
+/// arena has a hard ceiling of 4 GiB (also the u32 limit). Raised alongside
+/// VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH (96) to satisfy `arena >= VM_MAXIMUM_CODE_SIZE * cap`
+/// (32 MiB x 96 = 3072 MiB); 3200 MiB leaves ~0.9 GiB of headroom under the 4 GiB ceiling.
+pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = 3200 * 1024 * 1024 - 1;
 
 #[repr(C)]
 pub struct JmpBuf {

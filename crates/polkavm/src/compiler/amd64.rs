@@ -822,12 +822,96 @@ where
     // implementation with the interpreter; the accesses are generated here so that a bad address
     // faults through the same guard pages a scalar access does.
 
+    /// Whether the recompiler inlines the cheap/common wide (XReviveVec) compute ops as native code
+    /// instead of routing them through the `syscall_wide` trampoline. Inline is the **default** (at
+    /// parity with the base ISA, ~23% faster than the trampoline); set `POLKAVM_DISABLE_WIDE_INLINE`
+    /// to force every wide op back onto the trampoline — a kill switch for debugging the inline
+    /// lowerings. Only the cheap/common ops (`add`/`sub`/`and`/`or`/`xor`, the compares, `trunc`/
+    /// `zext`/`move`) have an inline form; the heavy and i512+ ops fall back to the trampoline
+    /// regardless (their `wide_*_inline` helper returns `false`).
+    fn wide_inline_enabled() -> bool {
+        std::env::var_os("POLKAVM_DISABLE_WIDE_INLINE").is_none()
+    }
+
     pub fn wide_add(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        if Self::wide_inline_enabled() && self.wide_binop_inline(wide_call::ADD, width, d, s1, s2) {
+            return;
+        }
         let descriptor = wide_call::pack(wide_call::ADD, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
         self.wide_op(descriptor, None, None);
     }
 
+    /// Inline a wide per-limb binary op over the wide file instead of the `syscall_wide` trampoline,
+    /// staying within the recompiler's 96-byte per-instruction native-code budget
+    /// (`VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH`). Returns `false` (emitting nothing) when the op does
+    /// not fit, so the caller falls back to the trampoline.
+    ///
+    /// Two shapes, both using only the general scratch `rcx` (`TMP_REG`), so no register is spilled:
+    ///  * **In-place**, when the destination aliases a source (commutative ops may use either):
+    ///    each limb is `mov rcx, [other]; <op>/<carry-op> [dst], rcx` -- two instructions, so it
+    ///    fits at every width (i256 = 8 instructions, ~56 B). `add`/`sub` chain the carry/borrow
+    ///    through `adc`/`sbb`; the intervening `mov` does not touch the flags.
+    ///  * **Three-address**, for distinct registers: `mov rcx, [s1]; <op> rcx, [s2]; mov [d], rcx`.
+    ///    At i256 this is 12 memory instructions (~88 B), within the 96-byte cap. i512+ (>= 112 B)
+    ///    exceeds it, so a distinct-register i512+ op returns `false` and stays on the trampoline.
+    fn wide_binop_inline(&mut self, op: u8, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) -> bool {
+        let limbs = width.limbs();
+        let commutative = matches!(op, wide_call::ADD | wide_call::AND | wide_call::OR | wide_call::XOR);
+        let inplace_other = if d.raw() == s1.raw() {
+            Some(s2)
+        } else if commutative && d.raw() == s2.raw() {
+            Some(s1)
+        } else {
+            None
+        };
+
+        if limbs > 4 {
+            return false; // i512+ (>= 112 B) exceeds the 96-byte per-instruction cap; use the trampoline.
+        }
+        if let Some(other) = inplace_other {
+            // d <op>= other, in place: `mov rcx, [other]; <op> [d], rcx`.
+            for index in 0..limbs {
+                self.push(rex(load(LoadKind::U64, TMP_REG, Self::wide_limb(other, index))));
+                let dst = Self::wide_limb(d, index);
+                let first = index == 0;
+                match op {
+                    wide_call::ADD if first => self.push(add((RegSize::R64, dst, TMP_REG))),
+                    wide_call::ADD => self.push(adc((RegSize::R64, dst, TMP_REG))),
+                    wide_call::SUB if first => self.push(sub((RegSize::R64, dst, TMP_REG))),
+                    wide_call::SUB => self.push(sbb((RegSize::R64, dst, TMP_REG))),
+                    wide_call::AND => self.push(and((RegSize::R64, dst, TMP_REG))),
+                    wide_call::OR => self.push(or((RegSize::R64, dst, TMP_REG))),
+                    wide_call::XOR => self.push(xor((RegSize::R64, dst, TMP_REG))),
+                    _ => unreachable!(),
+                }
+            }
+        } else {
+            // Distinct registers: three-address `mov rcx, [s1]; <op> rcx, [s2]; mov [d], rcx`, 3
+            // instr/limb -- i256 is 88 B, within the 96-byte cap.
+            for index in 0..limbs {
+                self.push(rex(load(LoadKind::U64, TMP_REG, Self::wide_limb(s1, index))));
+                let src = Self::wide_limb(s2, index);
+                let first = index == 0;
+                match op {
+                    wide_call::ADD if first => self.push(add((RegSize::R64, TMP_REG, src))),
+                    wide_call::ADD => self.push(adc((RegSize::R64, TMP_REG, src))),
+                    wide_call::SUB if first => self.push(sub((RegSize::R64, TMP_REG, src))),
+                    wide_call::SUB => self.push(sbb((RegSize::R64, TMP_REG, src))),
+                    wide_call::AND => self.push(and((RegSize::R64, TMP_REG, src))),
+                    wide_call::OR => self.push(or((RegSize::R64, TMP_REG, src))),
+                    wide_call::XOR => self.push(xor((RegSize::R64, TMP_REG, src))),
+                    _ => unreachable!(),
+                }
+                self.push(rex(store(Size::U64, Self::wide_limb(d, index), TMP_REG)));
+            }
+        }
+        true
+    }
+
     pub fn wide_sub(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        if Self::wide_inline_enabled() && self.wide_binop_inline(wide_call::SUB, width, d, s1, s2) {
+            return;
+        }
         let descriptor = wide_call::pack(wide_call::SUB, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
         self.wide_op(descriptor, None, None);
     }
@@ -838,16 +922,25 @@ where
     }
 
     pub fn wide_and(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        if Self::wide_inline_enabled() && self.wide_binop_inline(wide_call::AND, width, d, s1, s2) {
+            return;
+        }
         let descriptor = wide_call::pack(wide_call::AND, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
         self.wide_op(descriptor, None, None);
     }
 
     pub fn wide_or(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        if Self::wide_inline_enabled() && self.wide_binop_inline(wide_call::OR, width, d, s1, s2) {
+            return;
+        }
         let descriptor = wide_call::pack(wide_call::OR, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
         self.wide_op(descriptor, None, None);
     }
 
     pub fn wide_xor(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        if Self::wide_inline_enabled() && self.wide_binop_inline(wide_call::XOR, width, d, s1, s2) {
+            return;
+        }
         let descriptor = wide_call::pack(wide_call::XOR, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
         self.wide_op(descriptor, None, None);
     }
@@ -908,6 +1001,16 @@ where
     }
 
     pub fn wide_move(&mut self, width: WideWidth, d: WideReg, s1: WideReg, s2: WideReg) {
+        // Inline: copy s1 -> d, limb by limb (no-op when they alias). Fits <= i256.
+        if Self::wide_inline_enabled() && width.limbs() <= 4 {
+            if d.raw() != s1.raw() {
+                for index in 0..width.limbs() {
+                    self.push(rex(load(LoadKind::U64, TMP_REG, Self::wide_limb(s1, index))));
+                    self.push(rex(store(Size::U64, Self::wide_limb(d, index), TMP_REG)));
+                }
+            }
+            return;
+        }
         let descriptor = wide_call::pack(wide_call::MV, width.to_raw() as u8, d.raw() as u8, s1.raw() as u8, s2.raw() as u8, 0);
         self.wide_op(descriptor, None, None);
     }
@@ -927,22 +1030,78 @@ where
         self.wide_op(descriptor, Some(conv_reg(s2)), None);
     }
 
+    /// Inline: wide `<` as a subtract-with-borrow chain over the wide file -- the
+    /// final flag is the result (carry = unsigned borrow; SF!=OF on the top limb = signed less-than).
+    /// Only `rcx` is used as scratch; the result GPR is pre-zeroed so `setcc` on its low byte yields a
+    /// clean 0/1 without a `movzx`. Fits <= i256 (63 B); the `mov` loads between the `sbb`s preserve CF.
+    fn wide_slt_inline(&mut self, cond: Condition, width: WideWidth, d: NativeReg, s1: WideReg, s2: WideReg) {
+        // The result GPR must not be the scratch `rcx`, or the per-limb `mov rcx, ..` would clobber
+        // the pre-zeroed result. Guaranteed because `conv_reg` never maps a guest register to rcx.
+        debug_assert_ne!(d as u32, TMP_REG as u32);
+        self.push(xor((RegSize::R32, d, d)));
+        for index in 0..width.limbs() {
+            self.push(rex(load(LoadKind::U64, TMP_REG, Self::wide_limb(s1, index))));
+            let rhs = Self::wide_limb(s2, index);
+            if index == 0 {
+                self.push(sub((RegSize::R64, TMP_REG, rhs)));
+            } else {
+                self.push(sbb((RegSize::R64, TMP_REG, rhs)));
+            }
+        }
+        self.push(setcc(cond, d));
+    }
+
+    /// Inline: wide `==`/`!=` as an XOR-OR fold (no carry), then `setcc` on the zero
+    /// flag. The accumulator occupies the result GPR, so producing a clean 0/1 costs a flag-preserving
+    /// `mov d, 0` before `setcc`. At i256 this is ~74 B, within the 96-byte cap; the caller gates at
+    /// `limbs <= 4` so i512+ (which would exceed the cap) stays on the trampoline.
+    fn wide_equal_inline(&mut self, cond: Condition, width: WideWidth, d: NativeReg, s1: WideReg, s2: WideReg) {
+        // The result GPR must not be the scratch `rcx`, or the per-limb `mov rcx, ..` would clobber
+        // the accumulator. Guaranteed because `conv_reg` never maps a guest register to rcx.
+        debug_assert_ne!(d as u32, TMP_REG as u32);
+        self.push(rex(load(LoadKind::U64, d, Self::wide_limb(s1, 0))));
+        self.push(xor((RegSize::R64, d, Self::wide_limb(s2, 0))));
+        for index in 1..width.limbs() {
+            self.push(rex(load(LoadKind::U64, TMP_REG, Self::wide_limb(s1, index))));
+            self.push(xor((RegSize::R64, TMP_REG, Self::wide_limb(s2, index))));
+            self.push(or((RegSize::R64, d, TMP_REG)));
+        }
+        self.push(mov_imm(d, imm32(0))); // zero the result, preserving the flags from the final OR
+        self.push(setcc(cond, d));
+    }
+
     pub fn wide_set_equal(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) {
+        if Self::wide_inline_enabled() && width.limbs() <= 4 {
+            self.wide_equal_inline(Condition::Equal, width, conv_reg(d), s1, s2);
+            return;
+        }
         let descriptor = wide_call::pack(wide_call::SEQ, width.to_raw() as u8, 0, s1.raw() as u8, s2.raw() as u8, 0);
         self.wide_op(descriptor, None, Some(conv_reg(d)));
     }
 
     pub fn wide_set_not_equal(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) {
+        if Self::wide_inline_enabled() && width.limbs() <= 4 {
+            self.wide_equal_inline(Condition::NotEqual, width, conv_reg(d), s1, s2);
+            return;
+        }
         let descriptor = wide_call::pack(wide_call::SNE, width.to_raw() as u8, 0, s1.raw() as u8, s2.raw() as u8, 0);
         self.wide_op(descriptor, None, Some(conv_reg(d)));
     }
 
     pub fn wide_set_less_than_unsigned(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) {
+        if Self::wide_inline_enabled() && width.limbs() <= 4 {
+            self.wide_slt_inline(Condition::Below, width, conv_reg(d), s1, s2);
+            return;
+        }
         let descriptor = wide_call::pack(wide_call::SLTU, width.to_raw() as u8, 0, s1.raw() as u8, s2.raw() as u8, 0);
         self.wide_op(descriptor, None, Some(conv_reg(d)));
     }
 
     pub fn wide_set_less_than_signed(&mut self, width: WideWidth, d: RawReg, s1: WideReg, s2: WideReg) {
+        if Self::wide_inline_enabled() && width.limbs() <= 4 {
+            self.wide_slt_inline(Condition::Less, width, conv_reg(d), s1, s2);
+            return;
+        }
         let descriptor = wide_call::pack(wide_call::SLT, width.to_raw() as u8, 0, s1.raw() as u8, s2.raw() as u8, 0);
         self.wide_op(descriptor, None, Some(conv_reg(d)));
     }
@@ -958,11 +1117,25 @@ where
     }
 
     pub fn wide_truncate(&mut self, width: WideWidth, d: RawReg, s1: WideReg) {
+        // Inline: the result is just s1's low 64-bit limb.
+        if Self::wide_inline_enabled() {
+            self.push(rex(load(LoadKind::U64, conv_reg(d), Self::wide_limb(s1, 0))));
+            return;
+        }
         let descriptor = wide_call::pack(wide_call::TRUNC, width.to_raw() as u8, 0, s1.raw() as u8, 0, 0);
         self.wide_op(descriptor, None, Some(conv_reg(d)));
     }
 
     pub fn wide_widen_unsigned(&mut self, width: WideWidth, d: WideReg, s1: RawReg) {
+        // Inline: d[0] = s1 (a GPR), the rest zero. Fits <= i256.
+        if Self::wide_inline_enabled() && width.limbs() <= 4 {
+            self.push(rex(store(Size::U64, Self::wide_limb(d, 0), conv_reg(s1))));
+            self.push(xor((RegSize::R32, TMP_REG, TMP_REG)));
+            for index in 1..width.limbs() {
+                self.push(rex(store(Size::U64, Self::wide_limb(d, index), TMP_REG)));
+            }
+            return;
+        }
         let descriptor = wide_call::pack(wide_call::ZEXT, width.to_raw() as u8, d.raw() as u8, 0, 0, 0);
         self.wide_op(descriptor, Some(conv_reg(s1)), None);
     }

@@ -6524,3 +6524,406 @@ fn wide_preserves_callee_saved_registers_compiled() {
     }
     wide_preserves_callee_saved_registers_on(BackendKind::Compiler);
 }
+
+// ============================================================================
+// Comprehensive XReviveVec inline-lowering tests.
+//
+// The recompiler inlines the cheap/common wide ops as native code by default (`compiler::amd64`,
+// gated on `POLKAVM_DISABLE_WIDE_INLINE`); the interpreter runs the shared `wide::dispatch`. These
+// tests pin the inline lowerings against a hand-written limb reference *and* the interpreter, and
+// cover what the older wide tests omit: multi-limb carry/borrow, every operand/result register
+// aliasing shape the inline branches on, the compares, the unsigned-widen zero fill, and the >i256
+// widths that fall back to the trampoline (the same path the kill switch forces).
+//
+// Operands are materialised with scalar stores (so they are resident before the wide load, which the
+// interpreter's residency model requires) and results are read back from guest memory, so every limb
+// is checked -- not just the truncated low one. `main` receives the rw-data base as its first
+// argument (landing in `A0`); it is only known once the module is built, so it is passed rather than
+// baked into the code. Register roles: A0 = base in / result out, A1 = scalar scratch, S0/S1/A3 =
+// base pointers for the A/B/result regions.
+// ============================================================================
+
+const WIDE_TEST_A_OFF: i32 = 0;
+const WIDE_TEST_B_OFF: i32 = 64;
+const WIDE_TEST_R_OFF: usize = 128;
+const WIDE_TEST_OBSERVE: u32 = 192; // A (64) + B (64) + result (64)
+const WIDE_TEST_RW_SIZE: u32 = 0x4000;
+
+fn wide_from_le_bytes(bytes: &[u8]) -> Vec<u64> {
+    bytes.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect()
+}
+
+/// Which widths to exercise per backend. The compiler's wide load/store currently handle only up to
+/// i256 -- i512 wide memory traps (a pre-existing limitation independent of the inline lowerings) --
+/// so the wider shared-dispatch path is exercised on the interpreter, which handles it, while the
+/// compiler's >i256 *compute* fallback is covered separately by `wide_trampoline_fallback` (which
+/// avoids wide memory). i128/i256 exercise both the inline lowerings and every backend.
+fn wide_test_widths(backend: BackendKind) -> &'static [polkavm_common::program::WideWidth] {
+    use polkavm_common::program::WideWidth;
+    if matches!(backend, BackendKind::Interpreter) {
+        &[WideWidth::W128, WideWidth::W256, WideWidth::W512]
+    } else {
+        &[WideWidth::W128, WideWidth::W256]
+    }
+}
+
+/// Emit scalar stores that lay `limbs` down at `A0 + off`, little-endian, using A1 as scratch.
+fn wide_emit_operand(code: &mut Vec<polkavm_common::program::Instruction>, off: i32, limbs: &[u64]) {
+    for (index, &limb) in limbs.iter().enumerate() {
+        code.push(asm::load_imm64(A1, limb));
+        code.push(asm::store_indirect_u64(A1, A0, off + (index * 8) as i32));
+    }
+}
+
+/// The preamble every program shares: set up the A/B/result base pointers from the base in A0.
+fn wide_test_preamble() -> Vec<polkavm_common::program::Instruction> {
+    alloc::vec![
+        asm::add_imm_64(S0, A0, WIDE_TEST_A_OFF),
+        asm::add_imm_64(S1, A0, WIDE_TEST_B_OFF),
+        asm::add_imm_64(A3, A0, WIDE_TEST_R_OFF as i32),
+    ]
+}
+
+/// Assemble and run `code` on `backend`, returning the `A0` result and the observed rw region. The
+/// rw-data base address is passed to `main` in `A0`.
+fn wide_run(backend: BackendKind, code: &[polkavm_common::program::Instruction]) -> (u64, Vec<u8>) {
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::ReviveV2);
+    builder.set_rw_data_size(WIDE_TEST_RW_SIZE);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(code, &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut config = Config::default();
+    config.set_backend(Some(backend));
+    config.set_allow_experimental(true);
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
+    let rw_addr = module.memory_map().rw_data_range().start;
+    let linker: Linker<(), ()> = Linker::new();
+    let instance_pre = linker.instantiate_pre(&module).unwrap();
+    let mut instance = instance_pre.instantiate().unwrap();
+    let result = instance.call_typed_and_get_result::<u64, (u32,)>(&mut (), "main", (rw_addr,)).unwrap();
+    let memory = instance.read_memory(rw_addr, WIDE_TEST_OBSERVE).unwrap();
+    (result, memory)
+}
+
+fn wide_ref_add(a: &[u64], b: &[u64]) -> Vec<u64> {
+    let mut out = alloc::vec![0u64; a.len()];
+    let mut carry = 0u128;
+    for i in 0..a.len() {
+        let sum = a[i] as u128 + b[i] as u128 + carry;
+        out[i] = sum as u64;
+        carry = sum >> 64;
+    }
+    out
+}
+
+fn wide_ref_sub(a: &[u64], b: &[u64]) -> Vec<u64> {
+    let mut out = alloc::vec![0u64; a.len()];
+    let mut borrow = 0i128;
+    for i in 0..a.len() {
+        // The difference lands in (-2^64, 2^64); `as u64` truncates to the correct wrapped limb.
+        let diff = a[i] as i128 - b[i] as i128 - borrow;
+        out[i] = diff as u64;
+        borrow = i128::from(diff < 0);
+    }
+    out
+}
+
+fn wide_ref_and(a: &[u64], b: &[u64]) -> Vec<u64> {
+    a.iter().zip(b).map(|(x, y)| x & y).collect()
+}
+fn wide_ref_or(a: &[u64], b: &[u64]) -> Vec<u64> {
+    a.iter().zip(b).map(|(x, y)| x | y).collect()
+}
+fn wide_ref_xor(a: &[u64], b: &[u64]) -> Vec<u64> {
+    a.iter().zip(b).map(|(x, y)| x ^ y).collect()
+}
+
+fn wide_ref_eq(a: &[u64], b: &[u64]) -> bool {
+    a == b
+}
+fn wide_ref_ne(a: &[u64], b: &[u64]) -> bool {
+    a != b
+}
+fn wide_ref_lt_unsigned(a: &[u64], b: &[u64]) -> bool {
+    for i in (0..a.len()).rev() {
+        if a[i] != b[i] {
+            return a[i] < b[i];
+        }
+    }
+    false
+}
+fn wide_ref_lt_signed(a: &[u64], b: &[u64]) -> bool {
+    let top = a.len() - 1;
+    let (ah, bh) = (a[top] as i64, b[top] as i64);
+    if ah != bh {
+        return ah < bh;
+    }
+    for i in (0..top).rev() {
+        if a[i] != b[i] {
+            return a[i] < b[i];
+        }
+    }
+    false
+}
+
+/// `add`/`sub`/`and`/`or`/`xor` over multi-limb operands that carry/borrow out of every limb, in
+/// each register-aliasing shape and at widths that inline (i128, i256) and that fall back to the
+/// trampoline (i512).
+fn wide_arithmetic_on(backend: BackendKind) {
+    use polkavm_common::program::{Instruction, WideReg, WideWidth};
+
+    struct Op {
+        name: &'static str,
+        build: fn(WideWidth, WideReg, WideReg, WideReg) -> Instruction,
+        reference: fn(&[u64], &[u64]) -> Vec<u64>,
+    }
+    let ops = [
+        Op { name: "add", build: asm::wide_add, reference: wide_ref_add },
+        Op { name: "sub", build: asm::wide_sub, reference: wide_ref_sub },
+        Op { name: "and", build: asm::wide_and, reference: wide_ref_and },
+        Op { name: "or", build: asm::wide_or, reference: wide_ref_or },
+        Op { name: "xor", build: asm::wide_xor, reference: wide_ref_xor },
+    ];
+
+    // (name, a-slot, b-slot, d-slot, two distinct operands). These hit the in-place branch (d aliases
+    // a source) and the three-address branch (distinct, and d==s2 which overlaps the destination).
+    let aliases = [
+        ("distinct", 0u32, 8u32, 16u32, true),
+        ("d==a", 0, 8, 0, true),
+        ("d==b", 0, 8, 8, true),
+        ("d==a==b", 0, 0, 0, false),
+    ];
+
+    for &width in wide_test_widths(backend) {
+        let limbs = width.limbs();
+        let a: Vec<u64> = (0..limbs).map(|i| 0xFFFF_FFFF_FFFF_FFF0u64.wrapping_add(i as u64)).collect();
+        let b: Vec<u64> = (0..limbs)
+            .map(|i| 0x1234_5678_9ABC_DEF0u64 ^ (i as u64).wrapping_mul(0x0101_0101_0101_0101))
+            .collect();
+
+        for op in &ops {
+            for (alias, ai, bi, di, two) in aliases {
+                let (aw, bw, dw) = (WideReg::from_raw(ai, width), WideReg::from_raw(bi, width), WideReg::from_raw(di, width));
+                let (lhs, rhs): (&[u64], &[u64]) = if two { (&a, &b) } else { (&a, &a) };
+
+                let mut code = wide_test_preamble();
+                wide_emit_operand(&mut code, WIDE_TEST_A_OFF, &a);
+                code.push(asm::wide_load(width, aw, S0, 0));
+                if two {
+                    wide_emit_operand(&mut code, WIDE_TEST_B_OFF, &b);
+                    code.push(asm::wide_load(width, bw, S1, 0));
+                }
+                code.push((op.build)(width, dw, aw, bw));
+                code.push(asm::wide_store(width, dw, A3, 0));
+                code.push(asm::ret());
+
+                let (_, memory) = wide_run(backend, &code);
+                let got = wide_from_le_bytes(&memory[WIDE_TEST_R_OFF..WIDE_TEST_R_OFF + width.bytes()]);
+                assert_eq!(got, (op.reference)(lhs, rhs), "{} {alias} at {width:?} on {backend:?}", op.name);
+            }
+        }
+    }
+}
+
+/// `seq`/`sne`/`slt_u`/`slt_s`, which reduce a wide pair to a 0/1 GPR. Exercises equal, high-limb and
+/// low-limb discrimination, and a signed-negative vs positive pair that separates `slt_s` from
+/// `slt_u`; both operand orders; inline (i128, i256) and trampoline (i512) widths.
+fn wide_compare_on(backend: BackendKind) {
+    use polkavm_common::program::{Instruction, Reg, WideReg, WideWidth};
+
+    struct Cmp {
+        name: &'static str,
+        build: fn(WideWidth, Reg, WideReg, WideReg) -> Instruction,
+        reference: fn(&[u64], &[u64]) -> bool,
+    }
+    let cmps = [
+        Cmp { name: "seq", build: asm::wide_set_equal, reference: wide_ref_eq },
+        Cmp { name: "sne", build: asm::wide_set_not_equal, reference: wide_ref_ne },
+        Cmp { name: "sltu", build: asm::wide_set_less_than_unsigned, reference: wide_ref_lt_unsigned },
+        Cmp { name: "slts", build: asm::wide_set_less_than_signed, reference: wide_ref_lt_signed },
+    ];
+
+    for &width in wide_test_widths(backend) {
+        let n = width.limbs();
+        let equal: Vec<u64> = (0..n).map(|i| 0x1111_1111_1111_1111u64.wrapping_mul(i as u64 + 1)).collect();
+
+        let mut hi_differ = equal.clone();
+        hi_differ[n - 1] = equal[n - 1].wrapping_add(1); // differs only in the most-significant limb
+
+        let mut lo_differ = equal.clone();
+        lo_differ[0] = equal[0].wrapping_add(1); // differs only in the least-significant limb
+
+        let mut negative = alloc::vec![0u64; n];
+        negative[n - 1] = 0x8000_0000_0000_0000; // sign bit set: negative signed, huge unsigned
+        let mut positive = alloc::vec![0u64; n];
+        positive[0] = 1;
+
+        let cases = [
+            ("equal", &equal, &equal),
+            ("hi", &equal, &hi_differ),
+            ("lo", &equal, &lo_differ),
+            ("signed", &negative, &positive),
+        ];
+
+        for (cname, x, y) in cases {
+            for (dir, lhs, rhs) in [("fwd", x, y), ("rev", y, x)] {
+                for cmp in &cmps {
+                    let mut code = wide_test_preamble();
+                    wide_emit_operand(&mut code, WIDE_TEST_A_OFF, lhs);
+                    wide_emit_operand(&mut code, WIDE_TEST_B_OFF, rhs);
+                    code.push(asm::wide_load(width, WideReg::from_raw(0, width), S0, 0));
+                    code.push(asm::wide_load(width, WideReg::from_raw(8, width), S1, 0));
+                    code.push((cmp.build)(width, A0, WideReg::from_raw(0, width), WideReg::from_raw(8, width)));
+                    code.push(asm::ret());
+
+                    let (result, _) = wide_run(backend, &code);
+                    let want = u64::from((cmp.reference)(lhs, rhs));
+                    assert_eq!(result, want, "{} {cname} {dir} at {width:?} on {backend:?}", cmp.name);
+                }
+            }
+        }
+    }
+}
+
+/// `truncate` (low limb to a GPR, inlined at every width), `widen_unsigned` (zero fill, inlined
+/// through i256 and trampolined at i512), `widen_signed` (sign fill, always trampolined) and `move`
+/// (limb copy). Full results are read back so the high-limb fill is checked.
+fn wide_convert_move_on(backend: BackendKind) {
+    use polkavm_common::program::WideReg;
+
+    for &width in wide_test_widths(backend) {
+        let n = width.limbs();
+        let full: Vec<u64> = (0..n).map(|i| 0xDEAD_BEEF_0000_0000u64 ^ (i as u64 + 1)).collect();
+        let d0 = WideReg::from_raw(0, width);
+
+        // truncate: the low limb reaches A0 regardless of width.
+        let mut code = wide_test_preamble();
+        wide_emit_operand(&mut code, WIDE_TEST_A_OFF, &full);
+        code.push(asm::wide_load(width, d0, S0, 0));
+        code.push(asm::wide_truncate(width, A0, d0));
+        code.push(asm::ret());
+        let (result, _) = wide_run(backend, &code);
+        assert_eq!(result, full[0], "truncate at {width:?} on {backend:?}");
+
+        // widen_unsigned: low limb = scalar, high limbs zero.
+        let value = 0x1234_5678_9ABC_DEF0u64;
+        let mut code = wide_test_preamble();
+        code.push(asm::load_imm64(A2, value));
+        code.push(asm::wide_widen_unsigned(width, d0, A2));
+        code.push(asm::wide_store(width, d0, A3, 0));
+        code.push(asm::ret());
+        let (_, memory) = wide_run(backend, &code);
+        let mut want = alloc::vec![0u64; n];
+        want[0] = value;
+        assert_eq!(wide_from_le_bytes(&memory[WIDE_TEST_R_OFF..WIDE_TEST_R_OFF + width.bytes()]), want, "widen_u at {width:?} on {backend:?}");
+
+        // widen_signed: low limb = scalar, high limbs are the sign fill.
+        let negative = 0xFFFF_FFFF_FFFF_FF9Cu64; // -100
+        let mut code = wide_test_preamble();
+        code.push(asm::load_imm64(A2, negative));
+        code.push(asm::wide_widen_signed(width, d0, A2));
+        code.push(asm::wide_store(width, d0, A3, 0));
+        code.push(asm::ret());
+        let (_, memory) = wide_run(backend, &code);
+        let mut want = alloc::vec![0xFFFF_FFFF_FFFF_FFFFu64; n];
+        want[0] = negative;
+        assert_eq!(wide_from_le_bytes(&memory[WIDE_TEST_R_OFF..WIDE_TEST_R_OFF + width.bytes()]), want, "widen_s at {width:?} on {backend:?}");
+
+        // move: copy a whole wide value to a distinct register.
+        let dst = WideReg::from_raw(16, width);
+        let mut code = wide_test_preamble();
+        wide_emit_operand(&mut code, WIDE_TEST_A_OFF, &full);
+        code.push(asm::wide_load(width, d0, S0, 0));
+        code.push(asm::wide_move(width, dst, d0, d0));
+        code.push(asm::wide_store(width, dst, A3, 0));
+        code.push(asm::ret());
+        let (_, memory) = wide_run(backend, &code);
+        assert_eq!(wide_from_le_bytes(&memory[WIDE_TEST_R_OFF..WIDE_TEST_R_OFF + width.bytes()]), full, "move at {width:?} on {backend:?}");
+    }
+}
+
+/// The >i256 fallback: a cheap op that inlines at i256 must route through the `syscall_wide`
+/// trampoline at i512 (the same path `POLKAVM_DISABLE_WIDE_INLINE` forces). Operands are built with
+/// `widen` and observed with `truncate` so no i512 wide memory is touched (that traps on the compiler
+/// today); this checks the trampoline dispatch itself, cross-checked interpreter vs compiler.
+fn wide_trampoline_fallback_on(backend: BackendKind) {
+    use polkavm_common::program::{WideReg, WideWidth};
+
+    let width = WideWidth::W512;
+    for (name, lhs, rhs, expected) in [("add", 7u64, 8, 15u64), ("sub", 30, 8, 22), ("xor", 0xF0, 0x0F, 0xFF)] {
+        let (a, b, d) = (WideReg::from_raw(0, width), WideReg::from_raw(8, width), WideReg::from_raw(16, width));
+        let op = match name {
+            "add" => asm::wide_add(width, d, a, b),
+            "sub" => asm::wide_sub(width, d, a, b),
+            _ => asm::wide_xor(width, d, a, b),
+        };
+        let code = alloc::vec![
+            asm::load_imm64(A1, lhs),
+            asm::wide_widen_unsigned(width, a, A1),
+            asm::load_imm64(A1, rhs),
+            asm::wide_widen_unsigned(width, b, A1),
+            op,
+            asm::wide_truncate(width, A0, d),
+            asm::ret(),
+        ];
+        let (result, _) = wide_run(backend, &code);
+        assert_eq!(result, expected, "trampoline {name} at {width:?} on {backend:?}");
+    }
+}
+
+#[test]
+fn wide_trampoline_fallback_interpreted() {
+    wide_trampoline_fallback_on(BackendKind::Interpreter);
+}
+
+#[test]
+fn wide_trampoline_fallback_compiled() {
+    if !BackendKind::Compiler.is_supported() {
+        return;
+    }
+    wide_trampoline_fallback_on(BackendKind::Compiler);
+}
+
+#[test]
+fn wide_arithmetic_interpreted() {
+    wide_arithmetic_on(BackendKind::Interpreter);
+}
+
+#[test]
+fn wide_arithmetic_compiled() {
+    if !BackendKind::Compiler.is_supported() {
+        return;
+    }
+    wide_arithmetic_on(BackendKind::Compiler);
+}
+
+#[test]
+fn wide_compare_interpreted() {
+    wide_compare_on(BackendKind::Interpreter);
+}
+
+#[test]
+fn wide_compare_compiled() {
+    if !BackendKind::Compiler.is_supported() {
+        return;
+    }
+    wide_compare_on(BackendKind::Compiler);
+}
+
+#[test]
+fn wide_convert_move_interpreted() {
+    wide_convert_move_on(BackendKind::Interpreter);
+}
+
+#[test]
+fn wide_convert_move_compiled() {
+    if !BackendKind::Compiler.is_supported() {
+        return;
+    }
+    wide_convert_move_on(BackendKind::Compiler);
+}
+
+
+

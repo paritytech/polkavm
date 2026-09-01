@@ -355,20 +355,25 @@ define_cost_model_struct! {
     wide_store,
 }
 
-// Work-proportional gas for the XReviveVec wide instructions, as small multiples of a scalar
-// operation. They are derived from the primitive 64-bit operations the shared `wide::dispatch`
-// implementation runs at 256 bits (four limbs, the width the EVM lowering uses), plus a fixed
-// amount for marshalling the operands through the trampoline. These are deliberately
-// order-of-magnitude relative figures rather than measured cycles: they keep the naive model's
-// metering honest -- an iterative division or modular multiply costs a thousandfold a move,
-// because it is -- while gastool's per-target Simple model supplies exact costs when loaded.
-const WIDE_MARSHAL: Cost = 8;
-/// O(n) limb passes: add, sub, bitwise, min/max, compares, shifts, byte swap, sign extend, move.
+// Work-proportional gas for the XReviveVec wide instructions, calibrated to the scalar limb chain a
+// base-ISA build emits for the same computation -- which the naive model meters at 1 gas per
+// instruction -- so enabling the extension does not change the gas of an equivalent computation.
+// The figures count the primitive 64-bit operations the shared `wide::dispatch` runs at 256 bits
+// (four limbs, the width the EVM lowering uses). There is no trampoline-marshalling term: the cheap
+// ops are generated inline, and gas measures computational work, not the calling mechanism. (An
+// earlier model added a fixed marshal cost of 8, which over-metered the cheap convert/memory/move
+// ops 6-24x versus the scalar ops they replace; see the book's gas analysis.) The iterative ops keep
+// their large absolute costs -- a division or modular multiply is genuinely a thousandfold a move.
+const WIDE_MARSHAL: Cost = 0;
+/// O(n) limb pass with real per-limb work: add, sub, bitwise, min/max, compares, shifts, byte swap,
+/// sign extend. About the scalar-instruction count for four limbs.
 const WIDE_LINEAR: Cost = WIDE_MARSHAL + 16;
+/// Copy the limbs -- cheaper than a full linear pass.
+const WIDE_MOVE: Cost = WIDE_MARSHAL + 4;
 /// Widen from or truncate to a scalar: a limb or two of work.
-const WIDE_CONVERT: Cost = WIDE_MARSHAL + 4;
+const WIDE_CONVERT: Cost = WIDE_MARSHAL + 2;
 /// A load or store of the whole value, limb by limb through guest memory.
-const WIDE_MEMORY: Cost = WIDE_MARSHAL + 16;
+const WIDE_MEMORY: Cost = WIDE_MARSHAL + 6;
 /// Schoolbook multiply, O(n^2) limb products.
 const WIDE_MULTIPLY: Cost = WIDE_MARSHAL + 56;
 /// Shift-and-subtract division/remainder, n*64 iterations each doing O(n) work.
@@ -397,7 +402,7 @@ impl CostModel {
         self.wide_max_unsigned = WIDE_LINEAR;
         self.wide_max_signed = WIDE_LINEAR;
         self.wide_byte_swap = WIDE_LINEAR;
-        self.wide_move = WIDE_LINEAR;
+        self.wide_move = WIDE_MOVE;
         self.wide_sign_extend = WIDE_LINEAR;
         self.wide_shift_left = WIDE_LINEAR;
         self.wide_shift_right_logical = WIDE_LINEAR;
