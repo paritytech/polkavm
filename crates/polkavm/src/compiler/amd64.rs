@@ -1220,9 +1220,12 @@ where
             self.push(rex(load(LoadKind::U64, scratch, file)));
             self.push(store(Size::U64, guest, scratch));
         }
-        self.push(rex(add((TMP_REG, imm32(8)))));
-        self.push(rex(add((file_ptr, imm32(8)))));
-        self.push(rex(sub((counter, imm32(1)))));
+        // The pointers and counter are 64-bit: `imm64` selects the 64-bit operand size (REX.W).
+        // A `rex()`-wrapped `imm32` here would emit a 32-bit op that zeroes the high half of the
+        // file pointer (a VMCTX address well above 4 GiB), faulting on the next iteration.
+        self.push(add((TMP_REG, imm64(8))));
+        self.push(add((file_ptr, imm64(8))));
+        self.push(sub((counter, imm64(1))));
         self.push(jcc_label8(Condition::NotEqual, body));
 
         self.push(pop(file_ptr));

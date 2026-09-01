@@ -6553,18 +6553,13 @@ fn wide_from_le_bytes(bytes: &[u8]) -> Vec<u64> {
     bytes.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect()
 }
 
-/// Which widths to exercise per backend. The compiler's wide load/store currently handle only up to
-/// i256 -- i512 wide memory traps (a pre-existing limitation independent of the inline lowerings) --
-/// so the wider shared-dispatch path is exercised on the interpreter, which handles it, while the
-/// compiler's >i256 *compute* fallback is covered separately by `wide_trampoline_fallback` (which
-/// avoids wide memory). i128/i256 exercise both the inline lowerings and every backend.
-fn wide_test_widths(backend: BackendKind) -> &'static [polkavm_common::program::WideWidth] {
+/// The widths every test exercises. i128/i256 hit the inline lowerings; i512 hits the >i256
+/// trampoline fallback for compute and the looped (rather than unrolled) wide load/store path -- the
+/// latter being what previously trapped on the recompiler. Both backends run all three; `_backend`
+/// is kept so callers read uniformly and a future per-backend split is a one-line change.
+fn wide_test_widths(_backend: BackendKind) -> &'static [polkavm_common::program::WideWidth] {
     use polkavm_common::program::WideWidth;
-    if matches!(backend, BackendKind::Interpreter) {
-        &[WideWidth::W128, WideWidth::W256, WideWidth::W512]
-    } else {
-        &[WideWidth::W128, WideWidth::W256]
-    }
+    &[WideWidth::W128, WideWidth::W256, WideWidth::W512]
 }
 
 /// Emit scalar stores that lay `limbs` down at `A0 + off`, little-endian, using A1 as scratch.
@@ -6846,8 +6841,8 @@ fn wide_convert_move_on(backend: BackendKind) {
 
 /// The >i256 fallback: a cheap op that inlines at i256 must route through the `syscall_wide`
 /// trampoline at i512 (the same path `POLKAVM_DISABLE_WIDE_INLINE` forces). Operands are built with
-/// `widen` and observed with `truncate` so no i512 wide memory is touched (that traps on the compiler
-/// today); this checks the trampoline dispatch itself, cross-checked interpreter vs compiler.
+/// `widen` and observed with `truncate`, so this isolates the trampoline dispatch from the wide
+/// load/store path; cross-checked interpreter vs compiler.
 fn wide_trampoline_fallback_on(backend: BackendKind) {
     use polkavm_common::program::{WideReg, WideWidth};
 
@@ -6924,6 +6919,9 @@ fn wide_convert_move_compiled() {
     }
     wide_convert_move_on(BackendKind::Compiler);
 }
+
+
+
 
 
 
