@@ -3848,17 +3848,24 @@ fn resolve_wide_widths(
                     state = VtypeState::Width(WideWidth::from_raw(u32::from(*lmul)));
                 }
                 BasicInst::Wide { width, .. } if width.is_none() => {
-                    let VtypeState::Width(resolved) = state else {
-                        // Not a limitation of this analysis: it means the code really can arrive
-                        // here under more than one configuration, or under none. Reporting it beats
-                        // picking a width and silently building a program that reads the wrong
-                        // number of bytes.
-                        return Err(ProgramFromElfError::other(format!(
-                            "could not determine the width of the wide instruction at {source:?}: \
-                             no single vtype configuration reaches it (block {index} of the \
-                             function entered at block {owner_block}, reached as {state:?})",
-                            owner_block = owner[index],
-                        )));
+                    let resolved = match state {
+                        VtypeState::Width(resolved) => resolved,
+                        // Prototype XReviveW: the dedicated-register-file variant emits no vtype at
+                        // all -- the width is fixed at 256 bits -- so under this flag an unresolved
+                        // wide op defaults to i256 rather than being an error.
+                        _ if std::env::var_os("POLKAVM_ASSUME_W256").is_some() => WideWidth::W256,
+                        _ => {
+                            // Not a limitation of this analysis: it means the code really can arrive
+                            // here under more than one configuration, or under none. Reporting it beats
+                            // picking a width and silently building a program that reads the wrong
+                            // number of bytes.
+                            return Err(ProgramFromElfError::other(format!(
+                                "could not determine the width of the wide instruction at {source:?}: \
+                                 no single vtype configuration reaches it (block {index} of the \
+                                 function entered at block {owner_block}, reached as {state:?})",
+                                owner_block = owner[index],
+                            )));
+                        }
                     };
                     *width = Some(resolved);
                 }
