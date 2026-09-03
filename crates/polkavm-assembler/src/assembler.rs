@@ -303,6 +303,11 @@ impl Assembler {
         #[cfg(debug_assertions)]
         log::trace!("{:08x}: {:x?}", self.origin + self.code.len() as u64, bytes);
         self.code.extend_from_slice(bytes);
+        // `guaranteed_capacity` counts spare instruction slots kept at the tail of `code`
+        // for `push_unchecked`, which writes through `encode_into_vec_unsafe` without
+        // bounds-checking. Appending here consumes that tail, so a later unchecked push
+        // must re-reserve rather than trust the now-stale count.
+        self.guaranteed_capacity = 0;
         self
     }
 
