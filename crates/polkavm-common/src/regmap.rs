@@ -93,6 +93,7 @@ pub const TMP_REG: NativeReg = polkavm_assembler::aarch64::Reg::x16;
 /// On the generic sandbox, this holds the guest memory base address.
 pub const AUX_TMP_REG: NativeReg = polkavm_assembler::aarch64::Reg::x17;
 
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 #[inline]
 pub const fn to_guest_reg(reg: NativeReg) -> Option<Reg> {
     let mut index = 0;
