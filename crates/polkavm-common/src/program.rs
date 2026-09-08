@@ -7089,10 +7089,7 @@ impl ProgramBlob {
             }
 
             let jump_table_entry_size = reader.read_byte()?;
-            let code_length = reader.read_varint()?;
-            if code_length > VM_MAXIMUM_CODE_SIZE {
-                return Err(ProgramParseError(ProgramParseErrorKind::Other("the code section is too long")));
-            }
+            let legacy_code_length = if blob.isa.is_legacy() { Some(reader.read_varint()?) } else { None };
 
             if !matches!(jump_table_entry_size, 0..=4) {
                 return Err(ProgramParseError(ProgramParseErrorKind::Other("invalid jump table entry size")));
@@ -7104,19 +7101,23 @@ impl ProgramBlob {
 
             blob.jump_table_entry_size = jump_table_entry_size;
             blob.jump_table = reader.read_slice_as_bytes(jump_table_length as usize)?;
-            blob.code = reader.read_slice_as_bytes(code_length as usize)?;
+
+            let code_length = match legacy_code_length {
+                Some(code_length) => cast(code_length).to_usize(),
+                None => parts.code_and_jump_table.len() - (reader.position - initial_position),
+            };
+
+            if code_length > cast(VM_MAXIMUM_CODE_SIZE).to_usize() {
+                return Err(ProgramParseError(ProgramParseErrorKind::Other("the code section is too long")));
+            }
+
+            blob.code = reader.read_slice_as_bytes(code_length)?;
 
             if blob.code.len() > (i32::MAX as usize) {
                 return Err(ProgramParseError(ProgramParseErrorKind::Other("the program blob is too large")));
             }
 
-            if !blob.isa.is_legacy() {
-                if reader.position - initial_position != parts.code_and_jump_table.len() {
-                    return Err(ProgramParseError(ProgramParseErrorKind::Other(
-                        "unexpected data after the end of the code",
-                    )));
-                }
-            } else {
+            if blob.isa.is_legacy() {
                 let bitmask_length = parts.code_and_jump_table.len() - (reader.position - initial_position);
                 blob.bitmask = reader.read_slice_as_bytes(bitmask_length)?;
 

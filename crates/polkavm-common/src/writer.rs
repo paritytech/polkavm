@@ -687,7 +687,9 @@ impl ProgramBlobBuilder {
         writer.push_section_inplace(program::SECTION_CODE_AND_JUMP_TABLE, |writer| {
             writer.push_varint(code.jump_table_entry_count);
             writer.push_byte(code.jump_table_entry_size);
-            writer.push_varint(code.code.len() as u32);
+            if self.isa.is_legacy() {
+                writer.push_varint(code.code.len() as u32);
+            }
             writer.push_raw_bytes(&code.jump_table);
             writer.push_raw_bytes(&code.code);
             writer.push_raw_bytes(&code.bitmask);
