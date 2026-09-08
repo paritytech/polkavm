@@ -7,11 +7,139 @@
 // and the final return data -- as a canonical, layout-independent text block. Two builds that
 // compute the same thing produce byte-identical traces; a value miscompile (e.g. a truncated wide
 // copy) shows up as a differing store value or return payload. See tools diffcheck.py.
+/// Zero every wide-instruction cost, leaving scalar ops at their 1-gas cost. Running under this model
+/// yields the executed scalar-instruction gas of a build, so `full - scalar_only` is the total gas the
+/// wide ops contribute.
+fn zero_all_wide(m: &mut polkavm::CostModel) {
+    zero_convert(m);
+    zero_memory(m);
+    m.wide_move = 0;
+    zero_linear(m);
+    m.wide_mul = 0;
+    zero_divrem(m);
+    zero_modexp(m);
+}
+fn zero_convert(m: &mut polkavm::CostModel) {
+    m.wide_widen_unsigned = 0;
+    m.wide_widen_signed = 0;
+    m.wide_truncate = 0;
+}
+fn zero_memory(m: &mut polkavm::CostModel) {
+    m.wide_load = 0;
+    m.wide_store = 0;
+}
+fn zero_linear(m: &mut polkavm::CostModel) {
+    m.wide_add = 0;
+    m.wide_sub = 0;
+    m.wide_and = 0;
+    m.wide_or = 0;
+    m.wide_xor = 0;
+    m.wide_min_unsigned = 0;
+    m.wide_min_signed = 0;
+    m.wide_max_unsigned = 0;
+    m.wide_max_signed = 0;
+    m.wide_byte_swap = 0;
+    m.wide_sign_extend = 0;
+    m.wide_shift_left = 0;
+    m.wide_shift_right_logical = 0;
+    m.wide_shift_right_arithmetic = 0;
+    m.wide_set_equal = 0;
+    m.wide_set_not_equal = 0;
+    m.wide_set_less_than_unsigned = 0;
+    m.wide_set_less_than_signed = 0;
+}
+fn zero_divrem(m: &mut polkavm::CostModel) {
+    m.wide_div_unsigned = 0;
+    m.wide_div_signed = 0;
+    m.wide_rem_unsigned = 0;
+    m.wide_rem_signed = 0;
+}
+fn zero_modexp(m: &mut polkavm::CostModel) {
+    m.wide_add_mod = 0;
+    m.wide_mul_mod = 0;
+    m.wide_exp = 0;
+}
+
+/// RUNBLOB_GASDECOMP: total executed gas over all exports, under a series of cost models that each
+/// zero out one wide-op class. Since gas metering never changes control flow (as long as the budget
+/// is not exhausted), every model executes the identical instruction stream, so `full - z_<class>`
+/// is exactly the gas that class of wide op contributed to this build. Deterministic (interpreter).
+fn gas_decomp(engine: &polkavm::Engine, bytes: &[u8]) {
+    let variants: Vec<(&str, fn(&mut polkavm::CostModel))> = vec![
+        ("full", |_m| {}),
+        ("scalar_only", zero_all_wide),
+        ("z_convert", zero_convert),
+        ("z_memory", zero_memory),
+        ("z_move", |m| m.wide_move = 0),
+        ("z_linear", zero_linear),
+        ("z_mul", |m| m.wide_mul = 0),
+        ("z_divrem", zero_divrem),
+        ("z_modexp", zero_modexp),
+    ];
+    println!("gas_decomp (interpreter): model<TAB>total_gas");
+    for (name, apply) in &variants {
+        let mut model = polkavm::CostModel::naive();
+        apply(&mut model);
+        let kind = polkavm::CostModelKind::from(std::sync::Arc::new(model));
+        println!("  {name}\t{}", total_gas_under(engine, bytes, kind));
+    }
+}
+
+/// Sum executed gas across every export of the blob, under the given cost model. Ends each export
+/// where production would (return/revert/self-destruct) and caps stray host-call loops, matching the
+/// normal run's termination so the gas reflects the real deploy/call path.
+fn total_gas_under(engine: &polkavm::Engine, bytes: &[u8], cost_model: polkavm::CostModelKind) -> i64 {
+    let blob = polkavm::ProgramBlob::parse(bytes.to_vec().into()).expect("parse blob");
+    let mut module_config = polkavm::ModuleConfig::default();
+    module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
+    module_config.set_cost_model(Some(cost_model));
+    let module = polkavm::Module::from_blob(engine, &module_config, blob).expect("module");
+    let symbols: Vec<Option<String>> = module
+        .imports()
+        .iter()
+        .map(|s| s.map(|s| String::from_utf8_lossy(s.as_bytes()).into_owned()))
+        .collect();
+    let sym = |n: u32| symbols.get(n as usize).and_then(|s| s.as_deref()).unwrap_or("?");
+    let terminating: std::collections::HashSet<u32> = (0..symbols.len() as u32)
+        .filter(|&n| matches!(sym(n), "seal_return" | "consume_all_gas" | "terminate"))
+        .collect();
+    let mut linker: polkavm::Linker<(), ()> = polkavm::Linker::new();
+    linker.define_fallback(|_caller: polkavm::Caller<()>, _num: u32| -> Result<(), ()> { Ok(()) });
+    let mut instance = linker.instantiate_pre(&module).expect("pre").instantiate().expect("instance");
+    let exports: Vec<_> = module.exports().map(|e| e.program_counter()).collect();
+    const BUDGET: i64 = 2_000_000;
+    let mut total = 0i64;
+    for pc in exports {
+        instance.set_gas(BUDGET);
+        instance.set_reg(polkavm::Reg::SP, module.default_sp());
+        instance.set_next_program_counter(pc);
+        let mut steps = 0u64;
+        loop {
+            match instance.run() {
+                Ok(polkavm::InterruptKind::Finished) => break,
+                Ok(polkavm::InterruptKind::Ecalli(n)) => {
+                    if terminating.contains(&n) {
+                        break;
+                    }
+                    steps += 1;
+                    if steps > 2000 {
+                        break;
+                    }
+                }
+                Ok(_) => break,
+                Err(_) => break,
+            }
+        }
+        total += BUDGET - instance.gas();
+    }
+    total
+}
+
 fn main() {
     let _ = env_logger::try_init();
     let path = std::env::args().nth(1).expect("usage: run_blob <blob>");
     let bytes = std::fs::read(&path).expect("read blob");
-    let blob = polkavm::ProgramBlob::parse(bytes.into()).expect("parse blob");
+    let blob = polkavm::ProgramBlob::parse(bytes.clone().into()).expect("parse blob");
 
     let mut config = polkavm::Config::default();
     // `RUNBLOB_BACKEND=compiler` runs the blob through the recompiler instead.
@@ -22,6 +150,12 @@ fn main() {
     config.set_backend(Some(backend));
     config.set_allow_experimental(true);
     let engine = polkavm::Engine::new(&config).expect("engine");
+
+    // RUNBLOB_GASDECOMP: attribute total gas to each wide-op class (see gas_decomp), then exit.
+    if std::env::var("RUNBLOB_GASDECOMP").is_ok() {
+        gas_decomp(&engine, &bytes);
+        return;
+    }
     // Gas metering is what makes the run measurable: the count is deterministic and identical on
     // both backends, so it compares the work two builds do without wall-clock noise.
     let mut module_config = polkavm::ModuleConfig::default();
