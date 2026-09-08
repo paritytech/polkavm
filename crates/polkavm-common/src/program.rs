@@ -719,6 +719,7 @@ const fn fixup_table_2<const EXT: bool>() -> &'static LookupTable {
     }
 }
 
+#[doc(hidden)]
 #[inline(always)]
 pub fn read_args_imm<const EXT: bool>(chunk: u128, length: u32) -> i32 {
     let length = fixup_length::<EXT>(length);
@@ -726,11 +727,13 @@ pub fn read_args_imm<const EXT: bool>(chunk: u128, length: u32) -> i32 {
     cast(read_simple_varint(chunk, length)).bitwise_as_i32()
 }
 
+#[doc(hidden)]
 #[inline(always)]
 pub fn read_args_offset<const EXT: bool>(chunk: u128, instruction_offset: u32, length: u32) -> u32 {
     instruction_offset.wrapping_add(cast(read_args_imm::<EXT>(chunk, length)).bitwise_as_u32())
 }
 
+#[doc(hidden)]
 #[inline(always)]
 pub fn read_args_imm2<const EXT: bool>(chunk: u128, length: u32) -> (i32, i32) {
     let (imm1_bits, imm1_skip, imm2_bits) = fixup_table_1::<EXT>().get(length, chunk_into_u32::<EXT, 0>(chunk));
@@ -741,6 +744,7 @@ pub fn read_args_imm2<const EXT: bool>(chunk: u128, length: u32) -> (i32, i32) {
     (cast(imm1).bitwise_as_i32(), cast(imm2).bitwise_as_i32())
 }
 
+#[doc(hidden)]
 #[inline(always)]
 pub fn read_args_reg_imm<const EXT: bool>(chunk: u128, length: u32) -> (RawReg, i32) {
     let chunk = fixup_chunk64::<EXT>(chunk);
@@ -751,6 +755,7 @@ pub fn read_args_reg_imm<const EXT: bool>(chunk: u128, length: u32) -> (RawReg, 
     (reg, cast(imm).bitwise_as_i32())
 }
 
+#[doc(hidden)]
 #[inline(always)]
 pub fn read_args_reg_imm2<const EXT: bool>(chunk: u128, length: u32) -> (RawReg, i32, i32) {
     let reg = RawReg(chunk_into_u32::<EXT, 0>(chunk));
@@ -762,6 +767,7 @@ pub fn read_args_reg_imm2<const EXT: bool>(chunk: u128, length: u32) -> (RawReg,
     (reg, cast(imm1).bitwise_as_i32(), cast(imm2).bitwise_as_i32())
 }
 
+#[doc(hidden)]
 #[inline(always)]
 pub fn read_args_reg_imm_offset<const EXT: bool>(chunk: u128, instruction_offset: u32, length: u32) -> (RawReg, i32, u32) {
     let (reg, imm1, imm2) = read_args_reg_imm2::<EXT>(chunk, length);
@@ -769,6 +775,7 @@ pub fn read_args_reg_imm_offset<const EXT: bool>(chunk: u128, instruction_offset
     (reg, imm1, imm2)
 }
 
+#[doc(hidden)]
 #[inline(always)]
 pub fn read_args_regs2_imm2<const EXT: bool>(chunk: u128, length: u32) -> (RawReg, RawReg, i32, i32) {
     let (reg1, reg2, imm1_aux) = {
@@ -784,6 +791,7 @@ pub fn read_args_regs2_imm2<const EXT: bool>(chunk: u128, length: u32) -> (RawRe
     (reg1, reg2, cast(imm1).bitwise_as_i32(), cast(imm2).bitwise_as_i32())
 }
 
+#[doc(hidden)]
 #[inline(always)]
 pub fn read_args_reg_imm64<const EXT: bool>(chunk: u128) -> (RawReg, u64) {
     let reg = RawReg(chunk_into_u32::<EXT, 0>(chunk));
@@ -791,6 +799,7 @@ pub fn read_args_reg_imm64<const EXT: bool>(chunk: u128) -> (RawReg, u64) {
     (reg, imm)
 }
 
+#[doc(hidden)]
 #[inline(always)]
 pub fn read_args_regs2_imm<const EXT: bool>(chunk: u128, length: u32) -> (RawReg, RawReg, i32) {
     let chunk = fixup_chunk64::<EXT>(chunk);
@@ -804,6 +813,7 @@ pub fn read_args_regs2_imm<const EXT: bool>(chunk: u128, length: u32) -> (RawReg
     (reg1, reg2, cast(imm).bitwise_as_i32())
 }
 
+#[doc(hidden)]
 #[inline(always)]
 pub fn read_args_regs2_offset<const EXT: bool>(chunk: u128, instruction_offset: u32, length: u32) -> (RawReg, RawReg, u32) {
     let (reg1, reg2, imm) = read_args_regs2_imm::<EXT>(chunk, length);
@@ -811,6 +821,7 @@ pub fn read_args_regs2_offset<const EXT: bool>(chunk: u128, instruction_offset: 
     (reg1, reg2, imm)
 }
 
+#[doc(hidden)]
 #[inline(always)]
 pub fn read_args_regs3<const EXT: bool>(chunk: u128) -> (RawReg, RawReg, RawReg) {
     let chunk = chunk_into_u32::<EXT, 0>(chunk);
@@ -818,6 +829,7 @@ pub fn read_args_regs3<const EXT: bool>(chunk: u128) -> (RawReg, RawReg, RawReg)
     (reg1, reg2, reg3)
 }
 
+#[doc(hidden)]
 #[inline(always)]
 pub fn read_args_regs2<const EXT: bool>(chunk: u128) -> (RawReg, RawReg) {
     let chunk = chunk_into_u32::<EXT, 0>(chunk);
