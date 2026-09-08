@@ -620,6 +620,7 @@ impl LookupTable {
     #[inline(always)]
     const fn get_lookup_index(skip: u32, aux: u32) -> u32 {
         debug_assert!(skip <= 0b11111);
+        let skip = skip & 0b11111;
         let index = skip | ((aux & 0b111) << 5);
         debug_assert!(index <= 0xff);
         index
