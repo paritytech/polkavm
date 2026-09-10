@@ -14,7 +14,7 @@
 //! running the extension and the reference on the same inputs and comparing results, so a wrong
 //! reference is caught rather than flattering the comparison.
 
-use crate::{BackendKind, Config, Engine, Linker, Module, ProgramBlob};
+use crate::{BackendKind, Config, Engine, GasMeteringKind, Linker, Module, ModuleConfig, ProgramBlob};
 use polkavm_common::program::Instruction;
 use polkavm_common::program::{asm, InstructionSetKind, Reg, Reg::*, WideReg, WideWidth};
 use polkavm_common::writer::ProgramBlobBuilder;
@@ -469,6 +469,51 @@ fn measure_all(backend: BackendKind) {
     measure(backend, WideWidth::W256);
 }
 
+/// Total gas consumed running one blob's `main` to completion, under the default (naive + wide) cost
+/// model. Gas is deterministic and backend-independent, so the interpreter is used.
+fn gas_of(blob: ProgramBlob) -> i64 {
+    const BUDGET: i64 = 2_000_000_000;
+    let engine = engine_for(BackendKind::Interpreter);
+    let mut module_config = ModuleConfig::default();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let linker: Linker<(), ()> = Linker::new();
+    let instance_pre = linker.instantiate_pre(&module).unwrap();
+    let mut instance = instance_pre.instantiate().unwrap();
+    write_operands(&mut instance);
+    instance.set_gas(BUDGET);
+    instance.call_typed(&mut (), "main", ()).unwrap();
+    BUDGET - instance.gas()
+}
+
+/// Gas cost per operation for the extension (one wide instruction) vs the scalar limb chain a
+/// base-ISA build emits (each scalar instruction is 1 gas in the naive model). Isolating the body by
+/// differencing the unrolled blob against the same blob with an empty body removes the fixed setup,
+/// so the result is the exact metered cost of a single op. This is the gas analogue of the ns/op
+/// tables above: it is what a chain charges, deterministic and identical on both backends.
+fn measure_gas(width: WideWidth) {
+    let bits = limbs_of(width) * 64;
+    println!();
+    println!("=== wide microbenchmark GAS: {bits}-bit (gas per op) ===");
+    println!("{:<8} {:>10} {:>10} {:>10}", "op", "ext gas", "ref gas", "ext÷ref");
+    for op in ops() {
+        let (unroll, _) = op.weight.reps();
+        let ext = (gas_of(ext_blob(&op, width, unroll)) - gas_of(ext_blob(&op, width, 0))) as f64 / unroll as f64;
+        if op.ref_body.is_some() {
+            let reference = (gas_of(ref_blob(&op, width, unroll)) - gas_of(ref_blob(&op, width, 0))) as f64 / unroll as f64;
+            let ratio = if reference > 0.0 { ext / reference } else { f64::NAN };
+            println!("{:<8} {:>10.1} {:>10.1} {:>9.2}x", op.name, ext, reference, ratio);
+        } else {
+            println!("{:<8} {:>10.1} {:>10} {:>10}", op.name, ext, "-", "-");
+        }
+    }
+}
+
+fn measure_gas_all() {
+    measure_gas(WideWidth::W128);
+    measure_gas(WideWidth::W256);
+}
+
 #[test]
 #[ignore]
 fn wide_microbench_interpreter() {
@@ -479,4 +524,10 @@ fn wide_microbench_interpreter() {
 #[ignore]
 fn wide_microbench_compiler() {
     measure_all(BackendKind::Compiler);
+}
+
+#[test]
+#[ignore]
+fn wide_microbench_gas() {
+    measure_gas_all();
 }
