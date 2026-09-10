@@ -365,16 +365,18 @@ define_cost_model_struct! {
 // ops 6-24x versus the scalar ops they replace; see the book's gas analysis.) The iterative ops keep
 // their large absolute costs -- a division or modular multiply is genuinely a thousandfold a move.
 const WIDE_MARSHAL: Cost = 0;
-/// O(n) limb pass with real per-limb work: add, sub, bitwise, min/max, compares, shifts, byte swap,
-/// sign extend. About the scalar-instruction count for four limbs.
-const WIDE_LINEAR: Cost = WIDE_MARSHAL + 16;
-/// Copy the limbs -- cheaper than a full linear pass.
+/// One 64-bit operation per limb: add, sub, bitwise, min/max, compares, shifts, byte swap, sign
+/// extend. The ceiling is `N * (64-bit op cost)` = `N * 1` = the limb count at the 256-bit
+/// calibration width (N = 4), so a wide op never costs more than doing it limb-by-limb in scalar.
+const WIDE_LINEAR: Cost = WIDE_MARSHAL + 4;
+/// Copy the limbs: one 64-bit move per limb (N = 4).
 const WIDE_MOVE: Cost = WIDE_MARSHAL + 4;
-/// Widen from or truncate to a scalar: a limb or two of work.
+/// Widen from or truncate to a scalar: a limb or two of work (<= N).
 const WIDE_CONVERT: Cost = WIDE_MARSHAL + 2;
-/// A load or store of the whole value, limb by limb through guest memory.
-const WIDE_MEMORY: Cost = WIDE_MARSHAL + 6;
-/// Schoolbook multiply, O(n^2) limb products.
+/// A load or store of the whole value: one 64-bit access per limb through guest memory (N = 4).
+const WIDE_MEMORY: Cost = WIDE_MARSHAL + 4;
+/// Schoolbook multiply, O(n^2) limb products -- superlinear, so the `N * 64-bit` ceiling does not
+/// apply; kept at 56, comfortably under its ~105-instruction scalar chain (measured, §5a).
 const WIDE_MULTIPLY: Cost = WIDE_MARSHAL + 56;
 /// Shift-and-subtract division/remainder, n*64 iterations each doing O(n) work.
 const WIDE_DIVIDE: Cost = 3100;
