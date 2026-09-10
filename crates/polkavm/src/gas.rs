@@ -371,8 +371,11 @@ const WIDE_MARSHAL: Cost = 0;
 const WIDE_LINEAR: Cost = WIDE_MARSHAL + 4;
 /// Copy the limbs: one 64-bit move per limb (N = 4).
 const WIDE_MOVE: Cost = WIDE_MARSHAL + 4;
-/// Widen from or truncate to a scalar: a limb or two of work (<= N).
+/// Widen from a scalar: write the low limb and zero the rest (<= N limbs of work).
 const WIDE_CONVERT: Cost = WIDE_MARSHAL + 2;
+/// Truncate to a scalar: read the low limb only -- a single `mov` (and free register-aliasing in a
+/// base-ISA build where the value is already limbs). One 64-bit op.
+const WIDE_TRUNCATE: Cost = WIDE_MARSHAL + 1;
 /// A load or store of the whole value: one 64-bit access per limb through guest memory (N = 4).
 const WIDE_MEMORY: Cost = WIDE_MARSHAL + 4;
 /// Schoolbook multiply, O(n^2) limb products -- superlinear, so the `N * 64-bit` ceiling does not
@@ -432,7 +435,7 @@ impl CostModel {
 
         self.wide_widen_unsigned = WIDE_CONVERT;
         self.wide_widen_signed = WIDE_CONVERT;
-        self.wide_truncate = WIDE_CONVERT;
+        self.wide_truncate = WIDE_TRUNCATE;
 
         self.wide_load = WIDE_MEMORY;
         self.wide_store = WIDE_MEMORY;
@@ -1457,10 +1460,12 @@ mod tests {
     fn naive_wide_costs_reflect_work() {
         let model = CostModel::naive();
 
-        // Every wide instruction costs more than a scalar op.
+        // Most wide instructions cost more than a scalar op (wide_truncate is the exception: it
+        // just reads the low limb, so it is 1 -- as cheap as a scalar move).
+        assert_eq!(model.wide_truncate, 1);
         for opcode in [
             Opcode::wide_add, Opcode::wide_mul, Opcode::wide_div_unsigned,
-            Opcode::wide_mul_mod, Opcode::wide_exp, Opcode::wide_load, Opcode::wide_truncate,
+            Opcode::wide_mul_mod, Opcode::wide_exp, Opcode::wide_load,
         ] {
             assert!(model.cost_for_opcode(opcode) > 1, "{opcode:?} should cost more than a move");
         }
