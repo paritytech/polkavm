@@ -373,9 +373,9 @@ const WIDE_LINEAR: Cost = WIDE_MARSHAL + 4;
 const WIDE_MOVE: Cost = WIDE_MARSHAL + 4;
 /// Widen from a scalar: write the low limb and zero the rest (<= N limbs of work).
 const WIDE_CONVERT: Cost = WIDE_MARSHAL + 2;
-/// Truncate to a scalar: read the low limb only -- a single `mov` (and free register-aliasing in a
-/// base-ISA build where the value is already limbs). One 64-bit op.
-const WIDE_TRUNCATE: Cost = WIDE_MARSHAL + 1;
+/// Truncate to a scalar: it just names the low limb -- free register-aliasing in a base-ISA build
+/// (0 instructions), so it is metered at 0 to match what ref pays.
+const WIDE_TRUNCATE: Cost = WIDE_MARSHAL + 0;
 /// A load or store of the whole value: one 64-bit access per limb through guest memory (N = 4).
 const WIDE_MEMORY: Cost = WIDE_MARSHAL + 4;
 /// Schoolbook multiply, O(n^2) limb products -- superlinear, so the `N * 64-bit` ceiling does not
@@ -1461,8 +1461,8 @@ mod tests {
         let model = CostModel::naive();
 
         // Most wide instructions cost more than a scalar op (wide_truncate is the exception: it
-        // just reads the low limb, so it is 1 -- as cheap as a scalar move).
-        assert_eq!(model.wide_truncate, 1);
+        // just names the low limb -- free register-aliasing in a base-ISA build -- so it is 0).
+        assert_eq!(model.wide_truncate, 0);
         for opcode in [
             Opcode::wide_add, Opcode::wide_mul, Opcode::wide_div_unsigned,
             Opcode::wide_mul_mod, Opcode::wide_exp, Opcode::wide_load,
