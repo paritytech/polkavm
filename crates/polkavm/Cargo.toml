@@ -20,7 +20,7 @@ schnellru = { workspace = true, optional = true }
 [target.'cfg(all(not(miri), target_arch = "x86_64", target_os = "linux"))'.dependencies]
 polkavm-linux-raw = { workspace = true, features = ["std"] }
 
-[target.'cfg(all(not(miri), target_arch = "x86_64", any(target_os = "macos", target_os = "freebsd")))'.dependencies]
+[target.'cfg(all(not(miri), any(all(target_arch = "x86_64", any(target_os = "macos", target_os = "freebsd")), all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))))'.dependencies]
 libc = { workspace = true }
 
 [dev-dependencies]
@@ -47,6 +47,10 @@ module-cache = ["dep:schnellru", "polkavm-common/blake3"]
 # This is required on non-Linux systems to use the recompiler. On Linux it is unnecessary.
 # This sandbox is EXPERIMENTAL and is not meant for production use.
 generic-sandbox = []
+
+# Hardware-virtualization sandbox (aarch64-only): runs the guest in a vCPU with its
+# own stage-1 MMU, giving 4K guest pages on any host. EXPERIMENTAL; currently a scaffold.
+hypervisor-sandbox = []
 
 # Internal feature for testing. DO NOT USE.
 export-internals-for-testing = []

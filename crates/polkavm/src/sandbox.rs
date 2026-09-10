@@ -25,7 +25,10 @@ macro_rules! get_field_offset {
 #[cfg(feature = "generic-sandbox")]
 pub mod generic;
 
-#[cfg(target_os = "linux")]
+#[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+pub mod hypervisor;
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub mod linux;
 
 // This is literally the only thing we need from `libc` on Linux, so instead of including
@@ -74,15 +77,23 @@ pub trait SandboxProgram: Clone {
     fn machine_code(&self) -> &[u8];
 }
 
+/// Where the VM context sits relative to the guest memory base. Both the generic and the hypervisor
+/// sandbox place it one page below, which is what lets them share the AArch64 codegen.
+#[cfg(any(target_os = "linux", feature = "generic-sandbox", feature = "hypervisor-sandbox"))]
+pub(crate) const GUEST_MEMORY_TO_VMCTX_OFFSET: isize = -4096;
+
 pub struct OffsetTable {
     pub arg: usize,
     pub gas: usize,
     pub heap_info: usize,
     pub next_native_program_counter: usize,
+    // Only read by the x86 `memset` codegen; AArch64's loop tracks progress in A0/A2 instead.
+    #[cfg_attr(target_arch = "aarch64", allow(dead_code))]
     pub memset_continuation: usize,
     pub next_program_counter: usize,
     pub program_counter: usize,
     pub regs: usize,
+    #[allow(dead_code)] // Used by the Linux zygote sandbox; unused by the generic sandbox.
     pub futex: usize,
 }
 
@@ -112,6 +123,7 @@ pub(crate) trait Sandbox: Sized {
     fn recycle(sandbox: Box<Self>, global: &Self::GlobalState) -> Result<(), Self::Error>;
     fn address_table() -> AddressTable;
     fn offset_table() -> OffsetTable;
+    #[allow(dead_code)] // Used by the Linux zygote sandbox tooling; unused by the generic sandbox.
     fn idle_worker_pids(global: &Self::GlobalState) -> Vec<u32>;
 
     fn run(&mut self) -> Result<InterruptKind, Self::Error>;
@@ -220,17 +232,19 @@ where
 }
 
 pub(crate) enum GlobalStateKind {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     Linux(crate::sandbox::linux::GlobalState),
     #[cfg(feature = "generic-sandbox")]
     Generic(crate::sandbox::generic::GlobalState),
+    #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+    Hypervisor(crate::sandbox::hypervisor::GlobalState),
 }
 
 impl GlobalStateKind {
     pub(crate) fn new(kind: SandboxKind, config: &Config) -> Result<Self, Error> {
         match kind {
             SandboxKind::Linux => {
-                #[cfg(target_os = "linux")]
+                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                 {
                     Ok(Self::Linux(
                         crate::sandbox::linux::GlobalState::new(config)
@@ -238,7 +252,7 @@ impl GlobalStateKind {
                     ))
                 }
 
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
                 {
                     unreachable!()
                 }
@@ -257,13 +271,27 @@ impl GlobalStateKind {
                     unreachable!()
                 }
             }
+            SandboxKind::Hypervisor => {
+                #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+                {
+                    Ok(Self::Hypervisor(
+                        crate::sandbox::hypervisor::GlobalState::new(config)
+                            .map_err(|error| format!("failed to initialize hypervisor sandbox: {error}"))?,
+                    ))
+                }
+
+                #[cfg(not(all(feature = "hypervisor-sandbox", target_arch = "aarch64")))]
+                {
+                    unreachable!()
+                }
+            }
         }
     }
 
     pub(crate) fn idle_worker_pids(&self) -> Vec<u32> {
         #[allow(unreachable_patterns)]
         match self {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             GlobalStateKind::Linux(state) => crate::sandbox::linux::Sandbox::idle_worker_pids(state),
             _ => Vec::new(),
         }
@@ -297,7 +325,7 @@ where
 }
 
 // This is the same for both sandboxes.
-#[cfg(any(target_os = "linux", feature = "generic-sandbox"))]
+#[cfg(any(target_os = "linux", any(feature = "generic-sandbox", feature = "hypervisor-sandbox")))]
 pub(crate) fn charge_gas_on_entry<S>(
     module: &Module,
     pc: ProgramCounter,
