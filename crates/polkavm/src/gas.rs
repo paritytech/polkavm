@@ -387,6 +387,22 @@ const WIDE_MODULAR: Cost = 6300;
 /// Square-and-multiply exponentiation, up to n*64 iterations of two multiplies.
 const WIDE_EXPONENTIATE: Cost = 8000;
 
+/// Number of 64-bit limbs a byte-granular wide width occupies (ceiling): the unit of work for a
+/// `set_width`-declared value. An i160 (20-byte, e.g. an address) is 3 limbs, i256 is 4, i512 is 8.
+pub const fn wide_limbs_for_bytes(width_bytes: u32) -> u32 {
+    (width_bytes + 7) / 8
+}
+
+/// Gas for a limb-linear wide op (`load`/`store`/`move`/`add`/`sub`/bitwise/compare/shift/...) at a
+/// **`set_width`-declared byte width** — the set_width-aware generalization of the flat `WIDE_LINEAR`/
+/// `WIDE_MEMORY` cost (= `N * 64-bit-op cost`). One gas per 64-bit limb, so a `set_width 20` (i160)
+/// store costs 3, i256 costs 4, i512 costs 8, i128 costs 2 — never more than the scalar chain, and
+/// less than a full i256 when the compiler can prove the value is narrower. Superlinear ops (mul,
+/// div/rem/mod/exp) are not limb-linear and keep their own costs.
+pub const fn wide_linear_gas_for_width(width_bytes: u32) -> Cost {
+    wide_limbs_for_bytes(width_bytes)
+}
+
 impl CostModel {
     /// Overlays work-proportional costs for the 32 XReviveVec wide instructions onto an otherwise
     /// uniform model, so the default naive model does not meter an iterative wide operation like a
@@ -1445,6 +1461,21 @@ mod tests {
         // The fused modular operations are the ones the handoff called out as mismetered; they
         // must dwarf a register move.
         assert!(model.wide_mul_mod > 1000);
+    }
+
+    #[test]
+    fn set_width_aware_wide_gas() {
+        // A `set_width <bytes>`-declared value is metered by its real limb count, not rounded up to
+        // i256. A limb-linear wide op (load/store/move/add/...) costs one gas per 64-bit limb.
+        assert_eq!(wide_linear_gas_for_width(16), 2); // i128
+        assert_eq!(wide_linear_gas_for_width(20), 3); // i160 (an address) -> 3, not 4
+        assert_eq!(wide_linear_gas_for_width(32), 4); // i256
+        assert_eq!(wide_linear_gas_for_width(64), 8); // i512
+        // The point: proving a value is narrower than i256 makes its wide store strictly cheaper.
+        assert!(wide_linear_gas_for_width(20) < wide_linear_gas_for_width(32));
+        // At the full i256 width it matches the flat WIDE_LINEAR/WIDE_MEMORY the model uses today.
+        assert_eq!(wide_linear_gas_for_width(32), WIDE_LINEAR);
+        assert_eq!(wide_linear_gas_for_width(32), WIDE_MEMORY);
     }
 
     #[test]
