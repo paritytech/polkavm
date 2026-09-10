@@ -75,6 +75,22 @@ fn gas_decomp(engine: &polkavm::Engine, bytes: &[u8]) {
         ("z_mul", |m| m.wide_mul = 0),
         ("z_divrem", zero_divrem),
         ("z_modexp", zero_modexp),
+        // Per-opcode isolation (full - z_<op> = that op's executed gas). Scalar buckets first.
+        ("z_scalar_load", |m| { m.load_u8=0; m.load_u16=0; m.load_u32=0; m.load_u64=0; m.load_i8=0; m.load_i16=0; m.load_i32=0; }),
+        ("z_scalar_store", |m| { m.store_u8=0; m.store_u16=0; m.store_u32=0; m.store_u64=0; }),
+        ("z_scalar_reverse_byte", |m| m.reverse_byte = 0),
+        // Individual wide opcodes.
+        ("z_wide_load", |m| m.wide_load = 0),
+        ("z_wide_store", |m| m.wide_store = 0),
+        ("z_wide_zext", |m| m.wide_widen_unsigned = 0),
+        ("z_wide_trunc", |m| m.wide_truncate = 0),
+        ("z_wide_seq", |m| m.wide_set_equal = 0),
+        ("z_wide_or", |m| m.wide_or = 0),
+        ("z_wide_and", |m| m.wide_and = 0),
+        ("z_wide_add", |m| m.wide_add = 0),
+        ("z_wide_bswap", |m| m.wide_byte_swap = 0),
+        ("z_wide_shift_left", |m| m.wide_shift_left = 0),
+        ("z_wide_shift_right_logical", |m| m.wide_shift_right_logical = 0),
     ];
     println!("gas_decomp (interpreter): model<TAB>total_gas");
     for (name, apply) in &variants {
