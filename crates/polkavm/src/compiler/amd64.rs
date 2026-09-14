@@ -267,7 +267,12 @@ const SET_EQUAL: u8 = 0x94;
 const SET_NOT_EQUAL: u8 = 0x95;
 const SET_LESS: u8 = 0x9c;
 const SHIFT_RIGHT_SIGN_63: &[u8] = &[0x48, 0xc1, 0xf9, 0x3f];
-const MOVBE_LOAD: &[u8] = &[0x0f, 0x38, 0xf0];
+const SHIFT_LEFT_DOUBLE: &[u8] = &[0x0f, 0xa4];
+const SHIFT_RIGHT_DOUBLE: &[u8] = &[0x0f, 0xac];
+const SHIFT_BY_IMMEDIATE: &[u8] = &[0xc1];
+const SHIFT_LEFT: u8 = 4;
+const SHIFT_RIGHT: u8 = 5;
+const SHIFT_RIGHT_SIGNED: u8 = 7;
 
 fn wide_field(reg: RawWideReg) -> u8 {
     reg.get() as u8
@@ -279,6 +284,22 @@ fn vector_field(reg: RawVecReg) -> u8 {
 
 fn register_field(reg: RawReg) -> u8 {
     reg.get() as u8
+}
+
+/// The largest amount the in place immediate shift template covers. Past it the words
+/// themselves have to travel, which the template cannot do, and past 63 the shift count would
+/// wrap anyway: the hardware masks it to six bits.
+pub(crate) const MAXIMUM_IN_PLACE_SHIFT_AMOUNT: i32 = 63;
+
+/// The amount an immediate shift can run in place with. The destination has to already hold
+/// the source, and the shift has to stay inside the words, because the template moves bits
+/// between neighboring words but never moves a word. Anything else keeps the trampoline.
+fn in_place_shift_amount(d: u8, s: u8, immediate: i32) -> Option<u8> {
+    if d != s || !(1..=MAXIMUM_IN_PLACE_SHIFT_AMOUNT).contains(&immediate) {
+        return None;
+    }
+
+    Some(cast(cast(immediate).bitwise_as_u32()).truncate_to_u8())
 }
 
 #[derive(Copy, Clone)]
@@ -863,6 +884,21 @@ where
         self.asm.push_raw(&buffer[..length + 5]);
     }
 
+    /// One shift of a register file word by an immediate amount. The modrm register field
+    /// carries either the opcode extension that picks the direction, or, for the double
+    /// shifts, the register the bits shifted in come from.
+    fn push_wide_shift(&mut self, opcode: &[u8], modrm_register: u8, register_field: u8, word: usize, amount: u8) {
+        let disp = Self::wide_word_displacement(register_field, word).to_le_bytes();
+        let mut buffer = [0; 16];
+        buffer[0] = 0x48 | 0x01 | if modrm_register >= 8 { 0x04 } else { 0 };
+        buffer[1..1 + opcode.len()].copy_from_slice(opcode);
+        let length = 1 + opcode.len();
+        buffer[length] = 0x85 | ((modrm_register & 7) << 3);
+        buffer[length + 1..length + 5].copy_from_slice(&disp);
+        buffer[length + 5] = amount;
+        self.asm.push_raw(&buffer[..length + 6]);
+    }
+
     /// `mov qword ptr [file word], immediate`, sign extending the immediate.
     fn push_wide_store_immediate(&mut self, register_field: u8, word: usize, immediate: i32) {
         let disp = Self::wide_word_displacement(register_field, word).to_le_bytes();
@@ -888,6 +924,21 @@ where
             let opcode = if word == 0 { first_opcode } else { rest_opcode };
             self.push_wide_scalar(&[opcode], TMP_REG, destination, word);
         }
+    }
+
+    /// A shift by an immediate amount, run where the value already sits. Every word is
+    /// shifted in place and takes the bits crossing into it from its neighbor, so the words
+    /// are walked in the direction the bits travel and each one is read before it is
+    /// overwritten. The last word has no neighbor to take bits from and gets the plain
+    /// shift, whose opcode extension is what makes a right shift logical or arithmetic.
+    fn wide_shift_in_place(&mut self, double_opcode: &[u8], extension: u8, words: [usize; 4], d: u8, amount: u8) {
+        for neighbors in words.windows(2) {
+            let (destination, source) = (neighbors[0], neighbors[1]);
+            self.push_wide_scalar(&[SCALAR_LOAD], TMP_REG, d, source);
+            self.push_wide_shift(double_opcode, TMP_REG as u8, d, destination, amount);
+        }
+
+        self.push_wide_shift(SHIFT_BY_IMMEDIATE, extension, d, words[3], amount);
     }
 
     /// A full-width subtraction whose only product is the final flags, consumed by `setcc`.
@@ -1169,9 +1220,10 @@ where
     #[inline(always)]
     pub fn wide_reverse_bytes(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg) {
         let (d, s) = (wide_field(d), wide_field(s));
-        if d != s && crate::cpuid::is_movbe_supported() {
+        if d != s {
             for word in 0..4 {
-                self.push_wide_scalar(MOVBE_LOAD, TMP_REG, s, word);
+                self.push_wide_scalar(&[SCALAR_LOAD], TMP_REG, s, word);
+                self.push(bswap(RegSize::R64, TMP_REG));
                 self.push_wide_scalar(&[SCALAR_STORE], TMP_REG, d, 3 - word);
             }
         } else {
@@ -1284,38 +1336,29 @@ where
 
     #[inline(always)]
     pub fn wide_shift_logical_left_imm(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg, imm: i32) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideShiftLeftImmediate,
-            wide_field(d),
-            wide_field(s),
-            0,
-            imm,
-        );
+        let (d, s) = (wide_field(d), wide_field(s));
+        match in_place_shift_amount(d, s, imm) {
+            Some(amount) => self.wide_shift_in_place(SHIFT_LEFT_DOUBLE, SHIFT_LEFT, [3, 2, 1, 0], d, amount),
+            None => self.wide_operation(code_offset, WideOperationKind::WideShiftLeftImmediate, d, s, 0, imm),
+        }
     }
 
     #[inline(always)]
     pub fn wide_shift_logical_right_imm(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg, imm: i32) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideShiftRightImmediate,
-            wide_field(d),
-            wide_field(s),
-            0,
-            imm,
-        );
+        let (d, s) = (wide_field(d), wide_field(s));
+        match in_place_shift_amount(d, s, imm) {
+            Some(amount) => self.wide_shift_in_place(SHIFT_RIGHT_DOUBLE, SHIFT_RIGHT, [0, 1, 2, 3], d, amount),
+            None => self.wide_operation(code_offset, WideOperationKind::WideShiftRightImmediate, d, s, 0, imm),
+        }
     }
 
     #[inline(always)]
     pub fn wide_shift_arithmetic_right_imm(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg, imm: i32) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideShiftRightSignedImmediate,
-            wide_field(d),
-            wide_field(s),
-            0,
-            imm,
-        );
+        let (d, s) = (wide_field(d), wide_field(s));
+        match in_place_shift_amount(d, s, imm) {
+            Some(amount) => self.wide_shift_in_place(SHIFT_RIGHT_DOUBLE, SHIFT_RIGHT_SIGNED, [0, 1, 2, 3], d, amount),
+            None => self.wide_operation(code_offset, WideOperationKind::WideShiftRightSignedImmediate, d, s, 0, imm),
+        }
     }
 
     #[inline(always)]
