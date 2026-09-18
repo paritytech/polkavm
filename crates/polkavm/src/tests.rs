@@ -6017,11 +6017,102 @@ run_wide_tests! {
     wide_load_imm_widens_like_the_register_form
     wide_load_absolute_reads_without_a_base_register
     wide_shift_imm_matches_the_register_form
+    wide_shift_imm_in_place_matches_the_register_form
+    wide_reverse_bytes_reverses_whether_or_not_it_aliases
     wide_bit_counts_write_a_general_purpose_register
     vector_whole_register_moves_reach_the_halves_of_a_wide_one
     vector_loads_and_stores_reach_one_register
     vector_compares_produce_a_mask_the_population_count_reads
     every_wide_and_vector_instruction_matches_the_interpreter
+}
+
+if_compiler_is_supported! {
+    /// Compiles `body` and returns how many bytes of machine code each of its instructions
+    /// took, as the recompiler's own program counter map reports it.
+    fn wide_template_lengths(config: &Config, body: &[polkavm_common::program::Instruction]) -> Vec<u32> {
+        let mut code = Vec::from(body);
+        code.push(asm::ret());
+
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::ReviveV1);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&code, &[]);
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+        let engine = Engine::new(config).unwrap();
+        let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
+        let offsets = module.program_counter_to_machine_code_offset().unwrap();
+        offsets
+            .windows(2)
+            .map(|pair| pair[1].1 - pair[0].1)
+            .take(body.len())
+            .collect()
+    }
+
+    /// Nothing checks the per instruction length cap in a release build: only a debug
+    /// assertion does, and only for the shapes some test happens to emit. So emit the inline
+    /// wide templates in their longest shape and measure what came out.
+    fn wide_templates_fit_the_instruction_length_cap(config: Config) {
+        use crate::compiler::MAXIMUM_IN_PLACE_SHIFT_AMOUNT;
+        use polkavm_common::program::WideReg::*;
+        use polkavm_common::zygote::VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH;
+
+        const IN_PLACE_SHIFT_LENGTH: u32 = 56;
+        const REVERSE_BYTES_LENGTH: u32 = 68;
+
+        // The highest numbered registers put the largest displacement into every memory operand,
+        // and the emitter's own maximum is the largest amount the in place shift takes before
+        // it hands over to the trampoline, so widening that gate widens what this measures.
+        let amount = MAXIMUM_IN_PLACE_SHIFT_AMOUNT;
+        let cases = [
+            (
+                "shift left immediate",
+                asm::wide_shift_logical_left_imm(W15, W15, amount),
+                IN_PLACE_SHIFT_LENGTH,
+            ),
+            (
+                "shift right immediate",
+                asm::wide_shift_logical_right_imm(W15, W15, amount),
+                IN_PLACE_SHIFT_LENGTH,
+            ),
+            (
+                "arithmetic shift right immediate",
+                asm::wide_shift_arithmetic_right_imm(W15, W15, amount),
+                IN_PLACE_SHIFT_LENGTH,
+            ),
+            ("reverse bytes", asm::wide_reverse_bytes(W15, W14), REVERSE_BYTES_LENGTH),
+        ];
+
+        let body: Vec<_> = cases.iter().map(|&(_, instruction, _)| instruction).collect();
+        for (&(name, _, expected), length) in cases.iter().zip(wide_template_lengths(&config, &body)) {
+            // Pin the length instead of only bounding it: a template that quietly fell back
+            // to the trampoline would fit the cap too, and would have lost the point of existing.
+            assert_eq!(length, expected, "emitted length for {name}");
+            assert!(
+                length <= VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH,
+                "{name} does not fit the instruction length cap"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn compiler_linux_wide_templates_fit_the_instruction_length_cap() {
+        let mut config = crate::Config::default();
+        config.set_worker_count(1);
+        config.set_backend(Some(crate::BackendKind::Compiler));
+        config.set_sandbox(Some(crate::SandboxKind::Linux));
+        wide_templates_fit_the_instruction_length_cap(config);
+    }
+
+    #[cfg(feature = "generic-sandbox")]
+    #[test]
+    fn compiler_generic_wide_templates_fit_the_instruction_length_cap() {
+        let mut config = crate::Config::default();
+        config.set_backend(Some(crate::BackendKind::Compiler));
+        config.set_sandbox(Some(crate::SandboxKind::Generic));
+        config.set_allow_experimental(true);
+        wide_templates_fit_the_instruction_length_cap(config);
+    }
 }
 
 fn run_wide_program(config: &Config, operands: &[polkavm_common::wide::U256], body: &[polkavm_common::program::Instruction]) -> [u8; 32] {
@@ -6335,6 +6426,86 @@ fn wide_shift_imm_matches_the_register_form(config: Config) {
                 "shift by {amount}"
             );
         }
+    }
+}
+
+#[cfg(feature = "std")]
+fn wide_shift_imm_in_place_matches_the_register_form(config: Config) {
+    use polkavm_common::program::Reg::*;
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    // A shift whose destination is also its source is emitted as an in place template, so
+    // the cases that matter are the ones where a word has to hand bits to a neighbor that
+    // is being rewritten in the same sequence, and the amounts on either side of a word
+    // boundary, which is where the template hands over to the trampoline.
+    let values = [
+        U256([u64::MAX; 4]),
+        U256([
+            0xaaaa_aaaa_aaaa_aaaa,
+            0x5555_5555_5555_5555,
+            0xaaaa_aaaa_aaaa_aaaa,
+            0x5555_5555_5555_5555,
+        ]),
+        U256([1, 1 << 63, 1, 1 << 63]),
+        U256([0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, 7, 1 << 63]),
+        U256::ZERO,
+    ];
+    let store = asm::wide_store(W3, A0, 96);
+
+    for value in values {
+        for amount in [0, 1, 7, 63, 64, 65, 127, 128, 191, 255, 256, 257] {
+            for (in_place, with_register) in [
+                (
+                    asm::wide_shift_logical_left_imm(W3, W3, amount),
+                    asm::wide_shift_logical_left(W3, W0, A1),
+                ),
+                (
+                    asm::wide_shift_logical_right_imm(W3, W3, amount),
+                    asm::wide_shift_logical_right(W3, W0, A1),
+                ),
+                (
+                    asm::wide_shift_arithmetic_right_imm(W3, W3, amount),
+                    asm::wide_shift_arithmetic_right(W3, W0, A1),
+                ),
+            ] {
+                assert_eq!(
+                    run_wide(&config, &[value], &[asm::wide_move(W3, W0), in_place, store]),
+                    run_wide(&config, &[value], &[asm::load_imm(A1, amount), with_register, store]),
+                    "shift of {value:?} by {amount}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+fn wide_reverse_bytes_reverses_whether_or_not_it_aliases(config: Config) {
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    // Byte reversal sends every word to the other end of the register, so only values whose
+    // words differ tell a complete reversal from one that stopped halfway or swapped a pair
+    // back onto itself.
+    let values = [
+        U256([0x0011_2233_4455_6677, 0x8899_aabb_ccdd_eeff, 1, u64::MAX]),
+        U256::ONE,
+        U256([0, 0, 0, 1 << 56]),
+        U256([u64::MAX; 4]),
+    ];
+    let store = asm::wide_store(W3, A0, 96);
+
+    for value in values {
+        assert_eq!(
+            run_wide(&config, &[value], &[asm::wide_reverse_bytes(W3, W0), store]),
+            value.swap_bytes(),
+            "into another register: {value:?}"
+        );
+        assert_eq!(
+            run_wide(&config, &[value], &[asm::wide_move(W3, W0), asm::wide_reverse_bytes(W3, W3), store]),
+            value.swap_bytes(),
+            "in place: {value:?}"
+        );
     }
 }
 

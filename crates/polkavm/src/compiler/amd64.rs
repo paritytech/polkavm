@@ -267,7 +267,6 @@ const SET_EQUAL: u8 = 0x94;
 const SET_NOT_EQUAL: u8 = 0x95;
 const SET_LESS: u8 = 0x9c;
 const SHIFT_RIGHT_SIGN_63: &[u8] = &[0x48, 0xc1, 0xf9, 0x3f];
-const MOVBE_LOAD: &[u8] = &[0x0f, 0x38, 0xf0];
 
 fn wide_field(reg: RawWideReg) -> u8 {
     reg.get() as u8
@@ -279,6 +278,22 @@ fn vector_field(reg: RawVecReg) -> u8 {
 
 fn register_field(reg: RawReg) -> u8 {
     reg.get() as u8
+}
+
+/// The largest amount the in place immediate shift template covers. Past it the words
+/// themselves have to travel, which the template cannot do, and past 63 the shift count would
+/// wrap anyway: the hardware masks it to six bits.
+pub(crate) const MAXIMUM_IN_PLACE_SHIFT_AMOUNT: i32 = 63;
+
+/// The amount an immediate shift can run in place with. The destination has to already hold
+/// the source, and the shift has to stay inside the words, because the template moves bits
+/// between neighboring words but never moves a word. Anything else keeps the trampoline.
+fn in_place_shift_amount(d: u8, s: u8, immediate: i32) -> Option<u8> {
+    if d != s || !(1..=MAXIMUM_IN_PLACE_SHIFT_AMOUNT).contains(&immediate) {
+        return None;
+    }
+
+    Some(cast(cast(immediate).bitwise_as_u32()).truncate_to_u8())
 }
 
 #[derive(Copy, Clone)]
@@ -801,10 +816,15 @@ where
         self.call_to_label(label);
     }
 
+    /// The offset of one 64-bit word of the wide register file within the VM context.
+    fn wide_word_offset(register_field: u8, word: usize) -> usize {
+        S::offset_table().vector_state + usize::from(register_field) * 32 + word * 8
+    }
+
     /// The displacement of one 64-bit word of the wide register file, from the register
     /// generated code addresses the VM context through.
     fn wide_word_displacement(register_field: u8, word: usize) -> i32 {
-        let offset = S::offset_table().vector_state + usize::from(register_field) * 32 + word * 8;
+        let offset = Self::wide_word_offset(register_field, word);
         match S::KIND {
             SandboxKind::Linux => offset as i32,
             SandboxKind::Generic => {
@@ -819,6 +839,11 @@ where
                 }
             }
         }
+    }
+
+    /// The memory operand of one 64-bit word of the wide register file.
+    fn wide_word(register_field: u8, word: usize) -> MemOp {
+        Self::vmctx_field(Self::wide_word_offset(register_field, word))
     }
 
     /// One SSE instruction whose memory operand is a 16-byte half of the register file.
@@ -887,6 +912,33 @@ where
             self.push_wide_scalar(&[SCALAR_LOAD], TMP_REG, source, word);
             let opcode = if word == 0 { first_opcode } else { rest_opcode };
             self.push_wide_scalar(&[opcode], TMP_REG, destination, word);
+        }
+    }
+
+    /// A shift by an immediate amount, run where the value already sits. Every word is
+    /// shifted in place and takes the bits crossing into it from its neighbor, so the words
+    /// are walked in the direction the bits travel and each one is read before it is
+    /// overwritten. The last word has no neighbor to take bits from and gets the plain shift.
+    fn wide_shift_in_place(&mut self, kind: ShiftKind, d: u8, amount: u8) {
+        let words: [usize; 4] = match kind {
+            ShiftKind::LogicalLeft => [3, 2, 1, 0],
+            ShiftKind::LogicalRight | ShiftKind::ArithmeticRight => [0, 1, 2, 3],
+        };
+
+        for neighbors in words.windows(2) {
+            let (destination, source) = (Self::wide_word(d, neighbors[0]), Self::wide_word(d, neighbors[1]));
+            self.push(load(LoadKind::U64, TMP_REG, source));
+            match kind {
+                ShiftKind::LogicalLeft => self.push(shld_imm(RegSize::R64, destination, TMP_REG, amount)),
+                ShiftKind::LogicalRight | ShiftKind::ArithmeticRight => self.push(shrd_imm(RegSize::R64, destination, TMP_REG, amount)),
+            }
+        }
+
+        let last = Self::wide_word(d, words[3]);
+        match kind {
+            ShiftKind::LogicalLeft => self.push(shl_imm(RegSize::R64, last, amount)),
+            ShiftKind::LogicalRight => self.push(shr_imm(RegSize::R64, last, amount)),
+            ShiftKind::ArithmeticRight => self.push(sar_imm(RegSize::R64, last, amount)),
         }
     }
 
@@ -1169,10 +1221,11 @@ where
     #[inline(always)]
     pub fn wide_reverse_bytes(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg) {
         let (d, s) = (wide_field(d), wide_field(s));
-        if d != s && crate::cpuid::is_movbe_supported() {
+        if d != s {
             for word in 0..4 {
-                self.push_wide_scalar(MOVBE_LOAD, TMP_REG, s, word);
-                self.push_wide_scalar(&[SCALAR_STORE], TMP_REG, d, 3 - word);
+                self.push(load(LoadKind::U64, TMP_REG, Self::wide_word(s, word)));
+                self.push(bswap(RegSize::R64, TMP_REG));
+                self.push(store(Size::U64, Self::wide_word(d, 3 - word), TMP_REG));
             }
         } else {
             self.wide_operation(code_offset, WideOperationKind::WideReverseBytes, d, s, 0, 0);
@@ -1284,38 +1337,29 @@ where
 
     #[inline(always)]
     pub fn wide_shift_logical_left_imm(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg, imm: i32) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideShiftLeftImmediate,
-            wide_field(d),
-            wide_field(s),
-            0,
-            imm,
-        );
+        let (d, s) = (wide_field(d), wide_field(s));
+        match in_place_shift_amount(d, s, imm) {
+            Some(amount) => self.wide_shift_in_place(ShiftKind::LogicalLeft, d, amount),
+            None => self.wide_operation(code_offset, WideOperationKind::WideShiftLeftImmediate, d, s, 0, imm),
+        }
     }
 
     #[inline(always)]
     pub fn wide_shift_logical_right_imm(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg, imm: i32) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideShiftRightImmediate,
-            wide_field(d),
-            wide_field(s),
-            0,
-            imm,
-        );
+        let (d, s) = (wide_field(d), wide_field(s));
+        match in_place_shift_amount(d, s, imm) {
+            Some(amount) => self.wide_shift_in_place(ShiftKind::LogicalRight, d, amount),
+            None => self.wide_operation(code_offset, WideOperationKind::WideShiftRightImmediate, d, s, 0, imm),
+        }
     }
 
     #[inline(always)]
     pub fn wide_shift_arithmetic_right_imm(&mut self, code_offset: u32, d: RawWideReg, s: RawWideReg, imm: i32) {
-        self.wide_operation(
-            code_offset,
-            WideOperationKind::WideShiftRightSignedImmediate,
-            wide_field(d),
-            wide_field(s),
-            0,
-            imm,
-        );
+        let (d, s) = (wide_field(d), wide_field(s));
+        match in_place_shift_amount(d, s, imm) {
+            Some(amount) => self.wide_shift_in_place(ShiftKind::ArithmeticRight, d, amount),
+            None => self.wide_operation(code_offset, WideOperationKind::WideShiftRightSignedImmediate, d, s, 0, imm),
+        }
     }
 
     #[inline(always)]

@@ -1630,6 +1630,18 @@ pub mod inst {
             None,
             (fmt.write_fmt(core::format_args!("shr {}, 0x1", self.1.display(Size::from(self.0))))),
 
+        // https://www.felixcloutier.com/x86/shld
+        shld_imm(RegSize, RegMem, Reg, u8) =>
+            Inst::new(0xa4).op_alt().imm8(self.3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_reg(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("shld {}, {}, 0x{:x}", self.1.display_without_prefix(Size::from(self.0)), self.2.name_from(self.0), self.3))),
+
+        // https://www.felixcloutier.com/x86/shrd
+        shrd_imm(RegSize, RegMem, Reg, u8) =>
+            Inst::new(0xac).op_alt().imm8(self.3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_reg(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("shrd {}, {}, 0x{:x}", self.1.display_without_prefix(Size::from(self.0)), self.2.name_from(self.0), self.3))),
+
         // https://www.felixcloutier.com/x86/sarx:shlx:shrx
         shlx(RegSize, Reg, RegMem, Reg) =>
             Inst::new(0xf7)
@@ -2581,9 +2593,11 @@ mod tests {
         shl_cl,
         shl_imm,
         shl_imm_1,
+        shld_imm,
         shr_cl,
         shr_imm,
         shr_imm_1,
+        shrd_imm,
         store,
         sub,
         syscall,
