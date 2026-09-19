@@ -4,9 +4,10 @@
 //! they must agree bit for bit. Everything that reads or writes the register file therefore
 //! lives here, once: the interpreter calls these methods directly, and the recompiler calls
 //! them through a native helper that receives a [`WideOperation`] packed at translation
-//! time. Memory is the one thing that stays outside, because each executor has its own way
-//! of reaching guest memory; a memory operation is answered with a [`UnitStrideCopy`]
-//! describing the bytes to move.
+//! time, for the instructions it has no native code sequence of its own for. Memory is the
+//! one thing that stays outside, because each executor has its own way of reaching guest
+//! memory; a memory operation is answered with a [`UnitStrideCopy`] describing the bytes to
+//! move.
 
 use crate::cast::cast;
 use crate::program::{Reg, VecReg, WideReg, VECTOR_LENGTH_WORDS};
@@ -27,6 +28,26 @@ pub const WIDE_BYTES_PER_REGISTER: usize = WIDE_WORDS_PER_REGISTER * 8;
 
 /// How many 64-bit words the whole register file holds.
 pub const VECTOR_FILE_WORDS: usize = VecReg::ALL.len() * VECTOR_WORDS_PER_REGISTER;
+
+/// The byte offset of the upper halves of the `ymm` registers in a standard format `XSAVE`
+/// area, as the processor enumerates it.
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code)]
+fn ymm_high_state_offset() -> usize {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    static OFFSET: AtomicU32 = AtomicU32::new(0);
+    let cached = OFFSET.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached as usize;
+    }
+
+    // SAFETY: CPUID is always available on x86-64; leaf 0xd sub-leaf 2 describes the
+    // AVX state component, and reads as zero where it does not exist.
+    let offset = unsafe { core::arch::x86_64::__cpuid_count(0xd, 2) }.ebx;
+    OFFSET.store(offset, Ordering::Relaxed);
+    offset as usize
+}
 
 /// The value an element holds once truncated to its width.
 pub const fn element_mask(bits: u32) -> u64 {
@@ -55,13 +76,35 @@ const fn truncate_i128(value: i128) -> u64 {
     value as u64
 }
 
+/// How many 32-byte constants recompiled code reads from the VM context.
+pub const WIDE_CONSTANT_COUNT: usize = 2;
+
+/// The shuffle control that reverses the bytes within each 128-bit lane; swapping the two
+/// lanes afterwards reverses a whole 256-bit value.
+pub const WIDE_CONSTANT_BYTE_REVERSE: usize = 0;
+
+/// Every bit of the upper three words set, and none of the lowest.
+pub const WIDE_CONSTANT_UPPER_WORDS_ONES: usize = 1;
+
+/// The constants recompiled code reads from the VM context, indexed by the `WIDE_CONSTANT_*`
+/// values, each one a 256-bit vector as four little-endian words.
+pub const WIDE_CONSTANTS: [[u64; 4]; WIDE_CONSTANT_COUNT] = [
+    [
+        0x0809_0a0b_0c0d_0e0f,
+        0x0001_0203_0405_0607,
+        0x0809_0a0b_0c0d_0e0f,
+        0x0001_0203_0405_0607,
+    ],
+    [0, u64::MAX, u64::MAX, u64::MAX],
+];
+
 /// The vector register file, its configuration, and every operation on them.
 ///
 /// The layout is one flat array of words: a vector register is two of them, and a wide
 /// register is the four words of the vector register pair it names, so the two files are
 /// one. The layout is fixed so that the recompiler can address the words from generated
-/// code, and it is 16-byte aligned because the recompiler reaches the halves of a wide
-/// value with SSE instructions whose memory operands fault unless they are.
+/// code: wide register `n` is the 32 bytes at offset `32 * n`, which is where the
+/// recompiler saves and restores its `ymm<n>`.
 #[repr(C, align(16))]
 pub struct VectorState {
     words: [u64; VECTOR_FILE_WORDS],
@@ -121,6 +164,60 @@ impl VectorState {
         self.words[base + 1] = value.0[1];
         self.words[base + 2] = value.0[2];
         self.words[base + 3] = value.0[3];
+    }
+
+    /// Loads the wide registers from the vector registers a Linux signal frame saved.
+    ///
+    /// The recompiler keeps wide register `n` in `ymm<n>` while the guest runs, so when a
+    /// signal interrupts the guest the register file exists only in the frame the kernel
+    /// built: the `fpstate` area `sigcontext` points at, in the layout of `FXSAVE` followed
+    /// by the standard `XSAVE` header and extended state. The kernel writes the frame with
+    /// a plain `XSAVE`, so `XSTATE_BV` alone says which components are live: a clear bit
+    /// means the component is in its initial, all-zero state.
+    ///
+    /// # Safety
+    ///
+    /// `fpstate` must point at the FPU state area of a signal frame the kernel delivered on
+    /// x86-64, which is at least the 512 bytes of the `FXSAVE` image, and, when the software
+    /// reserved bytes carry the `FP_XSTATE_MAGIC1` marker, the `XSAVE` header and the
+    /// extended state after it.
+    #[cfg(target_arch = "x86_64")]
+    #[allow(unsafe_code)]
+    pub unsafe fn load_from_signal_frame(&mut self, fpstate: *const u8) {
+        const FXSAVE_XMM_OFFSET: usize = 160;
+        const FXSAVE_SW_RESERVED_OFFSET: usize = 464;
+        const SW_RESERVED_XSTATE_SIZE_OFFSET: usize = FXSAVE_SW_RESERVED_OFFSET + 16;
+        const XSAVE_HEADER_OFFSET: usize = 512;
+        const FP_XSTATE_MAGIC1: u32 = 0x4650_5853;
+        const XSTATE_SSE: u64 = 1 << 1;
+        const XSTATE_YMM_HI: u64 = 1 << 2;
+
+        let read_u32 = |offset: usize| -> u32 {
+            // SAFETY: Every offset read through here lies inside the FXSAVE image, or inside
+            // the extended area the marker in that image promises.
+            u32::from_le_bytes(unsafe { fpstate.add(offset).cast::<[u8; 4]>().read_unaligned() })
+        };
+        let read_u64 = |offset: usize| -> u64 {
+            // SAFETY: As above.
+            u64::from_le_bytes(unsafe { fpstate.add(offset).cast::<[u8; 8]>().read_unaligned() })
+        };
+
+        let (xstate_bv, xstate_size) = if read_u32(FXSAVE_SW_RESERVED_OFFSET) == FP_XSTATE_MAGIC1 {
+            (read_u64(XSAVE_HEADER_OFFSET), read_u32(SW_RESERVED_XSTATE_SIZE_OFFSET) as usize)
+        } else {
+            (XSTATE_SSE, XSAVE_HEADER_OFFSET)
+        };
+
+        let ymm_high_offset = ymm_high_state_offset();
+        let ymm_high_present = xstate_bv & XSTATE_YMM_HI != 0 && ymm_high_offset + 16 * 16 <= xstate_size;
+        let xmm_present = xstate_bv & XSTATE_SSE != 0;
+
+        for (index, register) in WideReg::ALL.iter().enumerate() {
+            let read_pair = |offset: usize| -> [u64; 2] { [read_u64(offset + index * 16), read_u64(offset + index * 16 + 8)] };
+            let low = if xmm_present { read_pair(FXSAVE_XMM_OFFSET) } else { [0, 0] };
+            let high = if ymm_high_present { read_pair(ymm_high_offset) } else { [0, 0] };
+            self.set_wide_reg(*register, U256([low[0], low[1], high[0], high[1]]));
+        }
     }
 
     pub fn vector_reg(&self, reg: VecReg) -> [u64; VECTOR_WORDS_PER_REGISTER] {

@@ -638,10 +638,10 @@ macro_rules! emit_instruction {
     }};
 }
 
-/// Like [`emit_instruction!`], but also hands the code offset to the code generator: every
-/// wide and vector instruction calls into the native helper, and the helper's memory copy
-/// can fault at a native address that maps back to no guest instruction, so the call site
-/// records the guest address ahead of the call.
+/// Like [`emit_instruction!`], but also hands the code offset to the code generator: a wide
+/// or vector instruction without a template of its own calls into the native helper, and
+/// the helper's memory copy can fault at a native address that maps back to no guest
+/// instruction, so such a call site records the guest address ahead of the call.
 macro_rules! emit_wide_instruction {
     ($self:ident, $code_offset:ident, $args_length:ident, $name:ident($($arg:expr),*)) => {{
         $self.before_instruction($code_offset);

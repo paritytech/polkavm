@@ -6022,6 +6022,9 @@ run_wide_tests! {
     vector_loads_and_stores_reach_one_register
     vector_compares_produce_a_mask_the_population_count_reads
     every_wide_and_vector_instruction_matches_the_interpreter
+    wide_templates_agree_with_the_interpreter_under_register_aliasing
+    wide_shift_imm_agrees_with_the_interpreter_at_every_word_boundary
+    wide_registers_survive_a_host_call_and_running_out_of_gas
 }
 
 fn run_wide_program(config: &Config, operands: &[polkavm_common::wide::U256], body: &[polkavm_common::program::Instruction]) -> [u8; 32] {
@@ -6066,6 +6069,393 @@ fn run_wide_program(config: &Config, operands: &[polkavm_common::wide::U256], bo
     let mut result = [0; 32];
     instance.read_memory_into(result_address, &mut result[..]).unwrap();
     result
+}
+
+/// Runs `body` on the given configuration and on the interpreter, and compares what the
+/// two stored.
+#[cfg(feature = "std")]
+fn assert_wide_program_matches_the_interpreter(
+    config: &Config,
+    operands: &[polkavm_common::wide::U256],
+    body: &[polkavm_common::program::Instruction],
+    context: &str,
+) {
+    use polkavm_common::wide::U256;
+
+    let mut reference = Config::default();
+    reference.set_backend(Some(BackendKind::Interpreter));
+    let expected = U256::from_le_bytes(run_wide_program(&reference, operands, body));
+    let actual = U256::from_le_bytes(run_wide_program(config, operands, body));
+    assert_eq!(actual, expected, "{context}");
+}
+
+/// Every wide instruction with a template of its own, under every way its operands can
+/// coincide, and on the registers at the top of the file where the template has to borrow
+/// a register below them. Each result is folded into `W3`, which is what the program stores.
+#[cfg(feature = "std")]
+fn wide_templates_agree_with_the_interpreter_under_register_aliasing(config: Config) {
+    use polkavm_common::program::Reg::*;
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::program::{Instruction, Reg, WideReg};
+    use polkavm_common::wide::U256;
+
+    let operand_sets = [
+        [
+            U256([0x0123_4567_89ab_cdef, 0xfeed_face_0000_0007, 3, 0x8000_0000_0000_0001]),
+            U256([29, 0, 0xffff_ffff_ffff_fffb, 1 << 62]),
+            U256::ONE.shift_left(255).wrapping_add(U256::from_u64(9)),
+        ],
+        [U256([u64::MAX; 4]), U256::ONE, U256([0, u64::MAX, 0, u64::MAX])],
+        [U256::ZERO, U256([0, 0, 0, 1 << 63]), U256([0x8000_0000_0000_0000, 0, 0, 0])],
+    ];
+
+    // (destination, first source, second source): the destination coinciding with either
+    // source, both sources coinciding, all three coinciding, and the same shapes at the top
+    // of the file.
+    let triples = [
+        (W4, W5, W6),
+        (W4, W4, W6),
+        (W4, W5, W4),
+        (W4, W5, W5),
+        (W4, W4, W4),
+        (W15, W14, W13),
+        (W15, W15, W14),
+        (W15, W14, W15),
+        (W14, W15, W15),
+        (W15, W15, W15),
+        (W12, W15, W14),
+        (W13, W12, W15),
+    ];
+
+    let wide_binary: [fn(WideReg, WideReg, WideReg) -> Instruction; 12] = [
+        asm::wide_add,
+        asm::wide_sub,
+        asm::wide_and,
+        asm::wide_or,
+        asm::wide_xor,
+        asm::wide_mul,
+        asm::wide_div_unsigned,
+        asm::wide_div_signed,
+        asm::wide_rem_unsigned,
+        asm::wide_rem_signed,
+        asm::wide_exp,
+        asm::wide_sign_extend_byte,
+    ];
+
+    let compares: [fn(Reg, WideReg, WideReg) -> Instruction; 4] = [
+        asm::wide_set_equal,
+        asm::wide_set_not_equal,
+        asm::wide_set_less_than_unsigned,
+        asm::wide_set_less_than_signed,
+    ];
+
+    let unary: [fn(WideReg, WideReg) -> Instruction; 2] = [asm::wide_move, asm::wide_reverse_bytes];
+
+    let to_register: [fn(WideReg, Reg) -> Instruction; 4] = [
+        asm::wide_to_reg,
+        asm::wide_count_set_bits,
+        asm::wide_count_leading_zero_bits,
+        asm::wide_count_trailing_zero_bits,
+    ];
+
+    for (set_index, operands) in operand_sets.iter().enumerate() {
+        let mut body: Vec<Instruction> = Vec::new();
+        let fold = |body: &mut Vec<Instruction>, result: WideReg| {
+            body.push(asm::wide_xor(W3, W3, result));
+            body.push(asm::wide_reverse_bytes(W3, W3));
+        };
+        let fold_register = |body: &mut Vec<Instruction>, result: Reg| {
+            body.push(asm::wide_from_reg_unsigned(W7, result));
+            fold(body, W7);
+        };
+
+        for (d, s1, s2) in triples {
+            for operation in wide_binary {
+                body.push(asm::wide_move(s1, W0));
+                body.push(asm::wide_move(s2, W1));
+                body.push(operation(d, s1, s2));
+                fold(&mut body, d);
+            }
+
+            for operation in compares {
+                for result in [A1, A2, A3, S0, T2] {
+                    body.push(asm::wide_move(s1, W0));
+                    body.push(asm::wide_move(s2, W1));
+                    body.push(operation(result, s1, s2));
+                    fold_register(&mut body, result);
+                }
+            }
+
+            body.push(asm::wide_move(s1, W0));
+            body.push(asm::wide_move(s2, W1));
+            body.push(asm::wide_add_mod(d, s1, s2, W2));
+            fold(&mut body, d);
+            body.push(asm::wide_move(s1, W0));
+            body.push(asm::wide_move(s2, W1));
+            body.push(asm::wide_mul_mod(d, s1, s2, W2));
+            fold(&mut body, d);
+            body.push(asm::wide_move(s1, W1));
+            body.push(asm::wide_move(s2, W2));
+            body.push(asm::wide_mul_mod(d, s1, s1, s2));
+            fold(&mut body, d);
+        }
+
+        for (d, s) in [(W4, W5), (W4, W4), (W15, W14), (W15, W15), (W14, W15), (W12, W15)] {
+            for operation in unary {
+                for source in [W0, W1, W2] {
+                    body.push(asm::wide_move(s, source));
+                    body.push(operation(d, s));
+                    fold(&mut body, d);
+                }
+            }
+
+            for operation in to_register {
+                for source in [W0, W1, W2] {
+                    for result in [A1, A3, T2] {
+                        body.push(asm::wide_move(s, source));
+                        body.push(operation(s, result));
+                        fold_register(&mut body, result);
+                    }
+                }
+            }
+
+            for value in [0_u64, 1, u64::MAX, 1 << 63, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff_0000_0000] {
+                for source in [A1, A3, T2] {
+                    body.push(asm::load_imm64(source, value));
+                    body.push(asm::wide_from_reg_unsigned(d, source));
+                    fold(&mut body, d);
+                    body.push(asm::wide_from_reg_signed(d, source));
+                    fold(&mut body, d);
+                }
+            }
+
+            for value in [0, 1, -1, 0x7fff_ffff, i32::MIN, 0x1234_5678, -0x1234_5678] {
+                body.push(asm::wide_load_imm_unsigned(d, value));
+                fold(&mut body, d);
+                body.push(asm::wide_load_imm_signed(d, value));
+                fold(&mut body, d);
+            }
+
+            // Stores through a base with and without an offset, then loads back the same way,
+            // including through a base past the slot with a negative offset.
+            body.push(asm::add_imm_64(A1, A0, 200));
+            for source in [W0, W1, W2] {
+                body.push(asm::wide_move(s, source));
+                body.push(asm::wide_store(s, A0, 128));
+                body.push(asm::wide_load(d, A1, -72));
+                fold(&mut body, d);
+                body.push(asm::wide_store(s, A1, -40));
+                body.push(asm::wide_load(d, A0, 160));
+                fold(&mut body, d);
+                body.push(asm::add_imm_64(A2, A0, 128));
+                body.push(asm::wide_store(s, A2, 0));
+                body.push(asm::wide_load(d, A2, 0));
+                fold(&mut body, d);
+            }
+        }
+
+        // Shifts by a register, which go through the native helper, on top of the file.
+        for amount in [0, 1, 63, 64, 100, 255, 256, 1 << 20] {
+            body.push(asm::load_imm(A2, amount));
+            for (d, s) in [(W4, W5), (W15, W15), (W14, W15)] {
+                for source in [W0, W1, W2] {
+                    body.push(asm::wide_move(s, source));
+                    body.push(asm::wide_shift_logical_left(d, s, A2));
+                    fold(&mut body, d);
+                    body.push(asm::wide_move(s, source));
+                    body.push(asm::wide_shift_logical_right(d, s, A2));
+                    fold(&mut body, d);
+                    body.push(asm::wide_move(s, source));
+                    body.push(asm::wide_shift_arithmetic_right(d, s, A2));
+                    fold(&mut body, d);
+                }
+            }
+        }
+
+        body.push(asm::wide_store(W3, A0, 96));
+        assert_wide_program_matches_the_interpreter(&config, operands, &body, &format!("operand set {set_index}"));
+    }
+}
+
+/// The three constant shifts at every word boundary and on both sides of it, for every way
+/// the destination and the source can coincide, including at the top of the file.
+#[cfg(feature = "std")]
+fn wide_shift_imm_agrees_with_the_interpreter_at_every_word_boundary(config: Config) {
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::program::{Instruction, WideReg};
+    use polkavm_common::wide::U256;
+
+    let operands = [
+        U256([0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, 7, 1 << 63]),
+        U256([
+            0x8000_0000_0000_0001,
+            0x7fff_ffff_ffff_ffff,
+            0xffff_ffff_0000_0000,
+            0x0000_0000_ffff_ffff,
+        ]),
+        U256([u64::MAX, 0, u64::MAX, 0]),
+    ];
+
+    let amounts = [
+        1,
+        2,
+        7,
+        31,
+        32,
+        33,
+        63,
+        64,
+        65,
+        100,
+        127,
+        128,
+        129,
+        150,
+        191,
+        192,
+        193,
+        254,
+        255,
+        256,
+        257,
+        1000,
+        i32::MAX,
+        -1,
+        -64,
+        i32::MIN,
+    ];
+    let shifts: [fn(WideReg, WideReg, i32) -> Instruction; 3] = [
+        asm::wide_shift_logical_left_imm,
+        asm::wide_shift_logical_right_imm,
+        asm::wide_shift_arithmetic_right_imm,
+    ];
+
+    let mut body: Vec<Instruction> = Vec::new();
+    for amount in amounts {
+        for shift in shifts {
+            for (d, s) in [(W4, W5), (W4, W4), (W15, W14), (W15, W15), (W14, W15), (W12, W13)] {
+                for source in [W0, W1, W2] {
+                    body.push(asm::wide_move(s, source));
+                    body.push(shift(d, s, amount));
+                    body.push(asm::wide_xor(W3, W3, d));
+                    body.push(asm::wide_reverse_bytes(W3, W3));
+                }
+            }
+        }
+    }
+    body.push(asm::wide_store(W3, A0, 96));
+
+    assert_wide_program_matches_the_interpreter(&config, &operands, &body, "constant shifts");
+}
+
+/// The wide registers are held in the host's vector registers while the guest runs, and
+/// must be exactly as the guest left them after every way control can leave and re-enter:
+/// a host call, running out of gas at a block boundary (which arrives as a signal), and an
+/// instruction that goes through the native helper.
+#[cfg(feature = "std")]
+fn wide_registers_survive_a_host_call_and_running_out_of_gas(config: Config) {
+    use polkavm_common::program::Reg::*;
+    use polkavm_common::program::WideReg::*;
+    use polkavm_common::wide::U256;
+
+    const DATA_SIZE: u32 = 0x4000;
+    const RESULT_OFFSET: i32 = 96;
+
+    let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(DATA_SIZE).build().unwrap();
+    let base = memory_map.rw_data_address();
+    let operands = [
+        U256([0x0123_4567_89ab_cdef, 0xfeed_face_0000_0007, 3, 0x8000_0000_0000_0001]),
+        U256([29, 0, 0xffff_ffff_ffff_fffb, 1 << 62]),
+        U256::ONE.shift_left(255).wrapping_add(U256::from_u64(9)),
+    ];
+
+    let mut code = vec![asm::load_imm(A0, cast(base).bitwise_as_i32())];
+    for (index, register) in [W0, W1, W2].iter().enumerate() {
+        code.push(asm::wide_load(*register, A0, cast(index as u32 * 32).bitwise_as_i32()));
+    }
+    code.extend_from_slice(&[
+        asm::wide_add(W4, W0, W1),
+        asm::wide_move(W15, W2),
+        asm::wide_sub(W8, W2, W0),
+        asm::ecalli(0),
+        asm::wide_xor(W4, W4, W15),
+        asm::fallthrough(),
+        asm::wide_add(W4, W4, W8),
+        asm::wide_mul(W8, W8, W15),
+        asm::fallthrough(),
+        asm::wide_xor(W4, W4, W8),
+        asm::wide_store(W4, A0, RESULT_OFFSET),
+        asm::ret(),
+    ]);
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::ReviveV1);
+    builder.set_rw_data_size(DATA_SIZE);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&code, &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+    let run = |config: &Config, gas: Option<i64>| -> U256 {
+        let engine = Engine::new(config).unwrap();
+        let mut module_config = ModuleConfig::default();
+        if gas.is_some() {
+            module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+        }
+        let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+        let mut instance = module.instantiate().unwrap();
+
+        for (index, operand) in operands.iter().enumerate() {
+            instance.write_memory(base + index as u32 * 32, &operand.to_le_bytes()).unwrap();
+        }
+        let result_address = base + cast(RESULT_OFFSET).bitwise_as_u32();
+        instance.write_memory(result_address, &U256::ZERO.to_le_bytes()).unwrap();
+
+        let entry_point = module.exports().find(|export| export == "main").unwrap().program_counter();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(entry_point);
+        if let Some(gas) = gas {
+            instance.set_gas(gas);
+        }
+
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Ecalli(0));
+
+        if gas.is_some() {
+            let mut resumed = 0;
+            loop {
+                match instance.run().unwrap() {
+                    InterruptKind::NotEnoughGas => {
+                        resumed += 1;
+                        instance.set_gas(1_000_000);
+                    }
+                    InterruptKind::Finished => break,
+                    interrupt => panic!("unexpected interrupt: {interrupt:?}"),
+                }
+            }
+            assert_eq!(resumed, 1, "the second block was expected to run out of gas exactly once");
+        } else {
+            match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+        }
+
+        let mut result = [0; 32];
+        instance.read_memory_into(result_address, &mut result[..]).unwrap();
+        U256::from_le_bytes(result)
+    };
+
+    let mut reference = Config::default();
+    reference.set_backend(Some(BackendKind::Interpreter));
+    let expected = run(&reference, None);
+
+    assert_eq!(run(&config, None), expected, "across a host call");
+
+    // Enough gas for the first block and the host call, but not for the second block.
+    let first_block_gas = {
+        let engine = Engine::new(&config).unwrap();
+        let mut module_config = ModuleConfig::default();
+        module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+        let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+        let entry_point = module.exports().find(|export| export == "main").unwrap().program_counter();
+        module.calculate_gas_cost_for(entry_point).unwrap()
+    };
+    assert_eq!(run(&config, Some(first_block_gas)), expected, "across running out of gas");
 }
 
 /// Runs `body` and returns the 256-bit value it stored.

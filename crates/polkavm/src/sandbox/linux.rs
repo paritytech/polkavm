@@ -2612,6 +2612,7 @@ impl super::Sandbox for Sandbox {
             wide_copy_source: get_field_offset!(VmCtx::new(), |base| base.wide_copy_source.as_ptr()),
             wide_copy_destination: get_field_offset!(VmCtx::new(), |base| base.wide_copy_destination.as_ptr()),
             wide_copy_length: get_field_offset!(VmCtx::new(), |base| base.wide_copy_length.as_ptr()),
+            wide_constants: get_field_offset!(VmCtx::new(), |base| &base.wide_constants),
         }
     }
 }

@@ -415,6 +415,12 @@ unsafe extern "C" fn signal_handler(signal: u32, info: &linux_raw::siginfo_t, co
         .tmp_reg
         .store(get_reg(polkavm_common::regmap::TMP_REG, &context.uc_mcontext), Ordering::Relaxed);
 
+    // The wide register file lives in the vector registers while the guest runs, and the
+    // signal leaves it only in the frame the kernel built.
+    if !context.uc_mcontext.fpstate.is_null() {
+        (*VMCTX.vector_state.get()).load_from_signal_frame(context.uc_mcontext.fpstate.cast::<u8>().cast_const());
+    }
+
     VMCTX.rip.store(rip, Ordering::Relaxed);
 
     signal_host_and_longjmp(futex_value);
