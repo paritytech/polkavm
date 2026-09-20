@@ -347,50 +347,37 @@ impl ProgramBlobBuilder {
         // Adjust offsets to other instructions until we reach a steady state.
         let mut remaining_iterations = 1024; // Limit the iteration count, just in case.
         loop {
+            // Resolve every relative offset against the same layout. Updating positions
+            // here would mix old forward targets with new sources; even a self-jump
+            // could temporarily acquire a nonzero offset when an earlier instruction grows.
+            for nth_instruction in 0..instructions.len() {
+                let Some(target_nth_instruction) = instructions[nth_instruction].target_nth_instruction else {
+                    continue;
+                };
+                let new_target = instructions[target_nth_instruction].position;
+                let entry = &mut instructions[nth_instruction];
+                if mutate(entry.instruction.target_mut().unwrap(), new_target) {
+                    entry.bytes = InstructionBuffer::new(self.isa, entry.position, entry.minimum_size, entry.instruction);
+                }
+            }
+
             let mut any_modified = false;
             position = 0;
-            for nth_instruction in 0..instructions.len() {
-                let has_target = instructions[nth_instruction].target_nth_instruction.is_some();
-                let mut target_modified = false;
-                if let Some(target_nth_instruction) = instructions[nth_instruction].target_nth_instruction {
-                    let new_target = instructions[target_nth_instruction].position;
-                    let old_target = instructions[nth_instruction].instruction.target_mut().unwrap();
-                    target_modified = mutate(old_target, new_target);
+            for entry in &mut instructions {
+                let ends_block = entry.instruction.opcode().starts_new_basic_block();
+                let new_position = padded_position(position, entry.bytes.len() as u32, ends_block);
+                if new_position != entry.position {
+                    // Keep the stored instruction consistent with its unchanged bytes
+                    // at the new position. The next pass only needs to re-serialize it
+                    // if the target moved by a different amount than the source.
+                    if let Some(target) = entry.instruction.target_mut() {
+                        *target = target.wrapping_add(new_position.wrapping_sub(entry.position));
+                    }
+                    entry.position = new_position;
+                    any_modified = true;
                 }
 
-                // Only instructions with a target have position-dependent bytes, so only
-                // they need re-serialization when their position changes.
-                if target_modified || (has_target && instructions[nth_instruction].position != position) {
-                    instructions[nth_instruction].bytes = InstructionBuffer::new(
-                        self.isa,
-                        position,
-                        instructions[nth_instruction].minimum_size,
-                        instructions[nth_instruction].instruction,
-                    );
-                }
-
-                let ends_block = instructions[nth_instruction].instruction.opcode().starts_new_basic_block();
-                let new_position = padded_position(position, instructions[nth_instruction].bytes.len() as u32, ends_block);
-                if new_position != position && has_target {
-                    instructions[nth_instruction].bytes = InstructionBuffer::new(
-                        self.isa,
-                        new_position,
-                        instructions[nth_instruction].minimum_size,
-                        instructions[nth_instruction].instruction,
-                    );
-
-                    debug_assert_eq!(
-                        padded_position(new_position, instructions[nth_instruction].bytes.len() as u32, ends_block),
-                        new_position
-                    );
-                }
-
-                let position_modified = mutate(&mut instructions[nth_instruction].position, new_position);
-                position = new_position
-                    .checked_add(instructions[nth_instruction].bytes.len() as u32)
-                    .expect("too many instructions");
-
-                any_modified |= target_modified | position_modified;
+                position = new_position.checked_add(entry.bytes.len() as u32).expect("too many instructions");
             }
 
             if !any_modified {
@@ -868,6 +855,64 @@ mod tests {
         }
 
         assert_eq!(original.next(), None);
+    }
+
+    #[test]
+    fn self_jumps_after_growing_forward_jump_reach_a_steady_state() {
+        use crate::program::{asm, Reg};
+
+        let mut code = alloc::vec![asm::jump(2)];
+        // In the legacy format this occupies 126 bytes, making the first jump's
+        // offset grow from one immediate byte to two during layout.
+        code.extend(core::iter::repeat(asm::load_imm(Reg::A0, 0x12345678)).take(20));
+        code.push(asm::load_imm(Reg::A0, 0x123456));
+        code.push(asm::fallthrough());
+        let first_self_jump = code.len();
+        // Mixing layout passes gives these self-jumps spurious nonzero offsets.
+        // Removing those offsets one at a time used to exhaust the iteration limit.
+        for block in 2..1025 {
+            code.push(asm::jump(block));
+        }
+        code.push(asm::branch_eq_imm(Reg::A0, 0x1234, 0));
+
+        for isa in [
+            InstructionSetKind::ReviveV1,
+            InstructionSetKind::JamV1,
+            InstructionSetKind::Latest32,
+            InstructionSetKind::Latest64,
+        ] {
+            let mut builder = ProgramBlobBuilder::new(isa);
+            builder.set_code(&code, &[2, 0]);
+            builder.add_export_by_basic_block(2, b"by_block");
+            builder.add_export_by_instruction(first_self_jump as u32, b"by_instruction");
+            let mut offsets = alloc::vec::Vec::new();
+            let bytes = builder
+                .to_vec_with_instruction_offsets(|_, instruction_offsets| offsets.extend_from_slice(instruction_offsets))
+                .unwrap();
+            let blob = ProgramBlob::parse(bytes.into()).unwrap();
+            let first_self_jump_offset = offsets[first_self_jump].0;
+
+            for (nth, mut expected) in code.iter().copied().enumerate() {
+                let offset = offsets[nth].0;
+                if let Some(target) = expected.target_mut() {
+                    *target = if nth == 0 {
+                        first_self_jump_offset.0
+                    } else if nth + 1 == code.len() {
+                        0
+                    } else {
+                        offset.0
+                    };
+                }
+                let parsed = blob.instructions_bounded_at(offset).next().unwrap();
+                assert_eq!(parsed.offset, offset);
+                assert_eq!(parsed.kind, expected, "{isa:?}, instruction #{nth}");
+            }
+
+            assert_eq!(blob.jump_table().get_by_index(0), Some(first_self_jump_offset));
+            assert_eq!(blob.jump_table().get_by_index(1), Some(offsets[0].0));
+            let exports: alloc::vec::Vec<_> = blob.exports().map(|export| export.program_counter()).collect();
+            assert_eq!(exports, [first_self_jump_offset, first_self_jump_offset]);
+        }
     }
 
     #[test]
