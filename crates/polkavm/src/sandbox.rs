@@ -61,6 +61,48 @@ pub(crate) fn get_native_page_size() -> usize {
     page_size
 }
 
+fn native_code_mapping_size(length: usize) -> Result<usize, &'static str> {
+    let size =
+        polkavm_common::utils::align_to_next_page_usize(get_native_page_size(), length).ok_or("native code mapping size overflow")?;
+    if size > polkavm_common::zygote::VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE as usize {
+        return Err("native code exceeds the sandbox code size limit");
+    }
+    Ok(size)
+}
+
+fn jump_table_mapping_size(count: usize) -> Result<usize, &'static str> {
+    let page_size = get_native_page_size();
+    let size = count
+        .checked_mul(core::mem::size_of::<usize>())
+        .and_then(|size| polkavm_common::utils::align_to_next_page_usize(page_size, size))
+        .ok_or("native jump table mapping size overflow")?;
+    let maximum =
+        polkavm_common::utils::align_to_next_page_usize(page_size, polkavm_common::zygote::VM_SANDBOX_MAXIMUM_JUMP_TABLE_SIZE as usize)
+            .ok_or("native jump table mapping size overflow")?;
+    if size > maximum {
+        return Err("native jump table exceeds the sandbox size limit");
+    }
+    Ok(size)
+}
+
+#[test]
+fn native_mapping_size_boundaries() {
+    use polkavm_common::zygote::{VM_SANDBOX_MAXIMUM_JUMP_TABLE_SIZE, VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE};
+    init_native_page_size();
+    let page_size = get_native_page_size();
+    let code_limit = VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE as usize / page_size * page_size;
+    assert_eq!(native_code_mapping_size(code_limit), Ok(code_limit));
+    assert!(native_code_mapping_size(code_limit + 1).is_err());
+    assert!(native_code_mapping_size(usize::MAX).is_err());
+
+    let count = VM_SANDBOX_MAXIMUM_JUMP_TABLE_SIZE as usize / core::mem::size_of::<usize>();
+    let jump_table_size = jump_table_mapping_size(count).unwrap();
+    let padded_count = jump_table_size / core::mem::size_of::<usize>();
+    assert_eq!(jump_table_mapping_size(padded_count), Ok(jump_table_size));
+    assert!(jump_table_mapping_size(padded_count + 1).is_err());
+    assert!(jump_table_mapping_size(usize::MAX).is_err());
+}
+
 pub trait SandboxConfig: Default {
     fn enable_logger(&mut self, value: bool);
     fn enable_sandboxing(&mut self, value: bool);

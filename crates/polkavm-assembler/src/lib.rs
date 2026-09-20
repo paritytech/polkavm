@@ -14,5 +14,5 @@ mod misc;
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-pub use crate::assembler::{Assembler, NonZero, ReservedAssembler, U0, U1, U2, U3, U4, U5, U6};
+pub use crate::assembler::{Assembler, AssemblerError, NonZero, ReservedAssembler, U0, U1, U2, U3, U4, U5, U6};
 pub use crate::misc::{Instruction, InstructionT, Label};

@@ -443,11 +443,14 @@ static_assert!(VM_ADDR_JUMP_TABLE_RETURN_TO_HOST < VM_ADDR_JUMP_TABLE + VM_SANDB
 static_assert!(VM_ADDR_JUMP_TABLE.count_ones() == 1);
 static_assert!((1 << VM_ADDR_JUMP_TABLE.trailing_zeros()) == VM_ADDR_JUMP_TABLE);
 
-// On x86_64 only: verify the native code size fits the Linux sandbox layout.
-// On aarch64, VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH is larger (fixed 4-byte instructions),
-// and the generic sandbox doesn't use this fixed address layout.
-#[cfg(target_arch = "x86_64")]
-static_assert!(VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE >= crate::abi::VM_MAXIMUM_CODE_SIZE * VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH);
+// Guest code admission and native expansion are independent limits. The compiler
+// bounds every emission (including trampolines and padding) before storing u32 offsets.
+static_assert!(VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE < u32::MAX);
+static_assert!(VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH < VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE);
+static_assert!(crate::abi::VM_MAXIMUM_CODE_SIZE < u32::MAX - 2);
+// Keep native code within the existing layout and the range unmapped by recycle().
+static_assert!(VM_ADDR_NATIVE_CODE + (VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE as u64) < 0x200000000);
+static_assert!(VM_ADDR_NATIVE_CODE + (VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE as u64) < VM_ADDR_VMCTX);
 static_assert!(VM_ADDR_NATIVE_CODE > 0xffffffff);
 static_assert!(VM_ADDR_VMCTX > 0xffffffff);
 static_assert!(VM_ADDR_NATIVE_STACK_LOW > 0xffffffff);

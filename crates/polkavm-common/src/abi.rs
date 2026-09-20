@@ -27,7 +27,7 @@ pub const VM_ADDR_RETURN_TO_HOST: u32 = 0xffff0000;
 static_assert!(VM_ADDR_RETURN_TO_HOST & 0b11 == 0);
 
 /// The maximum byte size of the code blob.
-pub const VM_MAXIMUM_CODE_SIZE: u32 = 32 * 1024 * 1024;
+pub const VM_MAXIMUM_CODE_SIZE: u32 = 64 * 1024 * 1024;
 
 /// The maximum number of entries in the jump table.
 pub const VM_MAXIMUM_JUMP_TABLE_ENTRIES: u32 = 16 * 1024 * 1024;

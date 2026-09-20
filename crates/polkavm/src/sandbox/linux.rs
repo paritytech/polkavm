@@ -1502,7 +1502,8 @@ impl super::Sandbox for Sandbox {
     }
 
     fn allocate_jump_table(global: &Self::GlobalState, count: usize) -> Result<Self::JumpTable, Self::Error> {
-        let Some(alloc) = global.shared_memory.alloc(count * core::mem::size_of::<usize>()) else {
+        let size = super::jump_table_mapping_size(count).map_err(Error::from_str)?;
+        let Some(alloc) = global.shared_memory.alloc(size) else {
             return Err(Error::from_str("failed to allocate the jump table: out of shared memory"));
         };
 
@@ -1515,6 +1516,8 @@ impl super::Sandbox for Sandbox {
 
     fn prepare_program(global: &Self::GlobalState, init: SandboxInit<Self>, (): Self::AddressSpace) -> Result<Self::Program, Self::Error> {
         let cfg = init.guest_init.memory_map()?;
+        let code_size = super::native_code_mapping_size(init.code.len()).map_err(Error::from_str)?;
+        super::jump_table_mapping_size(init.jump_table.as_ref().len()).map_err(Error::from_str)?;
 
         let Some(shm_ro_data) = global.shared_memory.alloc(init.guest_init.ro_data.len()) else {
             return Err(Error::from_str(
@@ -1528,7 +1531,7 @@ impl super::Sandbox for Sandbox {
             ));
         };
 
-        let Some(shm_code) = global.shared_memory.alloc(init.code.len()) else {
+        let Some(shm_code) = global.shared_memory.alloc(code_size) else {
             return Err(Error::from_str(
                 "failed to prepare the program for the sandbox: out of shared memory",
             ));

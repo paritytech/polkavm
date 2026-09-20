@@ -1018,6 +1018,13 @@ fn memory_map() -> &'static [VmMap] {
         let shm_memory_map_count = VMCTX.shm_memory_map_count.load(Ordering::Relaxed);
         if shm_memory_map_count > 0 {
             let shm_memory_map_offset = VMCTX.shm_memory_map_offset.load(Ordering::Relaxed);
+            let valid = shm_memory_map_count
+                .checked_mul(core::mem::size_of::<VmMap>() as u64)
+                .and_then(|length| shm_memory_map_offset.checked_add(length))
+                .map_or(false, |end| end <= VM_SHARED_MEMORY_SIZE);
+            if !valid || shm_memory_map_offset % core::mem::align_of::<VmMap>() as u64 != 0 {
+                abort_with_message("invalid shared memory map range");
+            }
             core::slice::from_raw_parts(
                 (VM_ADDR_SHARED_MEMORY as *const u8)
                     .add(shm_memory_map_offset as usize)
@@ -1030,6 +1037,17 @@ fn memory_map() -> &'static [VmMap] {
     }
 }
 
+fn validate_shm_mapping(offset: u64, length: u64, maximum_length: u64) {
+    let page_size = NATIVE_PAGE_SIZE.load(Ordering::Relaxed) as u64;
+    if page_size == 0
+        || length > maximum_length
+        || length % page_size != 0
+        || offset % page_size != 0
+        || !offset.checked_add(length).map_or(false, |end| end <= VM_SHARED_MEMORY_SIZE)
+    {
+        abort_with_message("invalid shared memory mapping range");
+    }
+}
 #[cold]
 #[inline(never)]
 pub unsafe extern "C" fn ext_load_program() -> ! {
@@ -1045,6 +1063,12 @@ pub unsafe extern "C" fn ext_load_program() -> ! {
     let memory_map = memory_map();
 
     for map in memory_map {
+        if !map.address.checked_add(map.length).map_or(false, |end| end <= VM_ADDR_NATIVE_CODE) {
+            abort_with_message("invalid guest memory mapping range");
+        }
+        if matches!(map.fd, VmFd::Shm) {
+            validate_shm_mapping(map.fd_offset, map.length, VM_ADDR_NATIVE_CODE);
+        }
         linux_raw::sys_mmap(
             map.address as *mut core::ffi::c_void,
             map.length as usize,
@@ -1087,6 +1111,7 @@ pub unsafe extern "C" fn ext_load_program() -> ! {
     let shm_code_length = VMCTX.shm_code_length.load(Ordering::Relaxed);
     if shm_code_length > 0 {
         let shm_code_offset = VMCTX.shm_code_offset.load(Ordering::Relaxed);
+        validate_shm_mapping(shm_code_offset, shm_code_length, u64::from(VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE));
         linux_raw::sys_mmap(
             VM_ADDR_NATIVE_CODE as *mut core::ffi::c_void,
             shm_code_length as usize,
@@ -1111,6 +1136,12 @@ pub unsafe extern "C" fn ext_load_program() -> ! {
     let shm_jump_table_length = VMCTX.shm_jump_table_length.load(Ordering::Relaxed);
     if shm_jump_table_length > 0 {
         let shm_jump_table_offset = VMCTX.shm_jump_table_offset.load(Ordering::Relaxed);
+        let maximum = polkavm_common::utils::align_to_next_page_usize(
+            NATIVE_PAGE_SIZE.load(Ordering::Relaxed),
+            VM_SANDBOX_MAXIMUM_JUMP_TABLE_SIZE as usize,
+        )
+        .unwrap_or_else(|| abort_with_message("jump table mapping size overflow"));
+        validate_shm_mapping(shm_jump_table_offset, shm_jump_table_length, maximum as u64);
         linux_raw::sys_mmap(
             VM_ADDR_JUMP_TABLE as *mut core::ffi::c_void,
             shm_jump_table_length as usize,

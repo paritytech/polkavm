@@ -1545,15 +1545,15 @@ impl super::Sandbox for Sandbox {
 
     fn allocate_jump_table(_global: &Self::GlobalState, count: usize) -> Result<Self::JumpTable, Self::Error> {
         // TODO: Cache this and don't unnecessarily double-initialize it.
-        let native_page_size = get_native_page_size();
-        let size = align_to_next_page_usize(native_page_size, count * core::mem::size_of::<usize>()).unwrap();
+        let size = super::jump_table_mapping_size(count)?;
         Ok(vec![0; size / core::mem::size_of::<usize>()])
     }
 
     fn reserve_address_space() -> Result<Self::AddressSpace, Self::Error> {
-        Mmap::reserve_executable_address_space(
-            VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE as usize + VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE as usize,
-        )
+        let size = (VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE as usize)
+            .checked_add(VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE as usize)
+            .ok_or("native address space size overflow")?;
+        Mmap::reserve_executable_address_space(size)
     }
 
     fn prepare_program(
@@ -1565,11 +1565,20 @@ impl super::Sandbox for Sandbox {
         let cfg = init.guest_init.memory_map()?;
         let jump_table = as_bytes(&init.jump_table);
 
-        let code_size = align_to_next_page_usize(native_page_size, init.code.len()).unwrap();
-        let jump_table_size = align_to_next_page_usize(native_page_size, jump_table.len()).unwrap();
+        let code_size = super::native_code_mapping_size(init.code.len())?;
+        let jump_table_size = super::jump_table_mapping_size(init.jump_table.len())?;
 
-        let jump_table_offset = code_size as usize;
-        let sysreturn_offset = jump_table_offset + (VM_ADDR_JUMP_TABLE_RETURN_TO_HOST - VM_ADDR_JUMP_TABLE) as usize;
+        let jump_table_offset = code_size;
+        let sysreturn_offset = jump_table_offset
+            .checked_add((VM_ADDR_JUMP_TABLE_RETURN_TO_HOST - VM_ADDR_JUMP_TABLE) as usize)
+            .ok_or("native sysreturn mapping offset overflow")?;
+        if !jump_table_offset
+            .checked_add(jump_table_size)
+            .map_or(false, |end| end <= sysreturn_offset)
+            || !sysreturn_offset.checked_add(native_page_size).map_or(false, |end| end <= map.len())
+        {
+            return Err("native code and jump table exceed the reserved address space".into());
+        }
 
         map.modify_and_protect(0, code_size as usize, PROT_EXEC | PROT_READ, |slice| {
             slice[..init.code.len()].copy_from_slice(init.code);

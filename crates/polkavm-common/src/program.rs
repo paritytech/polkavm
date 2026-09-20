@@ -300,7 +300,7 @@ where
     };
 
     offset = next_offset;
-    if is_next_instruction_invalid {
+    if is_next_instruction_invalid && opcode_visitor.should_continue(state) {
         // The invalid instruction covers everything up until the next real instruction.
         let next_offset = if (offset as usize) < code.len() {
             let next_offset = find_next_offset_legacy_unbounded(bitmask, code.len() as u32, offset);
@@ -336,17 +336,20 @@ fn visitor_run_legacy<T>(state: &mut <T as OpcodeVisitor>::State, code: &[u8], b
 where
     T: OpcodeVisitor<ReturnTy = ()>,
 {
+    if !opcode_visitor.should_continue(state) {
+        return;
+    }
     let mut offset = 0;
     if !get_bit_for_offset(bitmask, code.len(), 0) {
         offset = find_next_offset_legacy_unbounded(bitmask, code.len() as u32, 0);
         visitor_step_invalid_instruction(state, 0, offset, opcode_visitor);
     }
 
-    while cast(offset).to_usize() + 32 <= code.len() {
+    while cast(offset).to_usize() + 32 <= code.len() && opcode_visitor.should_continue(state) {
         offset = visitor_step_runner_legacy::<T, true>(state, code, bitmask, offset, opcode_visitor);
     }
 
-    while cast(offset).to_usize() < code.len() {
+    while cast(offset).to_usize() < code.len() && opcode_visitor.should_continue(state) {
         offset = visitor_step_runner_legacy::<T, false>(state, code, bitmask, offset, opcode_visitor);
     }
 }
@@ -356,6 +359,9 @@ fn visitor_run_extended<T>(state: &mut <T as OpcodeVisitor>::State, code: &[u8],
 where
     T: OpcodeVisitor<ReturnTy = ()>,
 {
+    if !opcode_visitor.should_continue(state) {
+        return;
+    }
     let table = opcode_visitor.instruction_set().raw_opcode_table();
     let mut offset: usize = 0;
 
@@ -363,11 +369,15 @@ where
         offset = visitor_run_extended_full_blocks::<T>(state, code, opcode_visitor, table);
     }
 
+    if !opcode_visitor.should_continue(state) {
+        return;
+    }
+
     if offset < code.len() {
         offset = visitor_run_extended_last_block::<T>(state, code, opcode_visitor, table, offset);
     }
 
-    debug_assert_eq!(offset, code.len());
+    debug_assert!(offset == code.len() || !opcode_visitor.should_continue(state));
 }
 
 #[must_use]
@@ -389,6 +399,9 @@ where
         let block_boundary = offset + CODE_BLOCK_SIZE;
         while offset < block_boundary {
             offset = visitor_step_extended::<T>(state, code, offset, block_boundary, opcode_visitor, table);
+            if !opcode_visitor.should_continue(state) {
+                return offset;
+            }
         }
 
         debug_assert_eq!(offset, block_boundary);
@@ -417,11 +430,17 @@ where
     while offset < bulk_boundary {
         // Fast path.
         offset = visitor_step_extended::<T>(state, code, offset, block_boundary, opcode_visitor, table);
+        if !opcode_visitor.should_continue(state) {
+            return offset;
+        }
     }
 
     while offset < code.len() {
         // Slow path.
         offset = visitor_step_extended::<T>(state, code, offset, block_boundary, opcode_visitor, table);
+        if !opcode_visitor.should_continue(state) {
+            return offset;
+        }
     }
 
     offset
@@ -1134,6 +1153,12 @@ pub trait OpcodeVisitor: Copy {
 
     fn instruction_set(self) -> Self::InstructionSet;
     fn dispatch(self, state: &mut Self::State, opcode: usize, chunk: u128, offset: u32, length: u32) -> Self::ReturnTy;
+
+    /// Whether bulk visitation should dispatch another instruction.
+    #[inline]
+    fn should_continue(self, _state: &Self::State) -> bool {
+        true
+    }
 }
 
 macro_rules! define_all_instructions {
@@ -1261,6 +1286,12 @@ macro_rules! define_all_instructions {
 
         pub trait ParsingVisitor {
             type ReturnTy;
+
+            /// Whether bulk visitation should dispatch another instruction.
+            #[inline]
+            fn should_continue(&self) -> bool {
+                true
+            }
 
             $(fn $name_argless(&mut self, offset: u32, length: u32) -> Self::ReturnTy;)+
             $(fn $name_reg_imm(&mut self, offset: u32, length: u32, reg: RawReg, imm: i32) -> Self::ReturnTy;)+
@@ -1726,6 +1757,11 @@ macro_rules! define_legacy_instruction_set {
                     #[inline]
                     fn dispatch(self, state: &mut $visitor_ty<'a>, opcode: usize, chunk: u128, offset: u32, length: u32) {
                         self.0[opcode](state, chunk, offset, length)
+                    }
+
+                    #[inline]
+                    fn should_continue(self, state: &Self::State) -> bool {
+                        state.should_continue()
                     }
                 }
 
@@ -2207,6 +2243,11 @@ macro_rules! define_extended_instruction_set {
                     #[inline]
                     fn dispatch(self, state: &mut $visitor_ty<'a>, opcode: usize, chunk: u128, offset: u32, length: u32) {
                         self.0[opcode](state, chunk, offset, length)
+                    }
+
+                    #[inline]
+                    fn should_continue(self, state: &Self::State) -> bool {
+                        state.should_continue()
                     }
                 }
 
@@ -7021,6 +7062,33 @@ impl ProgramParts {
         }
 
         Ok(parts)
+    }
+}
+
+#[test]
+fn test_program_code_size_boundary() {
+    for isa in [InstructionSetKind::Latest64, InstructionSetKind::ReviveV1] {
+        for length in [64 * 1024 * 1024, 64 * 1024 * 1024 + 1] {
+            let mut section = alloc::vec![0, 0]; // Empty jump table.
+            if isa.is_legacy() {
+                let mut buffer = [0; MAX_VARINT_LENGTH];
+                let count = crate::varint::write_varint(length, &mut buffer);
+                section.extend_from_slice(&buffer[..count]);
+            }
+            let header_length = section.len();
+            section.resize(header_length + length as usize, 0);
+            if isa.is_legacy() {
+                section.resize(section.len() + (length as usize + 7) / 8, 0);
+            }
+            let mut parts = ProgramParts::empty(isa);
+            parts.code_and_jump_table = section.into();
+            let result = ProgramBlob::from_parts(parts);
+            if length == 64 * 1024 * 1024 {
+                assert_eq!(result.unwrap().code().len(), length as usize);
+            } else {
+                assert!(result.is_err());
+            }
+        }
     }
 }
 

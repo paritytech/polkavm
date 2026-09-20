@@ -1,5 +1,29 @@
-use crate::misc::{EncodeFlags, FixupKind, InstBuf, InstructionT, Label};
+use crate::misc::{EncodeFlags, FixupKind, InstructionT, Label, MAXIMUM_INSTRUCTION_SIZE};
 use alloc::vec::Vec;
+
+/// An assembly failure. The first failure is retained until the assembler is cleared.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AssemblerError {
+    CodeSizeLimit { limit: usize },
+    AllocationFailed,
+    InvalidEncoding,
+    InvalidFixup,
+    FixupOutOfRange,
+    TooManyLabels,
+}
+
+impl core::fmt::Display for AssemblerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::CodeSizeLimit { limit } => write!(f, "assembled code exceeds the {limit}-byte limit"),
+            Self::AllocationFailed => f.write_str("assembler allocation failed"),
+            Self::InvalidEncoding => f.write_str("invalid instruction encoding"),
+            Self::InvalidFixup => f.write_str("invalid instruction fixup"),
+            Self::FixupOutOfRange => f.write_str("instruction fixup is out of range or misaligned"),
+            Self::TooManyLabels => f.write_str("assembler label count exceeds the representable range"),
+        }
+    }
+}
 
 #[derive(Copy, Clone)]
 struct Fixup {
@@ -15,6 +39,8 @@ pub struct Assembler {
     labels: Vec<isize>,
     fixups: Vec<Fixup>,
     guaranteed_capacity: usize,
+    code_size_limit: usize,
+    error: Option<AssemblerError>,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -101,7 +127,7 @@ impl<'a, R> ReservedAssembler<'a, R> {
         R: NonZero,
         T: InstructionT,
     {
-        // SAFETY: `R: NonZero`, so we still have space in the buffer.
+        // SAFETY: `R: NonZero` guarantees space unless reservation failed, in which case emission is a no-op.
         unsafe {
             self.0.push_unchecked(instruction);
         }
@@ -116,7 +142,7 @@ impl<'a, R> ReservedAssembler<'a, R> {
         T: InstructionT,
     {
         if condition {
-            // SAFETY: `R: NonZero`, so we still have space in the buffer.
+            // SAFETY: `R: NonZero` guarantees space unless reservation failed, in which case emission is a no-op.
             unsafe {
                 self.0.push_unchecked(instruction);
             }
@@ -157,6 +183,53 @@ impl Assembler {
             labels: Vec::new(),
             fixups: Vec::new(),
             guaranteed_capacity: 0,
+            code_size_limit: isize::MAX as usize,
+            error: None,
+        }
+    }
+
+    /// Limit emitted bytes, independently of spare capacity used by instruction encoding.
+    /// Lowering the limit below the current length records a sticky error.
+    pub fn set_code_size_limit(&mut self, limit: usize) {
+        self.code_size_limit = limit.min(isize::MAX as usize);
+        self.check_code_size(self.code.len());
+    }
+
+    pub fn error(&self) -> Option<&AssemblerError> {
+        self.error.as_ref()
+    }
+
+    #[inline]
+    fn fail(&mut self, error: AssemblerError) {
+        if self.error.is_none() {
+            self.error = Some(error);
+        }
+    }
+
+    #[inline]
+    fn check_code_size(&mut self, size: usize) -> bool {
+        if self.error.is_some() {
+            return false;
+        }
+        if size > self.code_size_limit {
+            self.fail(AssemblerError::CodeSizeLimit {
+                limit: self.code_size_limit,
+            });
+            return false;
+        }
+        true
+    }
+
+    #[inline]
+    fn check_code_growth(&mut self, additional: usize) -> bool {
+        match self.code.len().checked_add(additional) {
+            Some(size) => self.check_code_size(size),
+            None => {
+                self.fail(AssemblerError::CodeSizeLimit {
+                    limit: self.code_size_limit,
+                });
+                false
+            }
         }
     }
 
@@ -173,21 +246,32 @@ impl Assembler {
     }
 
     pub fn forward_declare_label(&mut self) -> Label {
-        let label = self.labels.len() as u32;
+        if self.error.is_some() {
+            return Label::from_raw(0);
+        }
+        if self.labels.len() >= u32::MAX as usize {
+            self.fail(AssemblerError::TooManyLabels);
+            return Label::from_raw(0);
+        }
+        self.reserve_labels(1);
+        if self.error.is_some() {
+            return Label::from_raw(0);
+        }
+        let label = Label::from_raw(self.labels.len() as u32);
         self.labels.push(isize::MAX);
-        Label::from_raw(label)
+        label
     }
 
     pub fn create_label(&mut self) -> Label {
-        let label = self.labels.len() as u32;
-        #[cfg(debug_assertions)]
-        log::trace!("{:08x}: {}:", self.origin + self.code.len() as u64, Label::from_raw(label));
-
-        self.labels.push(self.code.len() as isize);
-        Label::from_raw(label)
+        let label = self.forward_declare_label();
+        self.define_label(label);
+        label
     }
 
     pub fn define_label(&mut self, label: Label) -> &mut Self {
+        if self.error.is_some() {
+            return self;
+        }
         #[cfg(debug_assertions)]
         log::trace!("{:08x}: {}:", self.origin + self.code.len() as u64, label);
 
@@ -205,6 +289,9 @@ impl Assembler {
     /// instead of leaving them unresolved (which on AArch64 would cause
     /// infinite self-branch loops).
     pub fn define_all_undefined_labels(&mut self, offset: usize) {
+        if !self.check_code_size(offset) {
+            return;
+        }
         for label_offset in self.labels.iter_mut() {
             if *label_offset == isize::MAX {
                 *label_offset = offset as isize;
@@ -222,7 +309,7 @@ impl Assembler {
 
     #[inline]
     pub fn get_label_origin_offset(&self, label: Label) -> Option<isize> {
-        let offset = self.labels[label.raw() as usize];
+        let offset = *self.labels.get(label.raw() as usize)?;
         if offset == isize::MAX {
             None
         } else {
@@ -236,20 +323,25 @@ impl Assembler {
     }
 
     pub fn set_label_origin_offset(&mut self, label: Label, offset: isize) {
+        if self.error.is_some() {
+            return;
+        }
         self.labels[label.raw() as usize] = offset;
     }
 
     #[inline(always)]
     fn add_fixup(&mut self, instruction_offset: usize, instruction_length: usize, target_label: Label, kind: FixupKind) {
-        debug_assert!((target_label.raw() as usize) < self.labels.len());
-        debug_assert!(
-            kind.is_aarch64() || (kind.offset() as usize) < instruction_length,
-            "instruction is {} bytes long and yet its target fixup starts at {}",
-            instruction_length,
-            kind.offset()
-        );
-        debug_assert!(kind.is_aarch64() || (kind.length() as usize) < instruction_length);
-        debug_assert!((kind.offset() as usize + kind.length() as usize) <= instruction_length);
+        if (target_label.raw() as usize) >= self.labels.len()
+            || (!kind.is_aarch64() && (kind.offset() == 0 || !matches!(kind.length(), 1 | 4)))
+            || kind.offset() as usize + kind.length() as usize > instruction_length
+        {
+            self.fail(AssemblerError::InvalidFixup);
+            return;
+        }
+        self.reserve_fixups(1);
+        if self.error.is_some() {
+            return;
+        }
         self.fixups.push(Fixup {
             target_label,
             instruction_offset,
@@ -263,10 +355,26 @@ impl Assembler {
     where
         T: NonZero,
     {
-        InstBuf::reserve(&mut self.code, T::VALUE);
-
-        self.guaranteed_capacity = T::VALUE;
+        self.reserve_instructions(T::VALUE);
         ReservedAssembler(self, core::marker::PhantomData)
+    }
+
+    #[inline(always)]
+    fn reserve_instructions(&mut self, count: usize) {
+        if self.error.is_some() {
+            return;
+        }
+        // Encoding writes a full InstBuf, even when the instruction is shorter.
+        // This is capacity only: the byte limit is checked against actual emission.
+        let Some(bytes) = count.checked_mul(MAXIMUM_INSTRUCTION_SIZE) else {
+            self.fail(AssemblerError::AllocationFailed);
+            return;
+        };
+        if self.code.try_reserve(bytes).is_err() {
+            self.fail(AssemblerError::AllocationFailed);
+            return;
+        }
+        self.guaranteed_capacity = count;
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
@@ -275,20 +383,22 @@ impl Assembler {
         T: InstructionT,
     {
         if self.guaranteed_capacity == 0 {
-            InstBuf::reserve_const::<1>(&mut self.code);
-            self.guaranteed_capacity = 1;
+            self.reserve_instructions(1);
         }
 
-        // SAFETY: We've reserved space for at least one instruction.
+        // SAFETY: Space was reserved, or a sticky allocation error prevents the write.
         unsafe { self.push_unchecked(instruction) }
     }
 
-    // SAFETY: The buffer *must* have space for at least one instruction.
+    // SAFETY: Unless the assembler has failed, the buffer must have space for one full InstBuf.
     #[cfg_attr(not(debug_assertions), inline(always))]
     unsafe fn push_unchecked<T>(&mut self, instruction: T) -> &mut Self
     where
         T: InstructionT,
     {
+        if self.error.is_some() {
+            return self;
+        }
         #[cfg(debug_assertions)]
         log::trace!("{:08x}: {}", self.origin + self.code.len() as u64, instruction);
 
@@ -297,6 +407,13 @@ impl Assembler {
 
         let bytes = instruction.encode(EncodeFlags::default());
         let bytes_len = bytes.len();
+        if !bytes.is_valid() {
+            self.fail(AssemblerError::InvalidEncoding);
+            return self;
+        }
+        if !self.check_code_growth(bytes_len) {
+            return self;
+        }
 
         // SAFETY: The caller reserved space for at least one instruction.
         unsafe {
@@ -312,70 +429,81 @@ impl Assembler {
     }
 
     pub fn push_raw(&mut self, bytes: &[u8]) -> &mut Self {
+        if !self.check_code_growth(bytes.len()) {
+            return self;
+        }
+        if self.code.try_reserve(bytes.len()).is_err() {
+            self.fail(AssemblerError::AllocationFailed);
+            return self;
+        }
+        self.guaranteed_capacity = 0;
         #[cfg(debug_assertions)]
         log::trace!("{:08x}: {:x?}", self.origin + self.code.len() as u64, bytes);
         self.code.extend_from_slice(bytes);
         self
     }
 
-    pub fn finalize(&mut self) -> AssembledCode {
-        for fixup in self.fixups.drain(..) {
-            let target_absolute = self.labels[fixup.target_label.raw() as usize];
-            if target_absolute == isize::MAX {
-                log::trace!("Undefined label found: {}", fixup.target_label);
-                continue;
-            }
-
-            if fixup.kind.is_aarch64() {
-                // AArch64 fixup: PC-relative offset from the instruction itself.
-                let offset = target_absolute - fixup.instruction_offset as isize;
-                let p = fixup.instruction_offset;
-                let existing = u32::from_le_bytes([self.code[p], self.code[p + 1], self.code[p + 2], self.code[p + 3]]);
-                if Self::is_aarch64_adrp(existing) {
-                    let add = u32::from_le_bytes([self.code[p + 4], self.code[p + 5], self.code[p + 6], self.code[p + 7]]);
-                    let (patched_adrp, patched_add) = Self::patch_aarch64_adrp_pair(existing, add, p, target_absolute);
-                    self.code[p..p + 4].copy_from_slice(&patched_adrp.to_le_bytes());
-                    self.code[p + 4..p + 8].copy_from_slice(&patched_add.to_le_bytes());
-                } else {
-                    let patched = Self::patch_aarch64_branch(existing, offset);
-                    self.code[p..p + 4].copy_from_slice(&patched.to_le_bytes());
-                }
-            } else {
-                // x86-style fixup: offset is from end of instruction.
-                let origin = fixup.instruction_offset + fixup.instruction_length as usize;
-                let opcode = (fixup.kind.0 << 8) >> 8;
-                let fixup_offset = fixup.kind.offset();
-                let fixup_length = fixup.kind.length();
-
-                if fixup_offset >= 1 {
-                    self.code[fixup.instruction_offset] = opcode as u8;
-                    if fixup_offset >= 2 {
-                        self.code[fixup.instruction_offset + 1] = (opcode >> 8) as u8;
-                        if fixup_offset >= 3 {
-                            self.code[fixup.instruction_offset + 2] = (opcode >> 16) as u8;
-                        }
-                    }
-                }
-
-                let offset = target_absolute - origin as isize;
-                let p = fixup.instruction_offset + fixup_offset as usize;
-                if fixup_length == 1 {
-                    if offset > i8::MAX as isize || offset < i8::MIN as isize {
-                        panic!("out of range jump");
-                    }
-                    self.code[p] = offset as i8 as u8;
-                } else if fixup_length == 4 {
-                    if offset > i32::MAX as isize || offset < i32::MIN as isize {
-                        panic!("out of range jump");
-                    }
-                    self.code[p..p + 4].copy_from_slice(&(offset as i32).to_le_bytes());
-                } else {
-                    unreachable!()
-                }
+    pub fn finalize(&mut self) -> Result<AssembledCode<'_>, AssemblerError> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        for index in 0..self.fixups.len() {
+            if let Err(error) = self.apply_fixup(self.fixups[index]) {
+                self.fail(error);
+                return Err(error);
             }
         }
+        self.fixups.clear();
+        Ok(AssembledCode(self))
+    }
 
-        AssembledCode(self)
+    fn apply_fixup(&mut self, fixup: Fixup) -> Result<(), AssemblerError> {
+        let target_absolute = *self
+            .labels
+            .get(fixup.target_label.raw() as usize)
+            .ok_or(AssemblerError::InvalidFixup)?;
+        let p = fixup.instruction_offset;
+        let end = p
+            .checked_add(fixup.instruction_length as usize)
+            .ok_or(AssemblerError::InvalidFixup)?;
+        if end > self.code.len() {
+            return Err(AssemblerError::InvalidFixup);
+        }
+        if target_absolute == isize::MAX {
+            log::trace!("Undefined label found: {}", fixup.target_label);
+            return Ok(());
+        }
+
+        if fixup.kind.is_aarch64() {
+            let existing = u32::from_le_bytes(self.code[p..p + 4].try_into().unwrap());
+            if Self::is_aarch64_adrp(existing) {
+                if fixup.instruction_length != 8 {
+                    return Err(AssemblerError::InvalidFixup);
+                }
+                let add = u32::from_le_bytes(self.code[p + 4..p + 8].try_into().unwrap());
+                let (adrp, add) = Self::patch_aarch64_adrp_pair(existing, add, p, target_absolute)?;
+                self.code[p..p + 4].copy_from_slice(&adrp.to_le_bytes());
+                self.code[p + 4..p + 8].copy_from_slice(&add.to_le_bytes());
+            } else {
+                let offset = target_absolute.checked_sub(p as isize).ok_or(AssemblerError::FixupOutOfRange)?;
+                let patched = Self::patch_aarch64_branch(existing, offset)?;
+                self.code[p..p + 4].copy_from_slice(&patched.to_le_bytes());
+            }
+        } else {
+            let offset = target_absolute.checked_sub(end as isize).ok_or(AssemblerError::FixupOutOfRange)?;
+            let fixup_offset = fixup.kind.offset() as usize;
+            let p = p + fixup_offset;
+            match fixup.kind.length() {
+                1 => self.code[p] = i8::try_from(offset).map_err(|_| AssemblerError::FixupOutOfRange)? as u8,
+                4 => {
+                    self.code[p..p + 4].copy_from_slice(&i32::try_from(offset).map_err(|_| AssemblerError::FixupOutOfRange)?.to_le_bytes())
+                }
+                _ => return Err(AssemblerError::InvalidFixup),
+            }
+            let opcode = fixup.kind.0.to_le_bytes();
+            self.code[fixup.instruction_offset..p].copy_from_slice(&opcode[..fixup_offset]);
+        }
+        Ok(())
     }
 
     #[inline]
@@ -383,77 +511,53 @@ impl Assembler {
         instruction & 0x9f000000 == 0x90000000
     }
 
-    fn patch_aarch64_adrp_pair(adrp: u32, add: u32, instruction_offset: usize, target_offset: isize) -> (u32, u32) {
-        debug_assert!(Self::is_aarch64_adrp(adrp));
-        debug_assert_eq!(add & 0xff000000, 0x91000000);
-
-        let instruction_page = (instruction_offset as isize) & !0xfff;
-        let target_page = target_offset & !0xfff;
-        let page_offset = (target_page - instruction_page) >> 12;
-        assert!(page_offset >= -(1 << 20) && page_offset < (1 << 20), "ADRP: out of range");
-
+    fn patch_aarch64_adrp_pair(adrp: u32, add: u32, instruction_offset: usize, target_offset: isize) -> Result<(u32, u32), AssemblerError> {
+        if add & 0xffc00000 != 0x91000000 {
+            return Err(AssemblerError::InvalidFixup);
+        }
+        let instruction_page = (instruction_offset as isize) >> 12;
+        let target_page = target_offset >> 12;
+        let page_offset = target_page - instruction_page;
+        if !(-(1 << 20)..(1 << 20)).contains(&page_offset) {
+            return Err(AssemblerError::FixupOutOfRange);
+        }
         let encoded_page_offset = page_offset as u32;
         let immlo = (encoded_page_offset & 0x3) << 29;
         let immhi = ((encoded_page_offset >> 2) & 0x7ffff) << 5;
         let patched_adrp = (adrp & !(0x3 << 29) & !(0x7ffff << 5)) | immlo | immhi;
-
         let page_byte_offset = (target_offset as u32) & 0xfff;
         let patched_add = (add & !(0xfff << 10)) | (page_byte_offset << 10);
-        (patched_adrp, patched_add)
+        Ok((patched_adrp, patched_add))
     }
 
     /// Patch an AArch64 instruction word with a PC-relative byte offset.
     /// Detects the instruction type from its encoding and places the offset
     /// in the correct bit fields.
-    fn patch_aarch64_branch(instruction: u32, byte_offset: isize) -> u32 {
-        debug_assert!(
-            byte_offset & 3 == 0,
-            "AArch64 branch offset must be 4-byte aligned: {}",
-            byte_offset
-        );
-        let inst_offset = byte_offset >> 2; // Convert to instruction offset
-
-        // Detect instruction type from top bits:
-        let op0 = (instruction >> 24) & 0xFF;
-
-        match op0 {
-            // B imm26: 000101xx
-            x if (x >> 2) == 0b000101 => {
-                // Unconditional branch: imm26 in bits [25:0]
-                assert!(inst_offset >= -(1 << 25) && inst_offset < (1 << 25), "B: out of range");
-                let imm26 = (inst_offset as u32) & 0x03FFFFFF;
-                (instruction & !0x03FFFFFF) | imm26
+    fn patch_aarch64_branch(instruction: u32, byte_offset: isize) -> Result<u32, AssemblerError> {
+        let op0 = (instruction >> 24) & 0xff;
+        // ADR addresses bytes; unlike branches its displacement need not be aligned.
+        if (op0 & 0x9f) == 0b00010000 {
+            if !(-(1 << 20)..(1 << 20)).contains(&byte_offset) {
+                return Err(AssemblerError::FixupOutOfRange);
             }
-            // BL imm26: 100101xx
-            x if (x >> 2) == 0b100101 => {
-                assert!(inst_offset >= -(1 << 25) && inst_offset < (1 << 25), "BL: out of range");
-                let imm26 = (inst_offset as u32) & 0x03FFFFFF;
-                (instruction & !0x03FFFFFF) | imm26
-            }
-            // B.cond imm19: 01010100
-            0b01010100 => {
-                assert!(inst_offset >= -(1 << 18) && inst_offset < (1 << 18), "B.cond: out of range");
-                let imm19 = (inst_offset as u32) & 0x7FFFF;
-                (instruction & !(0x7FFFF << 5)) | (imm19 << 5)
-            }
-            // CBZ/CBNZ imm19: x0110100 / x0110101
-            x if (x & 0x7E) == 0b0110100 => {
-                assert!(inst_offset >= -(1 << 18) && inst_offset < (1 << 18), "CBZ/CBNZ: out of range");
-                let imm19 = (inst_offset as u32) & 0x7FFFF;
-                (instruction & !(0x7FFFF << 5)) | (imm19 << 5)
-            }
-            // ADR: immlo in bits [30:29], immhi in bits [23:5]
-            x if (x & 0x9F) == 0b00010000 => {
-                // ADR uses byte offset directly, not instruction offset
-                let off = byte_offset;
-                assert!(off >= -(1 << 20) && off < (1 << 20), "ADR: out of range");
-                let off = off as u32;
-                let immlo = (off & 0x3) << 29;
-                let immhi = ((off >> 2) & 0x7FFFF) << 5;
-                (instruction & !(0x3 << 29) & !(0x7FFFF << 5)) | immlo | immhi
-            }
-            _ => panic!("unknown AArch64 instruction type for fixup: 0x{:08x}", instruction),
+            let offset = byte_offset as u32;
+            return Ok((instruction & !(0x3 << 29) & !(0x7ffff << 5)) | ((offset & 0x3) << 29) | (((offset >> 2) & 0x7ffff) << 5));
         }
+        if byte_offset & 3 != 0 {
+            return Err(AssemblerError::FixupOutOfRange);
+        }
+        let offset = byte_offset >> 2;
+        let (bits, shift) = match op0 {
+            x if (x >> 2) == 0b000101 || (x >> 2) == 0b100101 => (26, 0),
+            0b01010100 => (19, 5),
+            x if (x & 0x7e) == 0b0110100 => (19, 5),
+            _ => return Err(AssemblerError::InvalidFixup),
+        };
+        if !(-(1isize << (bits - 1))..(1isize << (bits - 1))).contains(&offset) {
+            return Err(AssemblerError::FixupOutOfRange);
+        }
+        let mask = (1u32 << bits) - 1;
+        Ok((instruction & !(mask << shift)) | (((offset as u32) & mask) << shift))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -484,19 +588,37 @@ impl Assembler {
     }
 
     pub fn resize(&mut self, size: usize, fill_with: u8) {
-        self.code.resize(size, fill_with)
+        if !self.check_code_size(size) {
+            return;
+        }
+        if size <= self.code.len() {
+            self.truncate(size);
+            return;
+        }
+        if self.code.try_reserve(size - self.code.len()).is_err() {
+            self.fail(AssemblerError::AllocationFailed);
+            return;
+        }
+        self.guaranteed_capacity = 0;
+        self.code.resize(size, fill_with);
     }
 
     pub fn reserve_code(&mut self, length: usize) {
-        self.code.reserve(length);
+        if self.check_code_growth(length) && self.code.try_reserve(length).is_err() {
+            self.fail(AssemblerError::AllocationFailed);
+        }
     }
 
     pub fn reserve_labels(&mut self, length: usize) {
-        self.labels.reserve(length);
+        if self.error.is_none() && self.labels.try_reserve(length).is_err() {
+            self.fail(AssemblerError::AllocationFailed);
+        }
     }
 
     pub fn reserve_fixups(&mut self, length: usize) {
-        self.fixups.reserve(length);
+        if self.error.is_none() && self.fixups.try_reserve(length).is_err() {
+            self.fail(AssemblerError::AllocationFailed);
+        }
     }
 
     pub fn clear(&mut self) {
@@ -504,5 +626,279 @@ impl Assembler {
         self.code.clear();
         self.labels.clear();
         self.fixups.clear();
+        self.guaranteed_capacity = 0;
+        self.error = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{aarch64, amd64::inst as amd64};
+
+    #[test]
+    fn instruction_limit_is_exact_and_failure_is_sticky() {
+        let mut asm = Assembler::new();
+        asm.set_code_size_limit(1);
+        asm.push(amd64::nop());
+        assert_eq!(&*asm.finalize().unwrap(), &[0x90]);
+
+        asm.push(amd64::nop()).push(amd64::nop());
+        assert_eq!(asm.len(), 1);
+        assert_eq!(asm.error(), Some(&AssemblerError::CodeSizeLimit { limit: 1 }));
+        asm.truncate(0);
+        asm.set_code_size_limit(100);
+        asm.push_raw(&[0xcc]);
+        assert!(matches!(asm.finalize(), Err(AssemblerError::CodeSizeLimit { limit: 1 })));
+        assert!(asm.is_empty());
+
+        asm.clear();
+        asm.set_code_size_limit(1);
+        asm.push(amd64::nop());
+        asm.clear();
+        asm.push_raw(&[0x90, 0x90]);
+        assert!(matches!(asm.finalize(), Err(AssemblerError::CodeSizeLimit { limit: 1 })));
+    }
+
+    #[test]
+    fn reserved_emission_checks_actual_bytes() {
+        let mut asm = Assembler::new();
+        asm.set_code_size_limit(1);
+        asm.reserve::<U3>()
+            .push_if(false, amd64::nop())
+            .push_none()
+            .push(amd64::nop())
+            .assert_reserved_exactly_as_needed();
+        assert_eq!(&*asm.finalize().unwrap(), &[0x90]);
+
+        asm.reserve::<U3>()
+            .push(amd64::nop())
+            .push(amd64::nop())
+            .push(amd64::nop())
+            .assert_reserved_exactly_as_needed();
+        assert_eq!(asm.code_mut(), &[0x90]);
+        assert!(matches!(asm.finalize(), Err(AssemblerError::CodeSizeLimit { limit: 1 })));
+    }
+
+    #[test]
+    fn raw_and_resize_enforce_the_limit_before_writing() {
+        let mut asm = Assembler::new();
+        asm.set_code_size_limit(3);
+        asm.push_raw(&[1, 2]);
+        asm.resize(3, 3);
+        assert_eq!(&*asm.finalize().unwrap(), &[1, 2, 3]);
+
+        asm.push_raw(&[1, 2]);
+        asm.push_raw(&[3, 4]);
+        assert_eq!(asm.code_mut(), &[1, 2]);
+        assert!(matches!(asm.finalize(), Err(AssemblerError::CodeSizeLimit { limit: 3 })));
+
+        asm.clear();
+        asm.push_raw(&[1, 2]);
+        asm.resize(4, 3);
+        assert_eq!(asm.code_mut(), &[1, 2]);
+        assert!(matches!(asm.finalize(), Err(AssemblerError::CodeSizeLimit { limit: 3 })));
+        asm.clear();
+        asm.push_raw(&[1, 2]);
+        asm.set_code_size_limit(1);
+        assert!(matches!(asm.finalize(), Err(AssemblerError::CodeSizeLimit { limit: 1 })));
+    }
+
+    #[test]
+    fn capacity_is_not_reused_after_raw_growth_or_code_extraction() {
+        let mut asm = Assembler::new();
+        asm.reserve::<U6>();
+        asm.push_raw(&[0xcc; 96]);
+        asm.push(amd64::nop());
+        let code: Vec<u8> = asm.finalize().unwrap().into();
+        assert_eq!(&code[..96], &[0xcc; 96]);
+        assert_eq!(code[96], 0x90);
+
+        asm.reserve::<U6>().push(amd64::nop());
+        let code: Vec<u8> = asm.finalize().unwrap().into();
+        assert_eq!(code, [0x90]);
+        asm.push(amd64::nop());
+        assert_eq!(&*asm.finalize().unwrap(), &[0x90]);
+
+        asm.reserve::<U6>();
+        asm.resize(96, 0xcc);
+        asm.push(amd64::nop());
+        assert_eq!(&asm.finalize().unwrap()[95..], &[0xcc, 0x90]);
+    }
+
+    #[test]
+    fn reservations_fail_without_emission_or_panics() {
+        let mut asm = Assembler::new();
+        asm.set_code_size_limit(1);
+        asm.reserve_code(1);
+        asm.push(amd64::nop());
+        assert_eq!(&*asm.finalize().unwrap(), &[0x90]);
+        asm.reserve_code(2);
+        assert!(matches!(asm.finalize(), Err(AssemblerError::CodeSizeLimit { limit: 1 })));
+        assert!(asm.is_empty());
+
+        asm.clear();
+        asm.reserve_labels(usize::MAX);
+        assert!(matches!(asm.finalize(), Err(AssemblerError::AllocationFailed)));
+        asm.clear();
+        asm.reserve_fixups(usize::MAX);
+        assert!(matches!(asm.finalize(), Err(AssemblerError::AllocationFailed)));
+
+        struct HugeReservation;
+        // SAFETY: The value is nonzero and Next is not NonZero.
+        unsafe impl NonZero for HugeReservation {
+            const VALUE: usize = usize::MAX;
+            type Next = U0;
+        }
+        asm.clear();
+        asm.reserve::<HugeReservation>().push(amd64::nop());
+        assert!(matches!(asm.finalize(), Err(AssemblerError::AllocationFailed)));
+        assert!(asm.is_empty());
+    }
+
+    #[test]
+    fn rel8_fixups_reject_both_out_of_range_directions() {
+        for offset in [-129isize, -128, 127, 128, isize::MIN] {
+            let mut asm = Assembler::new();
+            let label = asm.forward_declare_label();
+            asm.push(amd64::jmp_label8(label));
+            let target = offset.checked_add(2).unwrap();
+            asm.set_label_origin_offset(label, target);
+            if (-128..=127).contains(&offset) {
+                assert_eq!(&*asm.finalize().unwrap(), &[0xeb, offset as u8]);
+            } else {
+                assert!(matches!(asm.finalize(), Err(AssemblerError::FixupOutOfRange)));
+                asm.set_label_origin_offset(label, 0);
+                assert!(matches!(asm.finalize(), Err(AssemblerError::FixupOutOfRange)));
+            }
+        }
+    }
+
+    #[test]
+    fn rel32_fixups_reject_both_out_of_range_directions() {
+        for offset in [i32::MIN as i64 - 1, i32::MIN as i64, i32::MAX as i64, i32::MAX as i64 + 1] {
+            let Ok(target) = isize::try_from(offset + 5) else {
+                continue;
+            };
+            let mut asm = Assembler::new();
+            let label = asm.forward_declare_label();
+            asm.push(amd64::jmp_label32(label));
+            asm.set_label_origin_offset(label, target);
+            if let Ok(offset) = i32::try_from(offset) {
+                let code = asm.finalize().unwrap();
+                assert_eq!(code[0], 0xe9);
+                assert_eq!(&code[1..], &offset.to_le_bytes());
+            } else {
+                assert!(matches!(asm.finalize(), Err(AssemblerError::FixupOutOfRange)));
+            }
+        }
+    }
+
+    #[test]
+    fn aarch64_branch_fixup_ranges_and_alignment() {
+        use aarch64::*;
+        fn check(make: fn(Label) -> crate::Instruction<AArch64Inst>, bits: u32) {
+            let bound = 1isize << (bits + 1);
+            for offset in [-bound - 4, -bound, bound - 4, bound, 2, isize::MIN] {
+                let mut asm = Assembler::new();
+                let label = asm.forward_declare_label();
+                asm.push(make(label));
+                asm.set_label_origin_offset(label, offset);
+                if offset >= -bound && offset < bound && offset & 3 == 0 {
+                    let code = asm.finalize().unwrap();
+                    let word = u32::from_le_bytes(code[..].try_into().unwrap());
+                    let shift = if bits == 26 { 0 } else { 5 };
+                    let decoded = (((word >> shift) << (32 - bits)) as i32) >> (32 - bits);
+                    assert_eq!((decoded as isize) << 2, offset);
+                } else {
+                    assert!(matches!(asm.finalize(), Err(AssemblerError::FixupOutOfRange)));
+                }
+            }
+        }
+        check(b_label, 26);
+        check(bl_label, 26);
+        check(|label| b_cond_label(Condition::EQ, label), 19);
+        check(|label| cbz_label(RegSize::X64, x0, label), 19);
+        check(|label| cbnz_label(RegSize::W32, x0, label), 19);
+    }
+
+    #[test]
+    fn aarch64_adr_allows_byte_addresses_but_not_out_of_range_targets() {
+        for offset in [-(1isize << 20) - 1, -(1 << 20), 3, (1 << 20) - 1, 1 << 20] {
+            let mut asm = Assembler::new();
+            let label = asm.forward_declare_label();
+            asm.push(aarch64::adr_label(aarch64::x0, label));
+            asm.set_label_origin_offset(label, offset);
+            if (-(1 << 20)..(1 << 20)).contains(&offset) {
+                let code = asm.finalize().unwrap();
+                let word = u32::from_le_bytes(code[..].try_into().unwrap());
+                let immediate = ((word >> 29) & 3) | (((word >> 5) & 0x7ffff) << 2);
+                assert_eq!(((immediate << 11) as i32 >> 11) as isize, offset);
+            } else {
+                assert!(matches!(asm.finalize(), Err(AssemblerError::FixupOutOfRange)));
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn aarch64_adrp_fixups_use_signed_pages_and_low_bytes() {
+        for target in [-(1isize << 32) - 1, -(1 << 32), 0x1234, (1 << 32) - 1, 1 << 32, isize::MIN] {
+            let mut asm = Assembler::new();
+            let label = asm.forward_declare_label();
+            asm.push(aarch64::adrp_add_label(aarch64::x0, label));
+            asm.set_label_origin_offset(label, target);
+            if (-(1 << 32)..(1 << 32)).contains(&target) {
+                let code = asm.finalize().unwrap();
+                let adrp = u32::from_le_bytes(code[..4].try_into().unwrap());
+                let add = u32::from_le_bytes(code[4..].try_into().unwrap());
+                let immediate = ((adrp >> 29) & 3) | (((adrp >> 5) & 0x7ffff) << 2);
+                let page = ((immediate << 11) as i32 >> 11) as isize;
+                assert_eq!((page << 12) + ((add >> 10) & 0xfff) as isize, target);
+            } else {
+                assert!(matches!(asm.finalize(), Err(AssemblerError::FixupOutOfRange)));
+            }
+        }
+    }
+
+    #[test]
+    fn truncated_or_invalid_fixup_encodings_cannot_finalize() {
+        let mut asm = Assembler::new();
+        let label = asm.create_label();
+        asm.push(amd64::jmp_label32(label));
+        asm.resize(2, 0);
+        assert!(matches!(asm.finalize(), Err(AssemblerError::InvalidFixup)));
+        asm.clear();
+        let label = asm.create_label();
+        asm.push(aarch64::b_label(label));
+        asm.code_mut().copy_from_slice(&[0; 4]);
+        assert!(matches!(asm.finalize(), Err(AssemblerError::InvalidFixup)));
+    }
+
+    #[test]
+    fn invalid_instruction_length_is_rejected_before_the_unsafe_write() {
+        let mut instruction = aarch64::nop();
+        for _ in 0..13 {
+            instruction.bytes.append(0);
+        }
+        let mut asm = Assembler::new();
+        asm.push(instruction);
+        assert!(asm.is_empty());
+        assert!(matches!(asm.finalize(), Err(AssemblerError::InvalidEncoding)));
+    }
+
+    #[test]
+    fn fixup_address_arithmetic_cannot_wrap() {
+        let mut asm = Assembler::new();
+        let label = asm.forward_declare_label();
+        asm.push(amd64::nop()).push(amd64::jmp_label32(label));
+        asm.set_label_origin_offset(label, isize::MIN);
+        assert!(matches!(asm.finalize(), Err(AssemblerError::FixupOutOfRange)));
+
+        asm.clear();
+        let label = asm.forward_declare_label();
+        asm.push(aarch64::nop()).push(aarch64::b_label(label));
+        asm.set_label_origin_offset(label, isize::MIN);
+        assert!(matches!(asm.finalize(), Err(AssemblerError::FixupOutOfRange)));
     }
 }

@@ -920,6 +920,72 @@ fn simple_test(engine_config: Config, isa: InstructionSetKind) {
     assert_eq!(instance.reg(Reg::A1), 100);
 }
 
+if_compiler_is_supported! {
+    #[test]
+    fn compiler_native_budget_stops_dispatch() {
+        use alloc::sync::Arc;
+        use core::sync::atomic::{AtomicUsize, Ordering};
+
+        struct LimitedCodegen {
+            calls: Arc<AtomicUsize>,
+            fail_during_callback: bool,
+        }
+
+        impl crate::config::CustomCodegen for LimitedCodegen {
+            fn should_emit_ecalli(&self, _: u32, asm: &mut polkavm_assembler::Assembler) -> bool {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                let limit = asm.len();
+                asm.set_code_size_limit(limit);
+                if self.fail_during_callback {
+                    asm.push_raw(&[0; 4]);
+                }
+                false
+            }
+        }
+
+        for sandbox in [crate::SandboxKind::Linux, crate::SandboxKind::Generic] {
+            if !sandbox.is_supported() {
+                continue;
+            }
+            let mut config = Config::new();
+            config.set_backend(Some(BackendKind::Compiler));
+            config.set_sandbox(Some(sandbox));
+            config.set_allow_experimental(true);
+            let engine = Engine::new(&config).unwrap();
+            for isa in [InstructionSetKind::Latest64, InstructionSetKind::ReviveV1] {
+                let mut builder = ProgramBlobBuilder::new(isa);
+                builder.add_import(b"hostcall");
+                builder.set_code(&[asm::ecalli(0), asm::fallthrough(), asm::ecalli(0), asm::trap()], &[]);
+                let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+                // Exercise failed custom emission, a failed gas prologue, and a failed step prologue.
+                for (gas, tracing) in [(false, false), (true, false), (false, true)] {
+                    let calls = Arc::new(AtomicUsize::new(0));
+                    let mut module_config = test_module_config();
+                    module_config.set_gas_metering(gas.then_some(GasMeteringKind::Sync));
+                    module_config.set_step_tracing(tracing);
+                    module_config.set_custom_codegen(LimitedCodegen {
+                        calls: calls.clone(),
+                        fail_during_callback: !gas && !tracing,
+                    });
+                    assert!(matches!(Module::from_blob(&engine, &module_config, blob.clone()), Err(CompileError::Error(_))));
+                    assert_eq!(calls.load(Ordering::Relaxed), 1);
+                }
+
+                // A failed compilation must not poison the engine's reusable assembler.
+                let mut builder = ProgramBlobBuilder::new(isa);
+                builder.set_code(&[asm::load_imm(A0, 123), asm::ret()], &[]);
+                let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+                let module = Module::from_blob(&engine, &test_module_config(), blob).unwrap();
+                let mut instance = module.instantiate().unwrap();
+                instance.set_reg(RA, crate::RETURN_TO_HOST);
+                instance.set_next_program_counter(ProgramCounter(0));
+                match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+                assert_eq!(instance.reg(A0), 123);
+            }
+        }
+    }
+}
+
 fn out_of_range_execution(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();

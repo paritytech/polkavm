@@ -7,7 +7,7 @@ use polkavm_common::abi::VM_CODE_ADDRESS_ALIGNMENT;
 use polkavm_common::cast::cast;
 use polkavm_common::program::{scan_is_jump_target_valid, InstructionSetKind, JumpTable, ProgramCounter, ProgramExport, RawReg};
 use polkavm_common::utils::{Bitness, BitnessT, GasVisitorT};
-use polkavm_common::zygote::VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH;
+use polkavm_common::zygote::{VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH, VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE};
 
 use crate::error::Error;
 
@@ -238,6 +238,10 @@ where
             export_to_label = HashMap::new();
         }
 
+        // Leave room for page rounding without increasing the sandbox reservation.
+        // Reapply the bound when reusing an assembler whose previous user changed it.
+        asm.set_code_size_limit(VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE as usize / native_page_size * native_page_size);
+
         let program_counter_to_machine_code_offset_list: Vec<(ProgramCounter, u32)>;
         let program_counter_to_machine_code_offset_map: HashMap<ProgramCounter, u32>;
         let mut gas_metering_stub_offsets: Vec<u32>;
@@ -331,17 +335,44 @@ where
             ArchVisitor(&mut visitor).emit_step_trampoline();
         }
 
+        visitor.check_assembler()?;
+
         log::trace!("Emitting code...");
         visitor
             .program_counter_to_machine_code_offset_list
             .push((ProgramCounter(0), visitor.asm.len() as u32));
 
         visitor.force_start_new_basic_block(0, visitor.scan_is_jump_target_valid(0));
+        visitor.check_assembler()?;
         Ok((visitor, address_space))
     }
 
     fn scan_is_jump_target_valid(&self, offset: u32) -> bool {
         scan_is_jump_target_valid(self.instruction_set, self.code, self.bitmask, offset)
+    }
+
+    #[inline]
+    fn check_assembler(&self) -> Result<(), Error> {
+        if let Some(error) = self.asm.error() {
+            return Err(Error::from_display(error));
+        }
+        if self.asm.len() > VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE as usize {
+            return Err(Error::from_static_str("native code exceeds the sandbox code size limit"));
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn native_code_offset(&mut self) -> Option<u32> {
+        // Custom codegen can change the assembler's limit; never narrow an
+        // offset until the actual emitted length fits the sandbox's budget.
+        if self.asm.len() > VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE as usize {
+            self.asm.set_code_size_limit(VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE as usize);
+        }
+        if self.asm.error().is_some() {
+            return None;
+        }
+        Some(self.asm.len() as u32)
     }
 
     pub(crate) fn finish_compilation(
@@ -353,6 +384,8 @@ where
     where
         S: Sandbox,
     {
+        self.check_assembler()?;
+
         if matches!(self.instruction_set, InstructionSetKind::JamV1) {
             if let Some(pc) = self.first_invalid_offset {
                 return Err(CompileError::ValidationFailed(format!("validation failed at offset {pc}")));
@@ -393,11 +426,15 @@ where
 
         let label_sysenter = ArchVisitor(&mut self).emit_sysenter();
         let label_sysreturn = ArchVisitor(&mut self).emit_sysreturn();
+        self.check_assembler()?;
         let native_code_origin = self.asm.origin();
         let native_page_size = crate::sandbox::get_native_page_size();
         let vm_code_address_alignment = VM_CODE_ADDRESS_ALIGNMENT as usize;
 
-        let jump_table_length = (self.jump_table.len() as usize + 1) * vm_code_address_alignment;
+        let jump_table_length = (self.jump_table.len() as usize)
+            .checked_add(1)
+            .and_then(|length| length.checked_mul(vm_code_address_alignment))
+            .ok_or_else(|| Error::from_static_str("native jump table size overflow"))?;
         let mut native_jump_table = S::allocate_jump_table(global, jump_table_length).map_err(Error::from_display)?;
         assert_eq!(core::mem::size_of_val(native_jump_table.as_ref()) % native_page_size, 0);
         {
@@ -455,7 +492,8 @@ where
             SandboxKind::Linux => {}
             SandboxKind::Generic => {
                 let native_page_size = crate::sandbox::get_native_page_size();
-                let padded_length = polkavm_common::utils::align_to_next_page_usize(native_page_size, self.asm.len()).unwrap();
+                let padded_length = polkavm_common::utils::align_to_next_page_usize(native_page_size, self.asm.len())
+                    .ok_or_else(|| Error::from_static_str("native code size overflow"))?;
                 self.asm.resize(padded_length, ArchVisitor::<S, B, G>::PADDING_BYTE);
                 self.asm.define_label(self.jump_table_label);
             }
@@ -472,10 +510,13 @@ where
             self.asm.define_all_undefined_labels(trap_offset);
         }
 
+        self.check_assembler()?;
+
         let module = {
+            let code = self.asm.finalize().map_err(Error::from_display)?;
             let init = SandboxInit {
                 guest_init: self.init,
-                code: &self.asm.finalize(),
+                code: &code,
                 jump_table: native_jump_table,
                 sysenter_address,
                 sysreturn_address,
@@ -535,8 +576,12 @@ where
             self.step(program_counter);
         }
 
+        let Some(offset) = self.native_code_offset() else {
+            return;
+        };
+
         if let Some(gas_metering) = self.gas_metering {
-            self.gas_metering_stub_offsets.push(cast(self.asm.len()).to_u32_or_debug_panic());
+            self.gas_metering_stub_offsets.push(offset);
             ArchVisitor(self).emit_gas_metering_stub(gas_metering);
         }
     }
@@ -557,6 +602,11 @@ where
             );
         }
 
+        // Failed emissions may be partial; do not inspect or record their offsets.
+        let Some(offset) = self.native_code_offset() else {
+            return;
+        };
+
         if cfg!(debug_assertions) && !self.step_tracing && self.custom_codegen.is_none() {
             let offset = self.program_counter_to_machine_code_offset_list.last().unwrap().1 as usize;
             let instruction_length = self.asm.len() - offset;
@@ -567,7 +617,7 @@ where
 
         let next_program_counter = program_counter + length;
         self.program_counter_to_machine_code_offset_list
-            .push((ProgramCounter(next_program_counter), self.asm.len() as u32));
+            .push((ProgramCounter(next_program_counter), offset));
 
         if KIND != CONTINUE_BASIC_BLOCK {
             if KIND == END_BASIC_BLOCK_INVALID && self.first_invalid_offset.is_none() {
@@ -688,6 +738,11 @@ where
     G: GasVisitorT,
 {
     type ReturnTy = ();
+
+    #[inline]
+    fn should_continue(&self) -> bool {
+        self.asm.error().is_none()
+    }
 
     fn and_inverted(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, and_inverted(d, s1, s2));
@@ -1783,5 +1838,63 @@ where
                 });
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "generic-sandbox"))]
+#[test]
+fn native_budget_includes_final_trampolines_and_padding() {
+    use crate::gas::{CostModel, GasVisitor};
+    use crate::sandbox::generic;
+    use polkavm_common::program::{asm, ProgramBlob};
+    use polkavm_common::utils::B64;
+    use polkavm_common::writer::ProgramBlobBuilder;
+
+    crate::sandbox::init_native_page_size();
+    let mut config = ModuleConfig::new();
+    config.set_page_size(crate::sandbox::get_native_page_size() as u32);
+    let cache = CompilerCache::default();
+    let global = generic::GlobalState::new(&crate::Config::new()).unwrap();
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.set_code(&[asm::trap()], &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    type Visitor<'a> = CompilerVisitor<'a, generic::Sandbox, B64, GasVisitor>;
+    let make_visitor = || {
+        let (mut visitor, address_space) = Visitor::new(
+            &cache,
+            &config,
+            blob.isa(),
+            blob.jump_table(),
+            blob.code(),
+            blob.bitmask(),
+            &[],
+            false,
+            blob.code().len() as u32,
+            GuestInit {
+                page_size: config.page_size,
+                ..GuestInit::default()
+            },
+            GasVisitor::new(CostModel::naive_ref()),
+        )
+        .unwrap();
+        blob.visit(
+            polkavm_common::program::build_static_dispatch_table_latest64!(BUDGET_TEST_VISITOR, Visitor<'a>),
+            &mut visitor,
+        );
+        (visitor, address_space)
+    };
+
+    let (visitor, address_space) = make_visitor();
+    let module = visitor.finish_compilation(&global, &cache, address_space).unwrap();
+    let padded_length = module.machine_code().len();
+    for limit_padding in [false, true] {
+        let (mut visitor, address_space) = make_visitor();
+        let limit = if limit_padding { padded_length - 1 } else { visitor.asm.len() };
+        visitor.asm.set_code_size_limit(limit);
+        assert!(visitor.asm.error().is_none());
+        assert!(matches!(
+            visitor.finish_compilation(&global, &cache, address_space),
+            Err(CompileError::Error(_))
+        ));
     }
 }

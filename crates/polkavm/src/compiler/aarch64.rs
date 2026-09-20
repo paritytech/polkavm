@@ -745,7 +745,9 @@ where
         }
 
         self.push(bl_label(step_label));
-        debug_assert_eq!(self.asm.len() - origin, step_prelude_length::<S>());
+        if self.asm.error().is_none() {
+            debug_assert_eq!(self.asm.len() - origin, step_prelude_length::<S>());
+        }
     }
 
     pub(crate) fn emit_gas_metering_stub(&mut self, kind: GasMeteringKind) {

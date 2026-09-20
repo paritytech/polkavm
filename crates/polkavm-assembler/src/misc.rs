@@ -167,7 +167,7 @@ impl FixupKind {
     }
 }
 
-const MAXIMUM_INSTRUCTION_SIZE: usize = 16;
+pub(crate) const MAXIMUM_INSTRUCTION_SIZE: usize = 16;
 
 #[derive(Copy, Clone)]
 pub struct InstBuf {
@@ -185,6 +185,12 @@ impl InstBuf {
     #[inline]
     pub fn len(&self) -> usize {
         (self.length >> 3) as usize
+    }
+
+    #[cfg(feature = "alloc")]
+    #[inline]
+    pub(crate) fn is_valid(&self) -> bool {
+        self.length <= (MAXIMUM_INSTRUCTION_SIZE * 8) as u32 && self.length & 7 == 0
     }
 
     #[inline]
@@ -215,34 +221,6 @@ impl InstBuf {
         self.encode_into_raw(output.spare_capacity_mut().as_mut_ptr().cast());
         let new_length = output.len() + (self.length as usize >> 3);
         output.set_len(new_length);
-    }
-
-    #[cfg(feature = "alloc")]
-    #[cold]
-    #[inline(never)]
-    fn reserve_impl(output: &mut Vec<u8>, length: usize) {
-        output.reserve(length);
-    }
-
-    #[cfg(feature = "alloc")]
-    #[inline(always)]
-    pub fn reserve_const<const INSTRUCTIONS: usize>(output: &mut Vec<u8>) {
-        Self::reserve(output, INSTRUCTIONS);
-    }
-
-    #[cfg(feature = "alloc")]
-    #[inline(always)]
-    pub fn reserve(output: &mut Vec<u8>, count: usize) {
-        let count = count.checked_mul(MAXIMUM_INSTRUCTION_SIZE).unwrap();
-        if output.spare_capacity_mut().len() < count {
-            Self::reserve_impl(output, count);
-            if output.spare_capacity_mut().len() < count {
-                // SAFETY: `reserve` made sure that we have this much capacity, so this is safe.
-                unsafe {
-                    core::hint::unreachable_unchecked();
-                }
-            }
-        }
     }
 
     #[inline]

@@ -2470,7 +2470,7 @@ mod tests {
             self.asm.push(inst);
             let ranges = [(inst, position..self.asm.len())];
 
-            let code = self.asm.finalize();
+            let code = self.asm.finalize().unwrap();
             let mut position = 0;
             for (inst, range) in ranges {
                 write!(&mut self.disassembly_1, "{:08x} ", position).unwrap();
@@ -2599,7 +2599,7 @@ mod tests {
         let mut asm = crate::Assembler::new();
         let label = asm.forward_declare_label();
         asm.push_with_label(label, jmp_label8(label));
-        let disassembly = disassemble(&asm.finalize());
+        let disassembly = disassemble(&asm.finalize().unwrap());
         assert_eq!(disassembly, "00000000 ebfe jmp short 0x0");
     }
 
@@ -2609,7 +2609,7 @@ mod tests {
         let mut asm = crate::Assembler::new();
         let label = asm.forward_declare_label();
         asm.push(jmp_label8(label));
-        let disassembly = disassemble(&asm.finalize());
+        let disassembly = disassemble(&asm.finalize().unwrap());
         assert_eq!(disassembly, "00000000 0f0b ud2");
     }
 
@@ -2619,7 +2619,7 @@ mod tests {
         let mut asm = crate::Assembler::new();
         let label = asm.forward_declare_label();
         asm.push_with_label(label, jmp_label32(label));
-        let disassembly = disassemble(&asm.finalize());
+        let disassembly = disassemble(&asm.finalize().unwrap());
         assert_eq!(disassembly, "00000000 e9fbffffff jmp 0x0");
     }
 
@@ -2629,7 +2629,7 @@ mod tests {
         let mut asm = crate::Assembler::new();
         let label = asm.forward_declare_label();
         asm.push(jmp_label32(label));
-        let disassembly = disassemble(&asm.finalize());
+        let disassembly = disassemble(&asm.finalize().unwrap());
         assert_eq!(disassembly, "00000000 0f0b ud2\n00000002 90 nop\n00000003 0f0b ud2");
     }
 
@@ -2639,7 +2639,7 @@ mod tests {
         let mut asm = crate::Assembler::new();
         let label = asm.forward_declare_label();
         asm.push_with_label(label, call_label32(label));
-        let disassembly = disassemble(&asm.finalize());
+        let disassembly = disassemble(&asm.finalize().unwrap());
         assert_eq!(disassembly, "00000000 e8fbffffff call 0x0");
     }
 
@@ -2649,7 +2649,7 @@ mod tests {
         let mut asm = crate::Assembler::new();
         let label = asm.forward_declare_label();
         asm.push(call_label32(label));
-        let disassembly = disassemble(&asm.finalize());
+        let disassembly = disassemble(&asm.finalize().unwrap());
         assert_eq!(disassembly, "00000000 0f0b ud2\n00000002 90 nop\n00000003 0f0b ud2");
     }
 
@@ -2660,7 +2660,7 @@ mod tests {
             let mut asm = crate::Assembler::new();
             let label = asm.forward_declare_label();
             asm.push_with_label(label, jcc_label8(cond, label));
-            let disassembly = disassemble(&asm.finalize());
+            let disassembly = disassemble(&asm.finalize().unwrap());
             assert_eq!(
                 disassembly,
                 format!("00000000 {:02x}fe j{} short 0x0", 0x70 + cond as u8, cond.suffix())
@@ -2675,7 +2675,7 @@ mod tests {
             let mut asm = crate::Assembler::new();
             let label = asm.forward_declare_label();
             asm.push(jcc_label8(cond, label));
-            let disassembly = disassemble(&asm.finalize());
+            let disassembly = disassemble(&asm.finalize().unwrap());
             assert_eq!(disassembly, "00000000 0f0b ud2");
         });
     }
@@ -2688,7 +2688,7 @@ mod tests {
             let label = asm.forward_declare_label();
             asm.push(jcc_label8(cond, label));
             asm.push_with_label(label, nop());
-            let disassembly = disassemble(&asm.finalize());
+            let disassembly = disassemble(&asm.finalize().unwrap());
             assert_eq!(
                 disassembly,
                 format!(
@@ -2708,7 +2708,7 @@ mod tests {
             let label = asm.forward_declare_label();
             asm.push_with_label(label, nop());
             asm.push(jcc_label8(cond, label));
-            let disassembly = disassemble(&asm.finalize());
+            let disassembly = disassemble(&asm.finalize().unwrap());
             assert_eq!(
                 disassembly,
                 format!(
@@ -2728,7 +2728,7 @@ mod tests {
             let label = asm.forward_declare_label();
             asm.push(jcc_label32(cond, label));
             asm.push_with_label(label, nop());
-            let disassembly = disassemble(&asm.finalize());
+            let disassembly = disassemble(&asm.finalize().unwrap());
             assert_eq!(
                 disassembly,
                 format!(
@@ -2747,7 +2747,7 @@ mod tests {
             let mut asm = crate::Assembler::new();
             let label = asm.forward_declare_label();
             asm.push(jcc_label32(cond, label));
-            let disassembly = disassemble(&asm.finalize());
+            let disassembly = disassemble(&asm.finalize().unwrap());
             assert_eq!(disassembly, "00000000 0f0b ud2\n00000002 0f0b ud2\n00000004 0f0b ud2");
         });
     }
@@ -2758,7 +2758,7 @@ mod tests {
         let mut asm = crate::Assembler::new();
         let label = asm.forward_declare_label();
         asm.push_with_label(label, lea_rip_label(super::Reg::rax, label));
-        let disassembly = disassemble(&asm.finalize());
+        let disassembly = disassemble(&asm.finalize().unwrap());
         assert_eq!(disassembly, "00000000 488d05f9ffffff lea rax, [rip-0x7]");
     }
 
@@ -2769,7 +2769,7 @@ mod tests {
             let mut asm = crate::Assembler::new();
             let label = asm.forward_declare_label();
             asm.push(lea_rip_label(reg, label));
-            let disassembly = disassemble(&asm.finalize());
+            let disassembly = disassemble(&asm.finalize().unwrap());
             assert_eq!(
                 disassembly,
                 "00000000 0f0b ud2\n00000002 0f0b ud2\n00000004 0f0b ud2\n00000006 90 nop"
@@ -2784,7 +2784,7 @@ mod tests {
         let label = asm.forward_declare_label();
         asm.push(lea_rip_label(super::Reg::rax, label));
         asm.push_with_label(label, nop());
-        let disassembly = disassemble(&asm.finalize());
+        let disassembly = disassemble(&asm.finalize().unwrap());
         assert_eq!(disassembly, "00000000 488d0500000000 lea rax, [rip]\n00000007 90 nop");
     }
 }

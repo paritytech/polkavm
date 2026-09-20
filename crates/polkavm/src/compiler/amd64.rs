@@ -195,14 +195,24 @@ enum ShiftKind {
 }
 
 #[cfg_attr(not(debug_assertions), inline(always))]
-fn calculate_label_offset(asm_len: usize, rel8_len: usize, rel32_len: usize, offset: isize) -> Result<i8, i32> {
-    let offset_near = offset - (asm_len as isize + rel8_len as isize);
-    if offset_near <= i8::MAX as isize && offset_near >= i8::MIN as isize {
-        Ok(offset_near as i8)
-    } else {
-        let offset = offset - (asm_len as isize + rel32_len as isize);
-        Err(offset as i32)
+fn calculate_label_offset(asm_len: usize, rel8_len: usize, rel32_len: usize, offset: isize) -> Option<Result<i8, i32>> {
+    let asm_len = isize::try_from(asm_len).ok()?;
+    let short_end = asm_len.checked_add(isize::try_from(rel8_len).ok()?)?;
+    if let Ok(offset) = i8::try_from(offset.checked_sub(short_end)?) {
+        return Some(Ok(offset));
     }
+    let long_end = asm_len.checked_add(isize::try_from(rel32_len).ok()?)?;
+    i32::try_from(offset.checked_sub(long_end)?).ok().map(Err)
+}
+
+#[test]
+fn label_displacement_boundaries() {
+    assert_eq!(calculate_label_offset(0, 2, 5, 129), Some(Ok(127)));
+    assert_eq!(calculate_label_offset(126, 2, 5, 0), Some(Ok(-128)));
+    assert_eq!(calculate_label_offset(0, 2, 5, i32::MAX as isize + 5), Some(Err(i32::MAX)));
+    assert_eq!(calculate_label_offset(i32::MAX as usize - 4, 2, 5, 0), Some(Err(i32::MIN)));
+    assert_eq!(calculate_label_offset(0, 2, 5, i32::MAX as isize + 6), None);
+    assert_eq!(calculate_label_offset(i32::MAX as usize - 3, 2, 5, 0), None);
 }
 
 #[cfg_attr(not(debug_assertions), inline(always))]
@@ -211,16 +221,11 @@ where
     R: NonZero,
 {
     if let Some(offset) = asm.get_label_origin_offset(label) {
-        let offset = calculate_label_offset(
-            asm.len(),
-            jcc_rel8(condition, i8::MAX).len(),
-            jcc_rel32(condition, i32::MAX).len(),
-            offset,
-        );
-
-        match offset {
-            Ok(offset) => asm.push(jcc_rel8(condition, offset)),
-            Err(offset) => asm.push(jcc_rel32(condition, offset)),
+        match calculate_label_offset(asm.len(), jcc_rel8(condition, 0).len(), jcc_rel32(condition, 0).len(), offset) {
+            Some(Ok(offset)) => asm.push(jcc_rel8(condition, offset)),
+            Some(Err(offset)) => asm.push(jcc_rel32(condition, offset)),
+            // Let the assembler report an unsupported displacement, without narrowing it.
+            None => asm.push(jcc_label32(condition, label)),
         }
     } else {
         asm.push(jcc_label32(condition, label))
@@ -233,11 +238,10 @@ where
     R: NonZero,
 {
     if let Some(offset) = asm.get_label_origin_offset(label) {
-        let offset = calculate_label_offset(asm.len(), jmp_rel8(i8::MAX).len(), jmp_rel32(i32::MAX).len(), offset);
-
-        match offset {
-            Ok(offset) => asm.push(jmp_rel8(offset)),
-            Err(offset) => asm.push(jmp_rel32(offset)),
+        match calculate_label_offset(asm.len(), jmp_rel8(0).len(), jmp_rel32(0).len(), offset) {
+            Some(Ok(offset)) => asm.push(jmp_rel8(offset)),
+            Some(Err(offset)) => asm.push(jmp_rel32(offset)),
+            None => asm.push(jmp_label32(label)),
         }
     } else {
         asm.push(jmp_label32(label))
@@ -974,7 +978,9 @@ where
         };
         let asm = asm.push(call_label32(step_label));
         asm.assert_reserved_exactly_as_needed();
-        debug_assert_eq!(step_prelude_length::<S>(), self.asm.len() - origin);
+        if self.asm.error().is_none() {
+            debug_assert_eq!(step_prelude_length::<S>(), self.asm.len() - origin);
+        }
     }
 
     pub(crate) fn emit_gas_metering_stub(&mut self, kind: GasMeteringKind) {
@@ -988,6 +994,9 @@ where
         // For generic sandbox this will be:
         // 49 81 ad 60 f0 ff ff ff ff ff 7f     sub qword [r13-0xfa0],0x7fffffff
         self.push(sub((Self::vmctx_field(S::offset_table().gas), imm64(i32::MAX))));
+        if self.asm.error().is_some() {
+            return;
+        }
         if matches!(kind, GasMeteringKind::Sync) {
             // This will jump 5 bytes (or 8 bytes on generic sandbox) backwards to 0x60 which is the PUSHA instruction
             // which is invalid in 64-bit, so it will trap with an SIGILL.

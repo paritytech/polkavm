@@ -33,6 +33,20 @@ PolkaVM is a general purpose user-level RISC-V based virtual machine.
 - Floating point support, SIMD, and other more niche RISC-V extensions. These could be added as an opt-in feature in the future if necessary, but this is not currently planned.
 - Support for full 32-register RISC-V ISA. This VM currently only targets the RV32EM.
 
+## Program size limits
+
+The parser admits instruction sections up to 64 MiB. This is an input-code
+limit, not a guarantee that every admitted program can be compiled: native
+code has an independent, platform-specific size and branch-displacement
+budget. Compilation returns an error if emission, final padding, or a fixup
+exceeds those bounds; increasing guest admission does not enlarge the
+sandbox's native address-space reservation.
+
+Embedders may impose a separate limit on the complete serialized program,
+which also contains data, jump tables, and metadata. Existing programs retain
+their bytecode encoding; consumers must update their parser/runtime before
+accepting programs above the previous 32 MiB instruction limit.
+
 ## License
 
 Licensed under either of
