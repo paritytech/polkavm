@@ -438,6 +438,20 @@ impl Module {
             return Err(Error::from_static_str("on AMD64 the full gas cost model is only supported on CPUs with AVX2 support").into());
         }
 
+        #[cfg(target_arch = "x86_64")]
+        if engine.selected_backend == BackendKind::Compiler && matches!(blob.isa(), InstructionSetKind::ReviveV1) {
+            if !crate::cpuid::is_avx2_supported() {
+                return Err(Error::from_static_str(
+                    "on AMD64 the recompiler runs the wide integer instructions only on CPUs with AVX2 support",
+                )
+                .into());
+            }
+
+            if !cfg!(target_os = "linux") {
+                return Err(Error::from_static_str("the recompiler runs the wide integer instructions only on Linux").into());
+            }
+        }
+
         if engine.selected_backend == BackendKind::Interpreter && matches!(blob.isa(), InstructionSetKind::JamV1) {
             if let Err(pc) = blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1) {
                 return Err(CompileError::ValidationFailed(format!("validation failed at offset {pc}")));

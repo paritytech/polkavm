@@ -286,6 +286,152 @@ pub enum RegMem {
     Mem(MemOp),
 }
 
+/// A 256-bit vector register. The same register named through its low half is an `xmm`.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum Ymm {
+    ymm0 = 0,
+    ymm1 = 1,
+    ymm2 = 2,
+    ymm3 = 3,
+    ymm4 = 4,
+    ymm5 = 5,
+    ymm6 = 6,
+    ymm7 = 7,
+    ymm8 = 8,
+    ymm9 = 9,
+    ymm10 = 10,
+    ymm11 = 11,
+    ymm12 = 12,
+    ymm13 = 13,
+    ymm14 = 14,
+    ymm15 = 15,
+}
+
+impl Ymm {
+    pub const ALL: [Ymm; 16] = [
+        Ymm::ymm0,
+        Ymm::ymm1,
+        Ymm::ymm2,
+        Ymm::ymm3,
+        Ymm::ymm4,
+        Ymm::ymm5,
+        Ymm::ymm6,
+        Ymm::ymm7,
+        Ymm::ymm8,
+        Ymm::ymm9,
+        Ymm::ymm10,
+        Ymm::ymm11,
+        Ymm::ymm12,
+        Ymm::ymm13,
+        Ymm::ymm14,
+        Ymm::ymm15,
+    ];
+
+    #[inline]
+    pub const fn from_index(index: u8) -> Ymm {
+        Ymm::ALL[(index & 0b1111) as usize]
+    }
+
+    #[inline]
+    pub const fn index(self) -> u8 {
+        self as u8
+    }
+
+    #[inline]
+    pub const fn needs_rex(self) -> bool {
+        self as u8 >= 8
+    }
+
+    #[inline]
+    pub const fn modrm_rm_bits(self) -> u8 {
+        (self as u8) & 0b111
+    }
+
+    #[inline]
+    pub const fn modrm_reg_bits(self) -> u8 {
+        ((self as u8) << 3) & 0b111000
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Ymm::ymm0 => "ymm0",
+            Ymm::ymm1 => "ymm1",
+            Ymm::ymm2 => "ymm2",
+            Ymm::ymm3 => "ymm3",
+            Ymm::ymm4 => "ymm4",
+            Ymm::ymm5 => "ymm5",
+            Ymm::ymm6 => "ymm6",
+            Ymm::ymm7 => "ymm7",
+            Ymm::ymm8 => "ymm8",
+            Ymm::ymm9 => "ymm9",
+            Ymm::ymm10 => "ymm10",
+            Ymm::ymm11 => "ymm11",
+            Ymm::ymm12 => "ymm12",
+            Ymm::ymm13 => "ymm13",
+            Ymm::ymm14 => "ymm14",
+            Ymm::ymm15 => "ymm15",
+        }
+    }
+
+    pub const fn xmm_name(self) -> &'static str {
+        match self {
+            Ymm::ymm0 => "xmm0",
+            Ymm::ymm1 => "xmm1",
+            Ymm::ymm2 => "xmm2",
+            Ymm::ymm3 => "xmm3",
+            Ymm::ymm4 => "xmm4",
+            Ymm::ymm5 => "xmm5",
+            Ymm::ymm6 => "xmm6",
+            Ymm::ymm7 => "xmm7",
+            Ymm::ymm8 => "xmm8",
+            Ymm::ymm9 => "xmm9",
+            Ymm::ymm10 => "xmm10",
+            Ymm::ymm11 => "xmm11",
+            Ymm::ymm12 => "xmm12",
+            Ymm::ymm13 => "xmm13",
+            Ymm::ymm14 => "xmm14",
+            Ymm::ymm15 => "xmm15",
+        }
+    }
+}
+
+impl core::fmt::Display for Ymm {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        fmt.write_str(self.name())
+    }
+}
+
+/// The register-or-memory operand of a 256-bit vector instruction.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum YmmMem {
+    Ymm(Ymm),
+    Mem(MemOp),
+}
+
+impl From<Ymm> for YmmMem {
+    #[inline]
+    fn from(reg: Ymm) -> Self {
+        YmmMem::Ymm(reg)
+    }
+}
+
+impl From<MemOp> for YmmMem {
+    #[inline]
+    fn from(mem: MemOp) -> Self {
+        YmmMem::Mem(mem)
+    }
+}
+
+impl core::fmt::Display for YmmMem {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
+            YmmMem::Ymm(reg) => reg.fmt(fmt),
+            YmmMem::Mem(mem) => mem.fmt(fmt),
+        }
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Operands {
     RegMem_Reg(Size, RegMem, Reg),
@@ -467,6 +613,7 @@ struct Inst {
     vex_m_mmmm: u8,
     vex_vvvv: u8,
     vex_pp: u8,
+    vex_l: bool,
 }
 
 // See: https://www-user.tu-chemnitz.de/~heha/hsn/chm/x86.chm/x64.htm
@@ -492,6 +639,7 @@ impl Inst {
             vex_m_mmmm: 0,
             vex_vvvv: 0,
             vex_pp: 0,
+            vex_l: false,
         }
     }
 
@@ -562,13 +710,49 @@ impl Inst {
         self
     }
 
+    /// Marks the instruction as VEX encoded. `vvvv` is the index of the register carried by the
+    /// VEX prefix's extra operand field; pass zero for instructions without one.
     #[inline]
-    const fn vex(mut self, m_mmmm: u8, vvvv: Reg, pp: u8) -> Self {
+    const fn vex(mut self, m_mmmm: u8, vvvv: u8, pp: u8) -> Self {
         self.vex = true;
         self.vex_m_mmmm = m_mmmm;
-        self.vex_vvvv = (!(vvvv as u8)) & 0xf;
+        self.vex_vvvv = (!vvvv) & 0xf;
         self.vex_pp = pp;
         self
+    }
+
+    /// Selects the 256-bit vector length of a VEX encoded instruction.
+    #[inline]
+    const fn vex_l256(mut self) -> Self {
+        self.vex_l = true;
+        self
+    }
+
+    #[inline]
+    const fn modrm_reg_vec(mut self, value: Ymm) -> Self {
+        if value.needs_rex() {
+            self.rex |= REX_EXT_MODRM_REG;
+        }
+        self.modrm |= value.modrm_reg_bits();
+        self.force_enable_modrm = true;
+        self
+    }
+
+    #[inline]
+    const fn modrm_rm_direct_vec(mut self, value: Ymm) -> Self {
+        if value.needs_rex() {
+            self.rex |= REX_EXT_MODRM_RM;
+        }
+        self.modrm |= value.modrm_rm_bits() | 0b11000000;
+        self
+    }
+
+    #[inline(always)]
+    const fn regmem_vec(self, operand: YmmMem) -> Self {
+        match operand {
+            YmmMem::Ymm(reg) => self.modrm_rm_direct_vec(reg),
+            YmmMem::Mem(mem) => self.mem(mem),
+        }
     }
 
     #[inline]
@@ -756,10 +940,16 @@ impl Inst {
             let rex_x = (self.rex >> 1) & 1;
             let rex_b = self.rex & 1;
             let rex_w = (self.rex >> 3) & 1;
+            let vex_l = u8::from(self.vex_l);
 
-            buf.append(0xc4);
-            buf.append(((rex_r ^ 1) << 7) | ((rex_x ^ 1) << 6) | ((rex_b ^ 1) << 5) | (self.vex_m_mmmm & 0x1f));
-            buf.append((rex_w << 7) | ((self.vex_vvvv & 0xf) << 3) | (self.vex_pp & 0x3));
+            if rex_x == 0 && rex_b == 0 && rex_w == 0 && self.vex_m_mmmm == 0b00001 {
+                buf.append(0xc5);
+                buf.append(((rex_r ^ 1) << 7) | ((self.vex_vvvv & 0xf) << 3) | (vex_l << 2) | (self.vex_pp & 0x3));
+            } else {
+                buf.append(0xc4);
+                buf.append(((rex_r ^ 1) << 7) | ((rex_x ^ 1) << 6) | ((rex_b ^ 1) << 5) | (self.vex_m_mmmm & 0x1f));
+                buf.append((rex_w << 7) | ((self.vex_vvvv & 0xf) << 3) | (vex_l << 2) | (self.vex_pp & 0x3));
+            }
         } else {
             if self.rex != 0 {
                 buf.append(self.rex);
@@ -1532,6 +1722,16 @@ pub mod inst {
             (fmt.write_fmt(core::format_args!("dec {}", self.1.display(self.0)))),
 
         // https://www.felixcloutier.com/x86/sub
+        adc(Operands) =>
+            alu_impl(0x10, 0x12, 0b010, self.0),
+            None,
+            (display_with_operands(fmt, "adc", self.0)),
+
+        sbb(Operands) =>
+            alu_impl(0x18, 0x1a, 0b011, self.0),
+            None,
+            (display_with_operands(fmt, "sbb", self.0)),
+
         sub(Operands) =>
             alu_impl(0x28, 0x2a, 0b101, self.0),
             None,
@@ -1630,22 +1830,10 @@ pub mod inst {
             None,
             (fmt.write_fmt(core::format_args!("shr {}, 0x1", self.1.display(Size::from(self.0))))),
 
-        // https://www.felixcloutier.com/x86/shld
-        shld_imm(RegSize, RegMem, Reg, u8) =>
-            Inst::new(0xa4).op_alt().imm8(self.3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_reg(self.2),
-            None,
-            (fmt.write_fmt(core::format_args!("shld {}, {}, 0x{:x}", self.1.display_without_prefix(Size::from(self.0)), self.2.name_from(self.0), self.3))),
-
-        // https://www.felixcloutier.com/x86/shrd
-        shrd_imm(RegSize, RegMem, Reg, u8) =>
-            Inst::new(0xac).op_alt().imm8(self.3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_reg(self.2),
-            None,
-            (fmt.write_fmt(core::format_args!("shrd {}, {}, 0x{:x}", self.1.display_without_prefix(Size::from(self.0)), self.2.name_from(self.0), self.3))),
-
         // https://www.felixcloutier.com/x86/sarx:shlx:shrx
         shlx(RegSize, Reg, RegMem, Reg) =>
             Inst::new(0xf7)
-                .vex(0b00010, self.3, 0b01)
+                .vex(0b00010, self.3 as u8, 0b01)
                 .rex_64b_if(matches!(self.0, RegSize::R64))
                 .modrm_reg(self.1)
                 .regmem(self.2),
@@ -1654,7 +1842,7 @@ pub mod inst {
 
         shrx(RegSize, Reg, RegMem, Reg) =>
             Inst::new(0xf7)
-                .vex(0b00010, self.3, 0b11)
+                .vex(0b00010, self.3 as u8, 0b11)
                 .rex_64b_if(matches!(self.0, RegSize::R64))
                 .modrm_reg(self.1)
                 .regmem(self.2),
@@ -1663,7 +1851,7 @@ pub mod inst {
 
         sarx(RegSize, Reg, RegMem, Reg) =>
             Inst::new(0xf7)
-                .vex(0b00010, self.3, 0b10)
+                .vex(0b00010, self.3 as u8, 0b10)
                 .rex_64b_if(matches!(self.0, RegSize::R64))
                 .modrm_reg(self.1)
                 .regmem(self.2),
@@ -1673,7 +1861,7 @@ pub mod inst {
         // https://www.felixcloutier.com/x86/andn
         andn(RegSize, Reg, Reg, RegMem) =>
             Inst::new(0xf2)
-                .vex(0b00010, self.2, 0b00)
+                .vex(0b00010, self.2 as u8, 0b00)
                 .rex_64b_if(matches!(self.0, RegSize::R64))
                 .modrm_reg(self.1)
                 .regmem(self.3),
@@ -1683,12 +1871,201 @@ pub mod inst {
         // https://www.felixcloutier.com/x86/mulx
         mulx(RegSize, Reg, Reg, RegMem) =>
             Inst::new(0xf6)
-                .vex(0b00010, self.2, 0b11)
+                .vex(0b00010, self.2 as u8, 0b11)
                 .rex_64b_if(matches!(self.0, RegSize::R64))
                 .modrm_reg(self.1)
                 .regmem(self.3),
             None,
             (fmt.write_fmt(core::format_args!("mulx {}, {}, {}", self.1.name_from(self.0), self.2.name_from(self.0), self.3.display_without_prefix(Size::from(self.0))))),
+
+        // https://www.felixcloutier.com/x86/movdqu:vmovdqu8:vmovdqu16:vmovdqu32:vmovdqu64
+        vmovdqu_load(Ymm, MemOp) =>
+            Inst::new(0x6f).vex(0b00001, 0, 0b10).vex_l256().modrm_reg_vec(self.0).mem(self.1),
+            None,
+            (fmt.write_fmt(core::format_args!("vmovdqu {}, {}", self.0, self.1))),
+
+        vmovdqu_store(MemOp, Ymm) =>
+            Inst::new(0x7f).vex(0b00001, 0, 0b10).vex_l256().modrm_reg_vec(self.1).mem(self.0),
+            None,
+            (fmt.write_fmt(core::format_args!("vmovdqu {}, {}", self.0, self.1))),
+
+        // https://www.felixcloutier.com/x86/movdqa:vmovdqa32:vmovdqa64
+        vmovdqa(Ymm, Ymm) =>
+            Inst::new(0x6f).vex(0b00001, 0, 0b01).vex_l256().modrm_reg_vec(self.0).modrm_rm_direct_vec(self.1),
+            None,
+            (fmt.write_fmt(core::format_args!("vmovdqa {}, {}", self.0, self.1))),
+
+        // https://www.felixcloutier.com/x86/pand
+        vpand(Ymm, Ymm, YmmMem) =>
+            Inst::new(0xdb).vex(0b00001, self.1.index(), 0b01).vex_l256().modrm_reg_vec(self.0).regmem_vec(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpand {}, {}, {}", self.0, self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/pandn
+        vpandn(Ymm, Ymm, YmmMem) =>
+            Inst::new(0xdf).vex(0b00001, self.1.index(), 0b01).vex_l256().modrm_reg_vec(self.0).regmem_vec(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpandn {}, {}, {}", self.0, self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/por
+        vpor(Ymm, Ymm, YmmMem) =>
+            Inst::new(0xeb).vex(0b00001, self.1.index(), 0b01).vex_l256().modrm_reg_vec(self.0).regmem_vec(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpor {}, {}, {}", self.0, self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/pxor
+        vpxor(Ymm, Ymm, YmmMem) =>
+            Inst::new(0xef).vex(0b00001, self.1.index(), 0b01).vex_l256().modrm_reg_vec(self.0).regmem_vec(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpxor {}, {}, {}", self.0, self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/pcmpeqb:pcmpeqw:pcmpeqd
+        vpcmpeqd(Ymm, Ymm, YmmMem) =>
+            Inst::new(0x76).vex(0b00001, self.1.index(), 0b01).vex_l256().modrm_reg_vec(self.0).regmem_vec(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpcmpeqd {}, {}, {}", self.0, self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/pcmpgtq
+        vpcmpgtq(Ymm, Ymm, YmmMem) =>
+            Inst::new(0x37).vex(0b00010, self.1.index(), 0b01).vex_l256().modrm_reg_vec(self.0).regmem_vec(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpcmpgtq {}, {}, {}", self.0, self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/ptest
+        vptest(Ymm, YmmMem) =>
+            Inst::new(0x17).vex(0b00010, 0, 0b01).vex_l256().modrm_reg_vec(self.0).regmem_vec(self.1),
+            None,
+            (fmt.write_fmt(core::format_args!("vptest {}, {}", self.0, self.1))),
+
+        // https://www.felixcloutier.com/x86/psllw:pslld:psllq
+        vpsllq_imm(Ymm, Ymm, u8) =>
+            Inst::new(0x73).vex(0b00001, self.0.index(), 0b01).vex_l256().modrm_opext(0b110).modrm_rm_direct_vec(self.1).imm8(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpsllq {}, {}, 0x{:x}", self.0, self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/psrlw:psrld:psrlq
+        vpsrlq_imm(Ymm, Ymm, u8) =>
+            Inst::new(0x73).vex(0b00001, self.0.index(), 0b01).vex_l256().modrm_opext(0b010).modrm_rm_direct_vec(self.1).imm8(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpsrlq {}, {}, 0x{:x}", self.0, self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/psraw:psrad:psraq
+        vpsrad_imm(Ymm, Ymm, u8) =>
+            Inst::new(0x72).vex(0b00001, self.0.index(), 0b01).vex_l256().modrm_opext(0b100).modrm_rm_direct_vec(self.1).imm8(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpsrad {}, {}, 0x{:x}", self.0, self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/pslldq
+        vpslldq_imm(Ymm, Ymm, u8) =>
+            Inst::new(0x73).vex(0b00001, self.0.index(), 0b01).vex_l256().modrm_opext(0b111).modrm_rm_direct_vec(self.1).imm8(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpslldq {}, {}, 0x{:x}", self.0, self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/psrldq
+        vpsrldq_imm(Ymm, Ymm, u8) =>
+            Inst::new(0x73).vex(0b00001, self.0.index(), 0b01).vex_l256().modrm_opext(0b011).modrm_rm_direct_vec(self.1).imm8(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpsrldq {}, {}, 0x{:x}", self.0, self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/pshufd
+        vpshufd(Ymm, YmmMem, u8) =>
+            Inst::new(0x70).vex(0b00001, 0, 0b01).vex_l256().modrm_reg_vec(self.0).regmem_vec(self.1).imm8(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpshufd {}, {}, 0x{:x}", self.0, self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/vpermq
+        vpermq(Ymm, YmmMem, u8) =>
+            Inst::new(0x00).vex(0b00011, 0, 0b01).rex_64b().vex_l256().modrm_reg_vec(self.0).regmem_vec(self.1).imm8(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpermq {}, {}, 0x{:x}", self.0, self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/vperm2i128
+        vperm2i128(Ymm, Ymm, YmmMem, u8) =>
+            Inst::new(0x46).vex(0b00011, self.1.index(), 0b01).vex_l256().modrm_reg_vec(self.0).regmem_vec(self.2).imm8(self.3),
+            None,
+            (fmt.write_fmt(core::format_args!("vperm2i128 {}, {}, {}, 0x{:x}", self.0, self.1, self.2, self.3))),
+
+        // https://www.felixcloutier.com/x86/palignr
+        vpalignr(Ymm, Ymm, YmmMem, u8) =>
+            Inst::new(0x0f).vex(0b00011, self.1.index(), 0b01).vex_l256().modrm_reg_vec(self.0).regmem_vec(self.2).imm8(self.3),
+            None,
+            (fmt.write_fmt(core::format_args!("vpalignr {}, {}, {}, 0x{:x}", self.0, self.1, self.2, self.3))),
+
+        // https://www.felixcloutier.com/x86/vpblendd
+        vpblendd(Ymm, Ymm, YmmMem, u8) =>
+            Inst::new(0x02).vex(0b00011, self.1.index(), 0b01).vex_l256().modrm_reg_vec(self.0).regmem_vec(self.2).imm8(self.3),
+            None,
+            (fmt.write_fmt(core::format_args!("vpblendd {}, {}, {}, 0x{:x}", self.0, self.1, self.2, self.3))),
+
+        // https://www.felixcloutier.com/x86/pshufb
+        vpshufb(Ymm, Ymm, YmmMem) =>
+            Inst::new(0x00).vex(0b00010, self.1.index(), 0b01).vex_l256().modrm_reg_vec(self.0).regmem_vec(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpshufb {}, {}, {}", self.0, self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/vpbroadcast
+        vpbroadcastq(Ymm, Ymm) =>
+            Inst::new(0x59).vex(0b00010, 0, 0b01).vex_l256().modrm_reg_vec(self.0).modrm_rm_direct_vec(self.1),
+            None,
+            (fmt.write_fmt(core::format_args!("vpbroadcastq {}, {}", self.0, self.1.xmm_name()))),
+
+        // https://www.felixcloutier.com/x86/vinserti128:vinserti32x4:vinserti64x2:vinserti32x8:vinserti64x4
+        vinserti128(Ymm, Ymm, Ymm, u8) =>
+            Inst::new(0x38).vex(0b00011, self.1.index(), 0b01).vex_l256().modrm_reg_vec(self.0).modrm_rm_direct_vec(self.2).imm8(self.3),
+            None,
+            (fmt.write_fmt(core::format_args!("vinserti128 {}, {}, {}, 0x{:x}", self.0, self.1, self.2.xmm_name(), self.3))),
+
+        // https://www.felixcloutier.com/x86/vextracti128:vextracti32x4:vextracti64x2:vextracti32x8:vextracti64x4
+        vextracti128(Ymm, Ymm, u8) =>
+            Inst::new(0x39).vex(0b00011, 0, 0b01).vex_l256().modrm_reg_vec(self.1).modrm_rm_direct_vec(self.0).imm8(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vextracti128 {}, {}, 0x{:x}", self.0.xmm_name(), self.1, self.2))),
+
+        // https://www.felixcloutier.com/x86/movd:movq
+        vmovq_to_vec(Ymm, Reg) =>
+            Inst::new(0x6e).vex(0b00001, 0, 0b01).rex_64b().modrm_reg_vec(self.0).modrm_rm_direct(self.1),
+            None,
+            (fmt.write_fmt(core::format_args!("vmovq {}, {}", self.0.xmm_name(), self.1))),
+
+        vmovq_from_vec(Reg, Ymm) =>
+            Inst::new(0x7e).vex(0b00001, 0, 0b01).rex_64b().modrm_reg_vec(self.1).modrm_rm_direct(self.0),
+            None,
+            (fmt.write_fmt(core::format_args!("vmovq {}, {}", self.0, self.1.xmm_name()))),
+
+        // https://www.felixcloutier.com/x86/pinsrb:pinsrd:pinsrq
+        vpinsrq(Ymm, Ymm, Reg, u8) =>
+            Inst::new(0x22).vex(0b00011, self.1.index(), 0b01).rex_64b().modrm_reg_vec(self.0).modrm_rm_direct(self.2).imm8(self.3),
+            None,
+            (fmt.write_fmt(core::format_args!("vpinsrq {}, {}, {}, 0x{:x}", self.0.xmm_name(), self.1.xmm_name(), self.2, self.3))),
+
+        // https://www.felixcloutier.com/x86/pextrb:pextrd:pextrq
+        vpextrq(Reg, Ymm, u8) =>
+            Inst::new(0x16).vex(0b00011, 0, 0b01).rex_64b().modrm_reg_vec(self.1).modrm_rm_direct(self.0).imm8(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("vpextrq {}, {}, 0x{:x}", self.0, self.1.xmm_name(), self.2))),
+
+        // https://www.felixcloutier.com/x86/movmskpd
+        vmovmskpd(Reg, Ymm) =>
+            Inst::new(0x50).vex(0b00001, 0, 0b01).vex_l256().modrm_reg(self.0).modrm_rm_direct_vec(self.1),
+            None,
+            (fmt.write_fmt(core::format_args!("vmovmskpd {}, {}", self.0.name32(), self.1))),
+
+        // https://www.felixcloutier.com/x86/rep:repe:repz:repne:repnz
+        rep_stosb() =>
+            InstBuf::from_array([0xf3, 0xaa]),
+            None,
+            (fmt.write_str("rep stosb")),
+
+        rep_movsb() =>
+            InstBuf::from_array([0xf3, 0xa4]),
+            None,
+            (fmt.write_str("rep movsb")),
+
+        // https://www.felixcloutier.com/x86/vzeroupper
+        vzeroupper() =>
+            InstBuf::from_array([0xc5, 0xf8, 0x77]),
+            None,
+            (fmt.write_str("vzeroupper")),
 
         // https://www.felixcloutier.com/x86/rcl:rcr:rol:ror
         ror_imm(RegSize, RegMem, u8) =>
@@ -2276,6 +2653,56 @@ mod tests {
         }
     }
 
+    impl GenerateTestValues for super::Ymm {
+        fn generate_test_values(cb: impl FnMut(Self)) {
+            super::Ymm::ALL.into_iter().for_each(cb);
+        }
+    }
+
+    impl GenerateTestValues for super::YmmMem {
+        fn generate_test_values(mut cb: impl FnMut(Self)) {
+            super::Ymm::generate_test_values(|reg| cb(super::YmmMem::Ymm(reg)));
+
+            // A representative subset of the memory operand forms: the full set multiplied by two
+            // register operands would take too long to run for every instruction.
+            use super::Reg::*;
+            for base in [rax, rsp, rbp, r12, r13] {
+                for offset in [0, -0x40, 0x7f, 0x80, -0x81, 0x7fffffff] {
+                    cb(super::YmmMem::Mem(super::MemOp::BaseOffset(
+                        None,
+                        super::RegSize::R64,
+                        base,
+                        offset,
+                    )));
+                    cb(super::YmmMem::Mem(super::MemOp::BaseOffset(
+                        None,
+                        super::RegSize::R32,
+                        base,
+                        offset,
+                    )));
+                }
+            }
+            cb(super::YmmMem::Mem(super::MemOp::BaseIndexScaleOffset(
+                None,
+                super::RegSize::R64,
+                r13,
+                super::RegIndex::rcx,
+                super::Scale::x1,
+                0,
+            )));
+            cb(super::YmmMem::Mem(super::MemOp::IndexScaleOffset(
+                None,
+                super::RegSize::R64,
+                super::RegIndex::rcx,
+                super::Scale::x8,
+                0x100,
+            )));
+            cb(super::YmmMem::Mem(super::MemOp::Offset(None, super::RegSize::R32, -0x1000)));
+            cb(super::YmmMem::Mem(super::MemOp::Offset(None, super::RegSize::R64, 0x1000)));
+            cb(super::YmmMem::Mem(super::MemOp::RipRelative(None, 0x1234)));
+        }
+    }
+
     impl GenerateTestValues for super::RegMem {
         fn generate_test_values(mut cb: impl FnMut(Self)) {
             super::Reg::generate_test_values(|reg| cb(super::RegMem::Reg(reg)));
@@ -2515,6 +2942,8 @@ mod tests {
 
     generate_tests! {
         add,
+        adc,
+        sbb,
         and,
         bts,
         call_rel32,
@@ -2593,11 +3022,9 @@ mod tests {
         shl_cl,
         shl_imm,
         shl_imm_1,
-        shld_imm,
         shr_cl,
         shr_imm,
         shr_imm_1,
-        shrd_imm,
         store,
         sub,
         syscall,
@@ -2605,6 +3032,38 @@ mod tests {
         ud2,
         xchg_mem,
         xor,
+        vmovdqu_load,
+        vmovdqu_store,
+        vmovdqa,
+        vpand,
+        vpandn,
+        vpor,
+        vpxor,
+        vpcmpeqd,
+        vpcmpgtq,
+        vptest,
+        vpsllq_imm,
+        vpsrlq_imm,
+        vpsrad_imm,
+        vpslldq_imm,
+        vpsrldq_imm,
+        vpshufd,
+        vpermq,
+        vperm2i128,
+        vpalignr,
+        vpblendd,
+        vpshufb,
+        vpbroadcastq,
+        vinserti128,
+        vextracti128,
+        vmovq_to_vec,
+        vmovq_from_vec,
+        vpinsrq,
+        vpextrq,
+        vmovmskpd,
+        vzeroupper,
+        rep_stosb,
+        rep_movsb,
     }
 
     #[test]

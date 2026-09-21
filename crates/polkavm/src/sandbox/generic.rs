@@ -464,6 +464,16 @@ unsafe extern "C" fn signal_handler(signal: c_int, info: &sys::siginfo_t, contex
             polkavm_common::static_assert!(polkavm_common::regmap::TMP_REG.equals(NativeReg::rcx));
             vmctx.tmp_reg.store(fetch_reg!(rcx), Ordering::Relaxed);
 
+            // The wide register file lives in the vector registers while the guest runs, and
+            // a signal leaves it only in the frame the kernel built.
+            #[cfg(target_os = "linux")]
+            {
+                let fpstate = context.uc_mcontext.fpstate;
+                if !fpstate.is_null() {
+                    (*vmctx.vector_state.get()).load_from_signal_frame(fpstate.cast::<u8>().cast_const());
+                }
+            }
+
             vmctx.next_native_program_counter.store(rip, Ordering::Relaxed);
 
             if is_page_fault {
@@ -641,7 +651,8 @@ struct VmCtx {
     next_native_program_counter: AtomicU64,
     memset_continuation: AtomicU64,
 
-    /// The vector register file and its configuration.
+    /// The vector register file and its configuration; the wide registers are written out
+    /// here whenever control leaves the guest, and read back when it re-enters.
     vector_state: UnsafeCell<VectorState>,
 
     /// The unit-stride copy the wide operation helper answered with, as two native
@@ -649,6 +660,10 @@ struct VmCtx {
     wide_copy_source: AtomicU64,
     wide_copy_destination: AtomicU64,
     wide_copy_length: AtomicU64,
+
+    /// The constants recompiled wide instructions read; see
+    /// [`polkavm_common::vector_state::WIDE_CONSTANTS`].
+    wide_constants: [[u64; 4]; polkavm_common::vector_state::WIDE_CONSTANT_COUNT],
 }
 
 impl VmCtx {
@@ -682,6 +697,7 @@ impl VmCtx {
             wide_copy_source: AtomicU64::new(0),
             wide_copy_destination: AtomicU64::new(0),
             wide_copy_length: AtomicU64::new(0),
+            wide_constants: polkavm_common::vector_state::WIDE_CONSTANTS,
         }
     }
 }
@@ -2150,6 +2166,7 @@ impl super::Sandbox for Sandbox {
             wide_copy_source: get_field_offset!(VmCtx::new(), |base| base.wide_copy_source.as_ptr()),
             wide_copy_destination: get_field_offset!(VmCtx::new(), |base| base.wide_copy_destination.as_ptr()),
             wide_copy_length: get_field_offset!(VmCtx::new(), |base| base.wide_copy_length.as_ptr()),
+            wide_constants: get_field_offset!(VmCtx::new(), |base| &base.wide_constants),
         }
     }
 }

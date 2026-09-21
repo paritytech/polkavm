@@ -125,7 +125,7 @@ pub const VM_SHARED_MEMORY_SIZE: u64 = u32::MAX as u64;
 ///
 /// This does *not* affect the VM ABI and can be changed at will,
 /// but should be high enough that it's never hit.
-pub const VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH: u32 = 69;
+pub const VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH: u32 = 112;
 
 /// The maximum number of bytes the jump table can be.
 pub const VM_SANDBOX_MAXIMUM_JUMP_TABLE_SIZE: u64 = (crate::abi::VM_MAXIMUM_JUMP_TABLE_ENTRIES as u64 + 1)
@@ -137,7 +137,7 @@ pub const VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE: u64 = 0x100000000 * core::
 
 // TODO: Make this smaller.
 /// The maximum number of bytes the native code can be.
-pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = 2303 * 1024 * 1024 - 1;
+pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = 3585 * 1024 * 1024 - 1;
 
 #[repr(C)]
 pub struct JmpBuf {
@@ -305,8 +305,9 @@ pub struct VmCtx {
 
     /// The vector register file and its configuration.
     ///
-    /// Only the wide operation helper and the recompiled code it serves touch this while
-    /// the guest runs; the host reads it at most while the sandbox is idle.
+    /// While the guest runs the wide registers live in the vector registers of the host, and
+    /// this is where they are written out whenever control leaves the guest and read back
+    /// when it re-enters; the wide operation helper works on this copy in between.
     pub vector_state: UnsafeCell<crate::vector_state::VectorState>,
 
     /// The unit-stride copy the wide operation helper answered with, as two native
@@ -314,6 +315,10 @@ pub struct VmCtx {
     pub wide_copy_source: AtomicU64,
     pub wide_copy_destination: AtomicU64,
     pub wide_copy_length: AtomicU64,
+
+    /// The constants recompiled wide instructions read; see
+    /// [`crate::vector_state::WIDE_CONSTANTS`].
+    pub wide_constants: [[u64; 4]; crate::vector_state::WIDE_CONSTANT_COUNT],
 
     /// Performance counters. Only for debugging.
     pub counters: CacheAligned<VmCtxCounters>,
@@ -415,6 +420,7 @@ impl VmCtx {
             wide_copy_source: AtomicU64::new(0),
             wide_copy_destination: AtomicU64::new(0),
             wide_copy_length: AtomicU64::new(0),
+            wide_constants: crate::vector_state::WIDE_CONSTANTS,
 
             counters: CacheAligned(VmCtxCounters {
                 syscall_wait_loop_start: UnsafeCell::new(0),
