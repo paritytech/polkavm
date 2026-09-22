@@ -893,15 +893,16 @@ where
     }
 
     #[inline(always)]
-    fn dispatch_generic(&mut self, dst: Option<RawReg>, src1: Option<RawReg>, src2: Option<RawReg>, cost: InstCost) {
+    fn dispatch_generic(&mut self, dst: Option<RawReg>, src1: Option<RawReg>, src2: Option<RawReg>, src3: Option<RawReg>, cost: InstCost) {
         #[cfg(all(test, feature = "logging"))]
         log::debug!(
-            "dispatch[{}]: instruction={:?}, dst={:?}, src=[{:?}, {:?}], slots={}, latency={}, alu={}, load={}, store={}, mul={}, div={}",
+            "dispatch[{}]: instruction={:?}, dst={:?}, src=[{:?}, {:?}, {:?}], slots={}, latency={}, alu={}, load={}, store={}, mul={}, div={}",
             self.cycles,
             self.instructions,
             dst.map(|reg| reg.get()),
             src1.map(|reg| reg.get()),
             src2.map(|reg| reg.get()),
+            src3.map(|reg| reg.get()),
             cost.decode_slots,
             cost.latency,
             cost.alu_slots,
@@ -912,20 +913,32 @@ where
         );
 
         debug_assert!(cost.latency >= 0);
-        unsafe_avx2! { self.dispatch_generic_avx2(dst, src1, src2, cost) }
+        unsafe_avx2! { self.dispatch_generic_avx2(dst, src1, src2, src3, cost) }
     }
 
     #[cfg_attr(all(feature = "simd", target_arch = "x86_64"), target_feature(enable = "avx2"))]
     #[inline]
-    fn dispatch_generic_avx2(&mut self, dst: Option<RawReg>, src1: Option<RawReg>, src2: Option<RawReg>, cost: InstCost) {
+    fn dispatch_generic_avx2(
+        &mut self,
+        dst: Option<RawReg>,
+        src1: Option<RawReg>,
+        src2: Option<RawReg>,
+        src3: Option<RawReg>,
+        cost: InstCost,
+    ) {
         self.tick_cycle_if_cannot_decode(cost.decode_slots);
-        match (dst, src1, src2) {
-            (Some(dst), Some(src1), Some(src2)) => self.dispatch_generic_avx2_impl(dst, src1, src2, cost.resources(), cost.latency),
-            (Some(dst), Some(src1), None) => self.dispatch_generic_avx2_impl(dst, src1, (), cost.resources(), cost.latency),
-            (Some(dst), None, None) => self.dispatch_generic_avx2_impl(dst, (), (), cost.resources(), cost.latency),
-            (None, None, None) => self.dispatch_generic_avx2_impl((), (), (), cost.resources(), cost.latency),
-            (None, Some(src1), None) => self.dispatch_generic_avx2_impl((), src1, (), cost.resources(), cost.latency),
-            (None, Some(src1), Some(src2)) => self.dispatch_generic_avx2_impl((), src1, src2, cost.resources(), cost.latency),
+        match (dst, src1, src2, src3) {
+            (Some(dst), Some(src1), Some(src2), Some(src3)) => {
+                self.dispatch_generic_avx2_impl(dst, src1, src2, src3, cost.resources(), cost.latency)
+            }
+            (Some(dst), Some(src1), Some(src2), None) => {
+                self.dispatch_generic_avx2_impl(dst, src1, src2, (), cost.resources(), cost.latency)
+            }
+            (Some(dst), Some(src1), None, None) => self.dispatch_generic_avx2_impl(dst, src1, (), (), cost.resources(), cost.latency),
+            (Some(dst), None, None, None) => self.dispatch_generic_avx2_impl(dst, (), (), (), cost.resources(), cost.latency),
+            (None, None, None, None) => self.dispatch_generic_avx2_impl((), (), (), (), cost.resources(), cost.latency),
+            (None, Some(src1), None, None) => self.dispatch_generic_avx2_impl((), src1, (), (), cost.resources(), cost.latency),
+            (None, Some(src1), Some(src2), None) => self.dispatch_generic_avx2_impl((), src1, src2, (), cost.resources(), cost.latency),
             _ => unreachable!(),
         }
         self.decode_slots_remaining_this_cycle -= cost.decode_slots;
@@ -939,12 +952,14 @@ where
         dst: impl DispatchReg,
         src1: impl DispatchReg,
         src2: impl DispatchReg,
+        src3: impl DispatchReg,
         resources: u32,
         latency: i8,
     ) {
         let dst = dst.get_reg();
         let src1 = src1.get_reg();
         let src2 = src2.get_reg();
+        let src3 = src3.get_reg();
 
         if T::SHOULD_CALL_ON_EVENT {
             self.tracer.on_event(self.cycles, self.instructions, EventKind::Decode);
@@ -960,33 +975,39 @@ where
             .map(|src1| self.rob_entry_by_register.as_slice()[src1.to_usize()])
             .map(i32::from)
             .map(|x| cast(x).bitwise_as_u32());
+
         let dependency_2: Option<u32> = src2
             .map(|src2| self.rob_entry_by_register.as_slice()[src2.to_usize()])
             .map(i32::from)
             .map(|x| cast(x).bitwise_as_u32());
-        match (dependency_1, dependency_2) {
-            (Some(dependency_1), Some(dependency_2)) => {
-                let base_1 = (dependency_1 >> 31) ^ 1;
-                let base_2 = (dependency_2 >> 31) ^ 1;
-                let dependencies_mask = cast(base_1.wrapping_shl(dependency_1) | base_2.wrapping_shl(dependency_2)).bitwise_as_i32();
-                self.rob_dependencies.as_slice_mut()[slot.to_usize()] = dependencies_mask;
-                if T::SHOULD_CALL_ON_EVENT {
-                    if base_1 != 0 {
-                        self.rob_depended_by.as_slice_mut()[dependency_1 as usize] |= cast(1u32 << slot.to_usize()).bitwise_as_i32();
-                    }
-                    if base_2 != 0 {
-                        self.rob_depended_by.as_slice_mut()[dependency_2 as usize] |= cast(1u32 << slot.to_usize()).bitwise_as_i32();
-                    }
+
+        let dependency_3: Option<u32> = src3
+            .map(|src3| self.rob_entry_by_register.as_slice()[src3.to_usize()])
+            .map(i32::from)
+            .map(|x| cast(x).bitwise_as_u32());
+
+        if dependency_1.is_some() || dependency_2.is_some() || dependency_3.is_some() {
+            let base_1 = dependency_1.map(|dep| (dep >> 31) ^ 1).unwrap_or(0);
+            let base_2 = dependency_2.map(|dep| (dep >> 31) ^ 1).unwrap_or(0);
+            let base_3 = dependency_3.map(|dep| (dep >> 31) ^ 1).unwrap_or(0);
+            let dependency_1 = dependency_1.unwrap_or(0);
+            let dependency_2 = dependency_2.unwrap_or(0);
+            let dependency_3 = dependency_3.unwrap_or(0);
+            let dependencies_mask =
+                cast(base_1.wrapping_shl(dependency_1) | base_2.wrapping_shl(dependency_2) | base_3.wrapping_shl(dependency_3))
+                    .bitwise_as_i32();
+            self.rob_dependencies.as_slice_mut()[slot.to_usize()] = dependencies_mask;
+            if T::SHOULD_CALL_ON_EVENT {
+                if base_1 != 0 {
+                    self.rob_depended_by.as_slice_mut()[dependency_1 as usize] |= cast(1u32 << slot.to_usize()).bitwise_as_i32();
+                }
+                if base_2 != 0 {
+                    self.rob_depended_by.as_slice_mut()[dependency_2 as usize] |= cast(1u32 << slot.to_usize()).bitwise_as_i32();
+                }
+                if base_3 != 0 {
+                    self.rob_depended_by.as_slice_mut()[dependency_3 as usize] |= cast(1u32 << slot.to_usize()).bitwise_as_i32();
                 }
             }
-            (Some(dependency), None) | (None, Some(dependency)) => {
-                let base = (dependency >> 31) ^ 1;
-                self.rob_dependencies.as_slice_mut()[slot.to_usize()] = cast(base.wrapping_shl(dependency)).bitwise_as_i32();
-                if T::SHOULD_CALL_ON_EVENT && base != 0 {
-                    self.rob_depended_by.as_slice_mut()[dependency as usize] |= cast(1u32 << slot.to_usize()).bitwise_as_i32();
-                }
-            }
-            (None, None) => {}
         }
 
         if let Some(dst) = dst {
@@ -1037,23 +1058,29 @@ where
     }
 
     #[inline(always)]
+    fn dispatch_4op(&mut self, dst: RawReg, src1: RawReg, src2: RawReg, src3: RawReg, cost: InstCost) {
+        self.dispatch_generic(Some(dst), Some(src1), Some(src2), Some(src3), cost);
+    }
+
+    #[inline(always)]
     fn dispatch_3op(&mut self, dst: RawReg, src1: RawReg, src2: RawReg, cost: InstCost) {
-        self.dispatch_generic(Some(dst), Some(src1), Some(src2), cost);
+        self.dispatch_generic(Some(dst), Some(src1), Some(src2), None, cost);
     }
 
     #[inline(always)]
     fn dispatch_2op(&mut self, dst: RawReg, src: RawReg, cost: InstCost) {
-        self.dispatch_generic(Some(dst), Some(src), None, cost);
+        self.dispatch_generic(Some(dst), Some(src), None, None, cost);
     }
 
     #[inline(always)]
     fn dispatch_1op_dst(&mut self, dst: RawReg, cost: InstCost) {
-        self.dispatch_generic(Some(dst), None, None, cost);
+        self.dispatch_generic(Some(dst), None, None, None, cost);
     }
 
     #[inline(always)]
     fn dispatch_finish(&mut self, latency: i8) {
         self.dispatch_generic(
+            None,
             None,
             None,
             None,
@@ -1102,22 +1129,22 @@ where
 
     #[inline(always)]
     fn dispatch_store(&mut self, src: RawReg, _offset: i32, _size: u32) {
-        self.dispatch_generic(None, Some(src), None, self.store_cost());
+        self.dispatch_generic(None, Some(src), None, None, self.store_cost());
     }
 
     #[inline(always)]
     fn dispatch_store_imm(&mut self, _offset: i32, _size: u32) {
-        self.dispatch_generic(None, None, None, self.store_cost());
+        self.dispatch_generic(None, None, None, None, self.store_cost());
     }
 
     #[inline(always)]
     fn dispatch_store_indirect(&mut self, src: RawReg, base: RawReg, _offset: i32, _size: u32) {
-        self.dispatch_generic(None, Some(src), Some(base), self.store_cost());
+        self.dispatch_generic(None, Some(src), Some(base), None, self.store_cost());
     }
 
     #[inline(always)]
     fn dispatch_store_imm_indirect(&mut self, base: RawReg, _offset: i32, _size: u32) {
-        self.dispatch_generic(None, Some(base), None, self.store_cost());
+        self.dispatch_generic(None, Some(base), None, None, self.store_cost());
     }
 
     fn get_branch_cost(&self, offset: u32, length: u32, jump_offset: u32) -> i8 {
@@ -1159,6 +1186,7 @@ where
             None,
             Some(s1),
             Some(s2),
+            None,
             InstCost {
                 latency: self.get_branch_cost(offset, length, jump_offset),
                 decode_slots: 1,
@@ -1174,6 +1202,7 @@ where
         self.dispatch_generic(
             None,
             Some(s),
+            None,
             None,
             InstCost {
                 latency: self.get_branch_cost(offset, length, jump_offset),
@@ -1352,7 +1381,8 @@ where
     }
 
     fn dispatch_cmov(&mut self, d: RawReg, s: RawReg, c: RawReg) {
-        self.dispatch_3op(
+        self.dispatch_4op(
+            d,
             d,
             s,
             c,
@@ -1366,7 +1396,8 @@ where
     }
 
     fn dispatch_cmov_imm(&mut self, d: RawReg, c: RawReg) {
-        self.dispatch_2op(
+        self.dispatch_3op(
+            d,
             d,
             c,
             InstCost {
@@ -2305,6 +2336,7 @@ where
             None,
             None,
             None,
+            None,
             InstCost {
                 latency: 40,
                 decode_slots: 1,
@@ -2329,6 +2361,7 @@ where
             None,
             Some(base),
             None,
+            None,
             InstCost {
                 latency: 22,
                 decode_slots: 1,
@@ -2352,6 +2385,7 @@ where
             None,
             Some(base),
             None,
+            None,
             InstCost {
                 latency: 22,
                 decode_slots: 1,
@@ -2366,6 +2400,7 @@ where
     #[inline(always)]
     fn ecalli(&mut self, _offset: u32, _length: u32, _imm: i32) -> Self::ReturnTy {
         self.dispatch_generic(
+            None,
             None,
             None,
             None,
@@ -2397,6 +2432,7 @@ where
     fn memset(&mut self, _offset: u32, _length: u32) -> Self::ReturnTy {
         // TODO: YOLO assigned
         self.dispatch_generic(
+            None,
             None,
             None,
             None,
@@ -2842,6 +2878,55 @@ mod tests {
             "
                 DeER.  a0 = a1 + a2
                 D=eER  jump 7 if a0 == a1
+            ",
+        );
+    }
+
+    #[test]
+    fn test_cmov_destination_is_part_of_the_dependency_chain() {
+        assert_timeline(
+            test_config(),
+            "
+                a0 = a0 * a3
+                a0 = a1 if a2 == 0
+                trap
+            ",
+            "
+                DeeeER..  a0 = a0 * a3
+                D===eeER  a0 = a1 if a2 == 0
+                DeeE---R  trap
+            ",
+        );
+    }
+
+    #[test]
+    fn test_cmov_imm_destination_is_part_of_the_dependency_chain() {
+        assert_timeline(
+            test_config(),
+            "
+                a0 = a0 * a3
+                a0 = 1 if a2 == 0
+                trap
+            ",
+            "
+                DeeeER..  a0 = a0 * a3
+                D===eeER  a0 = 0x1 if a2 == 0
+                .DeeE--R  trap
+            ",
+        );
+    }
+
+    #[test]
+    fn test_cmov_independent() {
+        assert_timeline(
+            test_config(),
+            "
+                a0 = a1 if a2 == 0
+                trap
+            ",
+            "
+                DeeER  a0 = a1 if a2 == 0
+                DeeER  trap
             ",
         );
     }
