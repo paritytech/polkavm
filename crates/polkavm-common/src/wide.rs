@@ -28,6 +28,12 @@ impl U256 {
         Self([value as u64, fill, fill, fill])
     }
 
+    /// The low four limbs of a wider value.
+    #[inline]
+    fn from_low_limbs(limbs: &[u64; 8]) -> Self {
+        Self([limbs[0], limbs[1], limbs[2], limbs[3]])
+    }
+
     /// The least significant limb, which is what a narrowing conversion keeps.
     #[inline]
     pub const fn low_u64(self) -> u64 {
@@ -297,11 +303,6 @@ impl U256 {
         self.0[index / 64] & (1 << (index % 64)) != 0
     }
 
-    #[inline]
-    fn set_bit(&mut self, index: usize) {
-        self.0[index / 64] |= 1 << (index % 64);
-    }
-
     /// Unsigned division and remainder. Division by zero produces zero, as `DIV` does.
     pub fn div_rem(self, divisor: Self) -> (Self, Self) {
         if divisor.is_zero() {
@@ -312,23 +313,19 @@ impl U256 {
             return (Self::ZERO, self);
         }
 
-        // Doubling the running remainder cannot carry out of the top here, unlike in
-        // `mul_mod` where the numerator is twice as wide: after s steps the remainder is
-        // below 2^s, so it only reaches 2^255 on the last one, and the loop ends there.
-        let mut quotient = Self::ZERO;
-        let mut remainder = Self::ZERO;
-        for index in (0..256).rev() {
-            remainder = remainder.shift_left(1);
-            if self.bit(index) {
-                remainder.0[0] |= 1;
+        let numerator_length = significant_limbs(&self.0);
+        let divisor_length = significant_limbs(&divisor.0);
+        if divisor_length == 1 {
+            if numerator_length == 1 {
+                return (Self::from_u64(self.0[0] / divisor.0[0]), Self::from_u64(self.0[0] % divisor.0[0]));
             }
-            if !remainder.less_than(divisor) {
-                remainder = remainder.wrapping_sub(divisor);
-                quotient.set_bit(index);
-            }
+
+            let (quotient, remainder) = div_rem_by_limb(&self.0[..numerator_length], divisor.0[0]);
+            return (Self::from_low_limbs(&quotient), Self::from_u64(remainder));
         }
 
-        (quotient, remainder)
+        let (quotient, remainder) = long_division(&self.0[..numerator_length], &divisor.0[..divisor_length]);
+        (Self::from_low_limbs(&quotient), remainder)
     }
 
     /// Signed division, following `SDIV`: division by zero produces zero, and the one
@@ -389,18 +386,22 @@ impl U256 {
         }
 
         let product = self.widening_mul(other);
-        let mut remainder = Self::ZERO;
-        for index in (0..512).rev() {
-            // As in `div_rem`, the bit shifted off the top is part of the comparison.
-            let carry = remainder.0[3] >> 63 != 0;
-            remainder = remainder.shift_left(1);
-            if product[index / 64] & (1 << (index % 64)) != 0 {
-                remainder.0[0] |= 1;
-            }
-            if carry || !remainder.less_than(modulus) {
-                remainder = remainder.wrapping_sub(modulus);
-            }
+        let product_length = significant_limbs(&product);
+        let modulus_length = significant_limbs(&modulus.0);
+        if modulus_length == 1 {
+            let (_, remainder) = div_rem_by_limb(&product[..product_length], modulus.0[0]);
+            return Self::from_u64(remainder);
         }
+
+        if less_than_limbs(&product[..product_length], &modulus.0[..modulus_length]) {
+            return Self::from_low_limbs(&product);
+        }
+
+        if modulus_length == 4 {
+            return rem_512_by_256(&product[..product_length], &modulus.0);
+        }
+
+        let (_, remainder) = long_division(&product[..product_length], &modulus.0[..modulus_length]);
         remainder
     }
 
@@ -440,9 +441,340 @@ impl U256 {
     }
 }
 
+/// Counters for the number of times certain paths have run. Used by tests to assert on coverage.
+#[cfg(test)]
+mod path_counters {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    static QUOTIENT_CORRECTIONS: AtomicUsize = AtomicUsize::new(0);
+    static DIVISOR_ADD_BACKS: AtomicUsize = AtomicUsize::new(0);
+
+    /// Increment the visited count of the path with a quotient correction
+    /// where an estimate is walked back by the second divisor limb.
+    pub fn increment_quotient_correction() {
+        QUOTIENT_CORRECTIONS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment the visited count of the path with a divisor add back
+    /// caused by an incorrect quotient estimate after correction.
+    pub fn increment_divisor_add_back() {
+        DIVISOR_ADD_BACKS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// The total counts so far, as (quotient corrections, add-backs).
+    pub fn totals() -> (usize, usize) {
+        (
+            QUOTIENT_CORRECTIONS.load(Ordering::Relaxed),
+            DIVISOR_ADD_BACKS.load(Ordering::Relaxed),
+        )
+    }
+}
+
+/// The number of limbs up to and including the most significant nonzero one, which is zero
+/// for a zero value.
+#[inline]
+fn significant_limbs(limbs: &[u64]) -> usize {
+    let mut length = limbs.len();
+    while length > 0 && limbs[length - 1] == 0 {
+        length -= 1;
+    }
+    length
+}
+
+/// Whether `left` is less than `right`, assuming both have been trimmed to their significant limbs.
+#[inline]
+fn less_than_limbs(left: &[u64], right: &[u64]) -> bool {
+    if left.len() != right.len() {
+        return left.len() < right.len();
+    }
+
+    for index in (0..left.len()).rev() {
+        if left[index] != right[index] {
+            return left[index] < right[index];
+        }
+    }
+    false
+}
+
+/// Seed approximations for [`reciprocal`], indexed by a normalized divisor's top nine bits.
+static RECIPROCAL_SEEDS: [u16; 256] = {
+    let mut seeds = [0u16; 256];
+    let mut index = 0;
+    while index < seeds.len() {
+        // `floor((2^19 - 3 * 2^8) / divisor)` where `divisor = index + 256` (the value of the top nine bits).
+        seeds[index] = (((1 << 19) - 3 * (1 << 8)) / (index as u32 + 256)) as u16;
+        index += 1;
+    }
+    seeds
+};
+
+/// The reciprocal that allows a 2-by-1 division to be performed with multiplication:
+/// `floor((2^128 - 1) / divisor) - 2^64`. The `divisor` must have its top bit set, making the value
+/// fit in one limb. Computed by Moller and Granlund's "Improved division by invariant integers", algorithm 3.
+#[inline]
+fn reciprocal(divisor: u64) -> u64 {
+    debug_assert!(divisor >> 63 == 1);
+
+    // The top bit being set is what makes the top nine bits land in the table's range.
+    let seed = u64::from(RECIPROCAL_SEEDS[(divisor >> 55) as usize % RECIPROCAL_SEEDS.len()]);
+    let upper = (divisor >> 24) + 1;
+    let half = divisor.wrapping_add(1) >> 1;
+
+    // Each step doubles the number of correct bits, the refinements are exact
+    // modulo 2^64, and the intermediates are meant to wrap.
+    let refined = (seed << 11) - ((seed * seed * upper) >> 40) - 1;
+    let doubled = (refined << 13).wrapping_add(refined.wrapping_mul((1u64 << 60).wrapping_sub(refined * upper)) >> 47);
+    let error = ((doubled >> 1) & (divisor & 1).wrapping_neg()).wrapping_sub(doubled.wrapping_mul(half));
+    let widened = (multiply_high(doubled, error) >> 1).wrapping_add(doubled << 31);
+    widened
+        .wrapping_sub(multiply_add_high(widened, divisor, divisor))
+        .wrapping_sub(divisor)
+}
+
+/// The high limb of a limb by limb product.
+#[inline]
+fn multiply_high(left: u64, right: u64) -> u64 {
+    ((u128::from(left) * u128::from(right)) >> 64) as u64
+}
+
+/// The high limb of a limb by limb product with a limb added in.
+#[inline]
+fn multiply_add_high(left: u64, right: u64, addend: u64) -> u64 {
+    ((u128::from(left) * u128::from(right) + u128::from(addend)) >> 64) as u64
+}
+
+/// Divides a 128-bit `high:low` value by a 64-bit value and returns the quotient and
+/// remainder, by Moller and Granlund's "Improved division by invariant integers", algorithm 4.
+/// The `divisor` must be normalized and `high` must be below it so that the quotient fits in a limb.
+#[inline]
+fn div_rem_128_by_64(high: u64, low: u64, divisor: u64, divisor_reciprocal: u64) -> (u64, u64) {
+    debug_assert!(high < divisor);
+
+    // The reciprocal is what allows the division to turn into a multiplication.
+    let estimate = u128::from(divisor_reciprocal) * u128::from(high) + ((u128::from(high) << 64) | u128::from(low));
+    let estimate_low = estimate as u64;
+    let mut quotient = ((estimate >> 64) as u64).wrapping_add(1);
+    let mut remainder = low.wrapping_sub(quotient.wrapping_mul(divisor));
+    if remainder > estimate_low {
+        quotient = quotient.wrapping_sub(1);
+        remainder = remainder.wrapping_add(divisor);
+    }
+    if remainder >= divisor {
+        quotient = quotient.wrapping_add(1);
+        remainder -= divisor;
+    }
+    (quotient, remainder)
+}
+
+/// Shifts `value` up by `shift` bits into `destination` and returns the bits that
+/// left the top limb. A normalization used for setting the `value`'s top bit.
+#[inline]
+fn normalize(value: &[u64], shift: u32, destination: &mut [u64]) -> u64 {
+    debug_assert!(destination.len() >= value.len());
+
+    let mut carry = 0;
+    for (source, target) in value.iter().zip(destination.iter_mut()) {
+        *target = (source << shift) | carry;
+        carry = if shift > 0 { source >> (64 - shift) } else { 0 };
+    }
+    carry
+}
+
+/// Shifts the low `length` limbs of `value` down by `shift`, undoing [`normalize`], and
+/// returns the resulting four limbs.
+#[inline]
+fn denormalize(value: &[u64], shift: u32, length: usize) -> U256 {
+    let mut limbs = [0u64; 4];
+    // Only a remainder is ever denormalized, and a remainder is below the divisor,
+    // so `length` divisor limbs hold all of it.
+    for index in 0..length {
+        limbs[index] = value[index] >> shift;
+        if shift > 0 && index + 1 < length {
+            limbs[index] |= value[index + 1] << (64 - shift);
+        }
+    }
+    U256(limbs)
+}
+
+/// Divides up to eight limbs by a single nonzero `divisor` limb. Each quotient limb
+/// is put at the position of the numerator limb it came from.
+#[inline]
+fn div_rem_by_limb(numerator: &[u64], divisor: u64) -> ([u64; 8], u64) {
+    debug_assert!(divisor != 0);
+    debug_assert!(numerator.len() <= 8);
+
+    let shift = divisor.leading_zeros();
+    let normalized_divisor = divisor << shift;
+    let divisor_reciprocal = reciprocal(normalized_divisor);
+
+    // Normalizing the numerator would need a ninth limb; instead the bits leaving its top
+    // seed the running remainder, which they may because they are below 2^shift and the
+    // normalized divisor is not.
+    let mut remainder = match numerator.last() {
+        Some(&top) if shift > 0 => top >> (64 - shift),
+        _ => 0,
+    };
+    let mut quotient = [0u64; 8];
+    let digits = &mut quotient[..numerator.len()];
+    for index in (0..digits.len()).rev() {
+        let mut low = numerator[index] << shift;
+        if shift > 0 && index > 0 {
+            low |= numerator[index - 1] >> (64 - shift);
+        }
+        let (digit, next_remainder) = div_rem_128_by_64(remainder, low, normalized_divisor, divisor_reciprocal);
+        digits[index] = digit;
+        remainder = next_remainder;
+    }
+    (quotient, remainder >> shift)
+}
+
+/// Divides a 512-bit `product` by a four limb `modulus` and returns the remainder.
+fn rem_512_by_256(product: &[u64], modulus: &[u64; 4]) -> U256 {
+    let product_length = product.len();
+    debug_assert!(modulus[3] != 0);
+    debug_assert!((4..=8).contains(&product_length));
+
+    let shift = modulus[3].leading_zeros();
+    let mut normalized_divisor = [0u64; 4];
+    normalize(modulus, shift, &mut normalized_divisor);
+    let mut normalized_numerator = [0u64; 9];
+    let shifted_out = normalize(product, shift, &mut normalized_numerator);
+    normalized_numerator[product_length] = shifted_out;
+
+    let divisor_reciprocal = reciprocal(normalized_divisor[3]);
+    // The product is never shorter than the modulus, but `saturating_sub` is used
+    // to tell the compiler that the digit windows stay inside the product.
+    for step in (0..=product_length.saturating_sub(4)).rev() {
+        long_division_step(&mut normalized_numerator[step..=step + 4], &normalized_divisor, divisor_reciprocal);
+    }
+
+    denormalize(&normalized_numerator, shift, 4)
+}
+
+/// Divides an up to eight limb `numerator` that is at least as large as the `divisor`,
+/// by a two to four limb `divisor` whose top limb is nonzero. Computed by schoolbook
+/// long division over `u64` digits, which is Knuth's algorithm D (TAOCP 4.3.1).
+fn long_division(numerator: &[u64], divisor: &[u64]) -> ([u64; 8], U256) {
+    let numerator_length = numerator.len();
+    let divisor_length = divisor.len();
+    debug_assert!((2..=4).contains(&divisor_length));
+    debug_assert!(divisor[divisor_length - 1] != 0);
+    debug_assert!((divisor_length..=8).contains(&numerator_length));
+
+    let shift = divisor[divisor_length - 1].leading_zeros();
+
+    let mut normalized_divisor = [0u64; 4];
+    normalize(divisor, shift, &mut normalized_divisor);
+    let mut normalized_numerator = [0u64; 9];
+    let shifted_out = normalize(numerator, shift, &mut normalized_numerator);
+    normalized_numerator[numerator_length] = shifted_out;
+
+    let divisor_reciprocal = reciprocal(normalized_divisor[divisor_length - 1]);
+    let quotient = match divisor_length {
+        2 => long_division_digits::<2>(&mut normalized_numerator, &normalized_divisor, numerator_length, divisor_reciprocal),
+        3 => long_division_digits::<3>(&mut normalized_numerator, &normalized_divisor, numerator_length, divisor_reciprocal),
+        _ => long_division_digits::<4>(&mut normalized_numerator, &normalized_divisor, numerator_length, divisor_reciprocal),
+    };
+
+    (quotient, denormalize(&normalized_numerator, shift, divisor_length))
+}
+
+/// Every digit of the long division, over a `divisor` whose length is known at compile time
+/// so that the digit steps come out as straight line code.
+#[inline(always)]
+fn long_division_digits<const DIVISOR_LENGTH: usize>(
+    numerator: &mut [u64; 9],
+    divisor: &[u64; 4],
+    numerator_length: usize,
+    divisor_reciprocal: u64,
+) -> [u64; 8] {
+    let mut quotient = [0u64; 8];
+    // The numerator is never shorter than the divisor, but `saturating_sub` is used
+    // to tell the compiler that the digit windows stay inside the numerator.
+    for step in (0..=numerator_length.saturating_sub(DIVISOR_LENGTH)).rev() {
+        quotient[step] = long_division_step(
+            &mut numerator[step..=step + DIVISOR_LENGTH],
+            &divisor[..DIVISOR_LENGTH],
+            divisor_reciprocal,
+        );
+    }
+    quotient
+}
+
+/// One quotient digit of the long division. Estimates it from the divisor's top limb, walks
+/// the estimate back against the second limb (twice at most, by Knuth's theorem 4.3.1B),
+/// then subtracts the divisor times the digit out of the running remainder. The estimate
+/// can still be over by one, which shows up as a borrow out of the top and is undone by
+/// adding the divisor back. `window` is the range of the running remainder the digit acts
+/// on, one limb longer than the divisor, and is a slice type rather than an index into the
+/// whole numerator which leaves the digit loops with no bound left to check.
+#[inline(always)]
+fn long_division_step(window: &mut [u64], divisor: &[u64], divisor_reciprocal: u64) -> u64 {
+    let divisor_length = divisor.len();
+    debug_assert!(window.len() == divisor_length + 1);
+
+    let top = divisor[divisor_length - 1];
+    let second = divisor[divisor_length - 2];
+    let high = window[divisor_length];
+    let low = window[divisor_length - 1];
+
+    // A digit cannot exceed the largest one there is, which is where the estimate saturates
+    // when the two leading limbs would divide out to more than that.
+    let (mut estimate, mut estimate_remainder) = if high >= top {
+        let leading = (u128::from(high) << 64) | u128::from(low);
+        (u64::MAX, leading - u128::from(u64::MAX) * u128::from(top))
+    } else {
+        let (digit, remainder) = div_rem_128_by_64(high, low, top, divisor_reciprocal);
+        (digit, u128::from(remainder))
+    };
+
+    while estimate_remainder <= u128::from(u64::MAX)
+        && u128::from(estimate) * u128::from(second) > ((estimate_remainder << 64) | u128::from(window[divisor_length - 2]))
+    {
+        #[cfg(test)]
+        path_counters::increment_quotient_correction();
+
+        estimate -= 1;
+        estimate_remainder += u128::from(top);
+    }
+
+    let mut carry = 0u64;
+    let mut borrow = false;
+    for (limb, &divisor_limb) in window.iter_mut().zip(divisor) {
+        let product = u128::from(estimate) * u128::from(divisor_limb) + u128::from(carry);
+        carry = (product >> 64) as u64;
+        let (difference, borrow_a) = limb.overflowing_sub(product as u64);
+        let (difference, borrow_b) = difference.overflowing_sub(u64::from(borrow));
+        *limb = difference;
+        borrow = borrow_a | borrow_b;
+    }
+    let (difference, borrow_a) = window[divisor_length].overflowing_sub(carry);
+    let (difference, borrow_b) = difference.overflowing_sub(u64::from(borrow));
+    window[divisor_length] = difference;
+
+    let mut digit = estimate;
+    if borrow_a | borrow_b {
+        #[cfg(test)]
+        path_counters::increment_divisor_add_back();
+
+        digit -= 1;
+        let mut carry = false;
+        for (limb, &divisor_limb) in window.iter_mut().zip(divisor) {
+            let (sum, carry_a) = limb.overflowing_add(divisor_limb);
+            let (sum, carry_b) = sum.overflowing_add(u64::from(carry));
+            *limb = sum;
+            carry = carry_a | carry_b;
+        }
+
+        // This carry is the borrow from above coming back, so it is meant to wrap.
+        window[divisor_length] = window[divisor_length].wrapping_add(u64::from(carry));
+    }
+    digit
+}
+
 #[cfg(test)]
 mod tests {
-    use super::U256;
+    use super::{path_counters, reciprocal, U256};
 
     fn from_parts(value: u128) -> U256 {
         U256([value as u64, (value >> 64) as u64, 0, 0])
@@ -667,5 +999,417 @@ mod tests {
     fn le_bytes_round_trip() {
         let value = U256([0x0123_4567_89ab_cdef, 2, 3, 4]);
         assert_eq!(U256::from_le_bytes(value.to_le_bytes()), value);
+    }
+
+    /// Enough biased random cases for the add-back path, which the operands have to conspire
+    /// to reach, to appear tens of times.
+    const BIASED_RANDOM_CASES: usize = 40_000;
+
+    /// Fixed, so that a failure names a case that can be reproduced by rerunning the test.
+    const BIASED_RANDOM_SEED: u64 = 0x5eed_5eed_5eed_5eed;
+
+    /// A bit-serial division kept as an oracle. It shares no estimate or correction machinery
+    /// with the digit-serial long division, so the two cannot be wrong in the same way.
+    fn reference_div_rem(numerator: U256, divisor: U256) -> (U256, U256) {
+        if divisor.is_zero() {
+            return (U256::ZERO, U256::ZERO);
+        }
+
+        if numerator.less_than(divisor) {
+            return (U256::ZERO, numerator);
+        }
+
+        let mut quotient = U256::ZERO;
+        let mut remainder = U256::ZERO;
+        for index in (0..256).rev() {
+            remainder = remainder.shift_left(1);
+            if numerator.0[index / 64] & (1 << (index % 64)) != 0 {
+                remainder.0[0] |= 1;
+            }
+            if !remainder.less_than(divisor) {
+                remainder = remainder.wrapping_sub(divisor);
+                quotient.0[index / 64] |= 1 << (index % 64);
+            }
+        }
+        (quotient, remainder)
+    }
+
+    /// A bit-serial reduction for `mul_mod` kept as an oracle. The bit shifted off the top being
+    /// part of the comparison is what makes it correct for a numerator twice the width of the modulus.
+    fn reference_mul_mod(left: U256, right: U256, modulus: U256) -> U256 {
+        if modulus.is_zero() {
+            return U256::ZERO;
+        }
+
+        let product = left.widening_mul(right);
+        let mut remainder = U256::ZERO;
+        for index in (0..512).rev() {
+            let carry = remainder.0[3] >> 63 != 0;
+            remainder = remainder.shift_left(1);
+            if product[index / 64] & (1 << (index % 64)) != 0 {
+                remainder.0[0] |= 1;
+            }
+            if carry || !remainder.less_than(modulus) {
+                remainder = remainder.wrapping_sub(modulus);
+            }
+        }
+        remainder
+    }
+
+    /// `add_mod` over the reference division.
+    fn reference_add_mod(left: U256, right: U256, modulus: U256) -> U256 {
+        if modulus.is_zero() {
+            return U256::ZERO;
+        }
+
+        let (_, left) = reference_div_rem(left, modulus);
+        let (_, right) = reference_div_rem(right, modulus);
+        let (sum, carry) = left.carrying_add(right);
+        if carry || !sum.less_than(modulus) {
+            sum.wrapping_sub(modulus)
+        } else {
+            sum
+        }
+    }
+
+    /// `div_signed` over the reference division.
+    fn reference_div_signed(numerator: U256, divisor: U256) -> U256 {
+        if divisor.is_zero() {
+            return U256::ZERO;
+        }
+
+        let negate = numerator.is_negative() != divisor.is_negative();
+        let left = if numerator.is_negative() {
+            numerator.wrapping_neg()
+        } else {
+            numerator
+        };
+        let right = if divisor.is_negative() { divisor.wrapping_neg() } else { divisor };
+        let (quotient, _) = reference_div_rem(left, right);
+        if negate {
+            quotient.wrapping_neg()
+        } else {
+            quotient
+        }
+    }
+
+    /// `rem_signed` over the reference division.
+    fn reference_rem_signed(numerator: U256, divisor: U256) -> U256 {
+        if divisor.is_zero() {
+            return U256::ZERO;
+        }
+
+        let negate = numerator.is_negative();
+        let left = if numerator.is_negative() {
+            numerator.wrapping_neg()
+        } else {
+            numerator
+        };
+        let right = if divisor.is_negative() { divisor.wrapping_neg() } else { divisor };
+        let (_, remainder) = reference_div_rem(left, right);
+        if negate {
+            remainder.wrapping_neg()
+        } else {
+            remainder
+        }
+    }
+
+    /// The values a 256-bit division is most likely to get wrong, and between them every
+    /// divisor length the kernels have a separate path for: zero and one, the limb boundaries
+    /// with their neighbors, the all-ones patterns, the powers of two, the signed extremes,
+    /// and the modulus a curve25519 chain runs on.
+    fn edge_values() -> [U256; 28] {
+        let one = U256::ONE;
+        [
+            U256::ZERO,
+            one,
+            U256::from_u64(2),
+            U256::from_u64(7),
+            U256::from_u64(31),
+            U256::from_u64(u64::MAX),
+            one.shift_left(64),
+            one.shift_left(64).wrapping_add(one),
+            one.shift_left(65),
+            one.shift_left(128).wrapping_sub(one),
+            one.shift_left(128),
+            one.shift_left(128).wrapping_add(one),
+            one.shift_left(192).wrapping_sub(one),
+            one.shift_left(192),
+            one.shift_left(192).wrapping_add(one),
+            one.shift_left(255).wrapping_sub(U256::from_u64(19)),
+            one.shift_left(255).wrapping_sub(one),
+            one.shift_left(255),
+            one.shift_left(255).wrapping_add(one),
+            U256([u64::MAX; 4]).wrapping_sub(one),
+            U256([u64::MAX; 4]),
+            U256([0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, 7, 1 << 63]),
+            U256([0xdead_beef_cafe_babe, 3, 0, 1 << 62]),
+            U256([u64::MAX, 0, u64::MAX, 0]),
+            U256([0, u64::MAX, 0, u64::MAX]),
+            U256([1, 2, 3, 1 << 63]),
+            U256([0, u64::MAX - 1, 1 << 63, 0]),
+            U256([u64::MAX, 1 << 63, 0, 0]),
+        ]
+    }
+
+    /// A deterministic xorshift generator, which keeps the cross checks reproducible without
+    /// the crate taking on a dependency for them.
+    struct BiasedRng(u64);
+
+    impl BiasedRng {
+        fn next_u64(&mut self) -> u64 {
+            let mut value = self.0;
+            value ^= value >> 12;
+            value ^= value << 25;
+            value ^= value >> 27;
+            self.0 = value;
+            value.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+
+        /// A value whose limbs lean towards zero, the largest limb and their neighbors,
+        /// because that is what makes a quotient digit estimate wrong. Under uniform
+        /// limbs the add-back path is visited about once in 2^63 digit steps.
+        fn next_u256(&mut self) -> U256 {
+            let mut limbs = [0u64; 4];
+            for limb in limbs.iter_mut() {
+                *limb = match self.next_u64() % 5 {
+                    0 => 0,
+                    1 => u64::MAX,
+                    2 => self.next_u64() % 16,
+                    3 => u64::MAX - (self.next_u64() % 16),
+                    _ => self.next_u64(),
+                };
+            }
+            U256(limbs)
+        }
+    }
+
+    #[test]
+    fn div_rem_matches_the_reference_over_edge_values() {
+        let values = edge_values();
+        for numerator in values {
+            for divisor in values {
+                let (quotient, remainder) = numerator.div_rem(divisor);
+                assert_eq!(
+                    (quotient, remainder),
+                    reference_div_rem(numerator, divisor),
+                    "{numerator:?} / {divisor:?}"
+                );
+
+                if divisor.is_zero() {
+                    continue;
+                }
+
+                assert!(remainder.less_than(divisor), "{numerator:?} / {divisor:?}");
+                assert_eq!(
+                    quotient.wrapping_mul(divisor).wrapping_add(remainder),
+                    numerator,
+                    "{numerator:?} / {divisor:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn signed_division_matches_the_reference_over_edge_values() {
+        let values = edge_values();
+        for numerator in values {
+            for divisor in values {
+                assert_eq!(
+                    numerator.div_signed(divisor),
+                    reference_div_signed(numerator, divisor),
+                    "{numerator:?} / {divisor:?}"
+                );
+                assert_eq!(
+                    numerator.rem_signed(divisor),
+                    reference_rem_signed(numerator, divisor),
+                    "{numerator:?} % {divisor:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn add_mod_matches_the_reference_over_edge_values() {
+        let values = edge_values();
+        for modulus in values {
+            for left in values {
+                for right in values {
+                    let result = left.add_mod(right, modulus);
+                    assert_eq!(
+                        result,
+                        reference_add_mod(left, right, modulus),
+                        "{left:?} + {right:?} mod {modulus:?}"
+                    );
+                    assert!(
+                        modulus.is_zero() || result.less_than(modulus),
+                        "{left:?} + {right:?} mod {modulus:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mul_mod_matches_the_reference_over_edge_values() {
+        let values = edge_values();
+        for modulus in values {
+            for left in values {
+                for right in values {
+                    let result = left.mul_mod(right, modulus);
+                    assert_eq!(
+                        result,
+                        reference_mul_mod(left, right, modulus),
+                        "{left:?} * {right:?} mod {modulus:?}"
+                    );
+                    assert!(
+                        modulus.is_zero() || result.less_than(modulus),
+                        "{left:?} * {right:?} mod {modulus:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn biased_random_values_match_the_reference() {
+        let mut rng = BiasedRng(BIASED_RANDOM_SEED);
+        for _ in 0..BIASED_RANDOM_CASES {
+            let left = rng.next_u256();
+            let right = rng.next_u256();
+            let modulus = rng.next_u256();
+
+            let (quotient, remainder) = left.div_rem(right);
+            assert_eq!((quotient, remainder), reference_div_rem(left, right), "{left:?} / {right:?}");
+            assert_eq!(left.div_signed(right), reference_div_signed(left, right), "{left:?} / {right:?}");
+            assert_eq!(left.rem_signed(right), reference_rem_signed(left, right), "{left:?} % {right:?}");
+            assert_eq!(
+                left.add_mod(right, modulus),
+                reference_add_mod(left, right, modulus),
+                "{left:?} + {right:?} mod {modulus:?}"
+            );
+            assert_eq!(
+                left.mul_mod(right, modulus),
+                reference_mul_mod(left, right, modulus),
+                "{left:?} * {right:?} mod {modulus:?}"
+            );
+
+            if !right.is_zero() {
+                assert!(remainder.less_than(right), "{left:?} / {right:?}");
+                assert_eq!(quotient.wrapping_mul(right).wrapping_add(remainder), left, "{left:?} / {right:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn single_limb_operands_divide_like_the_machine() {
+        let mut rng = BiasedRng(BIASED_RANDOM_SEED);
+        for _ in 0..BIASED_RANDOM_CASES {
+            let numerator = rng.next_u64();
+            let divisor = rng.next_u64() | 1;
+            let (quotient, remainder) = U256::from_u64(numerator).div_rem(U256::from_u64(divisor));
+            assert_eq!(quotient, U256::from_u64(numerator / divisor), "{numerator} / {divisor}");
+            assert_eq!(remainder, U256::from_u64(numerator % divisor), "{numerator} % {divisor}");
+        }
+
+        // The boundary the path is chosen at, from either side: the largest single limb
+        // numerator, and the smallest numerator that needs two.
+        let largest_limb = U256::from_u64(u64::MAX);
+        let two_limbs = U256::ONE.shift_left(64);
+        assert_eq!(largest_limb.div_rem(largest_limb), (U256::ONE, U256::ZERO));
+        assert_eq!(two_limbs.div_rem(largest_limb), (U256::ONE, U256::ONE));
+        assert_eq!(largest_limb.div_rem(two_limbs), (U256::ZERO, largest_limb));
+    }
+
+    #[test]
+    fn mul_mod_keeps_products_that_are_already_below_the_modulus() {
+        // The reduction is skipped when the product is below the modulus, so the boundary
+        // is the product that equals it: one step either side of that has to come out differently.
+        let modulus = U256::ONE.shift_left(255).wrapping_sub(U256::from_u64(19));
+        let largest_limb = U256::from_u64(u64::MAX);
+        assert_eq!(largest_limb.mul_mod(largest_limb, modulus), U256([1, u64::MAX - 1, 0, 0]));
+        assert_eq!(modulus.mul_mod(U256::ONE, modulus), U256::ZERO);
+        assert_eq!(
+            modulus.wrapping_sub(U256::ONE).mul_mod(U256::ONE, modulus),
+            modulus.wrapping_sub(U256::ONE)
+        );
+
+        // Five limbs of product against a four limb modulus, which is the shape that says the
+        // digit count follows the product rather than the width it could have filled.
+        let wide = U256([u64::MAX, u64::MAX, u64::MAX, u64::MAX >> 1]);
+        assert_eq!(wide.mul_mod(largest_limb, modulus), reference_mul_mod(wide, largest_limb, modulus));
+    }
+
+    #[test]
+    fn the_reciprocal_matches_the_exact_quotient() {
+        // The reciprocal comes out of a fixed point iteration instead of a division, so
+        // what says the iteration lands exactly is the division it replaced, over the values
+        // such an iteration is likeliest to slip on: every run of set bits, every pair of
+        // runs, each of their neighbors, and biased random draws on top.
+        fn exact(divisor: u64) -> u64 {
+            (u128::MAX / u128::from(divisor)) as u64
+        }
+
+        fn run_of_bits(start: u32, end: u32) -> u64 {
+            let width = end - start + 1;
+            if width == 64 {
+                u64::MAX
+            } else {
+                ((1 << width) - 1) << start
+            }
+        }
+
+        fn assert_reciprocal_is_exact(value: u64) {
+            // The top bit is set on every divisor a reciprocal is ever taken of.
+            let divisor = value | (1 << 63);
+            assert_eq!(reciprocal(divisor), exact(divisor), "{divisor:#018x}");
+        }
+
+        for start in 0..64 {
+            for end in start..64 {
+                let first = run_of_bits(start, end);
+                assert_reciprocal_is_exact(first);
+                assert_reciprocal_is_exact(first.wrapping_add(1));
+                assert_reciprocal_is_exact(first.wrapping_sub(1));
+                for second_start in (0..64).step_by(3) {
+                    for second_end in (second_start..64).step_by(7) {
+                        assert_reciprocal_is_exact(first | run_of_bits(second_start, second_end));
+                    }
+                }
+            }
+        }
+
+        let mut rng = BiasedRng(BIASED_RANDOM_SEED);
+        for _ in 0..BIASED_RANDOM_CASES {
+            let value = rng.next_u64();
+            assert_reciprocal_is_exact(value);
+            assert_reciprocal_is_exact(value.wrapping_add(1));
+            assert_reciprocal_is_exact(value.wrapping_sub(1));
+        }
+    }
+
+    #[test]
+    fn division_rare_paths_are_exercised() {
+        // Neither path can be reached on demand from the outside: the correction is common
+        // but the add-back needs the operands to conspire, so what proves the cross checks
+        // above cover them is counting. Tests share the counters and run in parallel, which
+        // can only add to the movement this one sees.
+        let (corrections_before, add_backs_before) = path_counters::totals();
+
+        let mut rng = BiasedRng(BIASED_RANDOM_SEED);
+        for _ in 0..BIASED_RANDOM_CASES {
+            let left = rng.next_u256();
+            let right = rng.next_u256();
+            let modulus = rng.next_u256();
+            let _ = left.div_rem(right);
+            let _ = left.mul_mod(right, modulus);
+        }
+
+        let (corrections, add_backs) = path_counters::totals();
+        assert!(
+            corrections > corrections_before,
+            "no quotient correction in {BIASED_RANDOM_CASES} biased cases"
+        );
+        assert!(add_backs > add_backs_before, "no add-back in {BIASED_RANDOM_CASES} biased cases");
     }
 }
