@@ -3736,6 +3736,30 @@ impl<'a, 'b, 'c> InstructionFormatter<'a, 'b, 'c> {
             is_64_bit: self.format.is_64_bit,
         }
     }
+
+    fn format_offset(&self, offset: i32) -> impl core::fmt::Display {
+        struct Formatter {
+            offset: i32,
+            prefer_unaliased: bool,
+        }
+
+        impl core::fmt::Display for Formatter {
+            fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+                if self.offset == 0 && !self.prefer_unaliased {
+                    Ok(())
+                } else if self.offset < 0 {
+                    write!(fmt, " - {}", cast(self.offset).to_i64_sign_extend() * -1)
+                } else {
+                    write!(fmt, " + {}", self.offset)
+                }
+            }
+        }
+
+        Formatter {
+            offset,
+            prefer_unaliased: self.format.prefer_unaliased,
+        }
+    }
 }
 
 impl<'a, 'b, 'c> core::fmt::Write for InstructionFormatter<'a, 'b, 'c> {
@@ -4471,68 +4495,56 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn store_imm_indirect_u8(&mut self, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         let base = self.format_reg(base);
         let value = self.format_imm(value);
-        write!(self, "u8 [{base} + {offset}] = {value}")
+        let offset = self.format_offset(offset);
+        write!(self, "u8 [{base}{offset}] = {value}")
     }
 
     fn store_imm_indirect_u16(&mut self, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         let base = self.format_reg(base);
         let value = self.format_imm(value);
-        write!(self, "u16 [{base} + {offset}] = {value}")
+        let offset = self.format_offset(offset);
+        write!(self, "u16 [{base}{offset}] = {value}")
     }
 
     fn store_imm_indirect_u32(&mut self, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         let base = self.format_reg(base);
         let value = self.format_imm(value);
-        write!(self, "u32 [{base} + {offset}] = {value}")
+        let offset = self.format_offset(offset);
+        write!(self, "u32 [{base}{offset}] = {value}")
     }
 
     fn store_imm_indirect_u64(&mut self, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         let base = self.format_reg(base);
         let value = self.format_imm(value);
-        write!(self, "u64 [{base} + {offset}] = {value}")
+        let offset = self.format_offset(offset);
+        write!(self, "u64 [{base}{offset}] = {value}")
     }
 
     fn store_indirect_u8(&mut self, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let base = self.format_reg(base);
-        if self.format.prefer_unaliased || offset != 0 {
-            let offset = self.format_imm(offset);
-            write!(self, "u8 [{base} + {offset}] = {src}")
-        } else {
-            write!(self, "u8 [{base}] = {src}")
-        }
+        let offset = self.format_offset(offset);
+        write!(self, "u8 [{base}{offset}] = {src}")
     }
 
     fn store_indirect_u16(&mut self, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let src = self.format_reg(src);
         let base = self.format_reg(base);
-        if self.format.prefer_unaliased || offset != 0 {
-            let offset = self.format_imm(offset);
-            write!(self, "u16 [{base} + {offset}] = {src}")
-        } else {
-            write!(self, "u16 [{base}] = {src}")
-        }
+        let offset = self.format_offset(offset);
+        write!(self, "u16 [{base}{offset}] = {src}")
     }
 
     fn store_indirect_u32(&mut self, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let src = self.format_reg(src);
         let base = self.format_reg(base);
-        if self.format.prefer_unaliased || offset != 0 {
-            let offset = self.format_imm(offset);
-            write!(self, "u32 [{base} + {offset}] = {src}")
-        } else {
-            write!(self, "u32 [{base}] = {src}")
-        }
+        let offset = self.format_offset(offset);
+        write!(self, "u32 [{base}{offset}] = {src}")
     }
 
     fn store_indirect_u64(&mut self, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let src = self.format_reg(src);
         let base = self.format_reg(base);
-        if self.format.prefer_unaliased || offset != 0 {
-            let offset = self.format_imm(offset);
-            write!(self, "u64 [{base} + {offset}] = {src}")
-        } else {
-            write!(self, "u64 [{base}] = {src}")
-        }
+        let offset = self.format_offset(offset);
+        write!(self, "u64 [{base}{offset}] = {src}")
     }
 
     fn store_imm_u8(&mut self, offset: i32, value: i32) -> Self::ReturnTy {
@@ -4586,78 +4598,50 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn load_indirect_u8(&mut self, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let base = self.format_reg(base);
-        if self.format.prefer_unaliased || offset != 0 {
-            let offset = self.format_imm(offset);
-            write!(self, "{} = u8 [{} + {}]", dst, base, offset)
-        } else {
-            write!(self, "{} = u8 [{}]", dst, base)
-        }
+        let offset = self.format_offset(offset);
+        write!(self, "{} = u8 [{}{}]", dst, base, offset)
     }
 
     fn load_indirect_i8(&mut self, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let base = self.format_reg(base);
-        if self.format.prefer_unaliased || offset != 0 {
-            let offset = self.format_imm(offset);
-            write!(self, "{} = i8 [{} + {}]", dst, base, offset)
-        } else {
-            write!(self, "{} = i8 [{}]", dst, base)
-        }
+        let offset = self.format_offset(offset);
+        write!(self, "{} = i8 [{}{}]", dst, base, offset)
     }
 
     fn load_indirect_u16(&mut self, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let base = self.format_reg(base);
-        if self.format.prefer_unaliased || offset != 0 {
-            let offset = self.format_imm(offset);
-            write!(self, "{} = u16 [{} + {}]", dst, base, offset)
-        } else {
-            write!(self, "{} = u16 [{} ]", dst, base)
-        }
+        let offset = self.format_offset(offset);
+        write!(self, "{} = u16 [{}{}]", dst, base, offset)
     }
 
     fn load_indirect_i16(&mut self, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let base = self.format_reg(base);
-        if self.format.prefer_unaliased || offset != 0 {
-            let offset = self.format_imm(offset);
-            write!(self, "{} = i16 [{} + {}]", dst, base, offset)
-        } else {
-            write!(self, "{} = i16 [{}]", dst, base)
-        }
+        let offset = self.format_offset(offset);
+        write!(self, "{} = i16 [{}{}]", dst, base, offset)
     }
 
     fn load_indirect_u32(&mut self, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let base = self.format_reg(base);
-        if self.format.prefer_unaliased || offset != 0 {
-            let offset = self.format_imm(offset);
-            write!(self, "{} = u32 [{} + {}]", dst, base, offset)
-        } else {
-            write!(self, "{} = u32 [{}]", dst, base)
-        }
+        let offset = self.format_offset(offset);
+        write!(self, "{} = u32 [{}{}]", dst, base, offset)
     }
 
     fn load_indirect_i32(&mut self, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let base = self.format_reg(base);
-        if self.format.prefer_unaliased || offset != 0 {
-            let offset = self.format_imm(offset);
-            write!(self, "{} = i32 [{} + {}]", dst, base, offset)
-        } else {
-            write!(self, "{} = i32 [{}]", dst, base)
-        }
+        let offset = self.format_offset(offset);
+        write!(self, "{} = i32 [{}{}]", dst, base, offset)
     }
 
     fn load_indirect_u64(&mut self, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
         let base = self.format_reg(base);
-        if self.format.prefer_unaliased || offset != 0 {
-            let offset = self.format_imm(offset);
-            write!(self, "{} = u64 [{} + {}]", dst, base, offset)
-        } else {
-            write!(self, "{} = u64 [{}]", dst, base)
-        }
+        let offset = self.format_offset(offset);
+        write!(self, "{} = u64 [{}{}]", dst, base, offset)
     }
 
     fn load_u8(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
@@ -4824,8 +4808,8 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
             }
         }
 
-        let offset = self.format_imm(offset);
-        write!(self, "jump [{} + {}]", self.format_reg(base), offset)
+        let offset = self.format_offset(offset);
+        write!(self, "jump [{}{}]", self.format_reg(base), offset)
     }
 
     fn load_imm_and_jump_indirect(&mut self, ra: RawReg, base: RawReg, value: i32, offset: i32) -> Self::ReturnTy {
@@ -4835,14 +4819,14 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
             if !self.format.prefer_unaliased && offset == 0 {
                 write!(self, "{ra} = {value}, jump [{base}]")
             } else {
-                let offset = self.format_imm(offset);
-                write!(self, "{ra} = {value}, jump [{base} + {offset}]")
+                let offset = self.format_offset(offset);
+                write!(self, "{ra} = {value}, jump [{base}{offset}]")
             }
         } else if !self.format.prefer_unaliased && offset == 0 {
             write!(self, "tmp = {base}, {ra} = {value}, jump [tmp]")
         } else {
-            let offset = self.format_imm(offset);
-            write!(self, "tmp = {base}, {ra} = {value}, jump [tmp + {offset}]")
+            let offset = self.format_offset(offset);
+            write!(self, "tmp = {base}, {ra} = {value}, jump [tmp{offset}]")
         }
     }
 
@@ -8471,4 +8455,13 @@ impl LineProgramOp {
             _ => None,
         }
     }
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn test_instruction_formatting() {
+    use crate::alloc::string::ToString;
+    assert_eq!(self::asm::store_imm_indirect_u8(Reg::A0, 0, 2).to_string(), "u8 [a0] = 0x2");
+    assert_eq!(self::asm::store_imm_indirect_u8(Reg::A0, 1, 2).to_string(), "u8 [a0 + 1] = 0x2");
+    assert_eq!(self::asm::store_imm_indirect_u8(Reg::A0, -1, 2).to_string(), "u8 [a0 - 1] = 0x2");
 }
