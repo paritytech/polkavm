@@ -2392,6 +2392,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "x86_64")] // only the label tests below format their assertions
     use alloc::format;
     use alloc::string::String;
 
@@ -2593,6 +2594,8 @@ mod tests {
         xor,
     }
 
+    // Label fixups are resolved by `Assembler::finalize`, which encodes for the *host* arch.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn jmp_label8_infinite_loop() {
         use super::inst::*;
@@ -2613,6 +2616,8 @@ mod tests {
         assert_eq!(disassembly, "00000000 0f0b ud2");
     }
 
+    // Label fixups are resolved by `Assembler::finalize`, which encodes for the *host* arch.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn jmp_label32_infinite_loop() {
         use super::inst::*;
@@ -2633,6 +2638,8 @@ mod tests {
         assert_eq!(disassembly, "00000000 0f0b ud2\n00000002 90 nop\n00000003 0f0b ud2");
     }
 
+    // Label fixups are resolved by `Assembler::finalize`, which encodes for the *host* arch.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn call_label32_infinite_loop() {
         use super::inst::*;
@@ -2653,6 +2660,8 @@ mod tests {
         assert_eq!(disassembly, "00000000 0f0b ud2\n00000002 90 nop\n00000003 0f0b ud2");
     }
 
+    // Label fixups are resolved by `Assembler::finalize`, which encodes for the *host* arch.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn jcc_label8_infinite_loop() {
         use super::inst::*;
@@ -2680,6 +2689,8 @@ mod tests {
         });
     }
 
+    // Label fixups are resolved by `Assembler::finalize`, which encodes for the *host* arch.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn jcc_label8_jump_forward() {
         use super::inst::*;
@@ -2700,6 +2711,8 @@ mod tests {
         })
     }
 
+    // Label fixups are resolved by `Assembler::finalize`, which encodes for the *host* arch.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn jcc_label8_jump_backward() {
         use super::inst::*;
@@ -2720,6 +2733,8 @@ mod tests {
         });
     }
 
+    // Label fixups are resolved by `Assembler::finalize`, which encodes for the *host* arch.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn jcc_label32_jump_forward() {
         use super::inst::*;
@@ -2752,6 +2767,8 @@ mod tests {
         });
     }
 
+    // Label fixups are resolved by `Assembler::finalize`, which encodes for the *host* arch.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn lea_rip_label_infinite_loop() {
         use super::inst::*;
@@ -2777,6 +2794,8 @@ mod tests {
         });
     }
 
+    // Label fixups are resolved by `Assembler::finalize`, which encodes for the *host* arch.
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn lea_rip_label_next_instruction() {
         use super::inst::*;

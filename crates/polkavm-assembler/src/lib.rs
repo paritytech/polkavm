@@ -5,6 +5,9 @@
 
 pub mod amd64;
 
+#[cfg(target_arch = "aarch64")]
+pub mod aarch64;
+
 #[cfg(feature = "alloc")]
 mod assembler;
 mod misc;
@@ -13,5 +16,5 @@ mod misc;
 extern crate alloc;
 
 #[cfg(feature = "alloc")]
-pub use crate::assembler::{Assembler, NonZero, ReservedAssembler, U0, U1, U2, U3, U4, U5, U6};
+pub use crate::assembler::{Assembler, NonZero, OutOfRange, ReservedAssembler, U0, U1, U2, U3, U4, U5, U6};
 pub use crate::misc::{InstructionT, Label};

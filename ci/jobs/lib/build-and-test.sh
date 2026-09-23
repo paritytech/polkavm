@@ -8,7 +8,8 @@ PROFILE="${1:?usage: build-and-test.sh <profile>}"
 
 echo ">> cargo test (main crates, $PROFILE)"
 cargo test --profile $PROFILE -p polkavm
-cargo test --profile $PROFILE -p polkavm-assembler
+# `alloc` gates the assembler's own tests; without it the run is empty.
+cargo test --profile $PROFILE -p polkavm-assembler --features alloc
 cargo test --profile $PROFILE -p polkavm-common
 cargo test --profile $PROFILE -p polkavm-common --all-features
 cargo test --profile $PROFILE -p polkavm-derive

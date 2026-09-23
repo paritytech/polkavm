@@ -30,10 +30,12 @@ if_compiler_is_supported! {
         use crate::sandbox::{Sandbox, SandboxInstance};
         use crate::compiler::{CompiledModule, CompilerCache};
 
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         use crate::sandbox::linux::Sandbox as SandboxLinux;
         #[cfg(feature = "generic-sandbox")]
         use crate::sandbox::generic::Sandbox as SandboxGeneric;
+        #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+        use crate::sandbox::hypervisor::Sandbox as SandboxHypervisor;
 
         pub(crate) struct EngineState {
             pub(crate) sandboxing_enabled: bool,
@@ -57,7 +59,7 @@ trait IntoResult<T> {
 }
 
 if_compiler_is_supported! {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     impl<T> IntoResult<T> for Result<T, polkavm_linux_raw::Error> {
         fn into_result(self, message: &str) -> Result<T, Error> {
             self.map_err(|error| Error::from(error).context(message))
@@ -69,6 +71,13 @@ if_compiler_is_supported! {
 
     #[cfg(feature = "generic-sandbox")]
     impl<T> IntoResult<T> for Result<T, generic::Error> {
+        fn into_result(self, message: &str) -> Result<T, Error> {
+            self.map_err(|error| Error::from(error).context(message))
+        }
+    }
+
+    #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+    impl<T> IntoResult<T> for Result<T, crate::sandbox::hypervisor::Error> {
         fn into_result(self, message: &str) -> Result<T, Error> {
             self.map_err(|error| Error::from(error).context(message))
         }
@@ -156,6 +165,8 @@ impl Engine {
                 if selected_backend == BackendKind::Compiler {
                     let default_sandbox = if SandboxKind::Linux.is_supported() {
                         SandboxKind::Linux
+                    } else if SandboxKind::Hypervisor.is_supported() {
+                        SandboxKind::Hypervisor
                     } else {
                         SandboxKind::Generic
                     };
@@ -167,7 +178,7 @@ impl Engine {
                         bail!("the '{selected_sandbox}' backend is not supported on this platform")
                     }
 
-                    if selected_sandbox == SandboxKind::Generic && !config.allow_experimental {
+                    if matches!(selected_sandbox, SandboxKind::Generic | SandboxKind::Hypervisor) && !config.allow_experimental {
                         bail!("cannot use the '{selected_sandbox}' sandbox: this sandbox is not production ready and may be insecure; you can enabled `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` to be able to use it anyway");
                     }
 
@@ -239,10 +250,12 @@ impl Engine {
 if_compiler_is_supported! {
     {
         pub(crate) enum CompiledModuleKind {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             Linux(CompiledModule<SandboxLinux>),
             #[cfg(feature = "generic-sandbox")]
             Generic(CompiledModule<SandboxGeneric>),
+            #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+            Hypervisor(CompiledModule<SandboxHypervisor>),
             Unavailable,
         }
     } else {
@@ -392,6 +405,8 @@ impl Module {
     }
 
     if_compiler_is_supported! {
+        // Used by the generic sandbox's page-fault path.
+        #[cfg_attr(not(feature = "generic-sandbox"), allow(dead_code))]
         pub(crate) fn address_to_page(&self, address: u32) -> u32 {
             address >> self.state().page_shift
         }
@@ -590,7 +605,7 @@ impl Module {
                     if let Some(selected_sandbox) = engine.selected_sandbox {
                         match selected_sandbox {
                             SandboxKind::Linux => {
-                                #[cfg(target_os = "linux")]
+                                #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                                 match blob.isa() {
                                     InstructionSetKind::ReviveV1 => compile_module!(SandboxLinux, B64, build_static_dispatch_table_revive_v1, COMPILER_VISITOR_LINUX, Linux),
                                     InstructionSetKind::JamV1 => compile_module!(SandboxLinux, B64, build_static_dispatch_table_jam_v1, COMPILER_VISITOR_LINUX, Linux),
@@ -598,7 +613,7 @@ impl Module {
                                     InstructionSetKind::Latest64 => compile_module!(SandboxLinux, B64, build_static_dispatch_table_latest64, COMPILER_VISITOR_LINUX, Linux),
                                 }
 
-                                #[cfg(not(target_os = "linux"))]
+                                #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
                                 {
                                     log::debug!("Selecetd sandbox unavailable: 'linux'");
                                     None
@@ -616,6 +631,21 @@ impl Module {
                                 #[cfg(not(feature = "generic-sandbox"))]
                                 {
                                     log::debug!("Selected sandbox unavailable: 'generic'");
+                                    None
+                                }
+                            },
+                            SandboxKind::Hypervisor => {
+                                #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+                                match blob.isa() {
+                                    InstructionSetKind::ReviveV1 => compile_module!(SandboxHypervisor, B64, build_static_dispatch_table_revive_v1, COMPILER_VISITOR_HYPERVISOR, Hypervisor),
+                                    InstructionSetKind::JamV1 => compile_module!(SandboxHypervisor, B64, build_static_dispatch_table_jam_v1, COMPILER_VISITOR_HYPERVISOR, Hypervisor),
+                                    InstructionSetKind::Latest32 => compile_module!(SandboxHypervisor, B32, build_static_dispatch_table_latest32, COMPILER_VISITOR_HYPERVISOR, Hypervisor),
+                                    InstructionSetKind::Latest64 => compile_module!(SandboxHypervisor, B64, build_static_dispatch_table_latest64, COMPILER_VISITOR_HYPERVISOR, Hypervisor),
+                                }
+
+                                #[cfg(not(all(feature = "hypervisor-sandbox", target_arch = "aarch64")))]
+                                {
+                                    log::debug!("Selected sandbox unavailable: 'hypervisor'");
                                     None
                                 }
                             },
@@ -749,7 +779,7 @@ impl Module {
         let backend = if_compiler_is_supported! {
             {{
                 match compiled_module {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     CompiledModuleKind::Linux(..) => {
                         let outer_instance = match outer_instance {
                             Some(outer_instance) => {
@@ -780,6 +810,22 @@ impl Module {
                         };
                         let compiled_instance = SandboxInstance::<SandboxGeneric>::spawn_and_load_module(Arc::clone(engine_state), self, outer_instance)?;
                         Some(InstanceBackend::CompiledGeneric(compiled_instance))
+                    },
+                    #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+                    CompiledModuleKind::Hypervisor(..) => {
+                        let outer_instance = match outer_instance {
+                            Some(outer_instance) => {
+                                let outer_module = &outer_instance.module;
+                                #[allow(clippy::match_wildcard_for_single_variants)]
+                                match outer_instance.backend {
+                                    InstanceBackend::CompiledHypervisor(ref outer_instance) if outer_module.engine_state_pointer() == self.engine_state_pointer() => Some(outer_instance),
+                                    _ => return Err(Error::from_static_str("failed to instantiate module: received incompatible outer instance")),
+                                }
+                            },
+                            None => None,
+                        };
+                        let compiled_instance = SandboxInstance::<SandboxHypervisor>::spawn_and_load_module(Arc::clone(engine_state), self, outer_instance)?;
+                        Some(InstanceBackend::CompiledHypervisor(compiled_instance))
                     },
                     CompiledModuleKind::Unavailable => None
                 }
@@ -862,10 +908,12 @@ impl Module {
         if_compiler_is_supported! {
             {
                 match self.state().compiled_module {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     CompiledModuleKind::Linux(ref module) => Some(module.machine_code()),
                     #[cfg(feature = "generic-sandbox")]
                     CompiledModuleKind::Generic(ref module) => Some(module.machine_code()),
+                    #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+                    CompiledModuleKind::Hypervisor(ref module) => Some(module.machine_code()),
                     CompiledModuleKind::Unavailable => None,
                 }
             } else {
@@ -882,10 +930,12 @@ impl Module {
         if_compiler_is_supported! {
             {
                 match self.state().compiled_module {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     CompiledModuleKind::Linux(..) => Some(polkavm_common::zygote::VM_ADDR_NATIVE_CODE),
                     #[cfg(feature = "generic-sandbox")]
                     CompiledModuleKind::Generic(..) => None,
+                    #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+                    CompiledModuleKind::Hypervisor(..) => None,
                     CompiledModuleKind::Unavailable => None,
                 }
             } else {
@@ -911,10 +961,12 @@ impl Module {
         if_compiler_is_supported! {
             {
                 match self.state().compiled_module {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     CompiledModuleKind::Linux(ref module) => Some(module.program_counter_to_machine_code_offset()),
                     #[cfg(feature = "generic-sandbox")]
                     CompiledModuleKind::Generic(ref module) => Some(module.program_counter_to_machine_code_offset()),
+                    #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+                    CompiledModuleKind::Hypervisor(ref module) => Some(module.program_counter_to_machine_code_offset()),
                     CompiledModuleKind::Unavailable => None,
                 }
             } else {
@@ -1032,10 +1084,12 @@ impl Module {
 if_compiler_is_supported! {
     {
         enum InstanceBackend {
-            #[cfg(target_os = "linux")]
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
             CompiledLinux(SandboxInstance<SandboxLinux>),
             #[cfg(feature = "generic-sandbox")]
             CompiledGeneric(SandboxInstance<SandboxGeneric>),
+            #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+            CompiledHypervisor(SandboxInstance<SandboxHypervisor>),
             Interpreted(InterpretedInstance),
         }
     } else {
@@ -1130,7 +1184,7 @@ if_compiler_is_supported! {
         macro_rules! access_backend {
             ($itself:expr, |$backend:ident| $e:expr) => {
                 match $itself {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     InstanceBackend::CompiledLinux(ref $backend) => {
                         let $backend = $backend.sandbox();
                         $e
@@ -1140,19 +1194,29 @@ if_compiler_is_supported! {
                         let $backend = $backend.sandbox();
                         $e
                     },
+                    #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+                    InstanceBackend::CompiledHypervisor(ref $backend) => {
+                        let $backend = $backend.sandbox();
+                        $e
+                    },
                     InstanceBackend::Interpreted(ref $backend) => $e,
                 }
             };
 
             ($itself:expr, |mut $backend:ident| $e:expr) => {
                 match $itself {
-                    #[cfg(target_os = "linux")]
+                    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
                     InstanceBackend::CompiledLinux(ref mut $backend) => {
                         let $backend = $backend.sandbox_mut();
                         $e
                     },
                     #[cfg(feature = "generic-sandbox")]
                     InstanceBackend::CompiledGeneric(ref mut $backend) => {
+                        let $backend = $backend.sandbox_mut();
+                        $e
+                    },
+                    #[cfg(all(feature = "hypervisor-sandbox", target_arch = "aarch64"))]
+                    InstanceBackend::CompiledHypervisor(ref mut $backend) => {
                         let $backend = $backend.sandbox_mut();
                         $e
                     },

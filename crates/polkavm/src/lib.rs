@@ -10,12 +10,21 @@
 
 #[cfg(all(
     not(miri),
-    target_arch = "x86_64",
-    any(
-        target_os = "linux",
-        all(feature = "generic-sandbox", any(target_os = "macos", target_os = "freebsd"))
-    ),
     feature = "std",
+    any(
+        all(
+            target_arch = "x86_64",
+            any(
+                target_os = "linux",
+                all(feature = "generic-sandbox", any(target_os = "macos", target_os = "freebsd"))
+            ),
+        ),
+        all(
+            target_arch = "aarch64",
+            any(feature = "generic-sandbox", feature = "hypervisor-sandbox"),
+            any(target_os = "macos", target_os = "linux")
+        ),
+    ),
 ))]
 macro_rules! if_compiler_is_supported {
     ({
@@ -33,12 +42,21 @@ macro_rules! if_compiler_is_supported {
 
 #[cfg(not(all(
     not(miri),
-    target_arch = "x86_64",
-    any(
-        target_os = "linux",
-        all(feature = "generic-sandbox", any(target_os = "macos", target_os = "freebsd"))
-    ),
     feature = "std",
+    any(
+        all(
+            target_arch = "x86_64",
+            any(
+                target_os = "linux",
+                all(feature = "generic-sandbox", any(target_os = "macos", target_os = "freebsd"))
+            ),
+        ),
+        all(
+            target_arch = "aarch64",
+            any(feature = "generic-sandbox", feature = "hypervisor-sandbox"),
+            any(target_os = "macos", target_os = "linux")
+        ),
+    ),
 )))]
 macro_rules! if_compiler_is_supported {
     ({
@@ -93,16 +111,18 @@ mod module_cache;
 
 if_compiler_is_supported! {
     mod compiler;
+    // Page tracking for the generic sandbox; the hypervisor tracks its own guest page table.
+    #[cfg_attr(not(feature = "generic-sandbox"), allow(dead_code))]
     mod page_set;
     mod sandbox;
 
-    #[cfg(all(target_os = "linux", not(feature = "export-internals-for-testing")))]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "export-internals-for-testing")))]
     mod generic_allocator;
 
-    #[cfg(all(target_os = "linux", not(feature = "export-internals-for-testing")))]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", not(feature = "export-internals-for-testing")))]
     mod bit_mask;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     mod shm_allocator;
 }
 
