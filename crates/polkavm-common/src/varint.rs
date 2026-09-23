@@ -11,18 +11,22 @@ pub const MAX_VARINT_LENGTH: usize = 5;
 pub(crate) fn read_varint(input: &[u8], first_byte: u8) -> Option<(usize, u32)> {
     let length = (!first_byte).leading_zeros();
     let upper_mask = 0b11111111_u32 >> length;
-    let upper_bits = (upper_mask & u32::from(first_byte)).wrapping_shl(length * 8);
+    let upper_bits = u64::from(upper_mask & u32::from(first_byte)).wrapping_shl(length * 8);
     let input = input.get(..length as usize)?;
     let value = match input.len() {
         0 => upper_bits,
-        1 => upper_bits | u32::from(input[0]),
-        2 => upper_bits | u32::from(u16::from_le_bytes([input[0], input[1]])),
-        3 => upper_bits | u32::from_le_bytes([input[0], input[1], input[2], 0]),
-        4 => upper_bits | u32::from_le_bytes([input[0], input[1], input[2], input[3]]),
+        1 => upper_bits | u64::from(input[0]),
+        2 => upper_bits | u64::from(u16::from_le_bytes([input[0], input[1]])),
+        3 => upper_bits | u64::from(u32::from_le_bytes([input[0], input[1], input[2], 0])),
+        4 => upper_bits | u64::from(u32::from_le_bytes([input[0], input[1], input[2], input[3]])),
         _ => return None,
     };
 
-    Some((length as usize, value))
+    if (length != 0 && value < (1u64 << (7 * length))) || value > u64::from(u32::MAX) {
+        return None;
+    }
+
+    Some((length as usize, value as u32))
 }
 
 #[inline]
@@ -72,6 +76,63 @@ proptest::proptest! {
         let (parsed_length, parsed_value) = read_varint(&buffer[1..], buffer[0]).unwrap();
         assert_eq!(parsed_value, value, "value mismatch");
         assert_eq!(parsed_length + 1, length, "length mismatch")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn varint_rejects_non_canonical_encodings() {
+        assert_eq!(read_varint(&[0x01], 0x80), None);
+        assert_eq!(read_varint(&[0x01, 0x00], 0xc0), None);
+        assert_eq!(read_varint(&[0x01, 0x00, 0x00], 0xe0), None);
+        assert_eq!(read_varint(&[0x01, 0x00, 0x00, 0x00], 0xf0), None);
+        assert_eq!(read_varint(&[0x00], 0x80), None);
+    }
+
+    #[test]
+    fn varint_rejects_values_outside_u32() {
+        assert_eq!(read_varint(&[0x00, 0x00, 0x00, 0x00], 0xf1), None);
+        assert_eq!(read_varint(&[0xff, 0xff, 0xff, 0xff], 0xf7), None);
+        assert_eq!(read_varint(&[0x00, 0x00, 0x00, 0x00, 0x00], 0xf8), None);
+        assert_eq!(read_varint(&[0x00; 8], 0xff), None);
+    }
+
+    #[test]
+    fn varint_accepts_canonical_encodings() {
+        assert_eq!(read_varint(&[], 0x00), Some((0, 0)));
+        assert_eq!(read_varint(&[], 0x7f), Some((0, 127)));
+        assert_eq!(read_varint(&[0x80], 0x80), Some((1, 128)));
+        assert_eq!(read_varint(&[0x00, 0x00, 0x00, 0x80], 0xf0), Some((4, 1 << 31)));
+        assert_eq!(read_varint(&[0xff, 0xff, 0xff, 0xff], 0xf0), Some((4, u32::MAX)));
+    }
+}
+
+#[cfg(kani)]
+mod kani {
+    use super::{read_varint, write_varint, MAX_VARINT_LENGTH};
+
+    #[kani::proof]
+    fn verify_read_varint_is_canonical() {
+        let first_byte: u8 = kani::any();
+        let input: [u8; 4] = kani::any();
+        if let Some((length, value)) = read_varint(&input, first_byte) {
+            if length != 0 {
+                assert!(u64::from(value) >= (1u64 << (7 * length)));
+            }
+        }
+    }
+
+    #[kani::proof]
+    fn verify_read_varint_round_trip() {
+        let value: u32 = kani::any();
+        let mut buffer = [0u8; MAX_VARINT_LENGTH];
+        let length = write_varint(value, &mut buffer);
+        let (parsed_length, parsed_value) = read_varint(&buffer[1..], buffer[0]).unwrap();
+        assert_eq!(parsed_value, value);
+        assert_eq!(parsed_length + 1, length);
     }
 }
 

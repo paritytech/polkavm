@@ -7813,6 +7813,42 @@ fn test_jump_table_entry_width_with_interior_zero_byte() {
     assert_eq!(blob.jump_table().get_by_index(0), Some(ProgramCounter(TARGET_POSITION)));
 }
 
+#[cfg(feature = "alloc")]
+#[test]
+fn test_from_parts_rejects_non_canonical_varints() {
+    for code_and_jump_table in [
+        // |j| = [80, 01]
+        alloc::vec![0x80, 0x01, 0x01, 0x00, 0x00],
+        // |j| = [c0, 01, 00]
+        alloc::vec![0xc0, 0x01, 0x00, 0x01, 0x00, 0x00],
+        // |j| = [e0, 01, 00, 00]
+        alloc::vec![0xe0, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00],
+    ] {
+        let mut parts = ProgramParts::empty(InstructionSetKind::Latest64);
+        parts.code_and_jump_table = ArcBytes::from(code_and_jump_table);
+        assert!(ProgramBlob::from_parts(parts).is_err());
+    }
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn test_from_parts_rejects_varints_outside_u32() {
+    let mut parts = ProgramParts::empty(InstructionSetKind::Latest64);
+    parts.code_and_jump_table = ArcBytes::from(alloc::vec![0xf1, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00]);
+    assert!(ProgramBlob::from_parts(parts).is_err());
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn test_from_parts_accepts_canonical_varints() {
+    // |j| = 1, z = 1, j = [0], c = [trap]
+    let mut parts = ProgramParts::empty(InstructionSetKind::Latest64);
+    parts.code_and_jump_table = ArcBytes::from(alloc::vec![0x01, 0x01, 0x00, 0x00]);
+    let blob = ProgramBlob::from_parts(parts).unwrap();
+    assert_eq!(blob.jump_table().len(), 1);
+    assert_eq!(blob.instructions().count(), 1);
+}
+
 /// The source location.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum SourceLocation<'a> {
