@@ -2053,17 +2053,13 @@ fn convert_instruction(
             Ok(())
         }
         Inst::Load { kind, dst, base, offset } => {
-            if dst == RReg::Zero && base == RReg::Zero && offset == 0 {
-                // These are sometimes used as a poor man's trap.
+            // Through `x0` this is an absolute access below 2 KiB, which no program can map, so
+            // it can only fault: a trap. LLVM uses `lw zero, 0(zero)` as a poor man's trap, and
+            // at higher optimisation levels also emits other offsets on paths it has proven
+            // dereference null plus a field offset.
+            let Some(base) = cast_reg_non_zero(base)? else {
                 emit(InstExt::Control(ControlInst::Unimplemented));
                 return Ok(());
-            }
-
-            let Some(base) = cast_reg_non_zero(base)? else {
-                return Err(ProgramFromElfError::other(format!(
-                    "found an unrelocated absolute load at {}",
-                    current_location.fmt_human_readable(elf)
-                )));
             };
 
             // LLVM riscv-enable-dead-defs pass may rewrite dst to the zero register.
@@ -2075,16 +2071,10 @@ fn convert_instruction(
             Ok(())
         }
         Inst::Store { kind, src, base, offset } => {
-            if src == RReg::Zero && base == RReg::Zero && offset == 0 {
+            // As for loads: through `x0` it can only fault, so it is a trap.
+            let Some(base) = cast_reg_non_zero(base)? else {
                 emit(InstExt::Control(ControlInst::Unimplemented));
                 return Ok(());
-            }
-
-            let Some(base) = cast_reg_non_zero(base)? else {
-                return Err(ProgramFromElfError::other(format!(
-                    "found an unrelocated absolute store at {}",
-                    current_location.fmt_human_readable(elf)
-                )));
             };
 
             let src = cast_reg_any(src)?;
@@ -6909,6 +6899,47 @@ mod test {
             expect_finished,
             expect_regs([(Reg::A0, 10), (Reg::A1, 8)]),
         )
+    }
+
+    /// A store or load through `x0` at a non-zero offset is an absolute access below 2 KiB,
+    /// inside the low region no program can map. It can only fault, so it links as a trap.
+    ///
+    /// LLVM emits exactly this at `-O3` on a path it has proven dereferences null plus a field
+    /// offset; the only form previously accepted was the all-zero `sw zero, 0(zero)`, so such a
+    /// program failed to link with "found an unrelocated absolute store".
+    #[test]
+    fn an_access_through_x0_links_as_a_trap() {
+        use crate::riscv::{LoadKind, StoreKind};
+        let bytes = include_bytes!("../../../test-data/x0-access.o");
+        let elf = Elf::parse::<object::elf::FileHeader64<object::endian::LittleEndian>>(bytes).unwrap();
+        let section = elf.section_by_name(".text").next().expect("the fixture has .text");
+        let at = SectionTarget {
+            section_index: section.index(),
+            offset: 0,
+        };
+        let accesses = [
+            Inst::Store {
+                kind: StoreKind::U64,
+                src: RReg::A0,
+                base: RReg::Zero,
+                offset: 8,
+            },
+            Inst::Load {
+                kind: LoadKind::U64,
+                dst: RReg::A1,
+                base: RReg::Zero,
+                offset: 16,
+            },
+        ];
+        for inst in accesses {
+            let mut emitted = Vec::new();
+            convert_instruction(&elf, section, at, inst, 4, true, |i| emitted.push(i))
+                .unwrap_or_else(|e| panic!("{inst:?} must link: {e}"));
+            assert!(
+                matches!(emitted.as_slice(), [InstExt::Control(ControlInst::Unimplemented)]),
+                "{inst:?} must link as a trap"
+            );
+        }
     }
 }
 
