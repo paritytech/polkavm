@@ -3488,6 +3488,79 @@ fn test_asm_reloc_hi_lo(config: Config, optimize: bool) {
     assert_eq!(i.instance.read_u32(address).unwrap(), 0xC3030303);
 }
 
+/// `test-data/x0-access.s` linked and run row by row. An access through `x0` faults as the literal
+/// address it names: a trap at the bottom; at the top a trap, or under dynamic paging a page fault
+/// that resumes once the host maps the page. A load into `x0` is made through a spilled scratch
+/// register, so every register is as it was when it finishes.
+fn test_asm_x0_access(config: Config, optimize: bool) {
+    const ELF: &[u8] = include_bytes!("../../../test-data/x0-access.o");
+
+    // (export, the top-of-memory address it touches, the register it writes)
+    const ROWS: [(&str, Option<u32>, Option<Reg>); 11] = [
+        ("store_low", None, None),
+        ("load_low", None, None),
+        ("store_high", Some(0xffff_fff0), None),
+        ("load_high", Some(0xffff_ffe8), Some(A1)),
+        ("load_x0_low", None, None),
+        ("load_x0_high", Some(0xffff_ffe0), None),
+        ("lr_w", None, None),
+        ("sc_w", None, None),
+        ("amoadd_w", None, None),
+        ("jalr_low", None, None),
+        ("trap_idiom", None, None),
+    ];
+
+    let blob = get_blob_impl(optimize, false, ELF);
+    for dynamic_paging in [false, true] {
+        let mut engine_config = config.clone();
+        engine_config.set_allow_dynamic_paging(dynamic_paging);
+        let engine = Engine::new(&engine_config).unwrap();
+        // Known once an engine exists.
+        let page_size = u32::try_from(get_native_page_size()).unwrap();
+        let mut module_config = ModuleConfig::new();
+        module_config.set_page_size(page_size);
+        module_config.set_dynamic_paging(dynamic_paging);
+        let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+
+        for (name, top, dst) in ROWS {
+            let context = format!("{name}, dynamic paging = {dynamic_paging}");
+            let mut instance = module.instantiate().unwrap();
+            for (nth, reg) in Reg::ALL.into_iter().enumerate() {
+                instance.set_reg(reg, 0x1000 + cast(nth).to_u64());
+            }
+            instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+            let before = Reg::ALL.map(|reg| instance.reg(reg));
+            instance.set_next_program_counter(module.exports().find(|export| export.symbol() == name).unwrap().program_counter());
+
+            // Under dynamic paging nothing is mapped up front, so a register spill can fault too.
+            let mut faults = Vec::new();
+            let interrupt = loop {
+                match instance.run().unwrap() {
+                    InterruptKind::Segfault(segfault) if dynamic_paging => {
+                        faults.push(segfault.page_address);
+                        instance
+                            .zero_memory_with_memory_protection(segfault.page_address, segfault.page_size, MemoryProtection::ReadWrite)
+                            .unwrap();
+                    }
+                    interrupt => break interrupt,
+                }
+            };
+
+            match top {
+                Some(address) if dynamic_paging => {
+                    assert_eq!(interrupt, InterruptKind::Finished, "{context}");
+                    assert!(faults.contains(&(address & !(page_size - 1))), "{context}: faulted at {faults:x?}");
+                    for (reg, before) in Reg::ALL.into_iter().zip(before) {
+                        let expected = if Some(reg) == dst { 0 } else { before };
+                        assert_eq!(instance.reg(reg), expected, "{context}: {reg}");
+                    }
+                }
+                _ => assert_eq!(interrupt, InterruptKind::Trap, "{context}"),
+            }
+        }
+    }
+}
+
 fn basic_gas_metering(config: Config, gas_metering_kind: GasMeteringKind) {
     let _ = env_logger::try_init();
 
@@ -4449,6 +4522,7 @@ run_test_blob_tests! {
 run_asm_tests! {
     test_asm_reloc_add_sub
     test_asm_reloc_hi_lo
+    test_asm_x0_access
 }
 
 macro_rules! assert_impl {
