@@ -37,6 +37,14 @@
     .popsection
 .endm
 
+    # Data at 0 too, as in any object file with data: no row may be mistaken for an access into it.
+    .section .rodata
+    .zero 16
+    .data
+    .zero 16
+    .bss
+    .zero 16
+
     .option norvc
     .text
     row store_low,      sd a0, 8(zero)          # -> store to literal 0x8

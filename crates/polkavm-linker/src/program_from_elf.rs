@@ -10595,7 +10595,6 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
     let top = if elf.is_64() { u64::MAX } else { u64::from(u32::MAX) };
     let guard_region_sections: Vec<SectionIndex> = sections_code
         .iter()
-        .filter(|_| !elf.is_relocatable())
         .chain(&sections_ro_data)
         .chain(&sections_rw_data)
         .chain(&sections_bss)
@@ -10603,7 +10602,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
         .filter(|&index| {
             let section = elf.section_by_index(index);
             let (start, size) = (section.original_address(), section.size());
-            ranges_overlap(0, 2048, start, size) || ranges_overlap(top - 2047, 2048, start, size)
+            !elf.is_relocatable() && (ranges_overlap(0, 2048, start, size) || ranges_overlap(top - 2047, 2048, start, size))
         })
         .collect();
 
