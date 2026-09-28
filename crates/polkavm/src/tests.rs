@@ -3394,6 +3394,124 @@ fn aux_data_works(config: Config, isa: InstructionSetKind) {
     assert_eq!(instance.read_u32(module.memory_map().aux_data_address()).unwrap(), 0);
 }
 
+fn two_page_aux_data_module(engine: &Engine, isa: InstructionSetKind) -> Module {
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_indirect_u32(Reg::A1, Reg::A0, 0), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_aux_data_size(page_size * 2);
+    Module::from_blob(engine, &module_config, blob).unwrap()
+}
+
+#[derive(PartialEq, Debug)]
+struct AuxDataPage {
+    host_read: Option<Vec<u8>>,
+    guest_load_of_last_word: Option<u64>,
+}
+
+fn aux_data_pages(instance: &mut crate::RawInstance) -> Vec<AuxDataPage> {
+    let page_size = get_native_page_size() as u32;
+    let aux_data_range = instance.module().memory_map().aux_data_range();
+    aux_data_range
+        .step_by(page_size as usize)
+        .map(|page_address| {
+            let host_read = instance.read_memory(page_address, page_size).ok();
+            instance.set_reg(Reg::A0, u64::from(page_address + page_size - 4));
+            instance.set_reg(Reg::A1, 0xdeadbeef);
+            instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+            instance.set_next_program_counter(ProgramCounter(0));
+            let guest_load_of_last_word = match instance.run().unwrap() {
+                InterruptKind::Finished => Some(instance.reg(Reg::A1)),
+                InterruptKind::Trap => None,
+                interrupt => panic!("unexpected interrupt: {interrupt:?}"),
+            };
+
+            AuxDataPage {
+                host_read,
+                guest_load_of_last_word,
+            }
+        })
+        .collect()
+}
+
+fn aux_data_page_with_content(byte: u8) -> AuxDataPage {
+    AuxDataPage {
+        host_read: Some(vec![byte; get_native_page_size()]),
+        guest_load_of_last_word: Some(u64::from(u32::from_le_bytes([byte; 4]))),
+    }
+}
+
+fn aux_data_content_on_new_instance(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let module = two_page_aux_data_module(&engine, isa);
+    let aux_data_range = module.memory_map().aux_data_range();
+
+    let mut instance = module.instantiate().unwrap();
+    instance
+        .write_memory(aux_data_range.start, &vec![0xff; aux_data_range.len()])
+        .unwrap();
+    core::mem::drop(instance);
+
+    let mut instance = module.instantiate().unwrap();
+    assert_eq!(
+        aux_data_pages(&mut instance),
+        [aux_data_page_with_content(0), aux_data_page_with_content(0)]
+    );
+}
+
+fn aux_data_after_memory_reset(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let module = two_page_aux_data_module(&engine, isa);
+    let aux_data_range = module.memory_map().aux_data_range();
+    let page_size = get_native_page_size() as u32;
+
+    let mut instance = module.instantiate().unwrap();
+    instance
+        .write_memory(aux_data_range.start, &vec![0xff; aux_data_range.len()])
+        .unwrap();
+    instance.set_accessible_aux_size(page_size).unwrap();
+    instance.reset_memory().unwrap();
+
+    let mut new_instance = module.instantiate().unwrap();
+    assert_eq!(aux_data_pages(&mut instance), aux_data_pages(&mut new_instance));
+}
+
+fn aux_data_content_after_shrink(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let module = two_page_aux_data_module(&engine, isa);
+    let aux_data_range = module.memory_map().aux_data_range();
+    let page_size = get_native_page_size() as u32;
+
+    let mut instance = module.instantiate().unwrap();
+    instance
+        .write_memory(aux_data_range.start, &vec![0xff; aux_data_range.len()])
+        .unwrap();
+    instance.set_accessible_aux_size(page_size).unwrap();
+    assert_eq!(
+        aux_data_pages(&mut instance),
+        [
+            aux_data_page_with_content(0xff),
+            AuxDataPage {
+                host_read: None,
+                guest_load_of_last_word: None
+            }
+        ]
+    );
+
+    instance.set_accessible_aux_size(page_size * 2).unwrap();
+    assert_eq!(
+        aux_data_pages(&mut instance),
+        [aux_data_page_with_content(0xff), aux_data_page_with_content(0)]
+    );
+}
+
 fn aux_data_accessible_area(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
@@ -6206,6 +6324,9 @@ run_tests! {
     branch_gas_cost_consistent_across_backends
     aux_data_works
     aux_data_accessible_area
+    aux_data_content_on_new_instance
+    aux_data_after_memory_reset
+    aux_data_content_after_shrink
     access_memory_from_host
     access_memory_from_within
     write_read_memory_from_host

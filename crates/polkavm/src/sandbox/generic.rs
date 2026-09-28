@@ -1010,7 +1010,7 @@ impl Sandbox {
             return Err(());
         };
 
-        if address >= self.aux_data_address && address_end < self.aux_data_address + self.aux_data_full_length {
+        if address >= self.aux_data_address && address_end <= self.aux_data_address + self.aux_data_full_length {
             if address_end > self.aux_data_address + self.aux_data_length {
                 return Err(());
             }
@@ -1454,7 +1454,7 @@ impl super::Sandbox for Sandbox {
                 address: cfg.aux_data_address(),
                 length: cfg.aux_data_size(),
                 is_writable: true,
-                kind: MapKind::Transient,
+                kind: MapKind::Zeroed,
             });
         }
 
@@ -1826,6 +1826,11 @@ impl super::Sandbox for Sandbox {
         if size > self.aux_data_full_length {
             return Err(Error::from("size exceeds the full length of aux data"));
         }
+        if size < self.aux_data_length {
+            let offset = self.guest_memory_offset + to_usize(self.aux_data_address + size).get();
+            let length = to_usize(self.aux_data_length - size).get();
+            self.memory.mmap_within(offset, length, PROT_READ | PROT_WRITE)?;
+        }
         self.aux_data_length = size;
         Ok(())
     }
@@ -1849,7 +1854,9 @@ impl super::Sandbox for Sandbox {
         };
 
         if !self.dynamic_paging_enabled {
-            self.force_reset_memory()
+            self.force_reset_memory()?;
+            self.aux_data_length = self.aux_data_full_length;
+            Ok(())
         } else {
             self.free_pages(0x10000, 0xffff0000)
         }

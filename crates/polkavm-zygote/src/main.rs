@@ -888,6 +888,7 @@ pub unsafe extern "C" fn ext_reset_memory() -> ! {
     *VMCTX.heap_info.heap_top.get() = heap_base;
     *VMCTX.heap_info.heap_threshold.get() = heap_initial_threshold;
 
+    mprotect_aux_data();
     signal_host_and_longjmp(VMCTX_FUTEX_IDLE);
 }
 
@@ -1177,6 +1178,11 @@ pub unsafe extern "C" fn ext_recycle() -> ! {
 #[inline(never)]
 pub unsafe extern "C" fn ext_set_accessible_aux_size() -> ! {
     trace!("Entry point: ext_set_accessible_aux_size");
+    mprotect_aux_data();
+    signal_host_and_longjmp(VMCTX_FUTEX_IDLE);
+}
+
+unsafe fn mprotect_aux_data() {
     let address = VMCTX.arg.load(Ordering::Relaxed) as usize;
     let length_accessible = VMCTX.arg2.load(Ordering::Relaxed) as usize;
     let length_full = VMCTX.arg3.load(Ordering::Relaxed) as usize;
@@ -1206,6 +1212,4 @@ pub unsafe extern "C" fn ext_set_accessible_aux_size() -> ! {
 
     linux_raw::sys_mprotect(address as *mut core::ffi::c_void, length_accessible, linux_raw::PROT_READ)
         .unwrap_or_else(|error| abort_with_error("failed to set accessible aux size: failed to set the region read-only", error));
-
-    signal_host_and_longjmp(VMCTX_FUTEX_IDLE);
 }

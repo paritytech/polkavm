@@ -2108,6 +2108,8 @@ impl super::Sandbox for Sandbox {
         log::trace!("Recycling sandbox #{}", sandbox.child.pid);
         if sandbox.dynamic_paging_enabled {
             sandbox.free_pages(0x10000, 0xffff0000)?;
+        } else if let Some(module) = sandbox.module.clone() {
+            sandbox.madvise_remove(sandbox.aux_data_address, module.memory_map().aux_data_size())?;
         }
 
         sandbox.module = None;
@@ -2227,11 +2229,11 @@ impl super::Sandbox for Sandbox {
     fn set_accessible_aux_size(&mut self, size: u32) -> Result<(), Error> {
         assert!(!self.dynamic_paging_enabled);
 
-        let module = self.module.as_ref().unwrap();
-        self.aux_data_length = size;
-        self.vmctx().arg.store(self.aux_data_address, Ordering::Relaxed);
-        self.vmctx().arg2.store(size, Ordering::Relaxed);
-        self.vmctx().arg3.store(module.memory_map().aux_data_size(), Ordering::Relaxed);
+        if size < self.aux_data_length {
+            self.madvise_remove(self.aux_data_address + size, self.aux_data_length - size)?;
+        }
+
+        self.set_accessible_aux_size_args(size);
         self.vmctx()
             .jump_into
             .store(ZYGOTE_TABLES.1.ext_set_accessible_aux_size, Ordering::Relaxed);
@@ -2252,11 +2254,13 @@ impl super::Sandbox for Sandbox {
     }
 
     fn reset_memory(&mut self) -> Result<(), Error> {
-        if self.module.is_none() {
+        let Some(aux_data_size) = self.module.as_ref().map(|module| module.memory_map().aux_data_size()) else {
             return Err(Error::from_str("no module loaded into the sandbox"));
         };
 
         if !self.dynamic_paging_enabled {
+            self.madvise_remove(self.aux_data_address, aux_data_size)?;
+            self.set_accessible_aux_size_args(aux_data_size);
             self.vmctx().jump_into.store(ZYGOTE_TABLES.1.ext_reset_memory, Ordering::Relaxed);
             self.wake_oneshot_and_expect_idle()
         } else {
@@ -2898,6 +2902,14 @@ impl Sandbox {
         }
 
         Ok(())
+    }
+
+    fn set_accessible_aux_size_args(&mut self, size: u32) {
+        let aux_data_size = self.module.as_ref().unwrap().memory_map().aux_data_size();
+        self.aux_data_length = size;
+        self.vmctx().arg.store(self.aux_data_address, Ordering::Relaxed);
+        self.vmctx().arg2.store(size, Ordering::Relaxed);
+        self.vmctx().arg3.store(aux_data_size, Ordering::Relaxed);
     }
 
     fn madvise_remove(&mut self, address: u32, length: u32) -> Result<(), Error> {
