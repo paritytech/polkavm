@@ -570,17 +570,13 @@ mod absolute_target {
 
     /// Where an absolute load or store lands; read it with [`place`](Self::place).
     ///
-    /// Almost always a place in a section the linker lays out. The exception is an access the
-    /// compiler emitted through `x0` (`sd a3, 8(zero)`), which LLVM does at higher optimization
-    /// levels for a null dereference on a path it assumes never runs: a *literal* address,
-    /// in the bottom or top 2 KiB, where no loaded section lies. It is kept as the access it is,
-    /// so the VM reports the fault it would have: at the bottom a trap; at the top a page fault
-    /// (resumable) under dynamic paging, or a trap without it.
+    /// Almost always an offset into a section. The exception is an access through `x0` (see
+    /// `zero_register_address`): a literal address in the bottom or top 2 KiB, kept as it is so the
+    /// VM reports the fault it would have.
     ///
-    /// Packed into a `SectionTarget`'s 16 octets, the literal under an index no section has,
-    /// rather than an enum: an enum is 24, which grew `BasicInst` from 32 octets to 40 - every
-    /// instruction of every program, for a case that occurs a handful of times per program. The
-    /// field is private to this module, so nothing can read the packing except `place`.
+    /// Not an enum: that is 24 octets and would grow `BasicInst` from 32 to 40 for every
+    /// instruction, to serve a handful per program. So the literal is packed into the
+    /// `SectionTarget` under an index no section has; the field is private, so only `place` reads it.
     #[derive(Copy, Clone, PartialEq, Eq)]
     pub(super) struct AbsoluteTarget(SectionTarget);
 
@@ -2034,27 +2030,25 @@ fn ranges_overlap(address: u64, width: u64, start: u64, size: u64) -> bool {
 /// - Nothing loaded there: it faults - fatally at the bottom; at the top, as a page fault that
 ///   dynamic paging may resolve. Typically a null dereference left on a path LLVM assumes never
 ///   runs. Linked as it is, with a warning.
-/// - A loaded section there (`guard_region_sections`): the instruction lost its relocation
+/// - A loaded section there (`guard_sections`): the instruction lost its relocation
 ///   (relaxation, or no `--emit-relocs`), so linking it would silently retarget it. An error.
-#[allow(clippy::too_many_arguments)]
 fn zero_register_address(
     elf: &Elf,
-    guard_region_sections: &[SectionIndex],
+    guard_sections: &[SectionIndex],
     current_location: SectionTarget,
     what: &str,
     offset: i32,
     width: u64,
-    rv64: bool,
 ) -> Result<u32, ProgramFromElfError> {
     // A 12-bit signed immediate: so the address can only be in the bottom or the top 2 KiB.
     debug_assert!((-2048..2048).contains(&offset), "{what} offset {offset} is not a 12-bit immediate");
-    let address = if rv64 {
+    let address = if elf.is_64() {
         cast(offset).to_u64_sign_extend()
     } else {
         u64::from(cast(offset).to_unsigned())
     };
 
-    if let Some(section) = guard_region_sections
+    if let Some(section) = guard_sections
         .iter()
         .map(|&index| elf.section_by_index(index))
         .find(|section| ranges_overlap(address, width, section.original_address(), section.size()))
@@ -2077,13 +2071,13 @@ fn zero_register_address(
 fn convert_instruction(
     elf: &Elf,
     section: &Section,
-    guard_region_sections: &[SectionIndex],
+    guard_sections: &[SectionIndex],
     current_location: SectionTarget,
     instruction: Inst,
     instruction_size: u64,
-    rv64: bool,
     mut emit: impl FnMut(InstExt<SectionTarget, SectionTarget>),
 ) -> Result<(), ProgramFromElfError> {
+    let rv64 = elf.is_64();
     match instruction {
         Inst::LoadUpperImmediate { dst, value } => {
             let Some(dst) = cast_reg_non_zero(dst)? else {
@@ -2145,7 +2139,7 @@ fn convert_instruction(
             let Some(base) = cast_reg_non_zero(base)? else {
                 // A jump to a literal address. Where no code lives there it can only fault, and an
                 // ELF address would mean nothing to the jump table anyway, so it is a trap.
-                zero_register_address(elf, guard_region_sections, current_location, "jump", value, 1, rv64)?;
+                zero_register_address(elf, guard_sections, current_location, "jump", value, 1)?;
                 emit(InstExt::Control(ControlInst::Unimplemented));
                 return Ok(());
             };
@@ -2186,7 +2180,7 @@ fn convert_instruction(
             // LLVM riscv-enable-dead-defs pass may rewrite dst to the zero register.
             let dst = cast_reg_non_zero(dst)?;
             let Some(base) = cast_reg_non_zero(base)? else {
-                let address = zero_register_address(elf, guard_region_sections, current_location, "load", offset, kind.width(), rv64)?;
+                let address = zero_register_address(elf, guard_sections, current_location, "load", offset, kind.width())?;
                 emit(InstExt::Basic(BasicInst::LoadAbsolute {
                     kind,
                     // With no destination the fault is all the load does, and must stay resumable at
@@ -2212,7 +2206,7 @@ fn convert_instruction(
 
             let src = cast_reg_any(src)?;
             let Some(base) = cast_reg_non_zero(base)? else {
-                let address = zero_register_address(elf, guard_region_sections, current_location, "store", offset, kind.width(), rv64)?;
+                let address = zero_register_address(elf, guard_sections, current_location, "store", offset, kind.width())?;
                 emit(InstExt::Basic(BasicInst::StoreAbsolute {
                     kind,
                     src,
@@ -2590,7 +2584,7 @@ fn convert_instruction(
 
             let Some(src) = cast_reg_non_zero(src)? else {
                 // Address 0: a guard region, so a certain fault - and at the bottom, a trap exactly.
-                zero_register_address(elf, guard_region_sections, current_location, "atomic load", 0, 4, rv64)?;
+                zero_register_address(elf, guard_sections, current_location, "atomic load", 0, 4)?;
                 emit(InstExt::Control(ControlInst::Unimplemented));
                 return Ok(());
             };
@@ -2613,7 +2607,7 @@ fn convert_instruction(
 
             let Some(src) = cast_reg_non_zero(src)? else {
                 // Address 0: a guard region, so a certain fault - and at the bottom, a trap exactly.
-                zero_register_address(elf, guard_region_sections, current_location, "atomic load", 0, 8, rv64)?;
+                zero_register_address(elf, guard_sections, current_location, "atomic load", 0, 8)?;
                 emit(InstExt::Control(ControlInst::Unimplemented));
                 return Ok(());
             };
@@ -2630,7 +2624,7 @@ fn convert_instruction(
         Inst::StoreConditional32 { src, addr, dst, .. } => {
             let Some(addr) = cast_reg_non_zero(addr)? else {
                 // Address 0: a guard region, so a certain fault - and at the bottom, a trap exactly.
-                zero_register_address(elf, guard_region_sections, current_location, "atomic store", 0, 4, rv64)?;
+                zero_register_address(elf, guard_sections, current_location, "atomic store", 0, 4)?;
                 emit(InstExt::Control(ControlInst::Unimplemented));
                 return Ok(());
             };
@@ -2653,7 +2647,7 @@ fn convert_instruction(
         Inst::StoreConditional64 { src, addr, dst, .. } if rv64 => {
             let Some(addr) = cast_reg_non_zero(addr)? else {
                 // Address 0: a guard region, so a certain fault - and at the bottom, a trap exactly.
-                zero_register_address(elf, guard_region_sections, current_location, "atomic store", 0, 8, rv64)?;
+                zero_register_address(elf, guard_sections, current_location, "atomic store", 0, 8)?;
                 emit(InstExt::Control(ControlInst::Unimplemented));
                 return Ok(());
             };
@@ -2708,7 +2702,7 @@ fn convert_instruction(
             let Some(addr) = cast_reg_non_zero(addr)? else {
                 // Address 0: a guard region, so a certain fault - and at the bottom, a trap exactly.
                 let width = if is_64_bit { 8 } else { 4 };
-                zero_register_address(elf, guard_region_sections, current_location, "atomic operation", 0, width, rv64)?;
+                zero_register_address(elf, guard_sections, current_location, "atomic operation", 0, width)?;
                 emit(InstExt::Control(ControlInst::Unimplemented));
                 return Ok(());
             };
@@ -3090,7 +3084,7 @@ fn try_parse_prologue(
 fn parse_code_section(
     elf: &Elf,
     section: &Section,
-    guard_region_sections: &[SectionIndex],
+    guard_sections: &[SectionIndex],
     decoder_config: &DecoderConfig,
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     imports: &mut Vec<Import>,
@@ -3379,18 +3373,9 @@ fn parse_code_section(
             }
 
             let original_length = output.len();
-            convert_instruction(
-                elf,
-                section,
-                guard_region_sections,
-                current_location,
-                original_inst,
-                inst_size,
-                elf.is_64(),
-                |inst| {
-                    output.push((source, inst));
-                },
-            )?;
+            convert_instruction(elf, section, guard_sections, current_location, original_inst, inst_size, |inst| {
+                output.push((source, inst));
+            })?;
 
             // We need to always emit at least one instruction (even if it's a NOP) to handle potential jumps.
             assert_ne!(
@@ -7092,7 +7077,7 @@ mod test {
     /// Converts the instruction of `row` (8 octets per row: it, then `ret`).
     fn x0_convert(
         elf: &Elf,
-        guard_region_sections: &[SectionIndex],
+        guard_sections: &[SectionIndex],
         row: usize,
     ) -> Result<Vec<InstExt<SectionTarget, SectionTarget>>, ProgramFromElfError> {
         let section = elf.section_by_name(".text").next().expect("the fixture has .text");
@@ -7104,7 +7089,7 @@ mod test {
             offset: cast(offset).to_u64(),
         };
         let mut emitted = Vec::new();
-        convert_instruction(elf, section, guard_region_sections, at, inst, 4, true, |i| emitted.push(i))?;
+        convert_instruction(elf, section, guard_sections, at, inst, 4, |i| emitted.push(i))?;
         Ok(emitted)
     }
 
@@ -10539,7 +10524,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
     // so they aren't in these lists. Empty for an object file: its sections all sit at a
     // placeholder 0, and keep their relocations.
     let top = if elf.is_64() { u64::MAX } else { u64::from(u32::MAX) };
-    let guard_region_sections: Vec<SectionIndex> = sections_code
+    let guard_sections: Vec<SectionIndex> = sections_code
         .iter()
         .chain(&sections_ro_data)
         .chain(&sections_rw_data)
@@ -10558,7 +10543,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
         parse_code_section(
             &elf,
             section,
-            &guard_region_sections,
+            &guard_sections,
             &decoder_config,
             &relocations,
             &mut imports,
