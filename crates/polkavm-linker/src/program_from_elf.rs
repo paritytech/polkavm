@@ -2713,14 +2713,6 @@ fn convert_instruction(
             src: operand,
             ..
         } => {
-            let Some(addr) = cast_reg_non_zero(addr)? else {
-                // Address 0: a guard region, so a certain fault - and at the bottom, a trap exactly.
-                // Width 8 whatever the kind: over-cautious only if a loaded section begins at 4.
-                zero_register_address(elf, guard_region_sections, current_location, "atomic operation", 0, 8, rv64)?;
-                emit(InstExt::Control(ControlInst::Unimplemented));
-                return Ok(());
-            };
-
             let is_64_bit = match kind {
                 AtomicKind::Swap32
                 | AtomicKind::Add32
@@ -2741,6 +2733,21 @@ fn convert_instruction(
                 | AtomicKind::And64
                 | AtomicKind::Or64
                 | AtomicKind::Xor64 => true,
+            };
+
+            let Some(addr) = cast_reg_non_zero(addr)? else {
+                // Address 0: a guard region, so a certain fault - and at the bottom, a trap exactly.
+                zero_register_address(
+                    elf,
+                    guard_region_sections,
+                    current_location,
+                    "atomic operation",
+                    0,
+                    if is_64_bit { 8 } else { 4 },
+                    rv64,
+                )?;
+                emit(InstExt::Control(ControlInst::Unimplemented));
+                return Ok(());
             };
 
             let mut operand = cast_reg_non_zero(operand)?;
