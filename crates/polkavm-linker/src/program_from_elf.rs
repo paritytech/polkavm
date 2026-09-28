@@ -572,7 +572,7 @@ mod absolute_target {
     ///
     /// Almost always a place in a section the linker lays out. The exception is an access the
     /// compiler emitted through `x0` (`sd a3, 8(zero)`), which LLVM does at higher optimization
-    /// levels on a path it has proven dereferences null plus a field offset: a *literal* address,
+    /// levels for a null dereference on a path it assumes never runs: a *literal* address,
     /// in the bottom or top 2 KiB, where no loaded section lies. It is kept as the access it is,
     /// so the VM reports the fault it would have: at the bottom a trap; at the top a page fault
     /// (resumable) under dynamic paging, or a trap without it.
@@ -783,7 +783,7 @@ impl<T> BasicInst<T> {
             | BasicInst::StoreAbsolute { .. }
             | BasicInst::StoreIndirect { .. }
             | BasicInst::Memset => true,
-            // A literal address is a guard region, so the load is a certain fault - never "unnecessary".
+            // A literal address is outside the memory map, so the load faults - never "unnecessary".
             BasicInst::LoadAbsolute { target, .. } if matches!(target.place(), Place::Address(_)) => true,
             BasicInst::LoadAbsolute { .. } | BasicInst::LoadIndirect { .. } => !config.elide_unnecessary_loads,
             BasicInst::Nop
@@ -2022,42 +2022,20 @@ fn emit_or_combine_byte(
 
 /// Does `[address, address + width)` intersect `[start, start + size)`? The whole access, not just
 /// its first octet - and in `u128`, so neither range wraps at the top of a 64-bit address space.
+/// (Not `AddressRange::is_overlapping`: its exclusive `end` can't hold 2^64.)
 fn ranges_overlap(address: u64, width: u64, start: u64, size: u64) -> bool {
     let (address, start) = (u128::from(address), u128::from(start));
     address < start + u128::from(size) && start < address + u128::from(width)
 }
 
-fn load_width(kind: LoadKind) -> u64 {
-    match kind {
-        LoadKind::I8 | LoadKind::U8 => 1,
-        LoadKind::I16 | LoadKind::U16 => 2,
-        LoadKind::I32 | LoadKind::U32 => 4,
-        LoadKind::U64 => 8,
-    }
-}
-
-fn store_width(kind: StoreKind) -> u64 {
-    match kind {
-        StoreKind::U8 => 1,
-        StoreKind::U16 => 2,
-        StoreKind::U32 => 4,
-        StoreKind::U64 => 8,
-    }
-}
-
-/// The literal address an access or jump through `x0` reaches, checked to lie in a guard region.
+/// Links an access or jump through `x0`, whose address is its sign-extended 12-bit offset - so the
+/// bottom or top 2 KiB of the address space. Returns that offset as the immediate.
 ///
-/// With `x0` as the base, the address is the sign-extended offset itself: below 2 KiB, or in the
-/// top 2 KiB of the address space. Where no section is laid out there, the instruction can only
-/// fault, and it is what LLVM emits at higher optimization levels on a path it has proven
-/// dereferences null plus a field offset - so it is linked (with a warning) rather than refused.
-///
-/// Where a section the linker *loads* is laid out there, the program itself lives at that address
-/// and the instruction has lost its relocation - linker relaxation, or no `--emit-relocs` - so
-/// linking it would silently point it at a guard region. That stays an error.
-/// `guard_region_sections` is exactly those candidates: loaded sections reaching into the bottom
-/// or top 2 KiB. (Allocated sections that never become guest memory - `.dynsym`, `.rela.dyn` and
-/// the like, which real guest ELFs put at low addresses - are not among them.)
+/// - Nothing loaded there: it faults - fatally at the bottom; at the top, as a page fault that
+///   dynamic paging may resolve. Typically a null dereference left on a path LLVM assumes never
+///   runs. Linked as it is, with a warning.
+/// - A loaded section there (`guard_region_sections`): the instruction lost its relocation
+///   (relaxation, or no `--emit-relocs`), so linking it would silently retarget it. An error.
 #[allow(clippy::too_many_arguments)]
 fn zero_register_address(
     elf: &Elf,
@@ -2089,7 +2067,7 @@ fn zero_register_address(
     }
 
     log::warn!(
-        "{what} through the zero register at {}: 0x{address:x} lies in a guard region, so it can only fault (typically LLVM's lowering of a null dereference); linking it as it is",
+        "{what} through the zero register at {}: 0x{address:x} is outside the memory map, so it faults - resumably only at the top, under dynamic paging (typically a null dereference on a path LLVM assumes never runs); linking it as it is",
         current_location.fmt_human_readable(elf),
     );
 
@@ -2208,7 +2186,7 @@ fn convert_instruction(
             // LLVM riscv-enable-dead-defs pass may rewrite dst to the zero register.
             let dst = cast_reg_non_zero(dst)?;
             let Some(base) = cast_reg_non_zero(base)? else {
-                let address = zero_register_address(elf, guard_region_sections, current_location, "load", offset, load_width(kind), rv64)?;
+                let address = zero_register_address(elf, guard_region_sections, current_location, "load", offset, kind.width(), rv64)?;
                 emit(InstExt::Basic(BasicInst::LoadAbsolute {
                     kind,
                     // With no destination the fault is all the load does, and must stay resumable at
@@ -2234,15 +2212,7 @@ fn convert_instruction(
 
             let src = cast_reg_any(src)?;
             let Some(base) = cast_reg_non_zero(base)? else {
-                let address = zero_register_address(
-                    elf,
-                    guard_region_sections,
-                    current_location,
-                    "store",
-                    offset,
-                    store_width(kind),
-                    rv64,
-                )?;
+                let address = zero_register_address(elf, guard_region_sections, current_location, "store", offset, kind.width(), rv64)?;
                 emit(InstExt::Basic(BasicInst::StoreAbsolute {
                     kind,
                     src,
@@ -2737,15 +2707,8 @@ fn convert_instruction(
 
             let Some(addr) = cast_reg_non_zero(addr)? else {
                 // Address 0: a guard region, so a certain fault - and at the bottom, a trap exactly.
-                zero_register_address(
-                    elf,
-                    guard_region_sections,
-                    current_location,
-                    "atomic operation",
-                    0,
-                    if is_64_bit { 8 } else { 4 },
-                    rv64,
-                )?;
+                let width = if is_64_bit { 8 } else { 4 };
+                zero_register_address(elf, guard_region_sections, current_location, "atomic operation", 0, width, rv64)?;
                 emit(InstExt::Control(ControlInst::Unimplemented));
                 return Ok(());
             };
@@ -5483,13 +5446,8 @@ impl BlockRegs {
             }
             BasicInst::LoadIndirect { kind, dst, base, offset } => {
                 if let RegValue::DataAddress(base) = self.get_reg(base) {
-                    return Some(BasicInst::LoadAbsolute {
-                        kind,
-                        dst,
-                        target: base
-                            .map_offset_i64(|base| base.wrapping_add(cast(offset).to_i64_sign_extend()))
-                            .into(),
-                    });
+                    let target = AbsoluteTarget::from(base.map_offset_i64(|base| base.wrapping_add(cast(offset).to_i64_sign_extend())));
+                    return Some(BasicInst::LoadAbsolute { kind, dst, target });
                 }
             }
             BasicInst::LoadAddressIndirect { dst, target } => {
@@ -5497,13 +5455,8 @@ impl BlockRegs {
             }
             BasicInst::StoreIndirect { kind, src, base, offset } => {
                 if let RegValue::DataAddress(base) = self.get_reg(base) {
-                    return Some(BasicInst::StoreAbsolute {
-                        kind,
-                        src,
-                        target: base
-                            .map_offset_i64(|base| base.wrapping_add(cast(offset).to_i64_sign_extend()))
-                            .into(),
-                    });
+                    let target = AbsoluteTarget::from(base.map_offset_i64(|base| base.wrapping_add(cast(offset).to_i64_sign_extend())));
+                    return Some(BasicInst::StoreAbsolute { kind, src, target });
                 }
 
                 if let RegImm::Reg(src) = src {
@@ -6017,7 +5970,7 @@ fn perform_constant_propagation(
             all_blocks[current.index()].ops[nth_instruction].1 = new_instruction;
         }
 
-        // Only a load from a section can be folded; a literal address is a certain fault, not a value.
+        // Only a load from a section can be folded; a literal address has no contents in the image.
         let foldable = match instruction {
             BasicInst::LoadAbsolute { kind, dst, target } => match target.place() {
                 Place::Section(target) => Some((kind, dst, target)),
@@ -6637,11 +6590,10 @@ mod test {
         if address < 0x10000 || address >= 0xffff_0000 {
             AbsoluteTarget::address(address)
         } else {
-            SectionTarget {
+            AbsoluteTarget::from(SectionTarget {
                 section_index: data_section,
                 offset: u64::from(address),
-            }
-            .into()
+            })
         }
     }
 
@@ -7176,8 +7128,8 @@ mod test {
     /// exactly the fault it would have - a trap at the bottom, a resumable page fault at the top
     /// under dynamic paging. A load into `x0` loads into the scratch `E0`, spilled later, since its
     /// fault is all it does. What has no literal form - an atomic, a jump to an ELF address - is a
-    /// trap, exact at address 0. LLVM emits the load/store forms at `-O3` on a path it has proven
-    /// dereferences null plus a field offset.
+    /// trap, exact at address 0. LLVM emits the load/store forms at `-O3` for a null dereference
+    /// on a path it assumes never runs.
     ///
     /// Not a `ProgramBuilder` test: that assembles PolkaVM code, which has no `x0`, straight into
     /// the optimizer's IR. The conversion is the stage before it; `crates/polkavm`'s
@@ -7253,7 +7205,7 @@ mod test {
         assert_eq!(format!("{a:?}"), format!("{b:?}"), "-O2 must fault exactly as -O0 does");
     }
 
-    /// A load from a literal guard-region address is a certain fault, so the optimizer must not
+    /// A load from a literal address outside the memory map faults, so the optimizer must not
     /// elide it as an unused load - otherwise `-O2` runs on past a null dereference `-O0` stops at.
     #[test]
     fn test_optimize_04_dead_load_from_a_literal_address_is_kept() {
@@ -7760,11 +7712,10 @@ fn spill_fake_registers(
                         BasicInst::LoadAbsolute {
                             kind: if is_rv64 { LoadKind::U64 } else { LoadKind::I32 },
                             dst: dst_reg,
-                            target: SectionTarget {
+                            target: AbsoluteTarget::from(SectionTarget {
                                 section_index: section_regspill,
                                 offset: cast(offset).to_u64(),
-                            }
-                            .into(),
+                            }),
                         }
                     }
                     (None, Some(src_reg)) => {
@@ -7775,11 +7726,10 @@ fn spill_fake_registers(
                         BasicInst::StoreAbsolute {
                             kind: if is_rv64 { StoreKind::U64 } else { StoreKind::U32 },
                             src: src_reg.into(),
-                            target: SectionTarget {
+                            target: AbsoluteTarget::from(SectionTarget {
                                 section_index: section_regspill,
                                 offset: cast(offset).to_u64(),
-                            }
-                            .into(),
+                            }),
                         }
                     }
                     (Some(dst_reg), Some(src_reg)) => {
@@ -9963,11 +9913,8 @@ fn harvest_code_relocations(
                                 offset: _,
                             } => {
                                 if let Some(dst) = cast_reg_non_zero(dst)? {
-                                    InstExt::Basic(BasicInst::LoadAbsolute {
-                                        kind,
-                                        dst,
-                                        target: target.into(),
-                                    })
+                                    let target = AbsoluteTarget::from(target);
+                                    InstExt::Basic(BasicInst::LoadAbsolute { kind, dst, target })
                                 } else {
                                     InstExt::nop()
                                 }
@@ -10005,7 +9952,7 @@ fn harvest_code_relocations(
                             } => InstExt::Basic(BasicInst::StoreAbsolute {
                                 kind,
                                 src: cast_reg_any(src)?,
-                                target: target.into(),
+                                target: AbsoluteTarget::from(target),
                             }),
                             _ => {
                                 return Err(ProgramFromElfError::other(format!(
@@ -10200,14 +10147,8 @@ fn harvest_code_relocations(
                 }
                 Inst::Load { kind, base, dst, .. } => {
                     if let Some(dst) = cast_reg_non_zero(dst)? {
-                        (
-                            base,
-                            InstExt::Basic(BasicInst::LoadAbsolute {
-                                kind,
-                                dst,
-                                target: target.into(),
-                            }),
-                        )
+                        let target = AbsoluteTarget::from(target);
+                        (base, InstExt::Basic(BasicInst::LoadAbsolute { kind, dst, target }))
                     } else {
                         (base, InstExt::nop())
                     }
@@ -10217,7 +10158,7 @@ fn harvest_code_relocations(
                     InstExt::Basic(BasicInst::StoreAbsolute {
                         kind,
                         src: cast_reg_any(src)?,
-                        target: target.into(),
+                        target: AbsoluteTarget::from(target),
                     }),
                 ),
                 _ => {
@@ -10593,12 +10534,10 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
     let mut imports = Vec::new();
     let mut metadata_to_nth_import = HashMap::new();
 
-    // The sections that become guest memory *and* reach into the bottom or top 2 KiB - the only
-    // addresses an access through `x0` (a 12-bit immediate) can name. One that lands in such a
-    // section lost its relocation; `.dynsym`, `.rela.dyn` and the like are allocated but never
-    // loaded, so they do not count. Filtered once here, so the check per `x0` site is over what is
-    // almost always an empty list rather than every section of the ELF. None in an object file:
-    // its sections all sit at a placeholder 0, and it has lost no relocation.
+    // Loaded sections an `x0` access can reach - the bottom or top 2 KiB; an access landing in one
+    // has lost its relocation. `.dynsym`, `.rela.dyn` and the like are allocated but never loaded,
+    // so they aren't in these lists. Empty for an object file: its sections all sit at a
+    // placeholder 0, and keep their relocations.
     let top = if elf.is_64() { u64::MAX } else { u64::from(u32::MAX) };
     let guard_region_sections: Vec<SectionIndex> = sections_code
         .iter()

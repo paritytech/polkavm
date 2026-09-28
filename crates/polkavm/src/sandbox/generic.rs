@@ -1853,12 +1853,8 @@ impl super::Sandbox for Sandbox {
     }
 
     fn zero_memory(&mut self, address: u32, length: u32, memory_protection: Option<MemoryProtection>) -> Result<(), MemoryAccessError> {
-        log::trace!(
-            "Zeroing memory: 0x{:x}-0x{:x} ({} bytes)",
-            address,
-            u64::from(address) + u64::from(length),
-            length
-        );
+        let end = u64::from(address) + u64::from(length);
+        log::trace!("Zeroing memory: 0x{:x}-0x{:x} ({} bytes)", address, end, length);
 
         if length == 0 {
             return Ok(());

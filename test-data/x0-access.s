@@ -1,6 +1,6 @@
 # Every instruction the linker can meet with `x0` as its base or address, one exported function
-# per row of `convert_instruction`'s handling. LLVM emits the load/store forms at -O3 on a path it
-# has proven dereferences null plus a field offset (e.g. `sd a3, 0x8(zero)` in an inlined
+# per row of `convert_instruction`'s handling. LLVM emits the load/store forms at -O3 for a null
+# dereference on a path it assumes never runs (e.g. `sd a3, 0x8(zero)` in an inlined
 # midnight-proofs `multi_prepare`).
 #
 # A relocatable object, as the linker accepts: every section sits at 0, so no row may be mistaken
