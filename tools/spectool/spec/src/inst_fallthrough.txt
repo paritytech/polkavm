@@ -2,5 +2,7 @@ pre: gas = 10000
 
 pub @main:
     fallthrough
+    pub @expected_exit: %no_fallthrough
+        trap
 
 post: gas = 9996

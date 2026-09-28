@@ -1,4 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(feature = "interpreter-musttail-dispatch", feature(explicit_tail_calls))]
+#![cfg_attr(feature = "interpreter-musttail-dispatch", allow(incomplete_features))]
 #![forbid(unused_must_use)]
 #![forbid(clippy::missing_safety_doc)]
 #![deny(clippy::undocumented_unsafe_blocks)]
@@ -56,6 +58,8 @@ mod error;
 
 mod api;
 mod config;
+#[cfg(target_arch = "x86_64")]
+mod cpuid;
 mod gas;
 mod interpreter;
 mod linker;
@@ -124,7 +128,7 @@ pub use polkavm_common::{
 
 /// Miscellaneous types related to debug info.
 pub mod debug_info {
-    pub use polkavm_common::program::{FrameInfo, FrameKind, LineProgram, RegionInfo, SourceLocation};
+    pub use polkavm_common::program::{FrameInfo, FrameKind, LineProgram, LineProgramConfig, RegionInfo, SourceLocation};
 
     #[cfg(feature = "std")]
     pub use crate::source_cache::SourceCache;
@@ -146,8 +150,8 @@ pub mod program {
 
 pub type Gas = i64;
 
-pub use crate::api::{Engine, MemoryAccessError, MemoryProtection, Module, RawInstance, RegValue, SetCacheSizeLimitArgs};
-pub use crate::config::{BackendKind, Config, CustomCodegen, GasMeteringKind, ModuleConfig, SandboxKind};
+pub use crate::api::{CompileError, Engine, MemoryAccessError, MemoryProtection, Module, RawInstance, RegValue, SetCacheSizeLimitArgs};
+pub use crate::config::{BackendKind, Config, CorePinning, CustomCodegen, GasMeteringKind, ModuleConfig, SandboxKind};
 pub use crate::error::Error;
 pub use crate::gas::{Cost, CostModel, CostModelKind, CostModelRef};
 pub use crate::linker::{CallError, Caller, Instance, InstancePre, Linker};

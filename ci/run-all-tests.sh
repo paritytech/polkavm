@@ -6,7 +6,8 @@ cd "${0%/*}/"
 cd ..
 
 ./ci/jobs/build-guests.sh
-./ci/jobs/build-and-test.sh
+./ci/jobs/build-and-test-dev.sh
+./ci/jobs/build-and-test-release.sh
 
 case "$OSTYPE" in
   linux*)

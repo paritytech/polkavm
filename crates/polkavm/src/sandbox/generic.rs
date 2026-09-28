@@ -3,7 +3,7 @@
 use polkavm_common::{
     cast::cast,
     program::Reg,
-    utils::{align_to_next_page_usize, byte_slice_init},
+    utils::{align_to_next_page_usize, byte_slice_init, Bitness},
     zygote::{
         AddressTable, AddressTableRaw, CacheAligned, VM_ADDR_JUMP_TABLE, VM_ADDR_JUMP_TABLE_RETURN_TO_HOST,
         VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE, VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE,
@@ -17,7 +17,7 @@ use core::ops::Range;
 use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use super::{get_native_page_size, OffsetTable, SandboxInit, SandboxKind, WorkerCache, WorkerCacheKind};
+use super::{get_native_page_size, OffsetTable, SandboxInit, SandboxKind};
 use crate::api::{CompiledModuleKind, MemoryAccessError, MemoryProtection, Module};
 use crate::compiler::CompiledModule;
 use crate::config::Config;
@@ -638,6 +638,7 @@ struct VmCtx {
     program_counter: AtomicU32,
     next_program_counter: AtomicU32,
     next_native_program_counter: AtomicU64,
+    memset_continuation: AtomicU64,
 }
 
 impl VmCtx {
@@ -666,6 +667,7 @@ impl VmCtx {
             program_counter: AtomicU32::new(0),
             next_program_counter: AtomicU32::new(0),
             next_native_program_counter: AtomicU64::new(0),
+            memset_continuation: AtomicU64::new(0),
         }
     }
 }
@@ -1060,11 +1062,24 @@ impl Sandbox {
         let machine_code_address = self.vmctx().next_native_program_counter.load(Ordering::Relaxed);
 
         let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
-        let Some(machine_code_offset) = machine_code_address.checked_sub(compiled_module.native_code_origin) else {
+        let native_code_origin = compiled_module.native_code_origin;
+        let Some(machine_code_offset) = machine_code_address.checked_sub(native_code_origin) else {
             return Err(Error::from("internal error: address underflow after a trap"));
         };
 
-        let Some(program_counter) = compiled_module.program_counter_by_native_code_offset(machine_code_offset, false) else {
+        // A general protection fault inside a `memset` is an unrecoverable trap, but its registers
+        // still need fixing up and it's reported at the `memset` instruction, not the fault address.
+        let memset = crate::compiler::are_we_executing_memset(compiled_module, machine_code_offset);
+        let program_counter_offset = if memset.is_some() {
+            self.vmctx()
+                .memset_continuation
+                .load(Ordering::Relaxed)
+                .wrapping_sub(native_code_origin)
+        } else {
+            machine_code_offset
+        };
+
+        let Some(program_counter) = compiled_module.program_counter_by_native_code_offset(program_counter_offset, false) else {
             return Err(Error::from(
                 "internal error: program counter not found for the given machine code address",
             ));
@@ -1074,14 +1089,14 @@ impl Sandbox {
         self.vmctx().next_program_counter.store(program_counter.0, Ordering::Relaxed);
         self.is_program_counter_valid = true;
 
-        if self.gas_metering.is_some() && self.gas() < 0 {
+        if self.gas_metering.is_some() && self.gas() < 0 && memset.is_none() {
             let Some(offset) = machine_code_offset.checked_sub(GAS_METERING_TRAP_OFFSET) else {
                 return Err(Error::from("internal error: address underflow after a guest signal"));
             };
 
             self.vmctx()
                 .next_native_program_counter
-                .store(compiled_module.native_code_origin + offset as u64, Ordering::Relaxed);
+                .store(native_code_origin + offset as u64, Ordering::Relaxed);
 
             let offset = offset as usize + GAS_COST_GENERIC_SANDBOX_OFFSET;
             let Some(gas_cost) = &compiled_module.machine_code().get(offset..offset + 4) else {
@@ -1099,9 +1114,31 @@ impl Sandbox {
 
             Ok(InterruptKind::NotEnoughGas)
         } else {
+            if let Some(kind) = memset {
+                self.fixup_memset_registers(kind);
+            }
             self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
             Ok(InterruptKind::Trap)
         }
+    }
+
+    fn fixup_memset_registers(&mut self, kind: crate::compiler::MemsetKind) {
+        let bytes_remaining = self.vmctx().tmp_reg.load(Ordering::Relaxed);
+        let guest_memory_base = self.memory.as_ptr() as u64 + self.guest_memory_offset as u64;
+        if self.gas_metering.is_some() {
+            self.vmctx()
+                .gas
+                .fetch_add(cast(bytes_remaining).to_i64_or_panic(), Ordering::Relaxed);
+        }
+
+        let vmctx = self.vmctx_mut();
+        let count = &mut vmctx.regs[Reg::A2 as usize];
+        *count = match kind {
+            crate::compiler::MemsetKind::Inline => bytes_remaining,
+            crate::compiler::MemsetKind::Trampoline => count.wrapping_add(bytes_remaining),
+        };
+        let pointer = &mut vmctx.regs[Reg::A0 as usize];
+        *pointer = pointer.wrapping_sub(guest_memory_base);
     }
 
     fn handle_guest_pagefault(&mut self, fault_address: u64) -> Result<InterruptKind, Error> {
@@ -1110,11 +1147,20 @@ impl Sandbox {
         let machine_code_address = self.vmctx().next_native_program_counter.load(Ordering::Relaxed);
 
         let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
-        let Some(machine_code_offset) = machine_code_address.checked_sub(compiled_module.native_code_origin) else {
+        let native_code_origin = compiled_module.native_code_origin;
+        let Some(machine_code_offset) = machine_code_address.checked_sub(native_code_origin) else {
             return Err(Error::from("internal error: address underflow after a trap"));
         };
 
-        let Some(program_counter) = compiled_module.program_counter_by_native_code_offset(machine_code_offset, false) else {
+        let memset = crate::compiler::are_we_executing_memset(compiled_module, machine_code_offset);
+        let memset_continuation = self.vmctx().memset_continuation.load(Ordering::Relaxed);
+        let program_counter_offset = if memset.is_some() {
+            memset_continuation.wrapping_sub(native_code_origin)
+        } else {
+            machine_code_offset
+        };
+
+        let Some(program_counter) = compiled_module.program_counter_by_native_code_offset(program_counter_offset, false) else {
             return Err(Error::from(
                 "internal error: program counter not found for the given machine code address",
             ));
@@ -1136,10 +1182,17 @@ impl Sandbox {
             None
         };
 
+        if let Some(kind) = memset {
+            self.fixup_memset_registers(kind);
+        }
+
         if let Some(is_write_protected) = segfault_kind {
-            self.vmctx()
-                .next_native_program_counter
-                .store(machine_code_address, Ordering::Relaxed);
+            let restart_address = if memset.is_some() {
+                memset_continuation
+            } else {
+                machine_code_address
+            };
+            self.vmctx().next_native_program_counter.store(restart_address, Ordering::Relaxed);
 
             Ok(InterruptKind::Segfault(Segfault {
                 page_address,
@@ -1150,6 +1203,22 @@ impl Sandbox {
             self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
             Ok(InterruptKind::Trap)
         }
+    }
+
+    fn recalculate_address_of_interrupted_access(&mut self) {
+        let program_counter = ProgramCounter(self.vmctx().next_program_counter.load(Ordering::Relaxed));
+        let Some(module) = self.module.as_ref() else { return };
+        let Some(instruction) = module.instructions_bounded_at(program_counter).next() else {
+            return;
+        };
+
+        let Some((base, offset)) = crate::compiler::indirect_memory_operand(instruction.kind) else {
+            return;
+        };
+
+        let base = cast(self.vmctx().regs[base.get() as usize]).truncate_to_u32();
+        let address = base.wrapping_add(cast(offset).bitwise_as_u32());
+        self.vmctx_mut().tmp_reg.store(u64::from(address), Ordering::Relaxed);
     }
 
     fn set_aux_data_permission_for_host(&mut self) -> Result<(), Error> {
@@ -1226,6 +1295,10 @@ impl super::Sandbox for Sandbox {
     type GlobalState = GlobalState;
     type JumpTable = Vec<usize>;
 
+    fn idle_worker_pids(_global: &Self::GlobalState) -> Vec<u32> {
+        Vec::new()
+    }
+
     fn downcast_module(module: &Module) -> &CompiledModule<Self> {
         match module.compiled_module() {
             CompiledModuleKind::Generic(ref module) => module,
@@ -1237,14 +1310,6 @@ impl super::Sandbox for Sandbox {
         #[allow(clippy::match_wildcard_for_single_variants)]
         match global {
             crate::sandbox::GlobalStateKind::Generic(global) => global,
-            _ => unreachable!(),
-        }
-    }
-
-    fn downcast_worker_cache(cache: &WorkerCacheKind) -> &WorkerCache<Self> {
-        #[allow(clippy::match_wildcard_for_single_variants)]
-        match cache {
-            crate::sandbox::WorkerCacheKind::Generic(ref cache) => cache,
             _ => unreachable!(),
         }
     }
@@ -1407,7 +1472,9 @@ impl super::Sandbox for Sandbox {
         })))
     }
 
-    fn spawn(_global: &Self::GlobalState, _config: &SandboxConfig) -> Result<Self, Error> {
+    fn spawn(_global: &Self::GlobalState, _config: &SandboxConfig, _outer_instance: Option<&Self>) -> Result<Box<Self>, Error> {
+        // TODO: Add caching.
+
         register_signal_handlers_if_necessary()?;
 
         let guest_memory_offset = get_guest_memory_offset();
@@ -1422,7 +1489,7 @@ impl super::Sandbox for Sandbox {
             core::ptr::write(vmctx_mut_ptr(&mut memory), VmCtx::new());
         }
 
-        Ok(Sandbox {
+        Ok(Box::new(Sandbox {
             poison: Poison::None,
             program: None,
             memory,
@@ -1439,7 +1506,7 @@ impl super::Sandbox for Sandbox {
             aux_data_address: 0,
             aux_data_full_length: 0,
             aux_data_length: 0,
-        })
+        }))
     }
 
     fn load_module(&mut self, _global: &Self::GlobalState, module: &Module) -> Result<(), Self::Error> {
@@ -1529,14 +1596,15 @@ impl super::Sandbox for Sandbox {
         Ok(())
     }
 
-    fn recycle(&mut self, _global: &Self::GlobalState) -> Result<(), Self::Error> {
+    fn recycle(mut sandbox: Box<Self>, _global: &Self::GlobalState) -> Result<(), Self::Error> {
         log::trace!("Recycling sandbox");
-        if self.dynamic_paging_enabled {
-            self.free_pages(0x10000, 0xffff0000)?;
+        if sandbox.dynamic_paging_enabled {
+            sandbox.free_pages(0x10000, 0xffff0000)?;
         }
 
-        self.module = None;
+        sandbox.module = None;
 
+        // TODO: Add caching.
         Ok(())
     }
 
@@ -1553,7 +1621,13 @@ impl super::Sandbox for Sandbox {
                 panic!("failed to run: next program counter is not set");
             };
 
-            let address = compiled_module.lookup_native_code_address(pc);
+            let Some(address) = compiled_module.lookup_native_code_address(pc) else {
+                log::debug!("Tried to call into {pc} which doesn't have any native code associated with it");
+                self.vmctx().program_counter.store(pc.0, Ordering::Relaxed);
+                self.is_program_counter_valid = true;
+                return Ok(InterruptKind::Trap);
+            };
+
             if self.charge_gas_on_entry {
                 match crate::sandbox::charge_gas_on_entry(module, pc, address, compiled_module, self.gas()) {
                     Some(Ok(new_gas)) => self.vmctx().gas.store(new_gas, Ordering::Relaxed),
@@ -1566,15 +1640,6 @@ impl super::Sandbox for Sandbox {
             self.next_program_counter = None;
             self.charge_gas_on_entry = false;
 
-            let address = address.unwrap_or_else(|| {
-                log::debug!("Tried to call into {pc} which doesn't have any native code associated with it");
-                compiled_module.invalid_code_offset_address
-            });
-
-            if address >= compiled_module.invalid_code_offset_address {
-                self.vmctx().program_counter.store(pc.0, Ordering::Relaxed);
-            }
-
             log::trace!("Jumping into: {pc} (0x{address:x})");
             self.vmctx_mut().next_program_counter.store(pc.0, Ordering::Relaxed);
             self.vmctx_mut().next_native_program_counter.store(address, Ordering::Relaxed);
@@ -1584,6 +1649,8 @@ impl super::Sandbox for Sandbox {
                 self.vmctx().next_program_counter.load(Ordering::Relaxed),
                 self.vmctx().next_native_program_counter.load(Ordering::Relaxed)
             );
+
+            self.recalculate_address_of_interrupted_access();
         }
 
         self.vmctx_mut().sandbox = self;
@@ -1644,10 +1711,10 @@ impl super::Sandbox for Sandbox {
                 lateout("r10") _,
                 lateout("r11") _,
                 lateout("r12") _,
-                lateout("r13") _,
+                lateout("r15") _,
                 inlateout("rcx") tmp_reg => _,
                 inlateout("r14") vmctx => _,
-                in("r15") guest_memory,
+                in("r13") guest_memory,
             );
 
             THREAD_VMCTX.with(|thread_ctx| core::ptr::write(thread_ctx.get(), core::ptr::null_mut()));
@@ -1684,11 +1751,18 @@ impl super::Sandbox for Sandbox {
 
     fn reg(&self, reg: Reg) -> RegValue {
         assert!(!matches!(self.poison, Poison::Poisoned), "sandbox has been poisoned");
-        self.vmctx().regs[reg as usize]
+        let mut value = self.vmctx().regs[reg as usize];
+        if Self::downcast_module(self.module.as_ref().unwrap()).bitness == Bitness::B32 {
+            value &= 0xffffffff;
+        }
+        value
     }
 
-    fn set_reg(&mut self, reg: Reg, value: RegValue) {
+    fn set_reg(&mut self, reg: Reg, mut value: RegValue) {
         assert!(!matches!(self.poison, Poison::Poisoned), "sandbox has been poisoned");
+        if Self::downcast_module(self.module.as_ref().unwrap()).bitness == Bitness::B32 {
+            value &= 0xffffffff;
+        }
         self.vmctx_mut().regs[reg as usize] = value;
     }
 
@@ -2034,13 +2108,11 @@ impl super::Sandbox for Sandbox {
             gas: get_field_offset!(VmCtx::new(), |base| base.gas.as_ptr()),
             heap_info: get_field_offset!(VmCtx::new(), |base| &base.heap_info),
             next_native_program_counter: get_field_offset!(VmCtx::new(), |base| base.next_native_program_counter.as_ptr()),
+            memset_continuation: get_field_offset!(VmCtx::new(), |base| base.memset_continuation.as_ptr()),
             next_program_counter: get_field_offset!(VmCtx::new(), |base| base.next_program_counter.as_ptr()),
             program_counter: get_field_offset!(VmCtx::new(), |base| base.program_counter.as_ptr()),
             regs: get_field_offset!(VmCtx::new(), |base| &base.regs),
+            futex: usize::MAX,
         }
-    }
-
-    fn sync(&mut self) -> Result<(), Self::Error> {
-        Ok(())
     }
 }

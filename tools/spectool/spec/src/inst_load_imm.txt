@@ -2,6 +2,8 @@ pre: gas = 10000
 
 pub @main:
     a0 = 0xdeadbeef
+    pub @expected_exit: %no_fallthrough
+        trap
 
 post: a0 = 0xdeadbeef
 post: gas = 9998

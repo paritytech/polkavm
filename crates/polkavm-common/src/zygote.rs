@@ -124,7 +124,7 @@ pub const VM_SHARED_MEMORY_SIZE: u64 = u32::MAX as u64;
 ///
 /// This does *not* affect the VM ABI and can be changed at will,
 /// but should be high enough that it's never hit.
-pub const VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH: u32 = 67;
+pub const VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH: u32 = 69;
 
 /// The maximum number of bytes the jump table can be.
 pub const VM_SANDBOX_MAXIMUM_JUMP_TABLE_SIZE: u64 = (crate::abi::VM_MAXIMUM_JUMP_TABLE_ENTRIES as u64 + 1)
@@ -136,7 +136,7 @@ pub const VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE: u64 = 0x100000000 * core::
 
 // TODO: Make this smaller.
 /// The maximum number of bytes the native code can be.
-pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = 2176 * 1024 * 1024 - 1;
+pub const VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE: u32 = 2303 * 1024 * 1024 - 1;
 
 #[repr(C)]
 pub struct JmpBuf {
@@ -349,6 +349,9 @@ pub const VMCTX_FUTEX_GUEST_NOT_ENOUGH_GAS: u32 = VMCTX_FUTEX_IDLE | (5 << 1);
 
 /// The VM has triggered a page fault.
 pub const VMCTX_FUTEX_GUEST_PAGEFAULT: u32 = VMCTX_FUTEX_IDLE | (6 << 1);
+
+/// The host wants the VM to execute a fresh longjmp.
+pub const VMCTX_FUTEX_LONGJUMP: u32 = u32::MAX;
 
 #[allow(clippy::declare_interior_mutable_const)]
 const ATOMIC_U64_ZERO: AtomicU64 = AtomicU64::new(0);

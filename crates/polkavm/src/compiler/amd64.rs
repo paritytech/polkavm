@@ -32,7 +32,7 @@ polkavm_common::static_assert!(polkavm_common::regmap::to_guest_reg(AUX_TMP_REG)
 #[derive(Copy, Clone)]
 pub enum RegImm {
     Reg(RawReg),
-    Imm(u32),
+    Imm(i32),
 }
 
 impl From<RawReg> for RegImm {
@@ -42,15 +42,34 @@ impl From<RawReg> for RegImm {
     }
 }
 
-impl From<u32> for RegImm {
+impl From<i32> for RegImm {
     #[inline]
-    fn from(value: u32) -> Self {
+    fn from(value: i32) -> Self {
         RegImm::Imm(value)
     }
 }
 
+/// PVM register operands are 4-bit fields; the spec clamps a nibble greater than the highest
+/// register index down to that register (see `RawReg::get`). This is that clamp target.
+const OUT_OF_BOUNDS_REG: Reg = {
+    let mut index = 1;
+    let mut max_reg = Reg::ALL[0];
+    while index < Reg::ALL.len() {
+        let reg = Reg::ALL[index];
+        if reg as usize > max_reg as usize {
+            max_reg = reg;
+        }
+        index += 1;
+    }
+    assert!(max_reg as usize == Reg::A5 as usize);
+    max_reg
+};
+
 static REG_MAP: [NativeReg; 16] = {
-    let mut output = [conv_reg_const(Reg::T2); 16];
+    // Register nibbles greater than the highest register index are clamped to `OUT_OF_BOUNDS_REG`
+    // (see `RawReg::get`), so map the unused indices there too.
+    // (See https://github.com/paritytech/polkavm/issues/391.)
+    let mut output = [conv_reg_const(OUT_OF_BOUNDS_REG); 16];
     let mut index = 0;
     while index < Reg::ALL.len() {
         assert!(Reg::ALL[index] as usize == index);
@@ -72,6 +91,13 @@ fn conv_reg(reg: RawReg) -> NativeReg {
 fn test_conv_reg() {
     for reg in Reg::ALL {
         assert_eq!(conv_reg(reg.into()), conv_reg_const(reg));
+    }
+
+    // Register nibbles greater than the highest register index are clamped to `OUT_OF_BOUNDS_REG`.
+    for nibble in 13..16 {
+        let reg = polkavm_common::program::read_args_regs2::<false>(u128::from(nibble) << 8).0;
+        assert_eq!(reg.raw_unparsed(), nibble);
+        assert_eq!(conv_reg(reg), conv_reg_const(OUT_OF_BOUNDS_REG));
     }
 }
 
@@ -99,11 +125,11 @@ macro_rules! load_store_operand {
                 SandboxKind::Linux => {
                     if let Some($base) = $base {
                         // [address + offset]
-                        let $op = reg_indirect(RegSize::R32, conv_reg($base) + $offset as i32);
+                        let $op = reg_indirect(RegSize::R32, conv_reg($base) + $offset);
                         $body
                     } else {
                         // [address] = ..
-                        let $op = abs(RegSize::R32, $offset as i32);
+                        let $op = abs(RegSize::R32, $offset);
                         $body
                     }
                 }
@@ -111,32 +137,35 @@ macro_rules! load_store_operand {
                     match ($base, $offset) {
                         // [address] = ..
                         // (address is in the lower 2GB of the address space)
-                        (None, _) if $offset as i32 >= 0 => {
-                            let $op = reg_indirect(RegSize::R64, GENERIC_SANDBOX_MEMORY_REG + $offset as i32);
+                        (None, _) if $offset >= 0 => {
+                            let $op = reg_indirect(RegSize::R64, GENERIC_SANDBOX_MEMORY_REG + $offset);
                             $body
                         }
 
                         // [address] = ..
                         (None, _) => {
-                            $self.push(mov_imm(TMP_REG, imm32($offset)));
+                            $self.push(mov_imm(TMP_REG, imm32(cast($offset).bitwise_as_u32())));
                             let $op = base_index(RegSize::R64, GENERIC_SANDBOX_MEMORY_REG, TMP_REG);
                             $body
                         }
 
                         // [base] = ..
-                        (Some($base), 0) => {
-                            // NOTE: This assumes that `base` has its upper 32-bits clear.
+                        // (a 32-bit register always has its upper 32 bits clear)
+                        (Some($base), 0) if B::BITNESS == Bitness::B32 => {
                             let $op = base_index(RegSize::R64, GENERIC_SANDBOX_MEMORY_REG, conv_reg($base));
+                            $body
+                        }
+
+                        // [base] = ..
+                        (Some($base), 0) => {
+                            $self.push(mov(RegSize::R32, TMP_REG, conv_reg($base)));
+                            let $op = base_index(RegSize::R64, GENERIC_SANDBOX_MEMORY_REG, TMP_REG);
                             $body
                         }
 
                         // [base + offset] = ..
                         (Some($base), _) => {
-                            $self.push(lea(
-                                RegSize::R32,
-                                TMP_REG,
-                                reg_indirect(RegSize::R32, conv_reg($base) + $offset as i32),
-                            ));
+                            $self.push(lea(RegSize::R32, TMP_REG, reg_indirect(RegSize::R32, conv_reg($base) + $offset)));
                             let $op = base_index(RegSize::R64, GENERIC_SANDBOX_MEMORY_REG, TMP_REG);
                             $body
                         }
@@ -194,15 +223,7 @@ where
             Err(offset) => asm.push(jcc_rel32(condition, offset)),
         }
     } else {
-        // For invalid jumps this will emit:
-        //   0f 84 fc ff ff ff    je near 2
-        // so if the branch triggers this will jump into itself:
-        //   fc                   cld
-        //   ff ff                invalid
-        // The `cld` here is harmless, and the 'ff' is the opcode shared by single register 'inc/dec/call/jmp/push' instructions,
-        // however the /7 opext it has here is currently undefined so this will trap. Same as for gas, this is technically
-        // a forward compatibility hazard.
-        asm.push(jcc_label32_default(condition, label, -4))
+        asm.push(jcc_label32(condition, label))
     }
 }
 
@@ -229,12 +250,41 @@ const GAS_COST_GENERIC_SANDBOX_OFFSET: usize = 7;
 const REP_STOSB_MACHINE_CODE: &[u8] = &[0xf3, 0xaa];
 
 #[derive(Copy, Clone)]
-enum MemsetKind {
+pub(crate) enum MemsetKind {
     Inline,
     Trampoline,
 }
 
-fn are_we_executing_memset<S>(compiled_module: &crate::compiler::CompiledModule<S>, machine_code_offset: u64) -> Option<MemsetKind>
+#[cfg(feature = "generic-sandbox")]
+pub(crate) fn indirect_memory_operand(instruction: polkavm_common::program::Instruction) -> Option<(RawReg, i32)> {
+    use polkavm_common::program::Instruction;
+
+    match instruction {
+        Instruction::store_imm_indirect_u8(base, offset, _)
+        | Instruction::store_imm_indirect_u16(base, offset, _)
+        | Instruction::store_imm_indirect_u32(base, offset, _)
+        | Instruction::store_imm_indirect_u64(base, offset, _) => Some((base, offset)),
+
+        Instruction::store_indirect_u8(_, base, offset)
+        | Instruction::store_indirect_u16(_, base, offset)
+        | Instruction::store_indirect_u32(_, base, offset)
+        | Instruction::store_indirect_u64(_, base, offset)
+        | Instruction::load_indirect_u8(_, base, offset)
+        | Instruction::load_indirect_i8(_, base, offset)
+        | Instruction::load_indirect_u16(_, base, offset)
+        | Instruction::load_indirect_i16(_, base, offset)
+        | Instruction::load_indirect_u32(_, base, offset)
+        | Instruction::load_indirect_i32(_, base, offset)
+        | Instruction::load_indirect_u64(_, base, offset) => Some((base, offset)),
+
+        _ => None,
+    }
+}
+
+pub(crate) fn are_we_executing_memset<S>(
+    compiled_module: &crate::compiler::CompiledModule<S>,
+    machine_code_offset: u64,
+) -> Option<MemsetKind>
 where
     S: Sandbox,
 {
@@ -260,7 +310,8 @@ where
     S: Sandbox,
 {
     let Some(program_counter) = compiled_module.program_counter_by_native_code_offset(machine_code_offset, false) else {
-        return Err("internal error: failed to find the program counter based on the native program counter when handling a page fault");
+        log::warn!("internal error: failed to find the program counter based on the native program counter after an interruption: machine code offset=0x{machine_code_offset:x}");
+        return Err("internal error: failed to find the program counter based on the native program counter after an interruption");
     };
 
     vmctx.program_counter.store(program_counter.0, Ordering::Relaxed);
@@ -291,7 +342,7 @@ where
 
     if is_gas_metering_enabled {
         // Give back the gas that we've pre-charged.
-        vmctx.gas.fetch_add(cast(bytes_remaining).to_signed(), Ordering::Relaxed);
+        vmctx.gas.fetch_add(cast(bytes_remaining).to_i64_or_panic(), Ordering::Relaxed);
     }
 
     let original_offset = match memset_kind {
@@ -313,10 +364,7 @@ where
     pub const PADDING_BYTE: u8 = 0x90; // NOP
 
     #[inline(always)]
-    fn push<T>(&mut self, inst: polkavm_assembler::Instruction<T>)
-    where
-        T: core::fmt::Display,
-    {
+    fn push(&mut self, inst: impl polkavm_assembler::InstructionT) {
         self.0.asm.push(inst);
     }
 
@@ -330,18 +378,18 @@ where
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
-    fn store(&mut self, src: impl Into<RegImm>, base: Option<RawReg>, offset: u32, kind: Size) {
+    fn store(&mut self, src: impl Into<RegImm>, base: Option<RawReg>, offset: i32, kind: Size) {
         let src = src.into();
         load_store_operand!(self, S::KIND, base, offset, |dst| {
             match src {
-                RegImm::Reg(src) => self.push(store(kind, dst, conv_reg(src))),
+                RegImm::Reg(src) => self.push(rex(store(kind, dst, conv_reg(src)))),
                 RegImm::Imm(value) => match kind {
-                    Size::U8 => self.push(mov_imm(dst, imm8(value as u8))),
-                    Size::U16 => self.push(mov_imm(dst, imm16(value as u16))),
-                    Size::U32 => self.push(mov_imm(dst, imm32(value))),
+                    Size::U8 => self.push(rex(mov_imm(dst, imm8(value as u8)))),
+                    Size::U16 => self.push(rex(mov_imm(dst, imm16(value as u16)))),
+                    Size::U32 => self.push(rex(mov_imm(dst, imm32(cast(value).bitwise_as_u32())))),
                     Size::U64 => {
                         assert_eq!(B::BITNESS, Bitness::B64);
-                        self.push(mov_imm(dst, imm64(cast(value).to_signed())));
+                        self.push(rex(mov_imm(dst, imm64(value))));
                     }
                 },
             }
@@ -349,9 +397,9 @@ where
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
-    fn load(&mut self, dst: RawReg, base: Option<RawReg>, offset: u32, kind: LoadKind) {
+    fn load(&mut self, dst: RawReg, base: Option<RawReg>, offset: i32, kind: LoadKind) {
         load_store_operand!(self, S::KIND, base, offset, |src| {
-            self.push(load(kind, conv_reg(dst), src));
+            self.push(rex(load(kind, conv_reg(dst), src)));
         });
     }
 
@@ -363,51 +411,43 @@ where
         let d = conv_reg(d);
         let asm = self.asm.reserve::<U3>();
         if d == s1 || d == s2 {
-            let asm = asm.push(cmp((reg_size, s1, s2)));
-            let asm = asm.push(setcc(condition, d));
-            asm.push(and((d, imm32(1))));
+            let asm = asm.push(rex(cmp((reg_size, s1, s2))));
+            let asm = asm.push(rex(setcc(condition, d)));
+            asm.push(rex(and((d, imm32(1)))));
         } else {
-            let asm = asm.push(xor((RegSize::R32, d, d)));
-            let asm = asm.push(cmp((reg_size, s1, s2)));
-            asm.push(setcc(condition, d));
+            let asm = asm.push(rex(xor((RegSize::R32, d, d))));
+            let asm = asm.push(rex(cmp((reg_size, s1, s2))));
+            asm.push(rex(setcc(condition, d)));
         }
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
-    fn compare_reg_imm(&mut self, d: RawReg, s1: RawReg, s2: u32, condition: Condition) {
+    fn compare_reg_imm(&mut self, d: RawReg, s1: RawReg, s2: i32, condition: Condition) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
 
         let asm = self.asm.reserve::<U4>();
         let asm = if d != s1 {
-            asm.push(xor((RegSize::R32, d, d)))
+            asm.push(rex(xor((RegSize::R32, d, d))))
         } else {
             asm.push_none()
         };
 
-        let asm = if condition == Condition::Below && s2 == 1 {
-            // d = s1 <u 1  =>  d = s1 == 0
-            let asm = asm.push(test((reg_size, s1, s1)));
-            asm.push(setcc(Condition::Equal, d))
-        } else if condition == Condition::Above && s2 == 0 {
-            // d = s1 >u 0  =>  d = s1 != 0
-            let asm = asm.push(test((reg_size, s1, s1)));
-            asm.push(setcc(Condition::NotEqual, d))
-        } else {
+        let asm = {
             let asm = match reg_size {
-                RegSize::R32 => asm.push(cmp((s1, imm32(s2)))),
-                RegSize::R64 => asm.push(cmp((s1, imm64(s2 as i32)))),
+                RegSize::R32 => asm.push(rex(cmp((s1, imm32(cast(s2).bitwise_as_u32()))))),
+                RegSize::R64 => asm.push(rex(cmp((s1, imm64(s2))))),
             };
-            asm.push(setcc(condition, d))
+            asm.push(rex(setcc(condition, d)))
         };
 
-        let asm = asm.push_if(d == s1, and((d, imm32(1))));
+        let asm = asm.push_if(d == s1, rex(and((d, imm32(1)))));
         asm.assert_reserved_exactly_as_needed();
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
-    fn shift_imm(&mut self, reg_size: RegSize, d: RawReg, s1: RawReg, mut s2: u32, kind: ShiftKind) {
+    fn shift_imm(&mut self, reg_size: RegSize, d: RawReg, s1: RawReg, mut s2: i32, kind: ShiftKind) {
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
         let asm = self.asm.reserve::<polkavm_assembler::U3>();
@@ -417,13 +457,13 @@ where
             RegSize::R64 => 64 - 1,
         };
 
-        let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
+        let asm = asm.push_if(d != s1, rex(mov(reg_size, d, s1)));
 
         // d = d << s2
         let asm = match kind {
-            ShiftKind::LogicalLeft => asm.push(shl_imm(reg_size, d, s2 as u8)),
-            ShiftKind::LogicalRight => asm.push(shr_imm(reg_size, d, s2 as u8)),
-            ShiftKind::ArithmeticRight => asm.push(sar_imm(reg_size, d, s2 as u8)),
+            ShiftKind::LogicalLeft => asm.push(rex(shl_imm(reg_size, d, s2 as u8))),
+            ShiftKind::LogicalRight => asm.push(rex(shr_imm(reg_size, d, s2 as u8))),
+            ShiftKind::ArithmeticRight => asm.push(rex(sar_imm(reg_size, d, s2 as u8))),
         };
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
@@ -442,23 +482,23 @@ where
         let asm = self.asm.reserve::<polkavm_assembler::U4>();
 
         // TODO: Consider using shlx/shrx/sarx when BMI2 is available.
-        let asm = asm.push(mov(reg_size, rcx, s2));
+        let asm = asm.push(rex(mov(reg_size, rcx, s2)));
         let asm = match s1.into() {
             RegImm::Reg(s1) => {
                 let s1 = conv_reg(s1);
-                asm.push_if(d != s1, mov(reg_size, d, s1))
+                asm.push_if(d != s1, rex(mov(reg_size, d, s1)))
             }
             RegImm::Imm(s1) => match reg_size {
-                RegSize::R32 => asm.push(mov_imm(d, imm32(s1))),
-                RegSize::R64 => asm.push(mov_imm(d, imm64(cast(s1).to_signed()))),
+                RegSize::R32 => asm.push(rex(mov_imm(d, imm32(cast(s1).bitwise_as_u32())))),
+                RegSize::R64 => asm.push(rex(mov_imm(d, imm64(s1)))),
             },
         };
 
         // d = d << s2
         let asm = match kind {
-            ShiftKind::LogicalLeft => asm.push(shl_cl(reg_size, d)),
-            ShiftKind::LogicalRight => asm.push(shr_cl(reg_size, d)),
-            ShiftKind::ArithmeticRight => asm.push(sar_cl(reg_size, d)),
+            ShiftKind::LogicalLeft => asm.push(rex(shl_cl(reg_size, d))),
+            ShiftKind::LogicalRight => asm.push(rex(shr_cl(reg_size, d))),
+            ShiftKind::ArithmeticRight => asm.push(rex(sar_cl(reg_size, d))),
         };
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
@@ -496,8 +536,8 @@ where
         let asm = match s2.into() {
             RegImm::Reg(s2) => asm.push(cmp((reg_size, s1, conv_reg(s2)))),
             RegImm::Imm(s2) => match reg_size {
-                RegSize::R32 => asm.push(cmp((s1, imm32(s2)))),
-                RegSize::R64 => asm.push(cmp((s1, imm64(cast(s2).to_signed())))),
+                RegSize::R32 => asm.push(cmp((s1, imm32(cast(s2).bitwise_as_u32())))),
+                RegSize::R64 => asm.push(cmp((s1, imm64(s2)))),
             },
         };
 
@@ -522,7 +562,7 @@ where
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
-    fn cmov_imm(&mut self, d: RawReg, s: u32, c: RawReg, condition: Condition) {
+    fn cmov_imm(&mut self, d: RawReg, s: i32, c: RawReg, condition: Condition) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let c = conv_reg(c);
@@ -530,8 +570,8 @@ where
         let asm = self.asm.reserve::<U3>();
         let asm = asm.push(test((reg_size, c, c)));
         let asm = match reg_size {
-            RegSize::R32 => asm.push(mov_imm(TMP_REG, imm32(s))),
-            RegSize::R64 => asm.push(mov_imm(TMP_REG, imm64(cast(s).to_signed()))),
+            RegSize::R32 => asm.push(mov_imm(TMP_REG, imm32(cast(s).bitwise_as_u32()))),
+            RegSize::R64 => asm.push(mov_imm(TMP_REG, imm64(s))),
         };
         let asm = asm.push(cmov(condition, reg_size, d, TMP_REG));
         asm.assert_reserved_exactly_as_needed();
@@ -634,10 +674,41 @@ where
         let label = self.ecall_label;
         self.define_label(label);
 
-        self.save_return_address_to_vmctx();
-        self.save_registers_to_vmctx();
-        self.push(mov_imm64(TMP_REG, S::address_table().syscall_hostcall));
-        self.push(jmp(TMP_REG));
+        match S::KIND {
+            SandboxKind::Linux => {
+                self.save_return_address_to_vmctx();
+                self.save_registers_to_vmctx();
+
+                // We don't need the old value, but doing an xchg is sligtly faster than just a normal store.
+                self.asm
+                    .push(mov_imm(TMP_REG, imm32(polkavm_common::zygote::VMCTX_FUTEX_GUEST_ECALLI)));
+                self.asm
+                    .push(xchg_mem(RegSize::R32, TMP_REG, Self::vmctx_field(S::offset_table().futex)));
+
+                let label_abort = self.asm.forward_declare_label();
+                let label = self.asm.create_label();
+                self.asm.push(pause());
+                self.asm
+                    .push(load(LoadKind::U32, TMP_REG, Self::vmctx_field(S::offset_table().futex)));
+                self.asm
+                    .push(cmp((TMP_REG, imm32(polkavm_common::zygote::VMCTX_FUTEX_GUEST_ECALLI))));
+                branch_to_label(self.asm.reserve::<U1>(), Condition::Equal, label);
+                self.asm.push(cmp((TMP_REG, imm32(polkavm_common::zygote::VMCTX_FUTEX_LONGJUMP))));
+                self.asm.push(jcc_label8(Condition::Equal, label_abort));
+                self.restore_registers_from_vmctx();
+                self.asm.push(ret());
+
+                self.define_label(label_abort);
+                self.push(mov_imm64(TMP_REG, S::address_table().syscall_hostcall));
+                self.push(jmp(TMP_REG));
+            }
+            SandboxKind::Generic => {
+                self.save_return_address_to_vmctx();
+                self.save_registers_to_vmctx();
+                self.push(mov_imm64(TMP_REG, S::address_table().syscall_hostcall));
+                self.push(jmp(TMP_REG));
+            }
+        }
     }
 
     pub(crate) fn emit_step_trampoline(&mut self) {
@@ -678,6 +749,18 @@ where
         self.push(ret());
     }
 
+    fn emit_rep_stosb(&mut self) {
+        if matches!(S::KIND, SandboxKind::Generic) {
+            self.push(add((RegSize::R64, rdi, GENERIC_SANDBOX_MEMORY_REG)));
+        }
+
+        self.asm.push_raw(REP_STOSB_MACHINE_CODE);
+
+        if matches!(S::KIND, SandboxKind::Generic) {
+            self.push(sub((RegSize::R64, rdi, GENERIC_SANDBOX_MEMORY_REG)));
+        }
+    }
+
     // This is a slower memset implementation when we're running with gas metering enabled
     // and we don't have enough gas to finish running the whole memset.
     pub(crate) fn emit_memset_trampoline(&mut self) {
@@ -686,6 +769,11 @@ where
         self.define_label(label);
 
         let count = conv_reg(Reg::A2.into());
+
+        // Gas was charged based on the truncated count, so truncate it here too.
+        if B::BITNESS == Bitness::B64 {
+            self.push(mov(RegSize::R32, count, count));
+        }
 
         // Grab the amount of gas we have (this will always be negative), and zero the gas counter.
         // (We assume the memset will consume all of the gas.)
@@ -702,7 +790,7 @@ where
         self.push(store(RegSize::R64, Self::vmctx_field(S::offset_table().arg), rcx));
 
         // Execute the memset.
-        self.asm.push_raw(REP_STOSB_MACHINE_CODE);
+        self.emit_rep_stosb();
 
         // We've successfully finished memset without page faulting, so we can run out of gas.
         self.save_registers_to_vmctx();
@@ -771,8 +859,8 @@ where
         if matches!(kind, Signedness::Signed) {
             // rdx = (dividend == i32::MIN) ? 1 : 0
             match reg_size {
-                RegSize::R32 => self.push(mov_imm(rdx, imm32(cast(i32::MIN).to_unsigned()))),
-                RegSize::R64 => self.push(mov_imm64(rdx, cast(i64::MIN).to_unsigned())),
+                RegSize::R32 => self.push(mov_imm(rdx, imm32(cast(i32::MIN).bitwise_as_u32()))),
+                RegSize::R64 => self.push(mov_imm64(rdx, cast(i64::MIN).bitwise_as_u64())),
             }
 
             self.push(cmp((reg_size, rax, rdx)));
@@ -781,7 +869,7 @@ where
             // r12 = (divisor == -1) ? 1 : 0
             self.push(xor((RegSize::R32, r12, r12)));
             match reg_size {
-                RegSize::R32 => self.push(cmp((TMP_REG, imm32(cast(-1_i32).to_unsigned())))),
+                RegSize::R32 => self.push(cmp((TMP_REG, imm32(cast(-1_i32).bitwise_as_u32())))),
                 RegSize::R64 => self.push(cmp((TMP_REG, imm64(-1_i32)))),
             }
             self.push(setcc(Condition::Equal, r12));
@@ -921,10 +1009,10 @@ where
         assert_eq!(S::offset_table().gas, 0x60);
 
         // For Linux sandbox this will be:
-        // 49 81 6f 60 ff ff ff 7f              sub qword [r15+0x60], 0x7fffffff
+        // 49 81 6d 60 ff ff ff 7f              sub qword [r13+0x60], 0x7fffffff
         //
         // For generic sandbox this will be:
-        // 49 81 af 60 f0 ff ff ff ff ff 7f     sub qword [r15-0xfa0],0x7fffffff
+        // 49 81 ad 60 f0 ff ff ff ff ff 7f     sub qword [r13-0xfa0],0x7fffffff
         self.push(sub((Self::vmctx_field(S::offset_table().gas), imm64(i32::MAX))));
         if matches!(kind, GasMeteringKind::Sync) {
             // This will jump 5 bytes (or 8 bytes on generic sandbox) backwards to 0x60 which is the PUSHA instruction
@@ -935,18 +1023,18 @@ where
 
             if matches!(S::KIND, SandboxKind::Linux) {
                 debug_assert_eq!(GAS_COST_LINUX_SANDBOX_OFFSET, self.asm.len() - origin - 4); // Offset to bring us from the start of the stub to the gas cost.
-                assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r15 + 0x60)); // Sanity check.
-                debug_assert!(self.asm.code_mut().ends_with(&[0x49, 0x81, 0x6f, 0x60, 0xff, 0xff, 0xff, 0x7f]));
+                assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r13 + 0x60)); // Sanity check.
+                debug_assert!(self.asm.code_mut().ends_with(&[0x49, 0x81, 0x6d, 0x60, 0xff, 0xff, 0xff, 0x7f]));
                 // Offset to bring us from where the trap will trigger to the beginning of the stub.
                 debug_assert_eq!(GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 5) as u64);
                 self.asm.push_raw(&[0x78, 0xf9]);
             } else {
                 debug_assert_eq!(GAS_COST_GENERIC_SANDBOX_OFFSET, self.asm.len() - origin - 4);
-                assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r15 - 0xfa0)); // Sanity check.
+                assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r13 - 0xfa0)); // Sanity check.
                 debug_assert!(self
                     .asm
                     .code_mut()
-                    .ends_with(&[0x49, 0x81, 0xaf, 0x60, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]));
+                    .ends_with(&[0x49, 0x81, 0xad, 0x60, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]));
                 debug_assert_eq!(GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 8) as u64);
                 self.asm.push_raw(&[0x78, 0xf6]);
             }
@@ -960,21 +1048,17 @@ where
     }
 
     #[cfg_attr(not(debug_assertions), inline(always))]
-    fn jump_indirect_impl(&mut self, load_imm: Option<(RawReg, u32)>, base: RawReg, offset: u32) {
+    fn jump_indirect_impl(&mut self, load_imm: Option<(RawReg, i32)>, base: RawReg, offset: i32) {
         match S::KIND {
             SandboxKind::Linux => {
                 use polkavm_assembler::amd64::{Scale, SegReg};
 
                 let asm = self.asm.reserve::<U3>();
-                let (asm, target) = if offset != 0 || load_imm.map_or(false, |(t, _)| t == base) {
-                    let asm = asm.push(lea(
-                        RegSize::R32,
-                        TMP_REG,
-                        reg_indirect(RegSize::R32, conv_reg(base) + offset as i32),
-                    ));
+                let (asm, target) = if offset != 0 || load_imm.map_or(false, |(t, _)| B::BITNESS == Bitness::B32 && t == base) {
+                    let asm = asm.push(rex(lea(RegSize::R32, TMP_REG, reg_indirect(RegSize::R32, conv_reg(base) + offset))));
                     (asm, TMP_REG)
                 } else if B::BITNESS == Bitness::B64 {
-                    let asm = asm.push(mov(RegSize::R32, TMP_REG, conv_reg(base)));
+                    let asm = asm.push(rex(mov(RegSize::R32, TMP_REG, conv_reg(base))));
                     (asm, TMP_REG)
                 } else {
                     (asm.push_none(), conv_reg(base))
@@ -982,8 +1066,8 @@ where
 
                 let asm = if let Some((return_register, return_address)) = load_imm {
                     match B::BITNESS {
-                        Bitness::B32 => asm.push(mov_imm(conv_reg(return_register), imm32(return_address))),
-                        Bitness::B64 => asm.push(mov_imm(conv_reg(return_register), imm64(cast(return_address).to_signed()))),
+                        Bitness::B32 => asm.push(mov_imm(conv_reg(return_register), imm32(cast(return_address).bitwise_as_u32()))),
+                        Bitness::B64 => asm.push(mov_imm(conv_reg(return_register), imm64(return_address))),
                     }
                 } else {
                     asm.push_none()
@@ -1011,20 +1095,31 @@ where
 
                 // TODO: This also could be more efficient.
                 self.push(lea_rip_label(TMP_REG, self.jump_table_label));
-                self.push(push(conv_reg(base)));
-                self.push(shl_imm(RegSize::R64, conv_reg(base), 3));
-                if offset > 0 {
-                    let offset = offset.wrapping_mul(8);
-                    self.push(add((conv_reg(base), imm32(offset))));
+                self.push(rex(push(conv_reg(base))));
+
+                // Make sure the access is in-bounds.
+                if offset != 0 {
+                    self.push(rex(lea(
+                        RegSize::R32,
+                        conv_reg(base),
+                        reg_indirect(RegSize::R32, conv_reg(base) + offset),
+                    )));
+                } else if B::BITNESS == Bitness::B64 {
+                    self.push(rex(mov(RegSize::R32, conv_reg(base), conv_reg(base))));
                 }
+
+                self.push(shl_imm(RegSize::R64, conv_reg(base), 3));
                 self.push(add((RegSize::R64, TMP_REG, conv_reg(base))));
-                self.push(pop(conv_reg(base)));
+                self.push(rex(pop(conv_reg(base))));
                 self.push(load(LoadKind::U64, TMP_REG, reg_indirect(RegSize::R64, TMP_REG)));
 
                 if let Some((return_register, return_address)) = load_imm {
                     match B::BITNESS {
-                        Bitness::B32 => self.push(mov_imm(conv_reg(return_register), imm32(return_address))),
-                        Bitness::B64 => self.push(mov_imm(conv_reg(return_register), imm64(cast(return_address).to_signed()))),
+                        Bitness::B32 => self.push(rex(mov_imm(
+                            conv_reg(return_register),
+                            imm32(cast(return_address).bitwise_as_u32()),
+                        ))),
+                        Bitness::B64 => self.push(rex(mov_imm(conv_reg(return_register), imm64(return_address)))),
                     }
                 }
 
@@ -1043,40 +1138,14 @@ where
     }
 
     #[inline(always)]
-    pub fn trap_without_modifying_program_counter(&mut self) {
-        let trap_label = self.trap_label;
-        let asm = self.asm.reserve::<U1>();
-        let asm = asm.push(call_label32(trap_label));
-        asm.assert_reserved_exactly_as_needed();
-    }
-
-    #[inline(always)]
     pub fn and_inverted(&mut self, d: RawReg, s1: RawReg, s2: RawReg) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
         let s2 = conv_reg(s2);
 
-        // todo: change this with ANDN instruction
-
-        let asm = self.asm.reserve::<U3>();
-        if d == s1 {
-            // d = d & ~s2
-            let asm = asm.push(mov(reg_size, TMP_REG, s2));
-            let asm = asm.push(not(reg_size, TMP_REG));
-            asm.push(and((reg_size, d, TMP_REG)))
-        } else if d == s2 {
-            // d = s1 & ~d
-            let asm = asm.push(not(reg_size, s2));
-            let asm = asm.push(and((reg_size, d, s1)));
-            asm.push_none()
-        } else {
-            // d = s1 & ~s2
-            let asm = asm.push(mov(reg_size, d, s2));
-            let asm = asm.push(not(reg_size, d));
-            asm.push(and((reg_size, d, s1)))
-        }
-        .assert_reserved_exactly_as_needed();
+        // d = s1 & ~s2
+        self.push(andn(reg_size, d, s2, s1));
     }
 
     #[inline(always)]
@@ -1178,9 +1247,9 @@ where
         let s2 = conv_reg(s2);
 
         let asm = self.asm.reserve::<polkavm_assembler::U4>();
-        let asm = asm.push(mov(reg_size, rcx, s2));
-        let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
-        let asm = asm.push(rol_cl(reg_size, d));
+        let asm = asm.push(rex(mov(reg_size, rcx, s2)));
+        let asm = asm.push_if(d != s1, rex(mov(reg_size, d, s1)));
+        let asm = asm.push(rex(rol_cl(reg_size, d)));
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
             asm.push(movsxd_32_to_64(d, d))
@@ -1209,9 +1278,9 @@ where
         let s2 = conv_reg(s2);
 
         let asm = self.asm.reserve::<polkavm_assembler::U4>();
-        let asm = asm.push(mov(reg_size, rcx, s2));
-        let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
-        let asm = asm.push(ror_cl(reg_size, d));
+        let asm = asm.push(rex(mov(reg_size, rcx, s2)));
+        let asm = asm.push_if(d != s1, rex(mov(reg_size, d, s1)));
+        let asm = asm.push(rex(ror_cl(reg_size, d)));
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
             asm.push(movsxd_32_to_64(d, d))
@@ -1284,8 +1353,6 @@ where
 
     #[inline(always)]
     pub fn memset(&mut self) {
-        let reg_size = self.reg_size();
-
         const _: () = {
             assert!(TMP_REG as u32 == rcx as u32);
             assert!(conv_reg_const(Reg::A0) as u32 == rdi as u32);
@@ -1295,47 +1362,59 @@ where
         let label_repeat = self.asm.create_label();
         self.asm.push(lea_rip_label(rcx, label_repeat));
 
-        // Store the address to restart the memset in case we trigger a page fault.
+        // Store the address to restart the memset from if it's interrupted.
         self.push(store(
             RegSize::R64,
             Self::vmctx_field(S::offset_table().next_native_program_counter),
             rcx,
         ));
 
+        // The generic sandbox clobbers `next_native_program_counter` with the fault address in its
+        // signal handler, so on top of the above it keeps the restart address in a dedicated field
+        // which survives a fault.
+        if matches!(S::KIND, SandboxKind::Generic) {
+            self.push(store(RegSize::R64, Self::vmctx_field(S::offset_table().memset_continuation), rcx));
+        }
+
         let count = conv_reg(Reg::A2.into());
-        self.asm.push(mov(RegSize::R32, count, count));
+
+        // Truncate the destination address; upper 32-bits are ignored just like normal memory accesses.
+        if B::BITNESS == Bitness::B64 {
+            self.asm.push(mov(RegSize::R32, rdi, rdi));
+        }
 
         match self.gas_metering {
             None => {
-                self.asm.push(mov(reg_size, rcx, count));
+                self.asm.push(mov(RegSize::R32, rcx, count));
                 // rep stosb, rdi is destination pointer, rcx is count, rax is the value
-                self.asm.push_raw(REP_STOSB_MACHINE_CODE);
-                self.asm.push(mov(reg_size, count, rcx));
+                self.emit_rep_stosb();
+                self.asm.push(mov(RegSize::R32, count, rcx));
             }
             Some(GasMeteringKind::Sync) => {
+                self.asm.push(mov(RegSize::R32, rcx, count));
                 // Pre charge the gas cost of the memset.
-                self.asm.push(sub((RegSize::R64, Self::vmctx_field(S::offset_table().gas), count)));
+                self.asm.push(sub((RegSize::R64, Self::vmctx_field(S::offset_table().gas), rcx)));
                 // Will we have enough gas to finish the operation?
                 self.asm.push(cmp((Self::vmctx_field(S::offset_table().gas), imm64(0))));
                 // If no - jump to a slower version of the routine.
                 let label_slow = self.memset_label;
                 branch_to_label(self.asm.reserve::<U1>(), Condition::Less, label_slow);
                 // If yes - do it the fast way.
-                self.asm.push(mov(reg_size, rcx, count));
-                self.asm.push_raw(REP_STOSB_MACHINE_CODE);
-                self.asm.push(mov(reg_size, count, rcx));
+                self.emit_rep_stosb();
+                self.asm.push(mov(RegSize::R32, count, rcx));
             }
             Some(GasMeteringKind::Async) => {
-                self.asm.push(sub((RegSize::R64, Self::vmctx_field(S::offset_table().gas), count)));
-                self.asm.push(mov(reg_size, rcx, count));
-                self.asm.push_raw(REP_STOSB_MACHINE_CODE);
-                self.asm.push(mov(reg_size, count, rcx));
+                self.asm.push(mov(RegSize::R32, rcx, count));
+                self.asm.push(sub((RegSize::R64, Self::vmctx_field(S::offset_table().gas), rcx)));
+                self.emit_rep_stosb();
+                self.asm.push(mov(RegSize::R32, count, rcx));
             }
         }
     }
 
     #[inline(always)]
-    pub fn ecalli(&mut self, code_offset: u32, args_length: u32, imm: u32) {
+    pub fn ecalli(&mut self, code_offset: u32, length: u32, imm: i32) {
+        let imm = cast(imm).bitwise_as_u32();
         if let Some(ref custom_codegen) = self.0.custom_codegen {
             if !custom_codegen.should_emit_ecalli(imm, &mut self.0.asm) {
                 return;
@@ -1343,12 +1422,13 @@ where
         }
 
         let ecall_label = self.ecall_label;
+        let next_program_counter = code_offset + length;
         let asm = self.asm.reserve::<U4>();
         let asm = asm.push(mov_imm(Self::vmctx_field(S::offset_table().arg), imm32(imm)));
         let asm = asm.push(mov_imm(Self::vmctx_field(S::offset_table().program_counter), imm32(code_offset)));
         let asm = asm.push(mov_imm(
             Self::vmctx_field(S::offset_table().next_program_counter),
-            imm32(code_offset + args_length + 1),
+            imm32(next_program_counter),
         ));
         let asm = asm.push(call_label32(ecall_label));
         asm.assert_reserved_exactly_as_needed();
@@ -1360,12 +1440,12 @@ where
     }
 
     #[inline(always)]
-    pub fn set_less_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn set_less_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         self.compare_reg_imm(d, s1, s2, Condition::Below);
     }
 
     #[inline(always)]
-    pub fn set_greater_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn set_greater_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         self.compare_reg_imm(d, s1, s2, Condition::Above);
     }
 
@@ -1375,12 +1455,12 @@ where
     }
 
     #[inline(always)]
-    pub fn set_less_than_signed_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn set_less_than_signed_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         self.compare_reg_imm(d, s1, s2, Condition::Less);
     }
 
     #[inline(always)]
-    pub fn set_greater_than_signed_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn set_greater_than_signed_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         self.compare_reg_imm(d, s1, s2, Condition::Greater);
     }
 
@@ -1415,32 +1495,32 @@ where
     }
 
     #[inline(always)]
-    pub fn shift_logical_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: u32) {
+    pub fn shift_logical_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: i32) {
         self.shift(RegSize::R32, d, s1, s2, ShiftKind::LogicalRight);
     }
 
     #[inline(always)]
-    pub fn shift_logical_right_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: u32) {
+    pub fn shift_logical_right_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: i32) {
         self.shift(RegSize::R64, d, s1, s2, ShiftKind::LogicalRight);
     }
 
     #[inline(always)]
-    pub fn shift_arithmetic_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: u32) {
+    pub fn shift_arithmetic_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: i32) {
         self.shift(RegSize::R32, d, s1, s2, ShiftKind::ArithmeticRight);
     }
 
     #[inline(always)]
-    pub fn shift_arithmetic_right_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: u32) {
+    pub fn shift_arithmetic_right_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: i32) {
         self.shift(RegSize::R64, d, s1, s2, ShiftKind::ArithmeticRight);
     }
 
     #[inline(always)]
-    pub fn shift_logical_left_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: u32) {
+    pub fn shift_logical_left_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: i32) {
         self.shift(RegSize::R32, d, s1, s2, ShiftKind::LogicalLeft);
     }
 
     #[inline(always)]
-    pub fn shift_logical_left_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: u32) {
+    pub fn shift_logical_left_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: i32) {
         self.shift(RegSize::R64, d, s1, s2, ShiftKind::LogicalLeft);
     }
 
@@ -1519,13 +1599,13 @@ where
         let asm = self.asm.reserve::<U3>();
         let asm = match (d, s1, s2) {
             // d = d + s2
-            (_, _, _) if d == s1 => asm.push(add((reg_size, d, s2))).push_none(),
+            (_, _, _) if d == s1 => asm.push(rex(add((reg_size, d, s2)))).push_none(),
             // d = s1 + d
-            (_, _, _) if d == s2 => asm.push(add((reg_size, d, s1))).push_none(),
+            (_, _, _) if d == s2 => asm.push(rex(add((reg_size, d, s1)))).push_none(),
             // d = s1 + s2
             _ => {
-                let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
-                asm.push(add((reg_size, d, s2)))
+                let asm = asm.push_if(d != s1, rex(mov(reg_size, d, s1)));
+                asm.push(rex(add((reg_size, d, s2))))
             }
         };
 
@@ -1558,16 +1638,16 @@ where
         let asm = self.asm.reserve::<U3>();
         let asm = match (d, s1, s2) {
             // d = d - s2
-            (_, _, _) if d == s1 => asm.push(sub((reg_size, d, s2))).push_none(),
+            (_, _, _) if d == s1 => asm.push(rex(sub((reg_size, d, s2)))).push_none(),
             // d = s1 - d
             (_, _, _) if d == s2 => {
-                let asm = asm.push(neg(reg_size, d));
-                asm.push(add((reg_size, d, s1)))
+                let asm = asm.push(rex(neg(reg_size, d)));
+                asm.push(rex(add((reg_size, d, s1))))
             }
             // d = s1 - s2
             _ => {
-                let asm = asm.push(mov(reg_size, d, s1));
-                asm.push(sub((reg_size, d, s2)))
+                let asm = asm.push(rex(mov(reg_size, d, s1)));
+                asm.push(rex(sub((reg_size, d, s2))))
             }
         };
 
@@ -1592,18 +1672,18 @@ where
     }
 
     #[inline(always)]
-    fn negate_and_add_imm_generic(&mut self, reg_size: RegSize, d: RawReg, s1: RawReg, s2: u32) {
+    fn negate_and_add_imm_generic(&mut self, reg_size: RegSize, d: RawReg, s1: RawReg, s2: i32) {
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
 
         let asm = self.asm.reserve::<U3>();
         let asm = if d == s1 {
             // d = -d + s2
-            let asm = asm.push(neg(reg_size, d));
+            let asm = asm.push(rex(neg(reg_size, d)));
             if s2 != 0 {
                 match reg_size {
-                    RegSize::R32 => asm.push(add((d, imm32(s2)))),
-                    RegSize::R64 => asm.push(add((d, imm64(cast(s2).to_signed())))),
+                    RegSize::R32 => asm.push(rex(add((d, imm32(cast(s2).bitwise_as_u32()))))),
+                    RegSize::R64 => asm.push(rex(add((d, imm64(s2))))),
                 }
             } else {
                 asm.push_none()
@@ -1611,14 +1691,14 @@ where
         } else {
             // d = -s1 + s2  =>  d = s2 - s1
             if s2 == 0 {
-                let asm = asm.push(mov(reg_size, d, s1));
-                asm.push(neg(reg_size, d))
+                let asm = asm.push(rex(mov(reg_size, d, s1)));
+                asm.push(rex(neg(reg_size, d)))
             } else {
                 let asm = match reg_size {
-                    RegSize::R32 => asm.push(mov_imm(d, imm32(s2))),
-                    RegSize::R64 => asm.push(mov_imm(d, imm64(cast(s2).to_signed()))),
+                    RegSize::R32 => asm.push(rex(mov_imm(d, imm32(cast(s2).bitwise_as_u32())))),
+                    RegSize::R64 => asm.push(rex(mov_imm(d, imm64(s2)))),
                 };
-                asm.push(sub((reg_size, d, s1)))
+                asm.push(rex(sub((reg_size, d, s1))))
             }
         };
 
@@ -1632,12 +1712,12 @@ where
     }
 
     #[inline(always)]
-    pub fn negate_and_add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn negate_and_add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         self.negate_and_add_imm_generic(RegSize::R32, d, s1, s2);
     }
 
     #[inline(always)]
-    pub fn negate_and_add_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn negate_and_add_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         assert_eq!(B::BITNESS, Bitness::B64);
         self.negate_and_add_imm_generic(RegSize::R64, d, s1, s2);
     }
@@ -1651,14 +1731,14 @@ where
         let asm = self.asm.reserve::<U3>();
         let asm = if d == s1 {
             // d = d * s2
-            asm.push(imul(reg_size, d, s2)).push_none()
+            asm.push(rex(imul(reg_size, d, s2))).push_none()
         } else if d == s2 {
             // d = s1 * d
-            asm.push(imul(reg_size, d, s1)).push_none()
+            asm.push(rex(imul(reg_size, d, s1))).push_none()
         } else {
             // d = s1 * s2
-            let asm = asm.push(mov(reg_size, d, s1));
-            asm.push(imul(reg_size, d, s2))
+            let asm = asm.push(rex(mov(reg_size, d, s1)));
+            asm.push(rex(imul(reg_size, d, s2)))
         };
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
@@ -1682,12 +1762,12 @@ where
     }
 
     #[inline(always)]
-    pub fn mul_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn mul_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
 
         let asm = self.asm.reserve::<U2>();
-        let asm = asm.push(imul_imm(RegSize::R32, d, s1, s2 as i32));
+        let asm = asm.push(rex(imul_imm(RegSize::R32, d, s1, s2)));
 
         let asm = if B::BITNESS == Bitness::B64 {
             asm.push(movsxd_32_to_64(d, d))
@@ -1699,8 +1779,8 @@ where
     }
 
     #[inline(always)]
-    pub fn mul_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) {
-        self.push(imul_imm(RegSize::R64, conv_reg(d), conv_reg(s1), s2 as i32));
+    pub fn mul_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) {
+        self.push(imul_imm(RegSize::R64, conv_reg(d), conv_reg(s1), s2));
     }
 
     #[inline(always)]
@@ -1725,15 +1805,12 @@ where
 
                 self.push(push(rax));
                 self.push(push(rdx));
-                match (s1 == rax, s2 == rax) {
-                    (true, true) => self.push(imul_dx_ax(RegSize::R64, rax)),
-                    (false, true) => self.push(imul_dx_ax(RegSize::R64, s1)),
-                    (true, false) => self.push(imul_dx_ax(RegSize::R64, s2)),
-                    (false, false) => {
-                        self.push(mov(RegSize::R64, rax, s1));
-                        self.push(imul_dx_ax(RegSize::R64, s2));
-                    }
-                }
+
+                let (arg_maybe_rax, arg_not_rax) = if s2 == rax { (s2, s1) } else { (s1, s2) };
+
+                self.push(mov(RegSize::R64, rax, arg_maybe_rax));
+                self.push(imul_dx_ax(RegSize::R64, arg_not_rax));
+
                 self.push(mov(RegSize::R64, TMP_REG, rdx));
                 self.push(pop(rdx));
                 self.push(pop(rax));
@@ -1771,20 +1848,14 @@ where
                     assert!(TMP_REG as u32 != rax as u32);
                 };
 
-                self.push(push(rax));
                 self.push(push(rdx));
-                match (s1 == rax, s2 == rax) {
-                    (true, true) => self.push(mul_dx_ax(RegSize::R64, rax)),
-                    (false, true) => self.push(mul_dx_ax(RegSize::R64, s1)),
-                    (true, false) => self.push(mul_dx_ax(RegSize::R64, s2)),
-                    (false, false) => {
-                        self.push(mov(RegSize::R64, rax, s1));
-                        self.push(mul(RegSize::R64, s2));
-                    }
-                }
-                self.push(mov(RegSize::R64, TMP_REG, rdx));
+
+                let (arg_maybe_rdx, arg_not_rdx) = if s2 == rdx { (s2, s1) } else { (s1, s2) };
+
+                self.push(mov(RegSize::R64, rdx, arg_maybe_rdx));
+                self.push(mulx(RegSize::R64, TMP_REG, TMP_REG, arg_not_rdx));
+
                 self.push(pop(rdx));
-                self.push(pop(rax));
                 self.push(mov(RegSize::R64, d, TMP_REG));
             }
         }
@@ -1832,23 +1903,25 @@ where
                     assert!(TMP_REG as u32 != rax as u32);
                 };
 
-                // TODO: This is not the most efficient implementation. We can optimize this.
-                self.push(push(AUX_TMP_REG));
                 self.push(push(rax));
                 self.push(push(rdx));
 
                 self.push(mov(RegSize::R64, TMP_REG, s1));
-                self.push(mov(RegSize::R64, AUX_TMP_REG, s2));
-
-                self.push(mov(RegSize::R64, rax, s2));
-                self.push(mul(RegSize::R64, TMP_REG));
                 self.push(sar_imm(RegSize::R64, TMP_REG, 63));
-                self.push(imul(RegSize::R64, TMP_REG, AUX_TMP_REG));
-                self.push(lea(RegSize::R64, TMP_REG, base_index(RegSize::R64, TMP_REG, rdx)));
+                self.push(and((RegSize::R64, TMP_REG, s2)));
 
+                let (arg_maybe_rax, arg_not_rax) = if s2 == rax { (s2, s1) } else { (s1, s2) };
+
+                // rdx = mulhu(s1, s2)
+                self.push(mov(RegSize::R64, rax, arg_maybe_rax));
+                self.push(mul_dx_ax(RegSize::R64, arg_not_rax));
+
+                // mulhsu(s1, s2) = mulhu(s1, s2) - (if s1 < 0 { s2 } else { 0 })
+                self.push(sub((RegSize::R64, rdx, TMP_REG)));
+
+                self.push(mov(RegSize::R64, TMP_REG, rdx));
                 self.push(pop(rdx));
                 self.push(pop(rax));
-                self.push(pop(AUX_TMP_REG));
                 self.push(mov(RegSize::R64, d, TMP_REG));
             }
         }
@@ -1872,10 +1945,10 @@ where
         let s2 = conv_reg(s2);
 
         let asm = self.asm.reserve::<polkavm_assembler::U5>();
-        let asm = asm.push(mov(reg_size, TMP_REG, s2));
-        let asm = asm.push(push(s1));
+        let asm = asm.push(rex(mov(reg_size, TMP_REG, s2)));
+        let asm = asm.push(rex(push(s1)));
         let asm = asm.push(call_label32(label));
-        let asm = asm.push(pop(d));
+        let asm = asm.push(rex(pop(d)));
         let asm = asm.push(mov(RegSize::R64, d, TMP_REG));
         asm.assert_reserved_exactly_as_needed();
     }
@@ -1925,37 +1998,37 @@ where
     }
 
     #[inline(always)]
-    pub fn shift_logical_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn shift_logical_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         self.shift_imm(RegSize::R32, d, s1, s2, ShiftKind::LogicalRight);
     }
 
     #[inline(always)]
-    pub fn shift_logical_right_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn shift_logical_right_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         self.shift_imm(RegSize::R64, d, s1, s2, ShiftKind::LogicalRight);
     }
 
     #[inline(always)]
-    pub fn shift_arithmetic_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn shift_arithmetic_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         self.shift_imm(RegSize::R32, d, s1, s2, ShiftKind::ArithmeticRight);
     }
 
     #[inline(always)]
-    pub fn shift_arithmetic_right_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn shift_arithmetic_right_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         self.shift_imm(RegSize::R64, d, s1, s2, ShiftKind::ArithmeticRight);
     }
 
     #[inline(always)]
-    pub fn shift_logical_left_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn shift_logical_left_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         self.shift_imm(RegSize::R32, d, s1, s2, ShiftKind::LogicalLeft);
     }
 
     #[inline(always)]
-    pub fn shift_logical_left_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn shift_logical_left_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         self.shift_imm(RegSize::R64, d, s1, s2, ShiftKind::LogicalLeft);
     }
 
     #[inline(always)]
-    pub fn or_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn or_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
@@ -1965,14 +2038,14 @@ where
 
         // d = s1 | s2
         let asm = match reg_size {
-            RegSize::R32 => asm.push(or((d, imm32(s2)))),
-            RegSize::R64 => asm.push(or((d, imm64(cast(s2).to_signed())))),
+            RegSize::R32 => asm.push(or((d, imm32(cast(s2).bitwise_as_u32())))),
+            RegSize::R64 => asm.push(or((d, imm64(s2)))),
         };
         asm.assert_reserved_exactly_as_needed();
     }
 
     #[inline(always)]
-    pub fn and_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn and_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
@@ -1982,45 +2055,46 @@ where
 
         // d = s1 & s2
         let asm = match reg_size {
-            RegSize::R32 => asm.push(and((d, imm32(s2)))),
-            RegSize::R64 => asm.push(and((d, imm64(cast(s2).to_signed())))),
+            RegSize::R32 => asm.push(and((d, imm32(cast(s2).bitwise_as_u32())))),
+            RegSize::R64 => asm.push(and((d, imm64(s2)))),
         };
         asm.assert_reserved_exactly_as_needed();
     }
 
     #[inline(always)]
-    pub fn xor_imm(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn xor_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         let reg_size = self.reg_size();
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
         let asm = self.asm.reserve::<U2>();
         let asm = asm.push_if(d != s1, mov(reg_size, d, s1));
 
-        if s2 != !0 {
-            // d = s1 ^ s2
-            match reg_size {
-                RegSize::R32 => asm.push(xor((d, imm32(s2)))),
-                RegSize::R64 => asm.push(xor((d, imm64(cast(s2).to_signed())))),
-            }
-        } else {
-            // d = s1 ^ 0xfffffff
-            asm.push(not(reg_size, d))
+        // d = s1 ^ s2
+        match reg_size {
+            RegSize::R32 => asm.push(xor((d, imm32(cast(s2).bitwise_as_u32())))),
+            RegSize::R64 => asm.push(xor((d, imm64(s2)))),
         }
         .assert_reserved_exactly_as_needed();
     }
 
     #[inline(always)]
-    pub fn load_imm(&mut self, dst: RawReg, s2: u32) {
+    pub fn load_imm(&mut self, dst: RawReg, s2: i32) {
         match B::BITNESS {
-            Bitness::B32 => self.push(mov_imm(conv_reg(dst), imm32(s2))),
-            Bitness::B64 => self.push(mov_imm(conv_reg(dst), imm64(cast(s2).to_signed()))),
+            Bitness::B32 => self.push(mov_imm(conv_reg(dst), imm32(cast(s2).bitwise_as_u32()))),
+            Bitness::B64 => {
+                if s2 >= 0 {
+                    self.push(rex(mov_imm(conv_reg(dst), imm32(cast(s2).bitwise_as_u32()))));
+                } else {
+                    self.push(mov_imm(conv_reg(dst), imm64(s2)));
+                }
+            }
         }
     }
 
     #[inline(always)]
     pub fn load_imm64(&mut self, dst: RawReg, s2: u64) {
         assert_eq!(B::BITNESS, Bitness::B64);
-        self.push(mov_imm64(conv_reg(dst), s2));
+        self.push(rex(mov_imm64(conv_reg(dst), s2)));
     }
 
     #[inline(always)]
@@ -2030,7 +2104,7 @@ where
 
     #[inline(always)]
     pub fn count_leading_zero_bits_32(&mut self, d: RawReg, s: RawReg) {
-        self.push(lzcnt(RegSize::R32, conv_reg(d), conv_reg(s)))
+        self.push(rex(lzcnt(RegSize::R32, conv_reg(d), conv_reg(s))))
     }
 
     #[inline(always)]
@@ -2040,7 +2114,7 @@ where
 
     #[inline(always)]
     pub fn count_trailing_zero_bits_32(&mut self, d: RawReg, s: RawReg) {
-        self.push(tzcnt(RegSize::R32, conv_reg(d), conv_reg(s)))
+        self.push(rex(tzcnt(RegSize::R32, conv_reg(d), conv_reg(s))))
     }
 
     #[inline(always)]
@@ -2050,7 +2124,7 @@ where
 
     #[inline(always)]
     pub fn count_set_bits_32(&mut self, d: RawReg, s: RawReg) {
-        self.push(popcnt(RegSize::R32, conv_reg(d), conv_reg(s)))
+        self.push(rex(popcnt(RegSize::R32, conv_reg(d), conv_reg(s))))
     }
 
     #[inline(always)]
@@ -2093,24 +2167,29 @@ where
     }
 
     #[inline(always)]
-    pub fn cmov_if_zero_imm(&mut self, d: RawReg, c: RawReg, s: u32) {
+    pub fn cmov_if_zero_imm(&mut self, d: RawReg, c: RawReg, s: i32) {
         self.cmov_imm(d, s, c, Condition::Equal);
     }
 
     #[inline(always)]
-    pub fn cmov_if_not_zero_imm(&mut self, d: RawReg, c: RawReg, s: u32) {
+    pub fn cmov_if_not_zero_imm(&mut self, d: RawReg, c: RawReg, s: i32) {
         self.cmov_imm(d, s, c, Condition::NotEqual);
     }
 
     #[inline(always)]
-    pub fn rotate_right_imm_generic(&mut self, reg_size: RegSize, d: RawReg, s: RawReg, c: u32) {
+    pub fn rotate_right_imm_generic(&mut self, reg_size: RegSize, d: RawReg, s: RawReg, c: i32) {
+        let size_mask = match reg_size {
+            RegSize::R32 => 32 - 1,
+            RegSize::R64 => 64 - 1,
+        };
+
         let d = conv_reg(d);
         let s = conv_reg(s);
+        let c = c & size_mask;
 
-        let asm = self.asm.reserve::<polkavm_assembler::U4>();
-        let asm = asm.push(mov_imm(rcx, imm32(c)));
-        let asm = asm.push_if(d != s, mov(reg_size, d, s));
-        let asm = asm.push(ror_cl(reg_size, d));
+        let asm = self.asm.reserve::<polkavm_assembler::U3>();
+        let asm = asm.push_if(d != s, rex(mov(reg_size, d, s)));
+        let asm = asm.push(rex(ror_imm(reg_size, d, c as u8)));
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
             asm.push(movsxd_32_to_64(d, d))
@@ -2122,25 +2201,28 @@ where
     }
 
     #[inline(always)]
-    pub fn rotate_right_imm_32(&mut self, d: RawReg, s: RawReg, c: u32) {
+    pub fn rotate_right_imm_32(&mut self, d: RawReg, s: RawReg, c: i32) {
         self.rotate_right_imm_generic(RegSize::R32, d, s, c);
     }
 
     #[inline(always)]
-    pub fn rotate_right_imm_64(&mut self, d: RawReg, s: RawReg, c: u32) {
+    pub fn rotate_right_imm_64(&mut self, d: RawReg, s: RawReg, c: i32) {
         assert_eq!(B::BITNESS, Bitness::B64);
         self.rotate_right_imm_generic(RegSize::R64, d, s, c);
     }
 
     #[inline(always)]
-    pub fn rotate_right_imm_alt_generic(&mut self, reg_size: RegSize, d: RawReg, s: RawReg, c: u32) {
+    pub fn rotate_right_imm_alt_generic(&mut self, reg_size: RegSize, d: RawReg, s: RawReg, c: i32) {
         let d = conv_reg(d);
         let s = conv_reg(s);
 
         let asm = self.asm.reserve::<polkavm_assembler::U4>();
-        let asm = asm.push(mov(reg_size, rcx, s));
-        let asm = asm.push(mov_imm(d, imm32(c)));
-        let asm = asm.push(ror_cl(reg_size, d));
+        let asm = asm.push(rex(mov(reg_size, rcx, s)));
+        let asm = match reg_size {
+            RegSize::R32 => asm.push(rex(mov_imm(d, imm32(cast(c).bitwise_as_u32())))),
+            RegSize::R64 => asm.push(rex(mov_imm(d, imm64(c)))),
+        };
+        let asm = asm.push(rex(ror_cl(reg_size, d)));
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
             asm.push(movsxd_32_to_64(d, d))
@@ -2152,33 +2234,34 @@ where
     }
 
     #[inline(always)]
-    pub fn rotate_right_imm_alt_32(&mut self, d: RawReg, s: RawReg, c: u32) {
+    pub fn rotate_right_imm_alt_32(&mut self, d: RawReg, s: RawReg, c: i32) {
         self.rotate_right_imm_alt_generic(RegSize::R32, d, s, c);
     }
 
     #[inline(always)]
-    pub fn rotate_right_imm_alt_64(&mut self, d: RawReg, s: RawReg, c: u32) {
+    pub fn rotate_right_imm_alt_64(&mut self, d: RawReg, s: RawReg, c: i32) {
         assert_eq!(B::BITNESS, Bitness::B64);
         self.rotate_right_imm_alt_generic(RegSize::R64, d, s, c);
     }
 
     #[inline(always)]
-    fn add_imm_generic(&mut self, reg_size: RegSize, d: RawReg, s1: RawReg, s2: u32) {
+    fn add_imm_generic(&mut self, reg_size: RegSize, d: RawReg, s1: RawReg, s2: i32) {
         let d = conv_reg(d);
         let s1 = conv_reg(s1);
 
-        let asm = self.asm.reserve::<U2>();
+        let asm = self.asm.reserve::<polkavm_assembler::U3>();
         let asm = if d == s1 {
-            if s2 == 1 {
-                asm.push(inc(reg_size, d))
-            } else {
-                match reg_size {
-                    RegSize::R32 => asm.push(add((d, imm32(s2)))),
-                    RegSize::R64 => asm.push(add((d, imm64(cast(s2).to_signed())))),
-                }
-            }
+            let asm = match reg_size {
+                RegSize::R32 => asm.push(rex(add((d, imm32(cast(s2).bitwise_as_u32()))))),
+                RegSize::R64 => asm.push(rex(add((d, imm64(s2))))),
+            };
+            asm.push_none()
         } else {
-            asm.push(lea(reg_size, d, reg_indirect(reg_size, s1 + s2 as i32)))
+            let asm = asm.push(rex(mov(reg_size, d, s1)));
+            match reg_size {
+                RegSize::R32 => asm.push(rex(add((d, imm32(cast(s2).bitwise_as_u32()))))),
+                RegSize::R64 => asm.push(rex(add((d, imm64(s2))))),
+            }
         };
 
         let asm = if (B::BITNESS, reg_size) == (Bitness::B64, RegSize::R32) {
@@ -2191,128 +2274,128 @@ where
     }
 
     #[inline(always)]
-    pub fn add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         self.add_imm_generic(RegSize::R32, d, s1, s2);
     }
 
     #[inline(always)]
-    pub fn add_imm_64(&mut self, d: RawReg, s1: RawReg, s2: u32) {
+    pub fn add_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) {
         assert_eq!(B::BITNESS, Bitness::B64);
         self.add_imm_generic(RegSize::R64, d, s1, s2);
     }
 
     #[inline(always)]
-    pub fn store_u8(&mut self, src: RawReg, offset: u32) {
+    pub fn store_u8(&mut self, src: RawReg, offset: i32) {
         self.store(src, None, offset, Size::U8);
     }
 
     #[inline(always)]
-    pub fn store_u16(&mut self, src: RawReg, offset: u32) {
+    pub fn store_u16(&mut self, src: RawReg, offset: i32) {
         self.store(src, None, offset, Size::U16);
     }
 
     #[inline(always)]
-    pub fn store_u32(&mut self, src: RawReg, offset: u32) {
+    pub fn store_u32(&mut self, src: RawReg, offset: i32) {
         self.store(src, None, offset, Size::U32);
     }
 
     #[inline(always)]
-    pub fn store_u64(&mut self, src: RawReg, offset: u32) {
+    pub fn store_u64(&mut self, src: RawReg, offset: i32) {
         assert_eq!(B::BITNESS, Bitness::B64);
         self.store(src, None, offset, Size::U64);
     }
 
     #[inline(always)]
-    pub fn store_indirect_u8(&mut self, src: RawReg, base: RawReg, offset: u32) {
+    pub fn store_indirect_u8(&mut self, src: RawReg, base: RawReg, offset: i32) {
         self.store(src, Some(base), offset, Size::U8);
     }
 
     #[inline(always)]
-    pub fn store_indirect_u16(&mut self, src: RawReg, base: RawReg, offset: u32) {
+    pub fn store_indirect_u16(&mut self, src: RawReg, base: RawReg, offset: i32) {
         self.store(src, Some(base), offset, Size::U16);
     }
 
     #[inline(always)]
-    pub fn store_indirect_u32(&mut self, src: RawReg, base: RawReg, offset: u32) {
+    pub fn store_indirect_u32(&mut self, src: RawReg, base: RawReg, offset: i32) {
         self.store(src, Some(base), offset, Size::U32);
     }
 
     #[inline(always)]
-    pub fn store_indirect_u64(&mut self, src: RawReg, base: RawReg, offset: u32) {
+    pub fn store_indirect_u64(&mut self, src: RawReg, base: RawReg, offset: i32) {
         assert_eq!(B::BITNESS, Bitness::B64);
         self.store(src, Some(base), offset, Size::U64);
     }
 
     #[inline(always)]
-    pub fn store_imm_indirect_u8(&mut self, base: RawReg, offset: u32, value: u32) {
+    pub fn store_imm_indirect_u8(&mut self, base: RawReg, offset: i32, value: i32) {
         self.store(value, Some(base), offset, Size::U8);
     }
 
     #[inline(always)]
-    pub fn store_imm_indirect_u16(&mut self, base: RawReg, offset: u32, value: u32) {
+    pub fn store_imm_indirect_u16(&mut self, base: RawReg, offset: i32, value: i32) {
         self.store(value, Some(base), offset, Size::U16);
     }
 
     #[inline(always)]
-    pub fn store_imm_indirect_u32(&mut self, base: RawReg, offset: u32, value: u32) {
+    pub fn store_imm_indirect_u32(&mut self, base: RawReg, offset: i32, value: i32) {
         self.store(value, Some(base), offset, Size::U32);
     }
 
     #[inline(always)]
-    pub fn store_imm_indirect_u64(&mut self, base: RawReg, offset: u32, value: u32) {
+    pub fn store_imm_indirect_u64(&mut self, base: RawReg, offset: i32, value: i32) {
         assert_eq!(B::BITNESS, Bitness::B64);
         self.store(value, Some(base), offset, Size::U64);
     }
 
     #[inline(always)]
-    pub fn store_imm_u8(&mut self, offset: u32, value: u32) {
+    pub fn store_imm_u8(&mut self, offset: i32, value: i32) {
         self.store(value, None, offset, Size::U8);
     }
 
     #[inline(always)]
-    pub fn store_imm_u16(&mut self, offset: u32, value: u32) {
+    pub fn store_imm_u16(&mut self, offset: i32, value: i32) {
         self.store(value, None, offset, Size::U16);
     }
 
     #[inline(always)]
-    pub fn store_imm_u32(&mut self, offset: u32, value: u32) {
+    pub fn store_imm_u32(&mut self, offset: i32, value: i32) {
         self.store(value, None, offset, Size::U32);
     }
 
     #[inline(always)]
-    pub fn store_imm_u64(&mut self, offset: u32, value: u32) {
+    pub fn store_imm_u64(&mut self, offset: i32, value: i32) {
         assert_eq!(B::BITNESS, Bitness::B64);
         self.store(value, None, offset, Size::U64);
     }
 
     #[inline(always)]
-    pub fn load_indirect_u8(&mut self, dst: RawReg, base: RawReg, offset: u32) {
+    pub fn load_indirect_u8(&mut self, dst: RawReg, base: RawReg, offset: i32) {
         self.load(dst, Some(base), offset, LoadKind::U8);
     }
 
     #[inline(always)]
-    pub fn load_indirect_i8(&mut self, dst: RawReg, base: RawReg, offset: u32) {
+    pub fn load_indirect_i8(&mut self, dst: RawReg, base: RawReg, offset: i32) {
         self.load(dst, Some(base), offset, LoadKind::I8);
     }
 
     #[inline(always)]
-    pub fn load_indirect_u16(&mut self, dst: RawReg, base: RawReg, offset: u32) {
+    pub fn load_indirect_u16(&mut self, dst: RawReg, base: RawReg, offset: i32) {
         self.load(dst, Some(base), offset, LoadKind::U16);
     }
 
     #[inline(always)]
-    pub fn load_indirect_i16(&mut self, dst: RawReg, base: RawReg, offset: u32) {
+    pub fn load_indirect_i16(&mut self, dst: RawReg, base: RawReg, offset: i32) {
         self.load(dst, Some(base), offset, LoadKind::I16);
     }
 
     #[inline(always)]
-    pub fn load_indirect_u32(&mut self, dst: RawReg, base: RawReg, offset: u32) {
+    pub fn load_indirect_u32(&mut self, dst: RawReg, base: RawReg, offset: i32) {
         assert_eq!(B::BITNESS, Bitness::B64);
         self.load(dst, Some(base), offset, LoadKind::U32);
     }
 
     #[inline(always)]
-    pub fn load_indirect_i32(&mut self, dst: RawReg, base: RawReg, offset: u32) {
+    pub fn load_indirect_i32(&mut self, dst: RawReg, base: RawReg, offset: i32) {
         let kind = match B::BITNESS {
             Bitness::B32 => LoadKind::U32,
             Bitness::B64 => LoadKind::I32,
@@ -2321,33 +2404,33 @@ where
     }
 
     #[inline(always)]
-    pub fn load_indirect_u64(&mut self, dst: RawReg, base: RawReg, offset: u32) {
+    pub fn load_indirect_u64(&mut self, dst: RawReg, base: RawReg, offset: i32) {
         assert_eq!(B::BITNESS, Bitness::B64);
         self.load(dst, Some(base), offset, LoadKind::U64);
     }
 
     #[inline(always)]
-    pub fn load_u8(&mut self, dst: RawReg, offset: u32) {
+    pub fn load_u8(&mut self, dst: RawReg, offset: i32) {
         self.load(dst, None, offset, LoadKind::U8);
     }
 
     #[inline(always)]
-    pub fn load_i8(&mut self, dst: RawReg, offset: u32) {
+    pub fn load_i8(&mut self, dst: RawReg, offset: i32) {
         self.load(dst, None, offset, LoadKind::I8);
     }
 
     #[inline(always)]
-    pub fn load_u16(&mut self, dst: RawReg, offset: u32) {
+    pub fn load_u16(&mut self, dst: RawReg, offset: i32) {
         self.load(dst, None, offset, LoadKind::U16);
     }
 
     #[inline(always)]
-    pub fn load_i16(&mut self, dst: RawReg, offset: u32) {
+    pub fn load_i16(&mut self, dst: RawReg, offset: i32) {
         self.load(dst, None, offset, LoadKind::I16);
     }
 
     #[inline(always)]
-    pub fn load_i32(&mut self, dst: RawReg, offset: u32) {
+    pub fn load_i32(&mut self, dst: RawReg, offset: i32) {
         let kind = match B::BITNESS {
             Bitness::B32 => LoadKind::U32,
             Bitness::B64 => LoadKind::I32,
@@ -2356,13 +2439,13 @@ where
     }
 
     #[inline(always)]
-    pub fn load_u32(&mut self, dst: RawReg, offset: u32) {
+    pub fn load_u32(&mut self, dst: RawReg, offset: i32) {
         assert_eq!(B::BITNESS, Bitness::B64);
         self.load(dst, None, offset, LoadKind::U32);
     }
 
     #[inline(always)]
-    pub fn load_u64(&mut self, dst: RawReg, offset: u32) {
+    pub fn load_u64(&mut self, dst: RawReg, offset: i32) {
         assert_eq!(B::BITNESS, Bitness::B64);
         self.load(dst, None, offset, LoadKind::U64);
     }
@@ -2398,52 +2481,52 @@ where
     }
 
     #[inline(always)]
-    pub fn branch_eq_imm(&mut self, s1: RawReg, s2: u32, target: u32) {
+    pub fn branch_eq_imm(&mut self, s1: RawReg, s2: i32, target: u32) {
         self.branch(s1, s2, target, Condition::Equal);
     }
 
     #[inline(always)]
-    pub fn branch_not_eq_imm(&mut self, s1: RawReg, s2: u32, target: u32) {
+    pub fn branch_not_eq_imm(&mut self, s1: RawReg, s2: i32, target: u32) {
         self.branch(s1, s2, target, Condition::NotEqual);
     }
 
     #[inline(always)]
-    pub fn branch_less_unsigned_imm(&mut self, s1: RawReg, s2: u32, target: u32) {
+    pub fn branch_less_unsigned_imm(&mut self, s1: RawReg, s2: i32, target: u32) {
         self.branch(s1, s2, target, Condition::Below);
     }
 
     #[inline(always)]
-    pub fn branch_less_signed_imm(&mut self, s1: RawReg, s2: u32, target: u32) {
+    pub fn branch_less_signed_imm(&mut self, s1: RawReg, s2: i32, target: u32) {
         self.branch(s1, s2, target, Condition::Less);
     }
 
     #[inline(always)]
-    pub fn branch_greater_or_equal_unsigned_imm(&mut self, s1: RawReg, s2: u32, target: u32) {
+    pub fn branch_greater_or_equal_unsigned_imm(&mut self, s1: RawReg, s2: i32, target: u32) {
         self.branch(s1, s2, target, Condition::AboveOrEqual);
     }
 
     #[inline(always)]
-    pub fn branch_greater_or_equal_signed_imm(&mut self, s1: RawReg, s2: u32, target: u32) {
+    pub fn branch_greater_or_equal_signed_imm(&mut self, s1: RawReg, s2: i32, target: u32) {
         self.branch(s1, s2, target, Condition::GreaterOrEqual);
     }
 
     #[inline(always)]
-    pub fn branch_less_or_equal_unsigned_imm(&mut self, s1: RawReg, s2: u32, target: u32) {
+    pub fn branch_less_or_equal_unsigned_imm(&mut self, s1: RawReg, s2: i32, target: u32) {
         self.branch(s1, s2, target, Condition::BelowOrEqual);
     }
 
     #[inline(always)]
-    pub fn branch_less_or_equal_signed_imm(&mut self, s1: RawReg, s2: u32, target: u32) {
+    pub fn branch_less_or_equal_signed_imm(&mut self, s1: RawReg, s2: i32, target: u32) {
         self.branch(s1, s2, target, Condition::LessOrEqual);
     }
 
     #[inline(always)]
-    pub fn branch_greater_unsigned_imm(&mut self, s1: RawReg, s2: u32, target: u32) {
+    pub fn branch_greater_unsigned_imm(&mut self, s1: RawReg, s2: i32, target: u32) {
         self.branch(s1, s2, target, Condition::Above);
     }
 
     #[inline(always)]
-    pub fn branch_greater_signed_imm(&mut self, s1: RawReg, s2: u32, target: u32) {
+    pub fn branch_greater_signed_imm(&mut self, s1: RawReg, s2: i32, target: u32) {
         self.branch(s1, s2, target, Condition::Greater);
     }
 
@@ -2454,24 +2537,24 @@ where
     }
 
     #[inline(always)]
-    pub fn load_imm_and_jump(&mut self, ra: RawReg, value: u32, target: u32) {
+    pub fn load_imm_and_jump(&mut self, ra: RawReg, value: i32, target: u32) {
         let label = self.get_or_forward_declare_label(target).unwrap_or(self.invalid_jump_label);
         let asm = self.asm.reserve::<U2>();
         let asm = match B::BITNESS {
-            Bitness::B32 => asm.push(mov_imm(conv_reg(ra), imm32(value))),
-            Bitness::B64 => asm.push(mov_imm(conv_reg(ra), imm64(cast(value).to_signed()))),
+            Bitness::B32 => asm.push(mov_imm(conv_reg(ra), imm32(cast(value).bitwise_as_u32()))),
+            Bitness::B64 => asm.push(mov_imm(conv_reg(ra), imm64(value))),
         };
         let asm = jump_to_label(asm, label);
         asm.assert_reserved_exactly_as_needed();
     }
 
     #[inline(always)]
-    pub fn jump_indirect(&mut self, base: RawReg, offset: u32) {
+    pub fn jump_indirect(&mut self, base: RawReg, offset: i32) {
         self.jump_indirect_impl(None, base, offset)
     }
 
     #[inline(always)]
-    pub fn load_imm_and_jump_indirect(&mut self, ra: RawReg, base: RawReg, value: u32, offset: u32) {
+    pub fn load_imm_and_jump_indirect(&mut self, ra: RawReg, base: RawReg, value: i32, offset: i32) {
         self.jump_indirect_impl(Some((ra, value)), base, offset)
     }
 }
@@ -2576,13 +2659,13 @@ where
     let offset = if matches!(S::KIND, SandboxKind::Linux) {
         debug_assert_eq!(
             machine_code[basic_block_machine_code_offset..basic_block_machine_code_offset + 4],
-            [0x49, 0x81, 0x6f, 0x60]
+            [0x49, 0x81, 0x6d, 0x60]
         );
         GAS_COST_LINUX_SANDBOX_OFFSET
     } else {
         debug_assert_eq!(
             machine_code[basic_block_machine_code_offset..basic_block_machine_code_offset + 5],
-            [0x49, 0x81, 0xaf, 0x60, 0xf0]
+            [0x49, 0x81, 0xad, 0x60, 0xf0]
         );
         GAS_COST_GENERIC_SANDBOX_OFFSET
     } + basic_block_machine_code_offset;

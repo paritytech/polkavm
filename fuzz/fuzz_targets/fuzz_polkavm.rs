@@ -235,7 +235,7 @@ enum OperationKind {
     RegImmArgs {
         kind: RegImmKind,
         reg: OperationReg,
-        imm: u32,
+        imm: i32,
     },
     RegOffsetArgs {
         kind: RegOffsetKind,
@@ -244,14 +244,14 @@ enum OperationKind {
     RegImmImmArgs {
         kind: RegImmImmKind,
         reg: OperationReg,
-        imm1: u32,
-        imm2: u32,
+        imm1: i32,
+        imm2: i32,
     },
     RegRegImmArgs {
         kind: RegRegImmKind,
         reg1: OperationReg,
         reg2: OperationReg,
-        imm: u32,
+        imm: i32,
     },
     RegRegOffsetArgs {
         kind: RegRegOffsetKind,
@@ -266,13 +266,21 @@ enum OperationKind {
     },
     ImmImmArgs {
         kind: ImmImmKind,
-        imm1: u32,
-        imm2: u32,
+        imm1: i32,
+        imm2: i32,
     },
     RegRegArgs {
         kind: RegRegKind,
         reg1: OperationReg,
         reg2: OperationReg,
+    },
+    RegImm64Args {
+        reg: OperationReg,
+        imm: u64,
+    },
+    RegImmOffsetArgs {
+        reg: OperationReg,
+        imm: i32,
     },
 }
 
@@ -504,6 +512,8 @@ fn transform_code(data: Vec<OperationKind>) -> Vec<Instruction> {
                     }
                 }
             }
+            OperationKind::RegImm64Args { reg, imm } => asm::load_imm64(reg.into(), imm),
+            OperationKind::RegImmOffsetArgs { reg, imm } => asm::load_imm_and_jump(reg.into(), imm, 0),
         };
 
         buffer.push(op);

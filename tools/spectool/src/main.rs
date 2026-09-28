@@ -343,7 +343,7 @@ fn main_generate() {
         }
 
         let input = input_lines.join("\n");
-        let blob = match assemble(Some(InstructionSetKind::Latest64), &input) {
+        let blob = match assemble(Some(InstructionSetKind::JamV1), &input) {
             Ok(blob) => blob,
             Err(error) => {
                 eprintln!("Failed to assemble {path:?}: {error}");
@@ -384,7 +384,7 @@ fn main_generate() {
         linker_config.set_opt_level(polkavm_linker::OptLevel::O1);
         linker_config.set_strip(true);
         linker_config.set_min_stack_size(0);
-        let blob = polkavm_linker::program_from_elf(linker_config, TargetInstructionSet::Latest, &elf).unwrap();
+        let blob = polkavm_linker::program_from_elf(linker_config, TargetInstructionSet::JamV1, &elf).unwrap();
 
         let mut post = PrePost::default();
 
@@ -432,7 +432,14 @@ fn main_generate() {
         module_config.set_dynamic_paging(true);
         module_config.set_cost_model(Some(CostModelKind::Full(cache_model)));
 
-        let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+        let module = match Module::from_blob(&engine, &module_config, blob.clone()) {
+            Ok(module) => module,
+            Err(error) => {
+                eprintln!("Failed to compile {internal_name}: {error}");
+                found_errors = true;
+                continue;
+            }
+        };
         let mut instance = module.instantiate().unwrap();
 
         let mut initial_steps = Vec::new();

@@ -5,6 +5,7 @@ set -euo pipefail
 cd "${0%/*}/"
 
 source build-common.sh
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${PWD}/target}"
 
 BUILD_WASM=0
 BUILD_CKBVM=0
@@ -72,8 +73,8 @@ build_polkavm() {
     pushd ..
 
     cargo run -q -p polkatool link \
-        --run-only-if-newer guest-programs/target/riscv32emac-unknown-none-polkavm/release/$1 \
-        -o guest-programs/target/riscv32emac-unknown-none-polkavm/release/$1.polkavm
+        --run-only-if-newer $CARGO_TARGET_DIR/riscv32emac-unknown-none-polkavm/release/$1 \
+        -o $CARGO_TARGET_DIR/riscv32emac-unknown-none-polkavm/release/$1.polkavm
 
     popd
 
@@ -87,8 +88,8 @@ build_polkavm() {
     pushd ..
 
     cargo run -q -p polkatool link \
-        --run-only-if-newer guest-programs/target/riscv64emac-unknown-none-polkavm/release/$1 \
-        -o guest-programs/target/riscv64emac-unknown-none-polkavm/release/$1.polkavm
+        --run-only-if-newer $CARGO_TARGET_DIR/riscv64emac-unknown-none-polkavm/release/$1 \
+        -o $CARGO_TARGET_DIR/riscv64emac-unknown-none-polkavm/release/$1.polkavm
 
     popd
 }
@@ -135,6 +136,7 @@ function build_benchmark() {
 build_benchmark "bench-minimal"
 build_benchmark "bench-pinky"
 build_benchmark "bench-prime-sieve"
+build_benchmark "bench-ed25519"
 
 if [ "${SOLANA_PLATFORM_TOOLS_DIR:-}" != "" ]; then
     unset SOLANA_PLATFORM_TOOLS_DIR

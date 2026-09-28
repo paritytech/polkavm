@@ -1,6 +1,6 @@
 #![allow(non_camel_case_types)]
 
-use crate::misc::{FixupKind, InstBuf, Instruction, Label};
+use crate::misc::{EncodeFlags, FixupKind, InstBuf, InstructionT, Label};
 
 /// The REX prefix.
 const REX: u8 = 0x40;
@@ -463,6 +463,10 @@ struct Inst {
     immediate: u32,
     immediate_length: u32,
     override_segment: Option<SegReg>,
+    vex: bool,
+    vex_m_mmmm: u8,
+    vex_vvvv: u8,
+    vex_pp: u8,
 }
 
 // See: https://www-user.tu-chemnitz.de/~heha/hsn/chm/x86.chm/x64.htm
@@ -484,6 +488,10 @@ impl Inst {
             immediate: 0,
             immediate_length: 0,
             override_segment: None,
+            vex: false,
+            vex_m_mmmm: 0,
+            vex_vvvv: 0,
+            vex_pp: 0,
         }
     }
 
@@ -551,6 +559,15 @@ impl Inst {
         if cond {
             self.rex |= REX_64B_OP;
         }
+        self
+    }
+
+    #[inline]
+    const fn vex(mut self, m_mmmm: u8, vvvv: Reg, pp: u8) -> Self {
+        self.vex = true;
+        self.vex_m_mmmm = m_mmmm;
+        self.vex_vvvv = (!(vvvv as u8)) & 0xf;
+        self.vex_pp = pp;
         self
     }
 
@@ -702,7 +719,11 @@ impl Inst {
     }
 
     #[inline]
-    fn encode(self) -> InstBuf {
+    fn encode(mut self, flags: EncodeFlags) -> InstBuf {
+        if flags.force_rex {
+            self.rex |= REX;
+        }
+
         let mut enc = InstBuf::new();
         self.encode_into(&mut enc);
         enc
@@ -711,6 +732,7 @@ impl Inst {
     #[inline(always)]
     fn encode_into(self, buf: &mut InstBuf) {
         if self.op_rep_prefix {
+            debug_assert!(!self.vex);
             buf.append(PREFIX_REP);
         }
 
@@ -721,6 +743,7 @@ impl Inst {
         }
 
         if self.override_op_size {
+            debug_assert!(!self.vex);
             buf.append(PREFIX_OVERRIDE_OP_SIZE);
         }
 
@@ -728,12 +751,23 @@ impl Inst {
             buf.append(PREFIX_OVERRIDE_ADDR_SIZE);
         }
 
-        if self.rex != 0 {
-            buf.append(self.rex);
-        }
+        if self.vex {
+            let rex_r = (self.rex >> 2) & 1;
+            let rex_x = (self.rex >> 1) & 1;
+            let rex_b = self.rex & 1;
+            let rex_w = (self.rex >> 3) & 1;
 
-        if self.op_alt {
-            buf.append(0x0f);
+            buf.append(0xc4);
+            buf.append(((rex_r ^ 1) << 7) | ((rex_x ^ 1) << 6) | ((rex_b ^ 1) << 5) | (self.vex_m_mmmm & 0x1f));
+            buf.append((rex_w << 7) | ((self.vex_vvvv & 0xf) << 3) | (self.vex_pp & 0x3));
+        } else {
+            if self.rex != 0 {
+                buf.append(self.rex);
+            }
+
+            if self.op_alt {
+                buf.append(0x0f);
+            }
         }
 
         buf.append(self.opcode);
@@ -834,15 +868,22 @@ macro_rules! impl_inst {
                     }
                 }
 
-                impl $name {
+                impl InstructionT for $name {
                     #[inline(always)]
-                    pub fn encode($self) -> InstBuf {
-                        $body
+                    fn encode($self, flags: EncodeFlags) -> InstBuf {
+                        $body.encode(flags)
                     }
 
                     #[inline(always)]
-                    pub(crate) fn fixup($self) -> Option<(Label, FixupKind)> {
+                    fn fixup($self, _flags: EncodeFlags) -> Option<(Label, FixupKind)> {
                         $fixup
+                    }
+                }
+
+                impl $name {
+                    #[inline(always)]
+                    pub fn len(self) -> usize {
+                        self.encode(EncodeFlags::default()).len()
                     }
                 }
 
@@ -875,13 +916,8 @@ macro_rules! impl_inst {
 
     (@ctor_impl $name:ident, $(($arg_name:ident: $arg_ty:tt)),*) => {
         #[inline(always)]
-        pub fn $name($($arg_name: impl_inst!(@conv_ty $arg_ty)),*) -> Instruction<types::$name> {
-            let instruction = self::types::$name($($arg_name.into()),*);
-            Instruction {
-                instruction,
-                bytes: instruction.encode(),
-                fixup: instruction.fixup(),
-            }
+        pub fn $name($($arg_name: impl_inst!(@conv_ty $arg_ty)),*) -> types::$name {
+            self::types::$name($($arg_name.into()),*)
         }
     };
 
@@ -1085,6 +1121,37 @@ pub mod inst {
     use super::*;
     use crate::misc::InstBuf;
 
+    #[repr(transparent)]
+    #[derive(Copy, Clone)]
+    pub struct rex<T>(pub T)
+    where
+        T: InstructionT;
+    impl<T> InstructionT for rex<T>
+    where
+        T: InstructionT,
+    {
+        #[inline(always)]
+        fn encode(self, mut flags: EncodeFlags) -> InstBuf {
+            flags.force_rex = true;
+            self.0.encode(flags)
+        }
+
+        #[inline(always)]
+        fn fixup(self, mut flags: EncodeFlags) -> Option<(Label, FixupKind)> {
+            flags.force_rex = true;
+            self.0.fixup(flags)
+        }
+    }
+
+    impl<T> core::fmt::Display for rex<T>
+    where
+        T: InstructionT,
+    {
+        fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+            self.0.fmt(fmt)
+        }
+    }
+
     #[inline(always)]
     const fn new_rm(op: u8, size: Size, regmem: RegMem, reg: Option<Reg>) -> Inst {
         let inst = match size {
@@ -1124,10 +1191,10 @@ pub mod inst {
     }
 
     #[inline(always)]
-    fn alu_impl(op_reg2rm: u8, op_rm2reg: u8, opext: u8, operands: Operands) -> InstBuf {
+    fn alu_impl(op_reg2rm: u8, op_rm2reg: u8, opext: u8, operands: Operands) -> Inst {
         match operands {
-            Operands::RegMem_Reg(size, dst, src) => new_rm(op_reg2rm, size, dst, Some(src)).encode(),
-            Operands::Reg_RegMem(size, dst, src) => new_rm(op_rm2reg, size, src, Some(dst)).encode(),
+            Operands::RegMem_Reg(size, dst, src) => new_rm(op_reg2rm, size, dst, Some(src)),
+            Operands::Reg_RegMem(size, dst, src) => new_rm(op_rm2reg, size, src, Some(dst)),
             Operands::RegMem_Imm(dst, imm) => match imm {
                 ImmKind::I8(imm) => Inst::new(0x80)
                     .rex_if(!matches!(dst, RegMem::Reg(Reg::rax | Reg::rcx | Reg::rdx | Reg::rbx)))
@@ -1158,8 +1225,7 @@ pub mod inst {
                 .rex_64b(),
             }
             .modrm_opext(opext)
-            .regmem(dst)
-            .encode(),
+            .regmem(dst),
         }
     }
 
@@ -1215,7 +1281,7 @@ pub mod inst {
 
         // https://www.felixcloutier.com/x86/push
         push(Reg) =>
-            Inst::with_reg_in_op(0x50, self.0).encode(),
+            Inst::with_reg_in_op(0x50, self.0),
             None,
             (fmt.write_fmt(core::format_args!("push {}", self.0))),
 
@@ -1226,16 +1292,22 @@ pub mod inst {
                     Inst::new(0x6a).imm8(value as u8).rex_64b()
                 } else {
                     Inst::new(0x68).imm32(value as u32).rex_64b()
-                }.encode()
+                }
             },
             None,
             (fmt.write_fmt(core::format_args!("push 0x{:x}", i64::from(self.0)))),
 
         // https://www.felixcloutier.com/x86/pop
         pop(Reg) =>
-            Inst::with_reg_in_op(0x58, self.0).encode(),
+            Inst::with_reg_in_op(0x58, self.0),
             None,
             (fmt.write_fmt(core::format_args!("pop {}", self.0))),
+
+        // https://www.felixcloutier.com/x86/pause
+        pause() =>
+            InstBuf::from_array([0xf3, 0x90]),
+            None,
+            (fmt.write_str("pause")),
 
         // https://www.felixcloutier.com/x86/nop
         nop() =>
@@ -1295,7 +1367,7 @@ pub mod inst {
 
         // https://www.felixcloutier.com/x86/clflushopt
         clflushopt(MemOp) =>
-            Inst::new(0xae).override_op_size().op_alt().modrm_opext(0b111).mem(self.0).encode(),
+            Inst::new(0xae).override_op_size().op_alt().modrm_opext(0b111).mem(self.0),
             None,
             (fmt.write_fmt(core::format_args!("clflushopt {}", self.0))),
 
@@ -1309,46 +1381,46 @@ pub mod inst {
         // https://www.felixcloutier.com/x86/movzx
         // https://www.felixcloutier.com/x86/movsx:movsxd
         mov(RegSize, Reg, Reg) =>
-            Inst::new(0x89).rex_64b_if(matches!(self.0, RegSize::R64)).modrm_rm_direct(self.1).modrm_reg(self.2).encode(),
+            Inst::new(0x89).rex_64b_if(matches!(self.0, RegSize::R64)).modrm_rm_direct(self.1).modrm_reg(self.2),
             None,
             (fmt.write_fmt(core::format_args!("mov {}, {}", self.1.name_from(self.0), self.2.name_from(self.0)))),
 
         movsx_8_to_64(RegSize, Reg, Reg) =>
-            Inst::new(0xbe).op_alt().rex_64b().modrm_rm_direct(self.2).modrm_reg(self.1).encode(),
+            Inst::new(0xbe).op_alt().rex_64b().modrm_rm_direct(self.2).modrm_reg(self.1),
             None,
             (fmt.write_fmt(core::format_args!("movsx {}, {}", self.1.name(), self.2.name8()))),
 
         movsx_16_to_64(RegSize, Reg, Reg) =>
-            Inst::new(0xbf).op_alt().rex_64b().modrm_rm_direct(self.2).modrm_reg(self.1).encode(),
+            Inst::new(0xbf).op_alt().rex_64b().modrm_rm_direct(self.2).modrm_reg(self.1),
             None,
             (fmt.write_fmt(core::format_args!("movsx {}, {}", self.1.name(), self.2.name16()))),
 
         movzx_16_to_64(RegSize, Reg, Reg) =>
-            Inst::new(0xb7).op_alt().rex_64b().modrm_rm_direct(self.2).modrm_reg(self.1).encode(),
+            Inst::new(0xb7).op_alt().rex_64b().modrm_rm_direct(self.2).modrm_reg(self.1),
             None,
             (fmt.write_fmt(core::format_args!("movzx {}, {}", self.1.name(), self.2.name16()))),
 
         movsxd_32_to_64(Reg, Reg) =>
-            Inst::new(0x63).rex_64b().modrm_rm_direct(self.1).modrm_reg(self.0).encode(),
+            Inst::new(0x63).rex_64b().modrm_rm_direct(self.1).modrm_reg(self.0),
             None,
             (fmt.write_fmt(core::format_args!("movsxd {}, {}", self.0.name(), self.1.name32()))),
 
         mov_imm64(Reg, u64) =>
             {
-                if self.1 <= 0x7fffffff {
-                    mov_imm(RegMem::Reg(self.0), ImmKind::I32(self.1 as u32)).encode()
+                if self.1 <= 0xffffffff {
+                    crate::misc::InstructionOrBuffer::from(mov_imm(RegMem::Reg(self.0), ImmKind::I32(self.1 as u32)))
                 } else {
                     let xs = self.1.to_le_bytes();
-                    InstBuf::from_array([
+                    crate::misc::InstructionOrBuffer::from(InstBuf::from_array([
                         REX_64B_OP | self.0.rex_bit(),
                         0xb8 | self.0.modrm_rm_bits(),
                         xs[0], xs[1], xs[2], xs[3], xs[4], xs[5], xs[6], xs[7]
-                    ])
+                    ]))
                 }
             },
             None,
             ({
-                if self.1 <= 0x7fffffff {
+                if self.1 <= 0xffffffff {
                     mov_imm(RegMem::Reg(self.0), ImmKind::I32(self.1 as u32)).fmt(fmt)
                 } else {
                     fmt.write_fmt(core::format_args!("mov {}, 0x{:x}", self.0, self.1))
@@ -1358,14 +1430,14 @@ pub mod inst {
         mov_imm(RegMem, ImmKind) =>
             {
                 match self.0 {
-                    RegMem::Mem(..) => new_rm_imm(0xc6, self.0, self.1).encode(),
+                    RegMem::Mem(..) => new_rm_imm(0xc6, self.0, self.1),
                     RegMem::Reg(reg) => {
                         match self.1 {
                             ImmKind::I8(value) => Inst::with_reg_in_op(0xb0, reg).imm8(value).rex_if(!matches!(reg, Reg::rax | Reg::rcx | Reg::rdx | Reg::rbx)),
                             ImmKind::I16(value) => Inst::with_reg_in_op(0xb8, reg).imm16(value).override_op_size(),
                             ImmKind::I32(value) => Inst::with_reg_in_op(0xb8, reg).imm32(value),
                             ImmKind::I64(..) => new_rm_imm(0xc6, self.0, self.1),
-                        }.encode()
+                        }
                     }
                 }
             },
@@ -1373,7 +1445,7 @@ pub mod inst {
             (display_with_operands(fmt, "mov", Operands::RegMem_Imm(self.0, self.1))),
 
         store(Size, MemOp, Reg) =>
-            new_rm(0x88, self.0, RegMem::Mem(self.1), Some(self.2)).encode(),
+            new_rm(0x88, self.0, RegMem::Mem(self.1), Some(self.2)),
             None,
             (fmt.write_fmt(core::format_args!("mov {}, {}", self.1, self.2.name_from_size(self.0)))),
 
@@ -1405,7 +1477,6 @@ pub mod inst {
                 inst
                     .modrm_reg(self.1)
                     .mem(self.2)
-                    .encode()
             },
             None,
             ({
@@ -1432,14 +1503,13 @@ pub mod inst {
                     .rex_64b_if(matches!(self.1, RegSize::R64))
                     .modrm_reg(self.2)
                     .regmem(self.3)
-                    .encode()
             },
             None,
             (fmt.write_fmt(core::format_args!("cmov{} {}, {}", self.0.suffix(), self.2.name_from(self.1), self.3.display_without_prefix(Size::from(self.1))))),
 
         // https://www.felixcloutier.com/x86/xchg
         xchg_mem(RegSize, Reg, MemOp) =>
-            Inst::new(0x87).rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).mem(self.2).encode(),
+            Inst::new(0x87).rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).mem(self.2),
             None,
             (fmt.write_fmt(core::format_args!("xchg {}, {}", self.1.name_from(self.0), self.2))),
 
@@ -1451,13 +1521,13 @@ pub mod inst {
 
         // https://www.felixcloutier.com/x86/inc
         inc(Size, RegMem) =>
-            new_rm(0xfe, self.0, self.1, None).encode(),
+            new_rm(0xfe, self.0, self.1, None),
             None,
             (fmt.write_fmt(core::format_args!("inc {}", self.1.display(self.0)))),
 
         // https://www.felixcloutier.com/x86/dec
         dec(Size, RegMem) =>
-            new_rm(0xfe, self.0, self.1, None).modrm_opext(0b001).encode(),
+            new_rm(0xfe, self.0, self.1, None).modrm_opext(0b001),
             None,
             (fmt.write_fmt(core::format_args!("dec {}", self.1.display(self.0)))),
 
@@ -1487,7 +1557,7 @@ pub mod inst {
 
         // https://www.felixcloutier.com/x86/bts
         bts(RegSize, RegMem, u8) =>
-            Inst::new(0xba).op_alt().modrm_opext(0b101).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).imm8(self.2).encode(),
+            Inst::new(0xba).op_alt().modrm_opext(0b101).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).imm8(self.2),
             None,
             ({
                 match self.0 {
@@ -1498,13 +1568,13 @@ pub mod inst {
 
         // https://www.felixcloutier.com/x86/neg
         neg(Size, RegMem) =>
-            new_rm(0xf6, self.0, self.1, None).modrm_opext(0b011).encode(),
+            new_rm(0xf6, self.0, self.1, None).modrm_opext(0b011),
             None,
             (fmt.write_fmt(core::format_args!("neg {}", self.1.display(self.0)))),
 
         // https://www.felixcloutier.com/x86/not
         not(Size, RegMem) =>
-            new_rm(0xf6, self.0, self.1, None).modrm_opext(0b010).encode(),
+            new_rm(0xf6, self.0, self.1, None).modrm_opext(0b010),
             None,
             (fmt.write_fmt(core::format_args!("not {}", self.1.display(self.0)))),
 
@@ -1516,72 +1586,116 @@ pub mod inst {
 
         // https://www.felixcloutier.com/x86/sal:sar:shl:shr
         sar_cl(RegSize, RegMem) =>
-            Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b111).encode(),
+            Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b111),
             None,
             (fmt.write_fmt(core::format_args!("sar {}, cl", self.1.display(Size::from(self.0))))),
 
         sar_imm(RegSize, RegMem, u8) =>
-            {
-                if self.2 == 1 {
-                    Inst::new(0xd1)
-                } else {
-                    Inst::new(0xc1).imm8(self.2)
-                }.rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b111).encode()
-            },
+            Inst::new(0xc1).imm8(self.2).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b111),
             None,
             (fmt.write_fmt(core::format_args!("sar {}, 0x{:x}", self.1.display(Size::from(self.0)), self.2))),
 
+        sar_imm_1(RegSize, RegMem) =>
+            Inst::new(0xd1).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b111),
+            None,
+            (fmt.write_fmt(core::format_args!("sar {}, 0x1", self.1.display(Size::from(self.0))))),
+
         shl_cl(RegSize, RegMem) =>
-            Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b100).encode(),
+            Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b100),
             None,
             (fmt.write_fmt(core::format_args!("shl {}, cl", self.1.display(Size::from(self.0))))),
 
         shl_imm(RegSize, RegMem, u8) =>
-            {
-                if self.2 == 1 {
-                    Inst::new(0xd1)
-                } else {
-                    Inst::new(0xc1).imm8(self.2)
-                }.rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b100).encode()
-            },
+            Inst::new(0xc1).imm8(self.2).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b100),
             None,
             (fmt.write_fmt(core::format_args!("shl {}, 0x{:x}", self.1.display(Size::from(self.0)), self.2))),
 
+        shl_imm_1(RegSize, RegMem) =>
+            Inst::new(0xd1).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b100),
+            None,
+            (fmt.write_fmt(core::format_args!("shl {}, 0x1", self.1.display(Size::from(self.0))))),
+
         shr_cl(RegSize, RegMem) =>
-            Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b101).encode(),
+            Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b101),
             None,
             (fmt.write_fmt(core::format_args!("shr {}, cl", self.1.display(Size::from(self.0))))),
 
         shr_imm(RegSize, RegMem, u8) =>
-            {
-                if self.2 == 1 {
-                    Inst::new(0xd1)
-                } else {
-                    Inst::new(0xc1).imm8(self.2)
-                }.rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b101).encode()
-            },
+            Inst::new(0xc1).imm8(self.2).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b101),
             None,
             (fmt.write_fmt(core::format_args!("shr {}, 0x{:x}", self.1.display(Size::from(self.0)), self.2))),
 
+        shr_imm_1(RegSize, RegMem) =>
+            Inst::new(0xd1).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b101),
+            None,
+            (fmt.write_fmt(core::format_args!("shr {}, 0x1", self.1.display(Size::from(self.0))))),
+
+        // https://www.felixcloutier.com/x86/sarx:shlx:shrx
+        shlx(RegSize, Reg, RegMem, Reg) =>
+            Inst::new(0xf7)
+                .vex(0b00010, self.3, 0b01)
+                .rex_64b_if(matches!(self.0, RegSize::R64))
+                .modrm_reg(self.1)
+                .regmem(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("shlx {}, {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0)), self.3.name_from(self.0)))),
+
+        shrx(RegSize, Reg, RegMem, Reg) =>
+            Inst::new(0xf7)
+                .vex(0b00010, self.3, 0b11)
+                .rex_64b_if(matches!(self.0, RegSize::R64))
+                .modrm_reg(self.1)
+                .regmem(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("shrx {}, {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0)), self.3.name_from(self.0)))),
+
+        sarx(RegSize, Reg, RegMem, Reg) =>
+            Inst::new(0xf7)
+                .vex(0b00010, self.3, 0b10)
+                .rex_64b_if(matches!(self.0, RegSize::R64))
+                .modrm_reg(self.1)
+                .regmem(self.2),
+            None,
+            (fmt.write_fmt(core::format_args!("sarx {}, {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0)), self.3.name_from(self.0)))),
+
+        // https://www.felixcloutier.com/x86/andn
+        andn(RegSize, Reg, Reg, RegMem) =>
+            Inst::new(0xf2)
+                .vex(0b00010, self.2, 0b00)
+                .rex_64b_if(matches!(self.0, RegSize::R64))
+                .modrm_reg(self.1)
+                .regmem(self.3),
+            None,
+            (fmt.write_fmt(core::format_args!("andn {}, {}, {}", self.1.name_from(self.0), self.2.name_from(self.0), self.3.display_without_prefix(Size::from(self.0))))),
+
+        // https://www.felixcloutier.com/x86/mulx
+        mulx(RegSize, Reg, Reg, RegMem) =>
+            Inst::new(0xf6)
+                .vex(0b00010, self.2, 0b11)
+                .rex_64b_if(matches!(self.0, RegSize::R64))
+                .modrm_reg(self.1)
+                .regmem(self.3),
+            None,
+            (fmt.write_fmt(core::format_args!("mulx {}, {}, {}", self.1.name_from(self.0), self.2.name_from(self.0), self.3.display_without_prefix(Size::from(self.0))))),
+
         // https://www.felixcloutier.com/x86/rcl:rcr:rol:ror
         ror_imm(RegSize, RegMem, u8) =>
-            {
-                if self.2 == 1 {
-                    Inst::new(0xd1)
-                } else {
-                    Inst::new(0xc1).imm8(self.2)
-                }.rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b001).encode()
-            },
+            Inst::new(0xc1).imm8(self.2).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b001),
             None,
             (fmt.write_fmt(core::format_args!("ror {}, 0x{:x}", self.1.display(Size::from(self.0)), self.2))),
 
+        ror_imm_1(RegSize, RegMem) =>
+            Inst::new(0xd1).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b001),
+            None,
+            (fmt.write_fmt(core::format_args!("ror {}, 0x1", self.1.display(Size::from(self.0))))),
+
         rol_cl(RegSize, RegMem) =>
-            Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b000).encode(),
+            Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b000),
             None,
             (fmt.write_fmt(core::format_args!("rol {}, cl", self.1.display(Size::from(self.0))))),
 
         ror_cl(RegSize, RegMem) =>
-            Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b001).encode(),
+            Inst::new(0xd3).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b001),
             None,
             (fmt.write_fmt(core::format_args!("ror {}, cl", self.1.display(Size::from(self.0))))),
 
@@ -1591,7 +1705,7 @@ pub mod inst {
                     Inst::new(0xd1)
                 } else {
                     Inst::new(0xc1).imm8(self.2)
-                }.rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b011).encode()
+                }.rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).modrm_opext(0b011)
             },
             None,
             (fmt.write_fmt(core::format_args!("rcr {}, 0x{:x}", self.1.display(Size::from(self.0)), self.2))),
@@ -1602,7 +1716,7 @@ pub mod inst {
                 Inst::new(0xb8)
                     .op_rep_prefix()
                     .op_alt()
-                    .rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2).encode()
+                    .rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2)
             },
             None,
             (fmt.write_fmt(core::format_args!("popcnt {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0))))),
@@ -1613,7 +1727,7 @@ pub mod inst {
             Inst::new(0xbd)
                 .op_rep_prefix()
                 .op_alt()
-                .rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2).encode()
+                .rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2)
         },
         None,
         (fmt.write_fmt(core::format_args!("lzcnt {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0))))),
@@ -1624,7 +1738,7 @@ pub mod inst {
             Inst::new(0xbc)
                 .op_rep_prefix()
                 .op_alt()
-                .rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2).encode()
+                .rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2)
         },
         None,
         (fmt.write_fmt(core::format_args!("tzcnt {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0))))),
@@ -1634,7 +1748,7 @@ pub mod inst {
         {
             Inst::with_reg_in_op(0xc8, self.1)
                 .op_alt()
-                .rex_64b_if(matches!(self.0, RegSize::R64)).encode()
+                .rex_64b_if(matches!(self.0, RegSize::R64))
         },
         None,
         (fmt.write_fmt(core::format_args!("bswap {}", self.1.name_from(self.0)))),
@@ -1644,8 +1758,8 @@ pub mod inst {
             {
                 match self.0 {
                     Operands::RegMem_Reg(size, regmem, reg) |
-                    Operands::Reg_RegMem(size, reg, regmem) => new_rm(0x84, size, regmem, Some(reg)).encode(),
-                    Operands::RegMem_Imm(regmem, imm) => new_rm_imm(0xf6, regmem, imm).encode(),
+                    Operands::Reg_RegMem(size, reg, regmem) => new_rm(0x84, size, regmem, Some(reg)),
+                    Operands::RegMem_Imm(regmem, imm) => new_rm_imm(0xf6, regmem, imm),
                 }
             },
             None,
@@ -1660,7 +1774,7 @@ pub mod inst {
 
         // https://www.felixcloutier.com/x86/imul
         imul(RegSize, Reg, RegMem) =>
-            Inst::new(0xaf).op_alt().rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2).encode(),
+            Inst::new(0xaf).op_alt().rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2),
             None,
             (fmt.write_fmt(core::format_args!("imul {}, {}", self.1.name_from(self.0), self.2.display_without_prefix(Size::from(self.0))))),
 
@@ -1671,7 +1785,7 @@ pub mod inst {
                     Inst::new(0x6b).imm8(value as u8)
                 } else {
                     Inst::new(0x69).imm32(value as u32)
-                }.rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2).encode()
+                }.rex_64b_if(matches!(self.0, RegSize::R64)).modrm_reg(self.1).regmem(self.2)
             },
             None,
             ({
@@ -1696,41 +1810,41 @@ pub mod inst {
             }),
 
         imul_dx_ax(RegSize, RegMem) =>
-            Inst::new(0xf7).modrm_opext(0b101).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).encode(),
+            Inst::new(0xf7).modrm_opext(0b101).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1),
             None,
             (fmt.write_fmt(core::format_args!("imul {}", self.1.display(Size::from(self.0))))),
 
         // https://www.felixcloutier.com/x86/mul
         mul(RegSize, RegMem) =>
-            Inst::new(0xf7).modrm_opext(0b100).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).encode(),
+            Inst::new(0xf7).modrm_opext(0b100).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1),
             None,
             (fmt.write_fmt(core::format_args!("mul {}", self.1.display(Size::from(self.0))))),
 
         mul_dx_ax(RegSize, RegMem) =>
-            Inst::new(0xf7).modrm_opext(0b100).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).encode(),
+            Inst::new(0xf7).modrm_opext(0b100).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1),
             None,
             (fmt.write_fmt(core::format_args!("mul {}", self.1.display(Size::from(self.0))))),
 
         // https://www.felixcloutier.com/x86/div
         div(RegSize, RegMem) =>
-            Inst::new(0xf7).modrm_opext(0b110).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).encode(),
+            Inst::new(0xf7).modrm_opext(0b110).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1),
             None,
             (fmt.write_fmt(core::format_args!("div {}", self.1.display(Size::from(self.0))))),
 
         // https://www.felixcloutier.com/x86/idiv
         idiv(RegSize, RegMem) =>
-            Inst::new(0xf7).modrm_opext(0b111).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1).encode(),
+            Inst::new(0xf7).modrm_opext(0b111).rex_64b_if(matches!(self.0, RegSize::R64)).regmem(self.1),
             None,
             (fmt.write_fmt(core::format_args!("idiv {}", self.1.display(Size::from(self.0))))),
 
         // https://www.felixcloutier.com/x86/cwd:cdq:cqo
         cdq() =>
-            Inst::new(0x99).encode(),
+            Inst::new(0x99),
             None,
             (fmt.write_str("cdq")),
 
         cqo() =>
-            Inst::new(0x99).rex_64b().encode(),
+            Inst::new(0x99).rex_64b(),
             None,
             (fmt.write_str("cqo")),
 
@@ -1741,7 +1855,6 @@ pub mod inst {
                     .rex_if(!matches!(self.1, RegMem::Reg(Reg::rax | Reg::rcx | Reg::rdx | Reg::rbx)))
                     .op_alt()
                     .regmem(self.1)
-                    .encode()
             },
             None,
             (fmt.write_fmt(core::format_args!("set{} {}", self.0.suffix(), self.1.display_without_prefix(Size::U8)))),
@@ -1751,7 +1864,7 @@ pub mod inst {
             Inst::new(0x8d)
                 .rex_64b_if(matches!(self.0, RegSize::R64))
                 .modrm_reg(self.1)
-                .mem(self.2).encode(),
+                .mem(self.2),
             None,
             (fmt.write_fmt(core::format_args!("lea {}, {}", self.1.name_from(self.0), self.2))),
 
@@ -1787,7 +1900,7 @@ pub mod inst {
 
         // https://www.felixcloutier.com/x86/call
         call(RegMem) => {
-            Inst::new(0xff).modrm_opext(0b010).regmem(self.0).encode()
+            Inst::new(0xff).modrm_opext(0b010).regmem(self.0)
         },
         None,
         ({
@@ -1798,13 +1911,13 @@ pub mod inst {
         }),
 
         call_rel32(i32) =>
-            Inst::new(0xe8).imm32(self.0 as u32).encode(),
+            Inst::new(0xe8).imm32(self.0 as u32),
             None,
             (fmt.write_fmt(core::format_args!("call 0x{:x}", i64::from(self.0).wrapping_add(5)))),
 
         // https://www.felixcloutier.com/x86/jmp
         jmp(RegMem) => {
-            Inst::new(0xff).modrm_opext(0b100).regmem(self.0).encode()
+            Inst::new(0xff).modrm_opext(0b100).regmem(self.0)
         },
         None,
         ({
@@ -1815,29 +1928,29 @@ pub mod inst {
         }),
 
         jmp_rel8(i8) =>
-            Inst::new(0xeb).imm8(self.0 as u8).encode(),
+            Inst::new(0xeb).imm8(self.0 as u8),
             None,
             (fmt.write_fmt(core::format_args!("jmp short 0x{:x}", i64::from(self.0).wrapping_add(2)))),
 
         jmp_rel32(i32) =>
-            Inst::new(0xe9).imm32(self.0 as u32).encode(),
+            Inst::new(0xe9).imm32(self.0 as u32),
             None,
             (fmt.write_fmt(core::format_args!("jmp 0x{:x}", i64::from(self.0).wrapping_add(5)))),
 
         // https://www.felixcloutier.com/x86/jcc
         jcc_rel8(Condition, i8) =>
-            Inst::new(0x70 | self.0 as u8).imm8(self.1 as u8).encode(),
+            Inst::new(0x70 | self.0 as u8).imm8(self.1 as u8),
             None,
             (fmt.write_fmt(core::format_args!("j{} short 0x{:x}", self.0.suffix(), i64::from(self.1).wrapping_add(2)))),
 
         jcc_rel32(Condition, i32) =>
-            Inst::new(0x80 | self.0 as u8).op_alt().imm32(self.1 as u32).encode(),
+            Inst::new(0x80 | self.0 as u8).op_alt().imm32(self.1 as u32),
             None,
             (fmt.write_fmt(core::format_args!("j{} near 0x{:x}", self.0.suffix(), i64::from(self.1).wrapping_add(6)))),
 
         // (label instructions)
         jmp_label8(Label) =>
-            ud2().encode(),
+            ud2(),
             Some((self.0, FixupKind::new_1(0xeb, 1))),
             (fmt.write_fmt(core::format_args!("jmp {}", self.0))),
 
@@ -1852,7 +1965,7 @@ pub mod inst {
             (fmt.write_fmt(core::format_args!("call {}", self.0))),
 
         jcc_label8(Condition, Label) =>
-            ud2().encode(),
+            ud2(),
             Some((self.1, FixupKind::new_1(0x70 | self.0 as u32, 1))),
             (fmt.write_fmt(core::format_args!("j{} {}", self.0.suffix(), self.1))),
 
@@ -1862,7 +1975,7 @@ pub mod inst {
             (fmt.write_fmt(core::format_args!("j{} {}", self.0.suffix(), self.1))),
 
         jcc_label32_default(Condition, Label, i32) =>
-            Inst::new(0x80 | self.0 as u8).op_alt().imm32(self.2 as u32).encode(),
+            Inst::new(0x80 | self.0 as u8).op_alt().imm32(self.2 as u32),
             Some((self.1, FixupKind::new_2([0x0f, 0x80 | self.0 as u32], 4))),
             (fmt.write_fmt(core::format_args!("j{} {} or near 0x{:x}", self.0.suffix(), self.1, i64::from(self.2).wrapping_add(6)))),
 
@@ -2343,9 +2456,9 @@ mod tests {
             }
         }
 
-        fn run<T>(&mut self, inst: crate::Instruction<T>)
+        fn run<T>(&mut self, inst: T)
         where
-            T: Copy + core::fmt::Display + core::fmt::Debug,
+            T: crate::misc::InstructionT + core::fmt::Debug,
         {
             use core::fmt::Write;
 
@@ -2381,11 +2494,7 @@ mod tests {
                 fn $inst_name() {
                     let mut test = TestAsm::new();
                     <super::inst::types::$inst_name as GenerateTestValues>::generate_test_values(|instruction| {
-                        test.run(crate::Instruction {
-                            bytes: instruction.encode(),
-                            fixup: None,
-                            instruction
-                        })
+                        test.run(instruction)
                     });
                 }
             )+
@@ -2444,6 +2553,7 @@ mod tests {
         nop9,
         not,
         or,
+        pause,
         pop,
         push,
         push_imm,
@@ -2452,10 +2562,17 @@ mod tests {
         rdtscp,
         ret,
         ror_imm,
+        ror_imm_1,
         rol_cl,
         ror_cl,
         sar_cl,
         sar_imm,
+        sar_imm_1,
+        shlx,
+        shrx,
+        sarx,
+        mulx,
+        andn,
         popcnt,
         lzcnt,
         tzcnt,
@@ -2463,8 +2580,10 @@ mod tests {
         bswap,
         shl_cl,
         shl_imm,
+        shl_imm_1,
         shr_cl,
         shr_imm,
+        shr_imm_1,
         store,
         sub,
         syscall,

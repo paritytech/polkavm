@@ -1,8 +1,9 @@
+#![deny(clippy::arithmetic_side_effects)]
 use polkavm_common::abi::{MemoryMapBuilder, VM_CODE_ADDRESS_ALIGNMENT, VM_MAX_PAGE_SIZE, VM_MIN_PAGE_SIZE};
 use polkavm_common::cast::cast;
 use polkavm_common::program::{
-    self, FrameKind, Instruction, InstructionFormat, InstructionSet, InstructionSetKind, LineProgramOp, Opcode, ProgramBlob,
-    ProgramCounter, ProgramSymbol,
+    self, FrameKind, Instruction, InstructionFormat, InstructionSet, InstructionSetKind, LineProgramConfig, LineProgramOp, Opcode,
+    ProgramBlob, ProgramCounter, ProgramSymbol,
 };
 use polkavm_common::utils::{align_to_next_page_u32, align_to_next_page_u64};
 use polkavm_common::varint;
@@ -19,6 +20,8 @@ use crate::fast_range_map::RangeMap;
 use crate::riscv::DecoderConfig;
 use crate::riscv::Reg as RReg;
 use crate::riscv::{AtomicKind, BranchKind, CmovKind, Inst, LoadKind, RegImmKind, StoreKind};
+
+static OVERFLOW: &str = "internal error: numerical overflow; this is a bug - please report it";
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 #[repr(u8)]
@@ -312,7 +315,7 @@ impl SourceStack {
     }
 
     fn overlay_on_top_of(&self, stack: &SourceStack) -> Self {
-        let mut vec = Vec::with_capacity(self.0.len() + stack.0.len());
+        let mut vec = Vec::with_capacity(self.0.len().checked_add(stack.0.len()).expect(OVERFLOW));
         vec.extend(self.0.iter().copied());
         vec.extend(stack.0.iter().copied());
 
@@ -338,7 +341,12 @@ impl SourceStack {
             write!(&mut out, "{}", source).unwrap();
             if let Some((origin, name)) = section_to_function_name.range(..=source.begin()).next_back() {
                 if origin.section_index == source.section_index {
-                    write!(&mut out, " \"{name}\"+{}", source.offset_range.start - origin.offset).unwrap();
+                    write!(
+                        &mut out,
+                        " \"{name}\"+{}",
+                        source.offset_range.start.checked_sub(origin.offset).expect(OVERFLOW)
+                    )
+                    .unwrap();
                 }
             }
         }
@@ -432,9 +440,9 @@ impl From<SectionTarget> for SectionIndex {
 fn extract_delimited<'a>(str: &mut &'a str, prefix: &str, suffix: &str) -> Option<(&'a str, &'a str)> {
     let original = *str;
     let start_of_prefix = str.find(prefix)?;
-    let start = start_of_prefix + prefix.len();
-    let end = str[start..].find(suffix)? + start;
-    *str = &str[end + suffix.len()..];
+    let start = start_of_prefix.checked_add(prefix.len()).expect(OVERFLOW);
+    let end = str[start..].find(suffix)?.checked_add(start).expect(OVERFLOW);
+    *str = &str[end.checked_add(suffix.len()).expect(OVERFLOW)..];
     Some((&original[..start_of_prefix], &original[start..end]))
 }
 
@@ -470,7 +478,7 @@ impl SectionTarget {
                             };
                             section_index == target.section_index.raw()
                                 && offset >= target.offset
-                                && offset < (target.offset + symbol.size())
+                                && offset < target.offset.checked_add(symbol.size()).expect(OVERFLOW)
                         });
 
                         let section_name = section.name();
@@ -481,7 +489,7 @@ impl SectionTarget {
                                     &mut output,
                                     ": '{}'+{}",
                                     symbol_name,
-                                    offset - symbol.section_target().unwrap().offset
+                                    offset.checked_sub(symbol.section_target().unwrap().offset).expect(OVERFLOW)
                                 )
                                 .unwrap();
                             }
@@ -501,7 +509,7 @@ impl SectionTarget {
     fn add(self, offset: u64) -> Self {
         SectionTarget {
             section_index: self.section_index,
-            offset: self.offset + offset,
+            offset: self.offset.checked_add(offset).expect(OVERFLOW),
         }
     }
 
@@ -597,7 +605,7 @@ mod absolute_target {
 
         pub(super) fn place(self) -> Place {
             if self.0.section_index == SectionIndex::LITERAL_ADDRESS {
-                Place::Address(cast(self.0.offset).assert_always_fits_in_u32())
+                Place::Address(cast(self.0.offset).to_u32_or_panic())
             } else {
                 Place::Section(self.0)
             }
@@ -912,7 +920,7 @@ impl<T> BasicInst<T> {
             .clone()
             .map_register(|reg, kind| {
                 list[length] = Some((reg, kind));
-                length += 1;
+                length = length.checked_add(1).expect(OVERFLOW);
                 reg
             })
             .is_none();
@@ -925,12 +933,12 @@ impl<T> BasicInst<T> {
 
             for reg in import.src_mask() {
                 list[length] = Some((reg, OpKind::Read));
-                length += 1;
+                length = length.checked_add(1).expect(OVERFLOW);
             }
 
             for reg in import.dst_mask() {
                 list[length] = Some((reg, OpKind::Write));
-                length += 1;
+                length = length.checked_add(1).expect(OVERFLOW);
             }
         };
 
@@ -1203,28 +1211,28 @@ fn split_function_name(name: &str) -> (String, String) {
     if with_hash.contains("::") {
         let suffix_index = {
             let mut found = None;
-            let mut depth = 0;
+            let mut depth: usize = 0;
             let mut last = '\0';
             let mut index = without_hash.len();
             for ch in without_hash.chars().rev() {
                 if ch == '>' {
-                    depth += 1;
+                    depth = depth.checked_add(1).expect(OVERFLOW);
                 } else if ch == '<' {
-                    depth -= 1;
+                    depth = depth.checked_sub(1).expect(OVERFLOW);
                 } else if ch == ':' && depth == 0 && last == ':' {
-                    found = Some(index + 1);
+                    found = Some(index.checked_add(1).expect(OVERFLOW));
                     break;
                 }
 
                 last = ch;
-                index -= ch.len_utf8();
+                index = index.checked_sub(ch.len_utf8()).expect(OVERFLOW);
             }
 
             found
         };
 
         if let Some(suffix_index) = suffix_index {
-            let prefix = &with_hash[..suffix_index - 2];
+            let prefix = &with_hash[..suffix_index.checked_sub(2).expect(OVERFLOW)];
             let suffix = &with_hash[suffix_index..];
             return (prefix.to_owned(), suffix.to_owned());
         } else {
@@ -1261,11 +1269,11 @@ struct MemoryConfig {
 }
 
 fn get_padding(memory_end: u64, align: u64) -> Option<u64> {
-    let misalignment = memory_end % align;
+    let misalignment = memory_end.checked_rem(align).expect(OVERFLOW);
     if misalignment == 0 {
         None
     } else {
-        Some(align - misalignment)
+        Some(align.checked_sub(misalignment).expect(OVERFLOW))
     }
 }
 
@@ -1281,7 +1289,7 @@ fn process_sections(
         assert!(section.size() >= section.data().len() as u64);
 
         if let Some(padding) = get_padding(*current_address, section.align()) {
-            *current_address += padding;
+            *current_address = current_address.checked_add(padding).expect(OVERFLOW);
             chunks.push(DataRef::Padding(padding as usize));
         }
 
@@ -1289,7 +1297,7 @@ fn process_sections(
         let section_base_address = *current_address;
         base_address_for_section.insert(section.index(), section_base_address);
 
-        *current_address += section.size();
+        *current_address = current_address.checked_add(section.size()).expect(OVERFLOW);
         if !section.data().is_empty() {
             chunks.push(DataRef::Section {
                 section_index: section.index(),
@@ -1297,18 +1305,18 @@ fn process_sections(
             });
         }
 
-        let padding = section.size() - section.data().len() as u64;
+        let padding = section.size().checked_sub(section.data().len() as u64).expect(OVERFLOW);
         if padding > 0 {
-            chunks.push(DataRef::Padding(padding.try_into().expect("overflow")))
+            chunks.push(DataRef::Padding(padding.try_into().expect(OVERFLOW)))
         }
 
         log::trace!(
             "Found section: '{}', original range = 0x{:x}..0x{:x} (relocated to: 0x{:x}..0x{:x}), size = 0x{:x}/0x{:x}",
             section_name,
             section.original_address(),
-            section.original_address() + section.size(),
+            section.original_address().checked_add(section.size()).expect(OVERFLOW),
             section_base_address,
-            section_base_address + section.size(),
+            section_base_address.checked_add(section.size()).expect(OVERFLOW),
             section.data().len(),
             section.size(),
         );
@@ -1319,9 +1327,9 @@ fn process_sections(
         chunks.pop();
     }
 
-    *current_address = align_to_next_page_u64(u64::from(VM_MAX_PAGE_SIZE), *current_address).expect("overflow");
+    *current_address = align_to_next_page_u64(u64::from(VM_MAX_PAGE_SIZE), *current_address).expect(OVERFLOW);
     // Add a guard page between this section and the next one.
-    *current_address += u64::from(VM_MAX_PAGE_SIZE);
+    *current_address = current_address.checked_add(u64::from(VM_MAX_PAGE_SIZE)).expect(OVERFLOW);
 
     size_in_memory
 }
@@ -1375,13 +1383,13 @@ fn extract_memory_config(
 
     log::trace!("Configured minimum stack size: 0x{min_stack_size:x}");
 
-    let ro_data_size = u32::try_from(ro_data_size).expect("overflow");
-    let rw_data_size = u32::try_from(rw_data_size).expect("overflow");
+    let ro_data_size = u32::try_from(ro_data_size).expect(OVERFLOW);
+    let rw_data_size = u32::try_from(rw_data_size).expect(OVERFLOW);
 
     // Sanity check that the memory configuration is actually valid.
     let heap_base = {
         let rw_data_size_physical: u64 = rw_data.iter().map(|x| x.size() as u64).sum();
-        let rw_data_size_physical = u32::try_from(rw_data_size_physical).expect("overflow");
+        let rw_data_size_physical = u32::try_from(rw_data_size_physical).expect(OVERFLOW);
         assert!(rw_data_size_physical <= rw_data_size);
 
         let config = match MemoryMapBuilder::new(VM_MAX_PAGE_SIZE)
@@ -1866,12 +1874,14 @@ fn resolve_simple_zero_register_usage(
     dst: Reg,
     src1: RReg,
     src2: RReg,
+    rv64: bool,
     mut emit: impl FnMut(InstExt<SectionTarget, SectionTarget>),
 ) -> bool {
     use crate::riscv::RegRegKind as K;
+    let xor = if rv64 { AnyAnyKind::Xor64 } else { AnyAnyKind::Xor32 };
     if kind == K::OrInverted && src1 == RReg::Zero && src2 != RReg::Zero {
         emit(InstExt::Basic(BasicInst::AnyAny {
-            kind: AnyAnyKind::Xor32,
+            kind: xor,
             dst,
             src1: RegImm::Imm(!0),
             src2: cast_reg_any(src2).unwrap(),
@@ -1881,7 +1891,7 @@ fn resolve_simple_zero_register_usage(
 
     if kind == K::Xnor && src1 == RReg::Zero && src2 != RReg::Zero {
         emit(InstExt::Basic(BasicInst::AnyAny {
-            kind: AnyAnyKind::Xor32,
+            kind: xor,
             dst,
             src1: RegImm::Imm(!0),
             src2: cast_reg_any(src2).unwrap(),
@@ -1891,7 +1901,7 @@ fn resolve_simple_zero_register_usage(
 
     if kind == K::Xnor && src1 != RReg::Zero && src2 == RReg::Zero {
         emit(InstExt::Basic(BasicInst::AnyAny {
-            kind: AnyAnyKind::Xor32,
+            kind: xor,
             dst,
             src1: cast_reg_any(src1).unwrap(),
             src2: RegImm::Imm(!0),
@@ -1908,9 +1918,14 @@ fn resolve_simple_zero_register_usage(
         let tmp = Reg::E2;
         let src1 = cast_reg_any(src1).unwrap();
         let src2 = cast_reg_any(src2).unwrap();
+        let less_than = if rv64 {
+            AnyAnyKind::SetLessThanSigned64
+        } else {
+            AnyAnyKind::SetLessThanSigned32
+        };
         let (kind, cmp_src1, cmp_src2) = match kind {
-            K::Minimum => (AnyAnyKind::SetLessThanSigned32, src1, src2),
-            K::Maximum => (AnyAnyKind::SetLessThanSigned32, src2, src1),
+            K::Minimum => (less_than, src1, src2),
+            K::Maximum => (less_than, src2, src1),
             _ => unreachable!(),
         };
 
@@ -2021,7 +2036,7 @@ fn emit_or_combine_byte(
 /// (Not `AddressRange::is_overlapping`: its exclusive `end` can't hold 2^64.)
 fn ranges_overlap(address: u64, width: u64, start: u64, size: u64) -> bool {
     let (address, start) = (u128::from(address), u128::from(start));
-    address < start + u128::from(size) && start < address + u128::from(width)
+    address < start.wrapping_add(u128::from(size)) && start < address.wrapping_add(u128::from(width))
 }
 
 /// Links an access or jump through `x0`, whose address is its sign-extended 12-bit offset - so the
@@ -2043,9 +2058,9 @@ fn zero_register_address(
     // A 12-bit signed immediate: so the address can only be in the bottom or the top 2 KiB.
     debug_assert!((-2048..2048).contains(&offset), "{what} offset {offset} is not a 12-bit immediate");
     let address = if elf.is_64() {
-        cast(offset).to_u64_sign_extend()
+        cast(cast(offset).to_i64_sign_extend()).bitwise_as_u64()
     } else {
-        u64::from(cast(offset).to_unsigned())
+        u64::from(cast(offset).bitwise_as_u32())
     };
 
     if let Some(section) = guard_sections
@@ -2065,7 +2080,7 @@ fn zero_register_address(
         current_location.fmt_human_readable(elf),
     );
 
-    Ok(cast(offset).to_unsigned())
+    Ok(cast(offset).bitwise_as_u32())
 }
 
 fn convert_instruction(
@@ -2392,7 +2407,7 @@ fn convert_instruction(
                 };
             }
 
-            if resolve_simple_zero_register_usage(kind, dst, src1, src2, &mut emit) {
+            if resolve_simple_zero_register_usage(kind, dst, src1, src2, rv64, &mut emit) {
                 emit(InstExt::nop());
                 return Ok(());
             };
@@ -2468,7 +2483,7 @@ fn convert_instruction(
             "found an unrelocated auipc instruction in {} ('{}') at address 0x{:x}; is the program compiled with relocations?",
             current_location,
             section.name(),
-            section.original_address() + current_location.offset
+            section.original_address().checked_add(current_location.offset).expect(OVERFLOW)
         ))),
         Inst::Ecall => Err(ProgramFromElfError::other(
             "found a bare ecall instruction; those are not supported",
@@ -2879,20 +2894,26 @@ fn convert_instruction(
 /// The instruction length and the raw instruction.
 fn read_instruction_bytes(text: &[u8], relative_offset: usize) -> (u64, u32) {
     assert!(
-        relative_offset % VM_CODE_ADDRESS_ALIGNMENT as usize == 0,
+        relative_offset.checked_rem(VM_CODE_ADDRESS_ALIGNMENT as usize).expect(OVERFLOW) == 0,
         "internal error: misaligned instruction read: 0x{relative_offset:08x}"
     );
 
     if Inst::is_compressed(text[relative_offset]) {
-        (2, u32::from(u16::from_le_bytes([text[relative_offset], text[relative_offset + 1]])))
+        (
+            2,
+            u32::from(u16::from_le_bytes([
+                text[relative_offset],
+                text[relative_offset.checked_add(1).expect(OVERFLOW)],
+            ])),
+        )
     } else {
         (
             4,
             u32::from_le_bytes([
                 text[relative_offset],
-                text[relative_offset + 1],
-                text[relative_offset + 2],
-                text[relative_offset + 3],
+                text[relative_offset.checked_add(1).expect(OVERFLOW)],
+                text[relative_offset.checked_add(2).expect(OVERFLOW)],
+                text[relative_offset.checked_add(3).expect(OVERFLOW)],
             ]),
         )
     }
@@ -2925,7 +2946,7 @@ fn try_parse_epilogue(
         (RegImmKind::Add32, LoadKind::U32, 4)
     };
 
-    let mut stack_space = None;
+    let mut stack_space: Option<i32> = None;
     let mut current_pc = *pc;
     let mut regs = Vec::new();
     loop {
@@ -2947,20 +2968,25 @@ fn try_parse_epilogue(
             return Ok(false);
         };
 
-        if kind != native_load_kind || dst == Reg::SP || offset < 0 || (offset % native_reg_size) != 0 {
+        if kind != native_load_kind || dst == Reg::SP || offset < 0 || offset.checked_rem(native_reg_size).expect(OVERFLOW) != 0 {
             return Ok(false);
         };
 
         if let Some(stack_space) = stack_space {
-            if offset != stack_space - native_reg_size * (1 + regs.len() as i32) {
+            let regs_plus_one = regs.len().checked_add(1).expect(OVERFLOW) as i32;
+            if offset
+                != stack_space
+                    .checked_sub(native_reg_size.checked_mul(regs_plus_one).expect(OVERFLOW))
+                    .expect(OVERFLOW)
+            {
                 return Ok(false);
             }
         } else {
-            stack_space = Some(offset + native_reg_size);
+            stack_space = Some(offset.checked_add(native_reg_size).expect(OVERFLOW));
         }
 
         let (next_inst_size, next_raw_inst) = read_instruction_bytes(text, current_pc);
-        current_pc += next_inst_size as usize;
+        current_pc = current_pc.checked_add(next_inst_size as usize).expect(OVERFLOW);
 
         if let Some(new_instruction) = Inst::decode(decoder_config, next_raw_inst) {
             instruction = new_instruction;
@@ -2968,7 +2994,7 @@ fn try_parse_epilogue(
             return Ok(false);
         }
 
-        regs.push((cast(offset).to_unsigned(), dst));
+        regs.push((cast(offset).to_u32_or_panic(), dst));
     }
 
     let Inst::RegImm {
@@ -2994,7 +3020,7 @@ fn try_parse_epilogue(
             offset_range: AddressRange::from(source.offset_range.start..current_pc as u64),
         },
         InstExt::Basic(BasicInst::Epilogue {
-            stack_space: cast(stack_space).to_unsigned(),
+            stack_space: cast(stack_space).to_u32_or_panic(),
             regs,
         }),
     ));
@@ -3025,7 +3051,7 @@ fn try_parse_prologue(
     else {
         return Ok(false);
     };
-    if kind != native_add_kind || imm >= 0 || (imm % native_reg_size) != 0 {
+    if kind != native_add_kind || imm >= 0 || imm.checked_rem(native_reg_size).expect(OVERFLOW) != 0 {
         return Ok(false);
     };
 
@@ -3056,13 +3082,16 @@ fn try_parse_prologue(
             break;
         };
 
-        if src == Reg::SP || kind != native_store_kind || offset * -1 != (remaining + native_reg_size) {
+        if src == Reg::SP
+            || kind != native_store_kind
+            || offset.checked_mul(-1).expect(OVERFLOW) != remaining.checked_add(native_reg_size).expect(OVERFLOW)
+        {
             break;
         }
 
-        regs.push((cast(offset).to_unsigned(), src));
-        current_pc += inst_size as usize;
-        remaining += native_reg_size;
+        regs.push((cast(offset).to_u32_or_panic(), src));
+        current_pc = current_pc.checked_add(inst_size as usize).expect(OVERFLOW);
+        remaining = remaining.checked_add(native_reg_size).expect(OVERFLOW);
     }
 
     *pc = current_pc;
@@ -3072,7 +3101,7 @@ fn try_parse_prologue(
             offset_range: AddressRange::from(source.offset_range.start..current_pc as u64),
         },
         InstExt::Basic(BasicInst::Prologue {
-            stack_space: cast(imm * -1).to_unsigned(),
+            stack_space: cast(imm.checked_mul(-1).expect(OVERFLOW)).to_u32_or_panic(),
             regs,
         }),
     ));
@@ -3097,7 +3126,7 @@ fn parse_code_section(
     let section_name = section.name();
     let text = &section.data();
 
-    if text.len() % VM_CODE_ADDRESS_ALIGNMENT as usize != 0 {
+    if text.len().checked_rem(VM_CODE_ADDRESS_ALIGNMENT as usize).expect(OVERFLOW) != 0 {
         return Err(ProgramFromElfError::other(format!(
             "size of section '{section_name}' is not divisible by 2"
         )));
@@ -3108,7 +3137,7 @@ fn parse_code_section(
     while relative_offset < text.len() {
         let current_location = SectionTarget {
             section_index: section.index(),
-            offset: relative_offset.try_into().expect("overflow"),
+            offset: relative_offset.try_into().expect(OVERFLOW),
         };
 
         let (inst_size, raw_inst) = read_instruction_bytes(text, relative_offset);
@@ -3118,12 +3147,22 @@ fn parse_code_section(
             let pointer_size = if elf.is_64() { 8 } else { 4 };
 
             // so (on 32-bit): 4 (ecalli) + 4 (pointer) = 8
-            if relative_offset + pointer_size + 4 > text.len() {
+            if relative_offset
+                .checked_add(pointer_size)
+                .expect(OVERFLOW)
+                .checked_add(4)
+                .expect(OVERFLOW)
+                > text.len()
+            {
                 return Err(ProgramFromElfError::other("truncated ecalli instruction"));
             }
 
             let target_location = current_location.add(4);
-            relative_offset += 4 + pointer_size;
+            relative_offset = relative_offset
+                .checked_add(4)
+                .expect(OVERFLOW)
+                .checked_add(pointer_size)
+                .expect(OVERFLOW);
 
             let Some(relocation) = relocations.get(&target_location) else {
                 return Err(ProgramFromElfError::other(format!(
@@ -3189,12 +3228,12 @@ fn parse_code_section(
             output.push((
                 Source {
                     section_index,
-                    offset_range: (relative_offset as u64..relative_offset as u64 + inst_size).into(),
+                    offset_range: (relative_offset as u64..(relative_offset as u64).checked_add(inst_size).expect(OVERFLOW)).into(),
                 },
                 InstExt::Basic(BasicInst::Sbrk { dst, size }),
             ));
 
-            relative_offset += inst_size as usize;
+            relative_offset = relative_offset.checked_add(inst_size as usize).expect(OVERFLOW);
             continue;
         }
 
@@ -3202,12 +3241,12 @@ fn parse_code_section(
             output.push((
                 Source {
                     section_index,
-                    offset_range: (relative_offset as u64..relative_offset as u64 + inst_size).into(),
+                    offset_range: (relative_offset as u64..(relative_offset as u64).checked_add(inst_size).expect(OVERFLOW)).into(),
                 },
                 InstExt::Basic(BasicInst::Memset),
             ));
 
-            relative_offset += inst_size as usize;
+            relative_offset = relative_offset.checked_add(inst_size as usize).expect(OVERFLOW);
             continue;
         }
 
@@ -3215,7 +3254,7 @@ fn parse_code_section(
             output.push((
                 Source {
                     section_index,
-                    offset_range: (relative_offset as u64..relative_offset as u64 + inst_size).into(),
+                    offset_range: (relative_offset as u64..(relative_offset as u64).checked_add(inst_size).expect(OVERFLOW)).into(),
                 },
                 match cast_reg_non_zero(dst)? {
                     Some(dst) => InstExt::Basic(BasicInst::LoadHeapBase { dst }),
@@ -3223,16 +3262,16 @@ fn parse_code_section(
                 },
             ));
 
-            relative_offset += inst_size as usize;
+            relative_offset = relative_offset.checked_add(inst_size as usize).expect(OVERFLOW);
             continue;
         }
 
         let source = Source {
             section_index,
-            offset_range: AddressRange::from(relative_offset as u64..relative_offset as u64 + inst_size),
+            offset_range: AddressRange::from(relative_offset as u64..(relative_offset as u64).checked_add(inst_size).expect(OVERFLOW)),
         };
 
-        relative_offset += inst_size as usize;
+        relative_offset = relative_offset.checked_add(inst_size as usize).expect(OVERFLOW);
 
         let Some(original_inst) = Inst::decode(decoder_config, raw_inst) else {
             return Err(ProgramFromElfErrorKind::Other(
@@ -3240,7 +3279,7 @@ fn parse_code_section(
                     "unsupported instruction in {} ('{}') at address 0x{:x}: 0x{:08x}",
                     current_location,
                     section.name(),
-                    section.original_address() + current_location.offset,
+                    section.original_address().checked_add(current_location.offset).expect(OVERFLOW),
                     raw_inst,
                 )
                 .into(),
@@ -3265,23 +3304,29 @@ fn parse_code_section(
                     if let Some(Inst::JumpAndLinkRegister { dst: ra_dst, base, value }) = next_inst {
                         if base == ra_dst && base == base_upper {
                             if let Some(ra) = cast_reg_non_zero(ra_dst)? {
-                                let offset = (relative_offset as i32 - next_inst_size as i32)
+                                let offset = (relative_offset as i32)
+                                    .wrapping_sub(next_inst_size as i32)
                                     .wrapping_add(value)
                                     .wrapping_add(value_upper as i32);
                                 if offset >= 0 && offset < section.data().len() as i32 {
-                                    output.push((
-                                        source,
-                                        InstExt::Control(ControlInst::Call {
-                                            ra,
-                                            target: SectionTarget {
-                                                section_index,
-                                                offset: u64::from(cast(offset).to_unsigned()),
-                                            },
-                                            target_return: current_location.add(inst_size + next_inst_size),
-                                        }),
-                                    ));
+                                    let target = SectionTarget {
+                                        section_index,
+                                        offset: u64::from(cast(offset).to_u32_or_panic()),
+                                    };
 
-                                    relative_offset += next_inst_size as usize;
+                                    let inst = if target == current_location {
+                                        // Infinite loop, in which case the return location might not be valid.
+                                        ControlInst::Jump { target }
+                                    } else {
+                                        ControlInst::Call {
+                                            ra,
+                                            target,
+                                            target_return: current_location.add(inst_size.checked_add(next_inst_size).expect(OVERFLOW)),
+                                        }
+                                    };
+
+                                    output.push((source, InstExt::Control(inst)));
+                                    relative_offset = relative_offset.checked_add(next_inst_size as usize).expect(OVERFLOW);
                                     continue;
                                 }
                             }
@@ -3297,8 +3342,8 @@ fn parse_code_section(
                         if base_upper == add_src
                             && ((elf.is_64() && kind == RegImmKind::Add64) || (!elf.is_64() && kind == RegImmKind::Add32))
                         {
-                            let offset = value_upper.wrapping_add(cast(value_lower).to_unsigned());
-                            let offset = cast(offset).to_signed();
+                            let offset = value_upper.wrapping_add(cast(value_lower).bitwise_as_u32());
+                            let offset = cast(offset).bitwise_as_i32();
                             let offset = cast(offset).to_i64_sign_extend();
                             let offset = current_location.offset.wrapping_add_signed(offset);
                             if offset >= section.size() {
@@ -3306,7 +3351,7 @@ fn parse_code_section(
                                     "found an unrelocated auipc instruction in {} ('{}') at address 0x{:x} with an oversized offset (offset = {}, section size = {})",
                                     current_location,
                                     section.name(),
-                                    section.original_address() + current_location.offset,
+                                    section.original_address().checked_add(current_location.offset).expect(OVERFLOW),
                                     offset,
                                     section.size(),
                                 )));
@@ -3332,7 +3377,7 @@ fn parse_code_section(
                                             "found an unrelocated auipc instruction in {} ('{}') at address 0x{:x}: unimplemented: destination register is zero",
                                             current_location,
                                             section.name(),
-                                            section.original_address() + current_location.offset,
+                                            section.original_address().checked_add(current_location.offset).expect(OVERFLOW),
                                         )));
                                     };
                                     let Ok(offset) = offset.try_into() else {
@@ -3340,7 +3385,7 @@ fn parse_code_section(
                                             "found an unrelocated auipc instruction in {} ('{}') at address 0x{:x}: offset doesn't fit in 32-bits",
                                             current_location,
                                             section.name(),
-                                            section.original_address() + current_location.offset,
+                                            section.original_address().checked_add(current_location.offset).expect(OVERFLOW),
                                         )));
                                     };
                                     output.push((
@@ -3355,7 +3400,7 @@ fn parse_code_section(
                                 }
                             }
 
-                            relative_offset += next_inst_size as usize;
+                            relative_offset = relative_offset.checked_add(next_inst_size as usize).expect(OVERFLOW);
                             continue;
                         }
                     }
@@ -3413,7 +3458,10 @@ fn split_code_into_basic_blocks(
             }
             log::trace!(
                 "Instruction at {source} (0x{:x}) \"{current_symbol}\": {op:?}",
-                elf.section_by_index(source.section_index).original_address() + source.offset_range.start
+                elf.section_by_index(source.section_index)
+                    .original_address()
+                    .checked_add(source.offset_range.start)
+                    .expect(OVERFLOW)
             );
         }
 
@@ -3950,7 +3998,7 @@ fn perform_meta_instruction_lowering(is_rv64: bool, all_blocks: &mut [BasicBlock
                         kind: add_kind,
                         dst: Reg::SP,
                         src1: Reg::SP.into(),
-                        src2: (cast(stack_space).to_signed() * -1).into(),
+                        src2: (cast(stack_space).to_i32_or_panic() * -1).into(),
                     },
                 ));
                 for &(offset, src) in regs {
@@ -3960,7 +4008,7 @@ fn perform_meta_instruction_lowering(is_rv64: bool, all_blocks: &mut [BasicBlock
                             kind: store_kind,
                             src: src.into(),
                             base: Reg::SP,
-                            offset: cast(offset).to_signed(),
+                            offset: cast(offset).to_i32_or_panic(),
                         },
                     ));
                 }
@@ -3973,7 +4021,7 @@ fn perform_meta_instruction_lowering(is_rv64: bool, all_blocks: &mut [BasicBlock
                             kind: load_kind,
                             dst,
                             base: Reg::SP,
-                            offset: cast(offset).to_signed(),
+                            offset: cast(offset).to_i32_or_panic(),
                         },
                     ));
                 }
@@ -3984,7 +4032,7 @@ fn perform_meta_instruction_lowering(is_rv64: bool, all_blocks: &mut [BasicBlock
                         kind: add_kind,
                         dst: Reg::SP,
                         src1: Reg::SP.into(),
-                        src2: cast(stack_space).to_signed().into(),
+                        src2: cast(stack_space).to_i32_or_panic().into(),
                     },
                 ));
             }
@@ -4092,7 +4140,7 @@ fn perform_inlining(
         }
 
         if let Some(fallthrough_target) = all_blocks[target.index()].next.instruction.fallthrough_target() {
-            if fallthrough_target.index() == target.index() + 1 {
+            if fallthrough_target.index() == target.index().checked_add(1).expect(OVERFLOW) {
                 // Do not inline if we'd need to inject a new fallthrough basic block.
                 return false;
             }
@@ -4101,10 +4149,10 @@ fn perform_inlining(
         // Inline if the target block is small enough.
         let mut inline_cost = all_blocks[target.index()].ops.len();
         if let Some((_, BasicInst::Prologue { regs, .. })) = all_blocks[target.index()].ops.first() {
-            inline_cost += regs.len();
+            inline_cost = inline_cost.checked_add(regs.len()).expect(OVERFLOW);
         }
         if let Some((_, BasicInst::Epilogue { regs, .. })) = all_blocks[target.index()].ops.last() {
-            inline_cost += regs.len();
+            inline_cost = inline_cost.checked_add(regs.len()).expect(OVERFLOW);
         }
 
         if inline_cost <= inline_threshold {
@@ -4683,12 +4731,12 @@ impl OperationKind {
 
         macro_rules! op32_on_64 {
             (|$lhs:ident, $rhs:ident| $e:expr) => {{
-                let $lhs: u64 = cast($lhs).to_unsigned();
+                let $lhs: u64 = cast($lhs).bitwise_as_u64();
                 let $lhs: u32 = cast($lhs).truncate_to_u32();
-                let $lhs: i32 = cast($lhs).to_signed();
-                let $rhs: u64 = cast($rhs).to_unsigned();
+                let $lhs: i32 = cast($lhs).bitwise_as_i32();
+                let $rhs: u64 = cast($rhs).bitwise_as_u64();
                 let $rhs: u32 = cast($rhs).truncate_to_u32();
-                let $rhs: i32 = cast($rhs).to_signed();
+                let $rhs: i32 = cast($rhs).bitwise_as_i32();
                 let out: i32 = $e;
                 cast(out).to_i64_sign_extend()
             }};
@@ -4720,13 +4768,13 @@ impl OperationKind {
                 div64(lhs, rhs)
             },
             Self::DivUnsigned32 => {
-                op32!(|lhs, rhs| cast(divu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
+                op32!(|lhs, rhs| cast(divu(cast(lhs).bitwise_as_u32(), cast(rhs).bitwise_as_u32())).bitwise_as_i32())
             }
             Self::DivUnsigned32AndSignExtend => {
-                op32_on_64!(|lhs, rhs| cast(divu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
+                op32_on_64!(|lhs, rhs| cast(divu(cast(lhs).bitwise_as_u32(), cast(rhs).bitwise_as_u32())).bitwise_as_i32())
             }
             Self::DivUnsigned64 => {
-                cast(divu64(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed()
+                cast(divu64(cast(lhs).bitwise_as_u64(), cast(rhs).bitwise_as_u64())).bitwise_as_i64()
             },
             Self::Eq32 => {
                 op32!(|lhs, rhs| i32::from(lhs == rhs))
@@ -4750,16 +4798,16 @@ impl OperationKind {
                 mulh64(lhs, rhs)
             },
             Self::MulUpperSignedUnsigned32 => {
-                op32!(|lhs, rhs| mulhsu(lhs, cast(rhs).to_unsigned()))
+                op32!(|lhs, rhs| mulhsu(lhs, cast(rhs).bitwise_as_u32()))
             },
             Self::MulUpperSignedUnsigned64 => {
-                mulhsu64(lhs, cast(rhs).to_unsigned())
+                mulhsu64(lhs, cast(rhs).bitwise_as_u64())
             },
             Self::MulUpperUnsignedUnsigned32 => {
-                op32!(|lhs, rhs| cast(mulhu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
+                op32!(|lhs, rhs| cast(mulhu(cast(lhs).bitwise_as_u32(), cast(rhs).bitwise_as_u32())).bitwise_as_i32())
             },
             Self::MulUpperUnsignedUnsigned64 => {
-                cast(mulhu64(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed()
+                cast(mulhu64(cast(lhs).bitwise_as_u64(), cast(rhs).bitwise_as_u64())).bitwise_as_i64()
             },
             Self::NotEq32 => {
                 op32!(|lhs, rhs| i32::from(lhs != rhs))
@@ -4783,13 +4831,13 @@ impl OperationKind {
                 rem64(lhs, rhs)
             },
             Self::RemUnsigned32 => {
-                op32!(|lhs, rhs| cast(remu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
+                op32!(|lhs, rhs| cast(remu(cast(lhs).bitwise_as_u32(), cast(rhs).bitwise_as_u32())).bitwise_as_i32())
             },
             Self::RemUnsigned32AndSignExtend => {
-                op32_on_64!(|lhs, rhs| cast(remu(cast(lhs).to_unsigned(), cast(rhs).to_unsigned())).to_signed())
+                op32_on_64!(|lhs, rhs| cast(remu(cast(lhs).bitwise_as_u32(), cast(rhs).bitwise_as_u32())).bitwise_as_i32())
             }
             Self::RemUnsigned64 => {
-                remu64(cast(lhs).to_unsigned(), cast(rhs).to_unsigned()) as i64
+                cast(remu64(cast(lhs).bitwise_as_u64(), cast(rhs).bitwise_as_u64())).bitwise_as_i64()
             },
             Self::SetGreaterOrEqualSigned32 => {
                 op32!(|lhs, rhs| i32::from(lhs >= rhs))
@@ -4798,10 +4846,10 @@ impl OperationKind {
                 i64::from(lhs >= rhs)
             },
             Self::SetGreaterOrEqualUnsigned32 => {
-                op32!(|lhs, rhs| i32::from(cast(lhs).to_unsigned() >= cast(rhs).to_unsigned()))
+                op32!(|lhs, rhs| i32::from(cast(lhs).bitwise_as_u32() >= cast(rhs).bitwise_as_u32()))
             },
             Self::SetGreaterOrEqualUnsigned64 => {
-                i64::from(cast(lhs).to_unsigned() >= cast(rhs).to_unsigned())
+                i64::from(cast(lhs).bitwise_as_u64() >= cast(rhs).bitwise_as_u64())
             },
             Self::SetLessThanSigned32 => {
                 op32!(|lhs, rhs| i32::from(lhs < rhs))
@@ -4810,38 +4858,38 @@ impl OperationKind {
                 i64::from(lhs < rhs)
             },
             Self::SetLessThanUnsigned32 => {
-                op32!(|lhs, rhs| i32::from(cast(lhs).to_unsigned() < cast(rhs).to_unsigned()))
+                op32!(|lhs, rhs| i32::from(cast(lhs).bitwise_as_u32() < cast(rhs).bitwise_as_u32()))
             },
             Self::SetLessThanUnsigned64 => {
                 i64::from((lhs as u64) < (rhs as u64))
             },
             Self::ShiftArithmeticRight32 => {
-                op32!(|lhs, rhs| lhs.wrapping_shr(cast(rhs).to_unsigned()))
+                op32!(|lhs, rhs| lhs.wrapping_shr(cast(rhs).bitwise_as_u32()))
             },
             Self::ShiftArithmeticRight32AndSignExtend => {
-                op32_on_64!(|lhs, rhs| lhs.wrapping_shr(cast(rhs).to_unsigned()))
+                op32_on_64!(|lhs, rhs| lhs.wrapping_shr(cast(rhs).bitwise_as_u32()))
             },
             Self::ShiftArithmeticRight64 => {
-                let rhs = cast(rhs).to_unsigned();
+                let rhs = cast(rhs).bitwise_as_u64();
                 let rhs = cast(rhs).truncate_to_u32();
                 lhs.wrapping_shr(rhs)
             },
             Self::ShiftLogicalLeft32 => {
-                op32!(|lhs, rhs| lhs.wrapping_shl(cast(rhs).to_unsigned()))
+                op32!(|lhs, rhs| lhs.wrapping_shl(cast(rhs).bitwise_as_u32()))
             },
             Self::ShiftLogicalLeft32AndSignExtend => {
-                op32_on_64!(|lhs, rhs| lhs.wrapping_shl(cast(rhs).to_unsigned()))
+                op32_on_64!(|lhs, rhs| lhs.wrapping_shl(cast(rhs).bitwise_as_u32()))
             },
             Self::ShiftLogicalLeft64 => {
-                let rhs = cast(rhs).to_unsigned();
+                let rhs = cast(rhs).bitwise_as_u64();
                 let rhs = cast(rhs).truncate_to_u32();
                 (lhs as u64).wrapping_shl(rhs) as i64
             },
             Self::ShiftLogicalRight32 => {
-                op32!(|lhs, rhs| cast(cast(lhs).to_unsigned().wrapping_shr(cast(rhs).to_unsigned())).to_signed())
+                op32!(|lhs, rhs| cast(cast(lhs).bitwise_as_u32().wrapping_shr(cast(rhs).bitwise_as_u32())).bitwise_as_i32())
             },
             Self::ShiftLogicalRight32AndSignExtend => {
-                op32_on_64!(|lhs, rhs| cast(cast(lhs).to_unsigned().wrapping_shr(cast(rhs).to_unsigned())).to_signed())
+                op32_on_64!(|lhs, rhs| cast(cast(lhs).bitwise_as_u32().wrapping_shr(cast(rhs).bitwise_as_u32())).bitwise_as_i32())
             }
             Self::ShiftLogicalRight64 => {
                 (lhs as u64).wrapping_shr(rhs as u32) as i64
@@ -4878,7 +4926,7 @@ impl OperationKind {
                 op32_on_64!(|lhs, rhs| lhs.rotate_left(rhs as u32))
             },
             Self::RotateLeft64 => {
-                let rhs = cast(rhs).to_unsigned();
+                let rhs = cast(rhs).bitwise_as_u64();
                 let rhs = cast(rhs).truncate_to_u32();
                 lhs.rotate_left(rhs)
             },
@@ -4889,7 +4937,7 @@ impl OperationKind {
                 op32_on_64!(|lhs, rhs| lhs.rotate_right(rhs as u32))
             },
             Self::RotateRight64 => {
-                let rhs = cast(rhs).to_unsigned();
+                let rhs = cast(rhs).bitwise_as_u64();
                 let rhs = cast(rhs).truncate_to_u32();
                 lhs.rotate_right(rhs)
             },
@@ -4907,7 +4955,7 @@ impl OperationKind {
                 C(self.apply_const(lhs, rhs))
             },
             (O::Add32, RegValue::DataAddress(lhs), C(rhs)) => {
-                let offset = cast(cast(lhs.offset).to_signed().wrapping_add(rhs)).to_unsigned();
+                let offset = cast(cast(lhs.offset).bitwise_as_i64().wrapping_add(rhs)).bitwise_as_u64();
                 if offset <= elf.section_by_index(lhs.section_index).size() {
                     RegValue::DataAddress(SectionTarget {
                         section_index: lhs.section_index,
@@ -4918,11 +4966,11 @@ impl OperationKind {
                 }
             },
             (O::Sub32, RegValue::DataAddress(lhs), C(rhs)) => {
-                let offset = cast(lhs.offset).to_signed().wrapping_sub(rhs);
+                let offset = cast(lhs.offset).bitwise_as_i64().wrapping_sub(rhs);
                 if offset >= 0 {
                     RegValue::DataAddress(SectionTarget {
                         section_index: lhs.section_index,
-                        offset: cast(offset).to_unsigned(),
+                        offset: cast(offset).bitwise_as_u64(),
                     })
                 } else {
                     return None;
@@ -5130,7 +5178,7 @@ impl RegValue {
                 if addend == 0 {
                     bits_used
                 } else {
-                    let addend = cast(addend).to_unsigned();
+                    let addend = cast(addend).bitwise_as_u64();
                     bits_used | (bits_used << 1) | addend | (addend << 1)
                 }
             }
@@ -5497,7 +5545,7 @@ impl BlockRegs {
                 bits_used: bits_used_masked,
             },
         );
-        *unknown_counter += 1;
+        *unknown_counter = unknown_counter.checked_add(1).expect(OVERFLOW);
     }
 
     fn set_reg_from_control_instruction(
@@ -5715,13 +5763,13 @@ impl BlockRegs {
                         kind,
                         dst: Reg::SP,
                         src1: Reg::SP.into(),
-                        src2: (cast(stack_space).to_signed() * -1).into(),
+                        src2: (cast(stack_space).to_i32_or_panic() * -1).into(),
                     },
                 );
 
                 let sp = self.get_reg(Reg::SP);
                 for (offset, reg) in regs {
-                    let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(cast(offset).to_signed()).to_i64_sign_extend())) else {
+                    let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(offset).to_i64())) else {
                         continue;
                     };
 
@@ -5750,13 +5798,13 @@ impl BlockRegs {
                         kind: add_kind,
                         dst: Reg::SP,
                         src1: Reg::SP.into(),
-                        src2: cast(stack_space).to_signed().into(),
+                        src2: cast(stack_space).to_i32_or_panic().into(),
                     },
                 );
 
                 let mut restored = [false; Reg::ALL.len()];
                 for &(offset, reg) in &regs {
-                    let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(cast(offset).to_signed()).to_i64_sign_extend())) else {
+                    let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(offset).to_i64())) else {
                         continue;
                     };
 
@@ -5780,7 +5828,7 @@ impl BlockRegs {
                             kind: load_kind,
                             base: Reg::SP,
                             dst,
-                            offset: cast(offset).to_signed(),
+                            offset: cast(offset).to_i32_or_panic(),
                         },
                     );
                 }
@@ -5913,7 +5961,7 @@ fn perform_constant_propagation(
             let mut simplified = false;
             let sp = regs.get_reg(Reg::SP);
             epilogue_regs.retain(|&(offset, reg)| {
-                if let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(cast(offset).to_signed()).to_i64_sign_extend())) {
+                if let Some(key) = add_op.apply(elf, sp, RegValue::Constant(cast(offset).to_i64())) {
                     if let Some(&restored_value) = stack.get(&key) {
                         let current_value = regs.get_reg(reg);
                         if current_value == restored_value {
@@ -5969,42 +6017,42 @@ fn perform_constant_propagation(
                 let value = match kind {
                     LoadKind::U64 => section
                         .data()
-                        .get(target.offset as usize..target.offset as usize + 8)
+                        .get(target.offset as usize..(target.offset as usize).checked_add(8).expect(OVERFLOW))
                         .map(|xs| u64::from_le_bytes([xs[0], xs[1], xs[2], xs[3], xs[4], xs[5], xs[6], xs[7]]))
-                        .map(|x| cast(x).to_signed()),
+                        .map(|x| cast(x).bitwise_as_i64()),
                     LoadKind::U32 => section
                         .data()
-                        .get(target.offset as usize..target.offset as usize + 4)
+                        .get(target.offset as usize..(target.offset as usize).checked_add(4).expect(OVERFLOW))
                         .map(|xs| u32::from_le_bytes([xs[0], xs[1], xs[2], xs[3]]))
                         .map(|x| cast(x).to_u64())
-                        .map(|x| cast(x).to_signed()),
+                        .map(|x| cast(x).bitwise_as_i64()),
                     LoadKind::I32 => section
                         .data()
-                        .get(target.offset as usize..target.offset as usize + 4)
+                        .get(target.offset as usize..(target.offset as usize).checked_add(4).expect(OVERFLOW))
                         .map(|xs| i32::from_le_bytes([xs[0], xs[1], xs[2], xs[3]]))
                         .map(|x| cast(x).to_i64_sign_extend()),
                     LoadKind::U16 => section
                         .data()
-                        .get(target.offset as usize..target.offset as usize + 2)
+                        .get(target.offset as usize..(target.offset as usize).checked_add(2).expect(OVERFLOW))
                         .map(|xs| u16::from_le_bytes([xs[0], xs[1]]))
                         .map(|x| cast(x).to_u64())
-                        .map(|x| cast(x).to_signed()),
+                        .map(|x| cast(x).bitwise_as_i64()),
                     LoadKind::I16 => section
                         .data()
-                        .get(target.offset as usize..target.offset as usize + 2)
+                        .get(target.offset as usize..(target.offset as usize).checked_add(2).expect(OVERFLOW))
                         .map(|xs| i16::from_le_bytes([xs[0], xs[1]]))
                         .map(|x| cast(x).to_i64_sign_extend()),
                     LoadKind::I8 => section
                         .data()
                         .get(target.offset as usize)
-                        .map(|&x| cast(x).to_signed())
+                        .map(|&x| cast(x).bitwise_as_i8())
                         .map(|x| cast(x).to_i64_sign_extend()),
                     LoadKind::U8 => section
                         .data()
                         .get(target.offset as usize)
                         .copied()
                         .map(|x| cast(x).to_u64())
-                        .map(|x| cast(x).to_signed()),
+                        .map(|x| cast(x).bitwise_as_i64()),
                 };
 
                 if let Some(imm) = value {
@@ -6436,9 +6484,9 @@ fn optimize_program(
         }
     }
 
-    let mut count_inline = 0;
-    let mut count_dce = 0;
-    let mut count_cp = 0;
+    let mut count_inline: usize = 0;
+    let mut count_dce: usize = 0;
+    let mut count_cp: usize = 0;
 
     let mut inline_history: HashSet<(BlockTarget, BlockTarget)> = HashSet::new(); // Necessary to prevent infinite loops.
     macro_rules! run_optimizations {
@@ -6456,7 +6504,7 @@ fn optimize_program(
                     config.inline_threshold,
                     $current,
                 ) {
-                    count_inline += 1;
+                    count_inline = count_inline.checked_add(1).expect(OVERFLOW);
                     modified |= true;
                 }
 
@@ -6469,7 +6517,7 @@ fn optimize_program(
                     $optimize_queue,
                     $current,
                 ) {
-                    count_dce += 1;
+                    count_dce = count_dce.checked_add(1).expect(OVERFLOW);
                     modified |= true;
                 }
 
@@ -6483,7 +6531,7 @@ fn optimize_program(
                     $optimize_queue,
                     $current,
                 ) {
-                    count_cp += 1;
+                    count_cp = count_cp.checked_add(1).expect(OVERFLOW);
                     modified |= true;
                 }
             }
@@ -6499,14 +6547,14 @@ fn optimize_program(
     garbage_collect_reachability(all_blocks, reachability_graph);
 
     let timestamp = std::time::Instant::now();
-    let mut opt_iteration_count = 0;
+    let mut opt_iteration_count: usize = 0;
     while let Some(current) = optimize_queue.pop_non_unique() {
         loop {
             if !run_optimizations!(current, Some(&mut optimize_queue)) {
                 break;
             }
         }
-        opt_iteration_count += 1;
+        opt_iteration_count = opt_iteration_count.checked_add(1).expect(OVERFLOW);
     }
 
     log::debug!(
@@ -6528,10 +6576,10 @@ fn optimize_program(
     }
 
     let timestamp = std::time::Instant::now();
-    let mut opt_brute_force_iterations = 0;
+    let mut opt_brute_force_iterations: usize = 0;
     let mut modified = true;
     while modified {
-        opt_brute_force_iterations += 1;
+        opt_brute_force_iterations = opt_brute_force_iterations.checked_add(1).expect(OVERFLOW);
         modified = false;
         for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
             modified |= run_optimizations!(current, Some(&mut optimize_queue));
@@ -6554,7 +6602,7 @@ fn optimize_program(
 
     log::debug!(
         "Optimizing the program took {} brute force iteration(s) and {} ms",
-        opt_brute_force_iterations - 1,
+        opt_brute_force_iterations.checked_sub(1).expect(OVERFLOW),
         timestamp.elapsed().as_millis()
     );
     log::debug!("             Inlinining: {count_inline}");
@@ -6570,8 +6618,10 @@ mod test {
     use polkavm::Reg;
 
     /// An absolute address in test assembly: a literal in a guard region, as the linker makes of an
-    /// access through `x0`, and otherwise an offset into the builder's data section.
-    fn absolute_target(data_section: SectionIndex, address: u32) -> AbsoluteTarget {
+    /// access through `x0`, and otherwise an offset into the builder's data section. The immediate's
+    /// 32-bit pattern is the guest address, so a negative one is in the top 64 KiB.
+    fn absolute_target(data_section: SectionIndex, address: i32) -> AbsoluteTarget {
+        let address = cast(address).bitwise_as_u32();
         if address < 0x10000 || address >= 0xffff_0000 {
             AbsoluteTarget::address(address)
         } else {
@@ -6629,7 +6679,7 @@ mod test {
         fn add_section(&mut self) -> SectionTarget {
             let index = self.next_free_section;
             self.next_offset_for_section.insert(index, 0);
-            self.next_free_section = SectionIndex::new(index.raw() + 1);
+            self.next_free_section = SectionIndex::new(index.raw().checked_add(1).unwrap());
             SectionTarget {
                 section_index: index,
                 offset: 0,
@@ -6657,7 +6707,7 @@ mod test {
 
         fn append_assembly(&mut self, assembly: &str) {
             let data_section = self.data_section;
-            let isa = InstructionSetKind::Latest32;
+            let isa = InstructionSetKind::Latest64;
             let raw_blob = polkavm_common::assembler::assemble(Some(isa), assembly).unwrap();
             let blob = ProgramBlob::parse(raw_blob.into()).unwrap();
             let mut program_counter_to_section_target = HashMap::new();
@@ -6691,18 +6741,14 @@ mod test {
                         *out = ControlInst::Jump { target }.into();
                     }
                     Instruction::load_imm(dst, imm) => {
-                        *out = BasicInst::LoadImmediate {
-                            dst: dst.into(),
-                            imm: cast(imm).to_signed(),
-                        }
-                        .into();
+                        *out = BasicInst::LoadImmediate { dst: dst.into(), imm }.into();
                     }
                     Instruction::add_imm_32(dst, src, imm) => {
                         *out = BasicInst::AnyAny {
                             kind: AnyAnyKind::Add32,
                             dst: dst.into(),
                             src1: src.into(),
-                            src2: cast(imm).to_signed().into(),
+                            src2: imm.into(),
                         }
                         .into();
                     }
@@ -6725,7 +6771,7 @@ mod test {
                                 _ => unreachable!(),
                             },
                             src1: src1.into(),
-                            src2: cast(src2).to_signed().into(),
+                            src2: src2.into(),
                             target_true,
                             target_false,
                         }
@@ -6762,7 +6808,7 @@ mod test {
                             kind: StoreKind::U32,
                             src: src.into(),
                             base: base.into(),
-                            offset: cast(offset).to_signed(),
+                            offset,
                         }
                         .into();
                     }
@@ -6779,7 +6825,7 @@ mod test {
         }
 
         fn build(&self, config: Config) -> TestProgram {
-            let isa = InstructionSetKind::Latest32;
+            let isa = InstructionSetKind::Latest64;
             let elf = Elf::default();
             let data_sections_set: HashSet<_> = core::iter::once(self.data_section).collect();
             let code_sections_set: HashSet<_> = self.next_offset_for_section.keys().copied().collect();
@@ -6843,7 +6889,7 @@ mod test {
 
             let mut builder = ProgramBlobBuilder::new(isa);
 
-            let mut export_count = 0;
+            let mut export_count: usize = 0;
             for current in used_blocks {
                 for &export_index in &reachability_graph.for_code.get(&current).unwrap().exports {
                     let export = &exports[export_index];
@@ -6851,7 +6897,7 @@ mod test {
                         .expect("internal error: export metadata points to a block without a jump target assigned");
 
                     builder.add_export_by_basic_block(jump_target.static_target, &export.metadata.symbol);
-                    export_count += 1;
+                    export_count = export_count.checked_add(1).expect(OVERFLOW);
                 }
             }
             assert_eq!(export_count, exports.len());
@@ -7004,7 +7050,7 @@ mod test {
             ",
             "
             @0 [export #0: 'main']
-                a0 = a0 + 0x1
+                i32 a0 = a0 + 0x1
                 jump @0 if a0 <u 10
             @1
                 ret
@@ -7031,7 +7077,7 @@ mod test {
                 a1 = 0x1
                 fallthrough
             @1
-                a0 = a0 + a1
+                i32 a0 = a0 + a1
                 jump @1 if a0 <u 10
             @2
                 ret
@@ -7056,7 +7102,7 @@ mod test {
             "
             @0 [export #0: 'main']
                 a1 = 0x8
-                a0 = a0 + 0x1
+                i32 a0 = a0 + 0x1
                 jump @0 if a0 <u 10
             @1
                 ret
@@ -7081,8 +7127,8 @@ mod test {
         row: usize,
     ) -> Result<Vec<InstExt<SectionTarget, SectionTarget>>, ProgramFromElfError> {
         let section = elf.section_by_name(".text").next().expect("the fixture has .text");
-        let offset = 8 * row;
-        let raw = u32::from_le_bytes(section.data()[offset..offset + 4].try_into().unwrap());
+        let offset = row.checked_mul(8).expect("row offset overflows");
+        let raw = u32::from_le_bytes(section.data()[offset..][..4].try_into().unwrap());
         let inst = Inst::decode(&DecoderConfig::new_64bit(), raw).unwrap_or_else(|| panic!("row {row} ({raw:#010x}) decodes"));
         let at = SectionTarget {
             section_index: section.index(),
@@ -7203,7 +7249,7 @@ mod test {
             ",
             "
             @0 [export #0: 'main']
-                a1 = i32 [0xfffff000]
+                a1 = i32 [0xfffffffffffff000]
                 a1 = 0x2
                 ret
             ",
@@ -7314,9 +7360,9 @@ fn merge_consecutive_fallthrough_blocks(
     }
 
     let mut removed = HashSet::new();
-    for nth_block in 0..used_blocks.len() - 1 {
+    for nth_block in 0..used_blocks.len().checked_sub(1).expect(OVERFLOW) {
         let current = used_blocks[nth_block];
-        let next = used_blocks[nth_block + 1];
+        let next = used_blocks[nth_block.checked_add(1).expect(OVERFLOW)];
 
         // Find blocks which are empty...
         if !all_blocks[current.index()].ops.is_empty() {
@@ -7473,7 +7519,7 @@ fn spill_fake_registers(
         }
 
         fn is_ret(&self, insn: regalloc2::Inst) -> bool {
-            insn.0 as usize + 1 == self.instructions.len()
+            (insn.0 as usize).checked_add(1).expect(OVERFLOW) == self.instructions.len()
         }
 
         fn is_branch(&self, _insn: regalloc2::Inst) -> bool {
@@ -7513,11 +7559,11 @@ fn spill_fake_registers(
         };
 
         let end_at = {
-            let mut end_at = start_at + 1;
+            let mut end_at = start_at.checked_add(1).expect(OVERFLOW);
             for index in start_at..block.ops.len() {
                 let instruction = &block.ops[index].1;
                 if !((instruction.src_mask(imports) | instruction.dst_mask(imports)) & fake_mask).is_empty() {
-                    end_at = index + 1;
+                    end_at = index.checked_add(1).expect(OVERFLOW);
                 }
             }
             end_at
@@ -7530,14 +7576,14 @@ fn spill_fake_registers(
         //
         // This is not going to be particularily pretty nor very fast at run time, but it is done only as the last restort.
 
-        let mut counter = 0;
+        let mut counter: usize = 0;
         let mut reg_to_value_index: [usize; Reg::ALL.len()] = Default::default();
         let mut instructions = Vec::new();
 
         let mut prologue = Vec::new();
         for reg in RegMask::all() {
             let value_index = counter;
-            counter += 1;
+            counter = counter.checked_add(1).expect(OVERFLOW);
             reg_to_value_index[reg as usize] = value_index;
             prologue.push(regalloc2::Operand::new(
                 regalloc2::VReg::new(value_index, regalloc2::RegClass::Int),
@@ -7557,7 +7603,7 @@ fn spill_fake_registers(
                 match kind {
                     OpKind::Write => {
                         let value_index = counter;
-                        counter += 1;
+                        counter = counter.checked_add(1).expect(OVERFLOW);
                         reg_to_value_index[reg as usize] = value_index;
                         operands.push(regalloc2::Operand::new(
                             regalloc2::VReg::new(value_index, regalloc2::RegClass::Int),
@@ -7597,12 +7643,12 @@ fn spill_fake_registers(
                         ));
 
                         let value_index_write = counter;
-                        counter += 1;
+                        counter = counter.checked_add(1).expect(OVERFLOW);
 
                         reg_to_value_index[reg as usize] = value_index_write;
                         operands.push(regalloc2::Operand::new(
                             regalloc2::VReg::new(value_index_write, regalloc2::RegClass::Int),
-                            regalloc2::OperandConstraint::Reuse(operands.len() - 1),
+                            regalloc2::OperandConstraint::Reuse(operands.len().checked_sub(1).expect(OVERFLOW)),
                             regalloc2::OperandKind::Def,
                             regalloc2::OperandPos::Late,
                         ));
@@ -7658,7 +7704,11 @@ fn spill_fake_registers(
         let output = match regalloc2::run(&alloc_block, &env, &opts) {
             Ok(output) => output,
             Err(regalloc2::RegAllocError::SSA(vreg, inst)) => {
-                let nth_instruction: isize = inst.index() as isize - 1 + start_at as isize;
+                let nth_instruction: isize = (inst.index() as isize)
+                    .checked_sub(1)
+                    .expect(OVERFLOW)
+                    .checked_add(start_at as isize)
+                    .expect(OVERFLOW);
                 let instruction = block.ops.get(nth_instruction as usize).map(|(_, instruction)| instruction);
                 panic!("internal error: register allocation failed because of invalid SSA for {vreg} for instruction {instruction:?}");
             }
@@ -7671,7 +7721,11 @@ fn spill_fake_registers(
         let mut edits = output.edits.into_iter().peekable();
         for nth_instruction in start_at..=end_at {
             while let Some((next_edit_at, edit)) = edits.peek() {
-                let target_nth_instruction: isize = next_edit_at.inst().index() as isize - 1 + start_at as isize;
+                let target_nth_instruction: isize = (next_edit_at.inst().index() as isize)
+                    .checked_sub(1)
+                    .expect(OVERFLOW)
+                    .checked_add(start_at as isize)
+                    .expect(OVERFLOW);
                 if target_nth_instruction < 0
                     || target_nth_instruction > nth_instruction as isize
                     || (target_nth_instruction == nth_instruction as isize && next_edit_at.pos() == regalloc2::InstPosition::After)
@@ -7692,8 +7746,8 @@ fn spill_fake_registers(
                     (Some(dst_reg), None) => {
                         let dst_reg = Reg::from_usize(dst_reg.hw_enc()).unwrap();
                         let src_slot = src.as_stack().unwrap();
-                        let offset = src_slot.index() * reg_size;
-                        *regspill_size = core::cmp::max(*regspill_size, offset + reg_size);
+                        let offset = src_slot.index().checked_mul(reg_size).expect(OVERFLOW);
+                        *regspill_size = core::cmp::max(*regspill_size, offset.checked_add(reg_size).expect(OVERFLOW));
                         BasicInst::LoadAbsolute {
                             kind: if is_rv64 { LoadKind::U64 } else { LoadKind::I32 },
                             dst: dst_reg,
@@ -7706,8 +7760,8 @@ fn spill_fake_registers(
                     (None, Some(src_reg)) => {
                         let src_reg = Reg::from_usize(src_reg.hw_enc()).unwrap();
                         let dst_slot = dst.as_stack().unwrap();
-                        let offset = dst_slot.index() * reg_size;
-                        *regspill_size = core::cmp::max(*regspill_size, offset + reg_size);
+                        let offset = dst_slot.index().checked_mul(reg_size).expect(OVERFLOW);
+                        *regspill_size = core::cmp::max(*regspill_size, offset.checked_add(reg_size).expect(OVERFLOW));
                         BasicInst::StoreAbsolute {
                             kind: if is_rv64 { StoreKind::U64 } else { StoreKind::U32 },
                             src: src_reg.into(),
@@ -7745,12 +7799,16 @@ fn spill_fake_registers(
             }
 
             let (source, instruction) = &block.ops[nth_instruction];
-            let mut alloc_index = output.inst_alloc_offsets[nth_instruction - start_at + 1];
+            let mut alloc_index = output.inst_alloc_offsets[nth_instruction
+                .checked_sub(start_at)
+                .expect(OVERFLOW)
+                .checked_add(1)
+                .expect(OVERFLOW)];
             let new_instruction = instruction
                 .clone()
                 .map_register(|reg, _| {
                     let alloc = &output.allocs[alloc_index as usize];
-                    alloc_index += 1;
+                    alloc_index = alloc_index.checked_add(1).expect(OVERFLOW);
 
                     assert_eq!(alloc.kind(), regalloc2::AllocationKind::Reg);
                     let allocated_reg = Reg::from_usize(alloc.as_reg().unwrap().hw_enc() as usize).unwrap();
@@ -8332,7 +8390,7 @@ impl IntoIterator for RegMask {
 
 impl RegMask {
     fn all() -> Self {
-        RegMask((1 << Reg::ALL.len()) - 1)
+        RegMask((1_u32 << Reg::ALL.len()).wrapping_sub(1))
     }
 
     fn fake() -> Self {
@@ -8486,7 +8544,12 @@ fn build_jump_table(
         assert!(!reachability.is_unreachable());
 
         let dynamic_target = if reachability.is_dynamically_reachable() {
-            let dynamic_target: u32 = (jump_table.len() + 1).try_into().expect("jump table index overflow");
+            let dynamic_target: u32 = jump_table
+                .len()
+                .checked_add(1)
+                .expect(OVERFLOW)
+                .try_into()
+                .expect("jump table index overflow");
             jump_table.push(static_target.try_into().expect("jump table index overflow"));
             Some(dynamic_target)
         } else {
@@ -8564,7 +8627,7 @@ fn emit_code(
     }
 
     let can_fallthrough_to_next_block = calculate_whether_can_fallthrough(all_blocks, used_blocks);
-    let get_data_address = |source: &SourceStack, target: SectionTarget| -> Result<u32, ProgramFromElfError> {
+    let get_data_address = |source: &SourceStack, target: SectionTarget| -> Result<i32, ProgramFromElfError> {
         if let Some(&base_address) = base_address_for_section.get(&target.section_index) {
             let Some(address) = base_address.checked_add(target.offset) else {
                 return Err(ProgramFromElfError::other(format!(
@@ -8583,10 +8646,10 @@ fn emit_code(
         }
     };
 
-    let get_absolute_address = |source: &SourceStack, target: AbsoluteTarget| -> Result<u32, ProgramFromElfError> {
+    let get_absolute_address = |source: &SourceStack, target: AbsoluteTarget| -> Result<i32, ProgramFromElfError> {
         match target.place() {
             Place::Section(target) => get_data_address(source, target),
-            Place::Address(address) => Ok(address),
+            Place::Address(address) => Ok(cast(address).bitwise_as_i32()),
         }
     };
 
@@ -8609,7 +8672,7 @@ fn emit_code(
             code.push((
                 Source {
                     section_index: block.source.section_index,
-                    offset_range: (block.source.offset_range.start..block.source.offset_range.start + 4).into(),
+                    offset_range: (block.source.offset_range.start..block.source.offset_range.start.checked_add(4).expect(OVERFLOW)).into(),
                 }
                 .into(),
                 Instruction::fallthrough,
@@ -8639,7 +8702,7 @@ fn emit_code(
             code.push((
                 Source {
                     section_index: block.source.section_index,
-                    offset_range: (block.source.offset_range.start..block.source.offset_range.start + 4).into(),
+                    offset_range: (block.source.offset_range.start..block.source.offset_range.start.checked_add(4).expect(OVERFLOW)).into(),
                 }
                 .into(),
                 Instruction::unlikely,
@@ -8648,15 +8711,20 @@ fn emit_code(
 
         for (source, op) in &block.ops {
             let op = match *op {
-                BasicInst::LoadImmediate { dst, imm } => Instruction::load_imm(conv_reg(dst), cast(imm).to_unsigned()),
+                BasicInst::LoadImmediate { dst, imm } => Instruction::load_imm(conv_reg(dst), imm),
                 BasicInst::LoadImmediate64 { dst, imm } => {
                     if !is_rv64 {
                         unreachable!("internal error: load_imm64 found when processing 32-bit binary")
                     } else {
-                        Instruction::load_imm64(conv_reg(dst), cast(imm).to_unsigned())
+                        Instruction::load_imm64(conv_reg(dst), cast(imm).bitwise_as_u64())
                     }
                 }
-                BasicInst::LoadHeapBase { dst } => Instruction::load_imm(conv_reg(dst), heap_base),
+                BasicInst::LoadHeapBase { dst } => Instruction::load_imm(
+                    conv_reg(dst),
+                    heap_base
+                        .try_into()
+                        .map_err(|_| ProgramFromElfError::other("overflow when emitting an address load"))?,
+                ),
                 BasicInst::LoadAbsolute { kind, dst, target } => {
                     codegen! {
                         args = (conv_reg(dst), get_absolute_address(source, target)?),
@@ -8689,7 +8757,7 @@ fn emit_code(
                         }
                         RegImm::Imm(value) => {
                             codegen! {
-                                args = (target, cast(value).to_unsigned()),
+                                args = (target, value),
                                 kind = kind,
                                 {
                                     StoreKind::U64 => store_imm_u64,
@@ -8703,7 +8771,7 @@ fn emit_code(
                 }
                 BasicInst::LoadIndirect { kind, dst, base, offset } => {
                     codegen! {
-                        args = (conv_reg(dst), conv_reg(base), cast(offset).to_unsigned()),
+                        args = (conv_reg(dst), conv_reg(base), offset),
                         kind = kind,
                         {
                             LoadKind::I8 => load_indirect_i8,
@@ -8719,7 +8787,7 @@ fn emit_code(
                 BasicInst::StoreIndirect { kind, src, base, offset } => match src {
                     RegImm::Reg(src) => {
                         codegen! {
-                            args = (conv_reg(src), conv_reg(base), cast(offset).to_unsigned()),
+                            args = (conv_reg(src), conv_reg(base), offset),
                             kind = kind,
                             {
                                 StoreKind::U64 => store_indirect_u64,
@@ -8731,7 +8799,7 @@ fn emit_code(
                     }
                     RegImm::Imm(value) => {
                         codegen! {
-                            args = (conv_reg(base), cast(offset).to_unsigned(), cast(value).to_unsigned()),
+                            args = (conv_reg(base), offset, value),
                             kind = kind,
                             {
                                 StoreKind::U64 => store_imm_indirect_u64,
@@ -8747,9 +8815,11 @@ fn emit_code(
                         AnyTarget::Code(target) => {
                             let value = get_jump_target(target)?.dynamic_target.expect("missing jump target for address");
                             let Some(value) = value.checked_mul(VM_CODE_ADDRESS_ALIGNMENT) else {
-                                return Err(ProgramFromElfError::other("overflow when emitting an address load"));
+                                return Err(ProgramFromElfError::other("overflow when emitting a code address load"));
                             };
                             value
+                                .try_into()
+                                .map_err(|_| ProgramFromElfError::other("overflow when emitting a code address load"))?
                         }
                         AnyTarget::Data(target) => get_data_address(source, target)?,
                     };
@@ -8877,14 +8947,35 @@ fn emit_code(
                         }
                         (RegImm::Reg(src1), RegImm::Imm(src2)) => {
                             let src1 = conv_reg(src1);
-                            let src2 = cast(src2).to_unsigned();
                             match kind {
                                 K::Add32 => I::add_imm_32(dst, src1, src2),
                                 K::Add32AndSignExtend => I::add_imm_32(dst, src1, src2),
                                 K::Add64 => I::add_imm_64(dst, src1, src2),
-                                K::Sub32 => I::add_imm_32(dst, src1, cast(-cast(src2).to_signed()).to_unsigned()),
-                                K::Sub32AndSignExtend => I::add_imm_32(dst, src1, cast(-cast(src2).to_signed()).to_unsigned()),
-                                K::Sub64 => I::add_imm_64(dst, src1, cast(-cast(src2).to_signed()).to_unsigned()),
+                                K::Sub32 => {
+                                    if let Some(src2_neg) = src2.checked_neg() {
+                                        I::add_imm_32(dst, src1, src2_neg)
+                                    } else {
+                                        code.push((
+                                            source.clone(),
+                                            I::add_imm_32(dst, src1, src2.wrapping_add(1).checked_neg().unwrap()),
+                                        ));
+                                        code.push((source.clone(), I::add_imm_32(dst, dst, 1)));
+                                        continue;
+                                    }
+                                }
+                                K::Sub32AndSignExtend => I::add_imm_32(dst, src1, src2.wrapping_neg()),
+                                K::Sub64 => {
+                                    if let Some(src2_neg) = src2.checked_neg() {
+                                        I::add_imm_64(dst, src1, src2_neg)
+                                    } else {
+                                        code.push((
+                                            source.clone(),
+                                            I::add_imm_64(dst, src1, src2.wrapping_add(1).checked_neg().unwrap()),
+                                        ));
+                                        code.push((source.clone(), I::add_imm_64(dst, dst, 1)));
+                                        continue;
+                                    }
+                                }
                                 K::ShiftLogicalLeft32 => I::shift_logical_left_imm_32(dst, src1, src2),
                                 K::ShiftLogicalLeft32AndSignExtend => I::shift_logical_left_imm_32(dst, src1, src2),
                                 K::ShiftLogicalLeft64 => I::shift_logical_left_imm_64(dst, src1, src2),
@@ -8910,7 +9001,6 @@ fn emit_code(
                             }
                         }
                         (RegImm::Imm(src1), RegImm::Reg(src2)) => {
-                            let src1 = cast(src1).to_unsigned();
                             let src2 = conv_reg(src2);
                             match kind {
                                 K::Add32 => I::add_imm_32(dst, src2, src1),
@@ -8949,10 +9039,10 @@ fn emit_code(
                             if is_optimized {
                                 unreachable!("internal error: instruction with only constant operands: {op:?}")
                             } else {
-                                let imm: u32 = OperationKind::from(kind)
+                                let imm = OperationKind::from(kind)
                                     .apply_const(cast(src1).to_i64_sign_extend(), cast(src2).to_i64_sign_extend())
                                     .try_into()
-                                    .expect("load immediate overflow");
+                                    .expect("internal error: load immediate overflow");
                                 I::load_imm(dst, imm)
                             }
                         }
@@ -8971,7 +9061,7 @@ fn emit_code(
                     }
                     RegImm::Imm(imm) => {
                         codegen! {
-                            args = (conv_reg(dst), conv_reg(cond), cast(imm).to_unsigned()),
+                            args = (conv_reg(dst), conv_reg(cond), imm),
                             kind = kind,
                             {
                                 CmovKind::EqZero => cmov_if_zero_imm,
@@ -8983,7 +9073,9 @@ fn emit_code(
                 BasicInst::Ecalli { nth_import } => {
                     assert!(used_imports.contains(&nth_import));
                     let import = &imports[nth_import];
-                    Instruction::ecalli(import.metadata.index.expect("internal error: no index was assigned to an ecall"))
+                    Instruction::ecalli(
+                        cast(import.metadata.index.expect("internal error: no index was assigned to an ecall")).bitwise_as_i32(),
+                    )
                 }
                 BasicInst::Sbrk { dst, size } => Instruction::sbrk(conv_reg(dst), conv_reg(size)),
                 BasicInst::Memset => Instruction::memset,
@@ -9019,6 +9111,10 @@ fn emit_code(
                 let Some(target_return) = target_return.checked_mul(VM_CODE_ADDRESS_ALIGNMENT) else {
                     return Err(ProgramFromElfError::other("overflow when emitting an indirect call"));
                 };
+
+                let target_return = target_return
+                    .try_into()
+                    .map_err(|_| ProgramFromElfError::other("overflow when emitting an indirect call"))?;
 
                 code.push((
                     block.next.source.clone(),
@@ -9059,6 +9155,10 @@ fn emit_code(
                     return Err(ProgramFromElfError::other("overflow when emitting an indirect call"));
                 };
 
+                let target_return = target_return
+                    .try_into()
+                    .map_err(|_| ProgramFromElfError::other("overflow when emitting a data address load"))?;
+
                 let Ok(offset) = offset.try_into() else {
                     unreachable!("internal error: indirect call with an out-of-range offset");
                 };
@@ -9097,7 +9197,7 @@ fn emit_code(
                     }
                     (RegImm::Imm(src1), RegImm::Reg(src2)) => {
                         codegen! {
-                            args = (conv_reg(src2), cast(src1).to_unsigned(), target_true.static_target),
+                            args = (conv_reg(src2), src1, target_true.static_target),
                             kind = kind,
                             {
                                 BranchKind::Eq32 | BranchKind::Eq64 => branch_eq_imm,
@@ -9111,7 +9211,7 @@ fn emit_code(
                     }
                     (RegImm::Reg(src1), RegImm::Imm(src2)) => {
                         codegen! {
-                            args = (conv_reg(src1), cast(src2).to_unsigned(), target_true.static_target),
+                            args = (conv_reg(src1), src2, target_true.static_target),
                             kind = kind,
                             {
                                 BranchKind::Eq32 | BranchKind::Eq64 => branch_eq_imm,
@@ -9455,7 +9555,7 @@ fn harvest_data_relocations(
 
         return Err(ProgramFromElfError::other(format!(
             "unsupported relocations for '{section_name}'[{relative_address:x}] (0x{absolute_address:08x}): {list}",
-            absolute_address = section.original_address() + relative_address,
+            absolute_address = section.original_address().checked_add(relative_address).expect(OVERFLOW),
             list = SectionTarget::make_human_readable_in_debug_string(elf, &format!("{list:?}")),
         )));
     }
@@ -9464,7 +9564,7 @@ fn harvest_data_relocations(
 }
 
 fn read_u32(data: &[u8], relative_address: u64) -> Result<u32, ProgramFromElfError> {
-    let target_range = relative_address as usize..relative_address as usize + 4;
+    let target_range = relative_address as usize..(relative_address as usize).checked_add(4).expect(OVERFLOW);
     let value = data
         .get(target_range)
         .ok_or(ProgramFromElfError::other("out of range relocation"))?;
@@ -9472,7 +9572,7 @@ fn read_u32(data: &[u8], relative_address: u64) -> Result<u32, ProgramFromElfErr
 }
 
 fn read_u16(data: &[u8], relative_address: u64) -> Result<u16, ProgramFromElfError> {
-    let target_range = relative_address as usize..relative_address as usize + 2;
+    let target_range = relative_address as usize..(relative_address as usize).checked_add(2).expect(OVERFLOW);
     let value = data
         .get(target_range)
         .ok_or(ProgramFromElfError::other("out of range relocation"))?;
@@ -9496,7 +9596,7 @@ fn overwrite_uleb128(data: &mut [u8], mut data_offset: usize, mut value: u64) ->
         let Some(byte) = data.get_mut(data_offset) else {
             return Err(ProgramFromElfError::other("ULEB128 relocation target offset out of bounds"));
         };
-        data_offset += 1;
+        data_offset = data_offset.checked_add(1).expect(OVERFLOW);
 
         if *byte & 0x80 != 0 {
             *byte = 0x80 | (value as u8 & 0x7f);
@@ -9525,29 +9625,29 @@ fn test_overwrite_uleb128() {
 
 fn write_u64(data: &mut [u8], relative_address: u64, value: u64) -> Result<(), ProgramFromElfError> {
     let value = value.to_le_bytes();
-    data[relative_address as usize + 7] = value[7];
-    data[relative_address as usize + 6] = value[6];
-    data[relative_address as usize + 5] = value[5];
-    data[relative_address as usize + 4] = value[4];
-    data[relative_address as usize + 3] = value[3];
-    data[relative_address as usize + 2] = value[2];
-    data[relative_address as usize + 1] = value[1];
+    data[(relative_address as usize).checked_add(7).expect(OVERFLOW)] = value[7];
+    data[(relative_address as usize).checked_add(6).expect(OVERFLOW)] = value[6];
+    data[(relative_address as usize).checked_add(5).expect(OVERFLOW)] = value[5];
+    data[(relative_address as usize).checked_add(4).expect(OVERFLOW)] = value[4];
+    data[(relative_address as usize).checked_add(3).expect(OVERFLOW)] = value[3];
+    data[(relative_address as usize).checked_add(2).expect(OVERFLOW)] = value[2];
+    data[(relative_address as usize).checked_add(1).expect(OVERFLOW)] = value[1];
     data[relative_address as usize] = value[0];
     Ok(())
 }
 
 fn write_u32(data: &mut [u8], relative_address: u64, value: u32) -> Result<(), ProgramFromElfError> {
     let value = value.to_le_bytes();
-    data[relative_address as usize + 3] = value[3];
-    data[relative_address as usize + 2] = value[2];
-    data[relative_address as usize + 1] = value[1];
+    data[(relative_address as usize).checked_add(3).expect(OVERFLOW)] = value[3];
+    data[(relative_address as usize).checked_add(2).expect(OVERFLOW)] = value[2];
+    data[(relative_address as usize).checked_add(1).expect(OVERFLOW)] = value[1];
     data[relative_address as usize] = value[0];
     Ok(())
 }
 
 fn write_u16(data: &mut [u8], relative_address: u64, value: u16) -> Result<(), ProgramFromElfError> {
     let value = value.to_le_bytes();
-    data[relative_address as usize + 1] = value[1];
+    data[(relative_address as usize).checked_add(1).expect(OVERFLOW)] = value[1];
     data[relative_address as usize] = value[0];
     Ok(())
 }
@@ -9648,7 +9748,9 @@ fn harvest_code_relocations(
                 match reloc_kind {
                     object::elf::R_RISCV_CALL_PLT => {
                         // This relocation is for a pair of instructions, namely AUIPC + JALR, where we're allowed to delete the AUIPC if it's unnecessary.
-                        let Some(xs) = section_data.get(current_location.offset as usize..current_location.offset as usize + 8) else {
+                        let Some(xs) = section_data
+                            .get(current_location.offset as usize..(current_location.offset as usize).checked_add(8).expect(OVERFLOW))
+                        else {
                             return Err(ProgramFromElfError::other("invalid R_RISCV_CALL_PLT relocation"));
                         };
 
@@ -10205,7 +10307,7 @@ fn parse_function_symbols(elf: &Elf) -> Result<Vec<(Source, String)>, ProgramFro
 
                 let source = Source {
                     section_index: target.section_index,
-                    offset_range: (target.offset..target.offset + sym.size()).into(),
+                    offset_range: (target.offset..target.offset.checked_add(sym.size()).expect(OVERFLOW)).into(),
                 };
 
                 functions.push((source, name.to_owned()));
@@ -10237,6 +10339,8 @@ pub struct Config {
     dispatch_table: Vec<Vec<u8>>,
     min_stack_size: u32,
     gas_cost_model_aware_optimizations: bool,
+    metadata_hash: Option<Vec<u8>>,
+    allow_unsupported_instructions: bool,
 }
 
 impl Default for Config {
@@ -10249,6 +10353,8 @@ impl Default for Config {
             dispatch_table: Vec::new(),
             min_stack_size: VM_MIN_PAGE_SIZE * 2,
             gas_cost_model_aware_optimizations: true,
+            metadata_hash: None,
+            allow_unsupported_instructions: false,
         }
     }
 }
@@ -10256,6 +10362,12 @@ impl Default for Config {
 impl Config {
     pub fn set_strip(&mut self, value: bool) -> &mut Self {
         self.strip = value;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn set_allow_unsupported_instructions(&mut self, value: bool) -> &mut Self {
+        self.allow_unsupported_instructions = value;
         self
     }
 
@@ -10293,14 +10405,29 @@ impl Config {
         self.gas_cost_model_aware_optimizations = value;
         self
     }
+
+    pub fn set_metadata_hash(&mut self, value: Option<Vec<u8>>) -> &mut Self {
+        self.metadata_hash = value;
+        self
+    }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[non_exhaustive]
 pub enum TargetInstructionSet {
     ReviveV1,
     JamV1,
     Latest,
+}
+
+impl From<InstructionSetKind> for TargetInstructionSet {
+    fn from(kind: InstructionSetKind) -> Self {
+        match kind {
+            InstructionSetKind::ReviveV1 => TargetInstructionSet::ReviveV1,
+            InstructionSetKind::JamV1 => TargetInstructionSet::JamV1,
+            InstructionSetKind::Latest32 | InstructionSetKind::Latest64 => TargetInstructionSet::Latest,
+        }
+    }
 }
 
 pub fn program_from_elf(config: Config, isa: TargetInstructionSet, data: &[u8]) -> Result<Vec<u8>, ProgramFromElfError> {
@@ -10370,7 +10497,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
             " {}: 0x{:08x}..0x{:08x}: {} [ty={}] ({} bytes)",
             section.index(),
             section.original_address(),
-            section.original_address() + section.size(),
+            section.original_address().checked_add(section.size()).expect(OVERFLOW),
             name,
             kind,
             section.size()
@@ -10378,7 +10505,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
 
         if section.is_allocated() && section.original_address() != 0 {
             section_map.insert(
-                section.original_address()..section.original_address() + section.size(),
+                section.original_address()..section.original_address().checked_add(section.size()).expect(OVERFLOW),
                 section.index(),
             );
         }
@@ -10533,7 +10660,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
         .filter(|&index| {
             let section = elf.section_by_index(index);
             let (start, size) = (section.original_address(), section.size());
-            !elf.is_relocatable() && (ranges_overlap(0, 2048, start, size) || ranges_overlap(top - 2047, 2048, start, size))
+            !elf.is_relocatable() && (ranges_overlap(0, 2048, start, size) || ranges_overlap(top.wrapping_sub(2047), 2048, start, size))
         })
         .collect();
 
@@ -10561,7 +10688,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
             let last_source = instructions.last().unwrap().0;
             let source = Source {
                 section_index: last_source.section_index,
-                offset_range: (last_source.offset_range.end..last_source.offset_range.end + 4).into(),
+                offset_range: (last_source.offset_range.end..last_source.offset_range.end.checked_add(4).expect(OVERFLOW)).into(),
             };
             instructions.push((source, InstExt::Control(ControlInst::Unimplemented)));
         }
@@ -10704,10 +10831,10 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
     log::debug!("Exports found: {}", exports.len());
 
     {
-        let mut count_dynamic = 0;
+        let mut count_dynamic: usize = 0;
         for reachability in reachability_graph.for_code.values() {
             if reachability.is_dynamically_reachable() {
-                count_dynamic += 1;
+                count_dynamic = count_dynamic.checked_add(1).expect(OVERFLOW);
             }
         }
         log::debug!(
@@ -10715,7 +10842,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
             reachability_graph.for_code.len(),
             all_blocks.len(),
             count_dynamic,
-            reachability_graph.for_code.len() - count_dynamic
+            reachability_graph.for_code.len().checked_sub(count_dynamic).expect(OVERFLOW)
         );
     }
 
@@ -10739,9 +10866,9 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
                         continue;
                     }
 
-                    let offset = target_to_got_offset.len() as u64 * u64::from(bitness);
+                    let offset = (target_to_got_offset.len() as u64).checked_mul(u64::from(bitness)).expect(OVERFLOW);
                     target_to_got_offset.insert(*target, offset);
-                    got_size = offset + u64::from(bitness);
+                    got_size = offset.checked_add(u64::from(bitness)).expect(OVERFLOW);
 
                     let target = match target {
                         AnyTarget::Data(target) => *target,
@@ -10767,7 +10894,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
         }
     }
 
-    elf.extend_section_to_at_least(section_got, got_size.try_into().expect("overflow"));
+    elf.extend_section_to_at_least(section_got, got_size.try_into().expect(OVERFLOW));
     check_imports_and_assign_indexes(&mut imports, &used_imports)?;
 
     let mut base_address_for_section = HashMap::new();
@@ -11029,21 +11156,21 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
                         if range.end < range.start {
                             match size {
                                 RelocationSize::U8 => {
-                                    if let Ok(new_value) = cast(value).to_signed().try_into() {
+                                    if let Ok(new_value) = cast(value).bitwise_as_i64().try_into() {
                                         let new_value: i8 = new_value;
-                                        value = cast(cast(new_value).to_unsigned()).to_u64();
+                                        value = cast(cast(new_value).bitwise_as_u8()).to_u64();
                                     }
                                 }
                                 RelocationSize::U16 => {
-                                    if let Ok(new_value) = cast(value).to_signed().try_into() {
+                                    if let Ok(new_value) = cast(value).bitwise_as_i64().try_into() {
                                         let new_value: i16 = new_value;
-                                        value = cast(cast(new_value).to_unsigned()).to_u64();
+                                        value = cast(cast(new_value).bitwise_as_u16()).to_u64();
                                     }
                                 }
                                 RelocationSize::U32 => {
-                                    if let Ok(new_value) = cast(value).to_signed().try_into() {
+                                    if let Ok(new_value) = cast(value).bitwise_as_i64().try_into() {
                                         let new_value: i32 = new_value;
-                                        value = cast(cast(new_value).to_unsigned()).to_u64();
+                                        value = cast(cast(new_value).bitwise_as_u32()).to_u64();
                                     }
                                 }
                                 RelocationSize::U64 => {}
@@ -11184,6 +11311,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
     log::trace!("Instruction count: {}", code.len());
 
     let mut builder = ProgramBlobBuilder::new(isa);
+    builder.set_ignore_instruction_set_incompatibility(config.allow_unsupported_instructions);
     builder.set_ro_data_size(memory_config.ro_data_size);
     builder.set_rw_data_size(memory_config.rw_data_size);
     builder.set_stack_size(memory_config.min_stack_size);
@@ -11198,7 +11326,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
                         buffer.extend_from_slice(slice);
                     }
                     DataRef::Padding(bytes) => {
-                        let new_size = buffer.len() + bytes;
+                        let new_size = buffer.len().checked_add(bytes).expect(OVERFLOW);
                         buffer.resize(new_size, 0);
                     }
                 }
@@ -11226,13 +11354,13 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
             };
 
             assert_eq!(index, next_index);
-            next_index += 1;
+            next_index = next_index.checked_add(1).expect(OVERFLOW);
 
             builder.add_import(&import.metadata.symbol);
         }
     }
 
-    let mut export_count = 0;
+    let mut export_count: usize = 0;
     for current in used_blocks {
         for &export_index in &reachability_graph.for_code.get(&current).unwrap().exports {
             let export = &exports[export_index];
@@ -11240,7 +11368,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
                 .expect("internal error: export metadata points to a block without a jump target assigned");
 
             builder.add_export_by_basic_block(jump_target.static_target, &export.metadata.symbol);
-            export_count += 1;
+            export_count = export_count.checked_add(1).expect(OVERFLOW);
         }
     }
     assert_eq!(export_count, exports.len());
@@ -11318,25 +11446,35 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
     builder.set_code(&raw_code, &jump_table);
 
     let mut offsets = Vec::new();
-    if !config.strip {
-        let blob = ProgramBlob::parse(builder.to_vec().map_err(ProgramFromElfError::other)?.into())?;
-        offsets = blob
-            .instructions()
-            .skip(config.dispatch_table.len())
-            .map(|instruction| (instruction.offset, instruction.next_offset))
-            .collect();
-        assert_eq!(offsets.len(), locations_for_instruction.len());
+    let raw_blob = if config.strip {
+        if let Some(metadata_hash) = config.metadata_hash.clone() {
+            builder.add_custom_section(program::SECTION_OPT_METADATA_HASH, metadata_hash);
+        }
 
-        emit_debug_info(&mut builder, &locations_for_instruction, &offsets);
+        builder.to_vec()
+    } else {
+        builder.to_vec_with_instruction_offsets(|builder, instruction_offsets| {
+            offsets = instruction_offsets.iter().copied().skip(config.dispatch_table.len()).collect();
+            assert_eq!(offsets.len(), locations_for_instruction.len());
+            emit_debug_info(builder, &locations_for_instruction, &offsets);
+
+            if let Some(metadata_hash) = config.metadata_hash.clone() {
+                builder.add_custom_section(program::SECTION_OPT_METADATA_HASH, metadata_hash);
+            }
+        })
     }
-
-    let raw_blob = builder.to_vec().map_err(ProgramFromElfError::other)?;
+    .map_err(ProgramFromElfError::other)?;
 
     log::debug!("Built a program of {} bytes", raw_blob.len());
     let blob = ProgramBlob::parse(raw_blob[..].into())?;
 
     // Sanity check that our debug info was properly emitted and can be parsed.
     if cfg!(debug_assertions) && !config.strip {
+        // Raise/disable the per-region limit so the check never rejects valid output.
+        // A deeply inlined instruction could produce a region with more opcodes than the default allows.
+        let mut line_program_config = LineProgramConfig::default();
+        line_program_config.instruction_limit_per_region = usize::MAX;
+
         'outer: for (nth_instruction, locations) in locations_for_instruction.iter().enumerate() {
             let (program_counter, _) = offsets[nth_instruction];
             let line_program = blob.get_debug_line_program_at(program_counter).unwrap();
@@ -11346,7 +11484,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
             };
 
             let mut line_program = line_program.unwrap();
-            while let Some(region_info) = line_program.run().unwrap() {
+            while let Some(region_info) = line_program.run_with_config(line_program_config).unwrap() {
                 if !region_info.instruction_range().contains(&program_counter) {
                     continue;
                 }
@@ -11497,8 +11635,14 @@ fn emit_debug_info(
 
         if let Some(last_group) = groups.last_mut() {
             if last_group.key() == group.key() {
-                assert_eq!(last_group.instruction_position + last_group.instruction_count, instruction_position);
-                last_group.instruction_count += 1;
+                assert_eq!(
+                    last_group
+                        .instruction_position
+                        .checked_add(last_group.instruction_count)
+                        .expect(OVERFLOW),
+                    instruction_position
+                );
+                last_group.instruction_count = last_group.instruction_count.checked_add(1).expect(OVERFLOW);
                 last_group.program_counter_end = group.program_counter_end;
                 continue;
             }
@@ -11521,7 +11665,12 @@ fn emit_debug_info(
         let offset_base = writer.len();
         writer.push_byte(program::VERSION_DEBUG_LINE_PROGRAM_V1);
         for group in &groups {
-            let info_offset: u32 = (writer.len() - offset_base).try_into().expect("function info offset overflow");
+            let info_offset: u32 = writer
+                .len()
+                .checked_sub(offset_base)
+                .expect(OVERFLOW)
+                .try_into()
+                .expect("function info offset overflow");
             info_offsets.push(info_offset);
 
             #[derive(Default)]
@@ -11588,16 +11737,16 @@ fn emit_debug_info(
                 }
 
                 fn finish_instruction(&mut self, writer: &mut Writer, next_depth: usize, instruction_length: u32) {
-                    self.queued_count += instruction_length;
+                    self.queued_count = self.queued_count.checked_add(instruction_length).expect(OVERFLOW);
 
                     enum Direction {
                         GoDown,
                         GoUp,
                     }
 
-                    let dir = if next_depth == self.stack_depth + 1 {
+                    let dir = if next_depth == self.stack_depth.checked_add(1).expect(OVERFLOW) {
                         Direction::GoDown
-                    } else if next_depth + 1 == self.stack_depth {
+                    } else if next_depth.checked_add(1).expect(OVERFLOW) == self.stack_depth {
                         Direction::GoUp
                     } else {
                         return;
@@ -11630,7 +11779,9 @@ fn emit_debug_info(
             }
 
             let mut state = LineProgramState::default();
-            for nth_instruction in group.instruction_position..group.instruction_position + group.instruction_count {
+            for nth_instruction in
+                group.instruction_position..group.instruction_position.checked_add(group.instruction_count).expect(OVERFLOW)
+            {
                 let locations = locations_for_instruction[nth_instruction].as_ref().unwrap();
                 state.set_stack_depth(writer, locations.len());
 
@@ -11706,16 +11857,16 @@ fn emit_debug_info(
                     if changed_line {
                         state.set_mutation_depth(writer, depth);
                         match (state.stack[depth].line, new_line) {
-                            (Some(old_value), Some(new_value)) if old_value + 1 == new_value => {
+                            (Some(old_value), Some(new_value)) if old_value.checked_add(1).expect(OVERFLOW) == new_value => {
                                 writer.push_byte(LineProgramOp::IncrementLine as u8);
                             }
                             (Some(old_value), Some(new_value)) if new_value > old_value => {
                                 writer.push_byte(LineProgramOp::AddLine as u8);
-                                writer.push_varint(new_value - old_value);
+                                writer.push_varint(new_value.checked_sub(old_value).expect(OVERFLOW));
                             }
                             (Some(old_value), Some(new_value)) if new_value < old_value => {
                                 writer.push_byte(LineProgramOp::SubLine as u8);
-                                writer.push_varint(old_value - new_value);
+                                writer.push_varint(old_value.checked_sub(new_value).expect(OVERFLOW));
                             }
                             _ => {
                                 writer.push_byte(LineProgramOp::SetLine as u8);
@@ -11734,10 +11885,17 @@ fn emit_debug_info(
                 }
 
                 let next_depth = locations_for_instruction
-                    .get(nth_instruction + 1)
+                    .get(nth_instruction.checked_add(1).expect(OVERFLOW))
                     .and_then(|next_locations| next_locations.as_ref().map(|xs| xs.len()))
                     .unwrap_or(0);
-                state.finish_instruction(writer, next_depth, (offsets[nth_instruction].1).0 - (offsets[nth_instruction].0).0);
+                state.finish_instruction(
+                    writer,
+                    next_depth,
+                    (offsets[nth_instruction].1)
+                        .0
+                        .checked_sub((offsets[nth_instruction].0).0)
+                        .expect(OVERFLOW),
+                );
             }
 
             state.flush_if_any_are_queued(writer);
@@ -11760,4 +11918,73 @@ fn emit_debug_info(
     builder.add_custom_section(program::SECTION_OPT_DEBUG_STRINGS, dbg_strings.section);
     builder.add_custom_section(program::SECTION_OPT_DEBUG_LINE_PROGRAMS, section_line_programs);
     builder.add_custom_section(program::SECTION_OPT_DEBUG_LINE_PROGRAM_RANGES, section_line_program_ranges);
+}
+
+#[cfg(test)]
+mod test_debug_line_program {
+    use super::*;
+    use crate::dwarf::SourceCodeLocation;
+    use polkavm_common::program::{LineProgramConfig, ProgramParseError};
+
+    /// Creates a maximally verbose frame: every field is distinct, so each frame
+    /// forces [`emit_debug_info`] to emit the full set of line program ops.
+    fn create_location(depth: u32) -> Location {
+        Location {
+            kind: if (depth & 1) == 0 { FrameKind::Enter } else { FrameKind::Call },
+            namespace: Some(format!("ns{depth}").into()),
+            function_name: Some(format!("fn{depth}").into()),
+            source_code_location: Some(SourceCodeLocation::Column {
+                path: format!("f{depth}.rs").into(),
+                line: depth,
+                column: depth,
+            }),
+        }
+    }
+
+    /// Attributes `stack` to one instruction, emits the debug info, and walks the
+    /// resulting line program with `config`, surfacing any parse error.
+    fn emit_and_parse(stack: Arc<[Location]>, config: LineProgramConfig) -> Result<(), ProgramParseError> {
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+        builder.set_code(&[Instruction::fallthrough, Instruction::fallthrough], &[]);
+
+        let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+        let offsets: Vec<(ProgramCounter, ProgramCounter)> = blob
+            .instructions()
+            .map(|instruction| (instruction.offset, instruction.next_offset))
+            .collect();
+        assert!(!offsets.is_empty());
+
+        let mut locations: Vec<Option<Arc<[Location]>>> = vec![None; offsets.len()];
+        locations[0] = Some(stack);
+
+        emit_debug_info(&mut builder, &locations, &offsets);
+
+        let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+        let mut line_program = blob.get_debug_line_program_at(offsets[0].0)?.unwrap();
+        while line_program.run_with_config(config)?.is_some() {}
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_deep_frame_stack_parses_only_when_the_limit_is_raised() {
+        let default_config = LineProgramConfig::default();
+
+        // Use as many frames as the default per-region opcode budget. Each frame emits
+        // several opcodes, so the region's opcode count far exceeds the default limit.
+        let deep_frame_count = default_config.instruction_limit_per_region as u32;
+        let deep_stack: Arc<[Location]> = (0..deep_frame_count).map(create_location).collect();
+
+        let error = emit_and_parse(Arc::clone(&deep_stack), default_config)
+            .expect_err("a region with more opcodes than the default limit should fail to parse");
+        assert!(
+            error.to_string().contains("too many instructions"),
+            "unexpected parse error: {error}"
+        );
+
+        // With the limit raised/disabled, the whole region parses.
+        let mut config_no_limit = default_config;
+        config_no_limit.instruction_limit_per_region = usize::MAX;
+        assert!(emit_and_parse(deep_stack, config_no_limit).is_ok());
+    }
 }

@@ -95,9 +95,11 @@ pub use crate::arch_bindings::{
     __NR_fcntl as SYS_fcntl,
     __NR_ftruncate as SYS_ftruncate,
     __NR_futex as SYS_futex,
+    __NR_getcpu as SYS_getcpu,
     __NR_getdents64 as SYS_getdents64,
     __NR_getgid as SYS_getgid,
     __NR_getpid as SYS_getpid,
+    __NR_gettid as SYS_gettid,
     __NR_getuid as SYS_getuid,
     __NR_io_uring_enter as SYS_io_uring_enter,
     __NR_io_uring_register as SYS_io_uring_register,
@@ -131,6 +133,8 @@ pub use crate::arch_bindings::{
     __NR_rt_sigaction as SYS_rt_sigaction,
     __NR_rt_sigprocmask as SYS_rt_sigprocmask,
     __NR_rt_sigreturn as SYS_rt_sigreturn,
+    __NR_sched_getaffinity as SYS_sched_getaffinity,
+    __NR_sched_setaffinity as SYS_sched_setaffinity,
     __NR_sched_yield as SYS_sched_yield,
     __NR_seccomp as SYS_seccomp,
     __NR_sendmsg as SYS_sendmsg,
@@ -1387,6 +1391,14 @@ impl Error {
         }
     }
 
+    #[cold]
+    pub fn with_message_static(mut self, message: &'static str) -> Self {
+        #[cfg(feature = "std")]
+        let message = Cow::Borrowed(message);
+        self.message = message;
+        self
+    }
+
     #[inline]
     pub fn from_syscall(message: &'static str, result: i64) -> Result<(), Self> {
         if result >= -4095 && result < 0 {
@@ -1592,16 +1604,43 @@ pub fn sys_sched_yield() -> Result<(), Error> {
     Ok(())
 }
 
+pub fn sys_sched_getaffinity(pid: pid_t, mask: &mut [usize]) -> Result<(), Error> {
+    let result = unsafe { syscall!(SYS_sched_getaffinity, pid, core::mem::size_of_val(mask), mask.as_mut_ptr()) };
+    Error::from_syscall("sched_getaffinity", result)?;
+    Ok(())
+}
+
+pub fn sys_sched_setaffinity(pid: pid_t, mask: &[usize]) -> Result<(), Error> {
+    let result = unsafe { syscall_readonly!(SYS_sched_setaffinity, pid, core::mem::size_of_val(mask), mask.as_ptr()) };
+    Error::from_syscall("sched_setaffinity", result)?;
+    Ok(())
+}
+
+pub fn sys_getcpu() -> Result<(u32, u32), Error> {
+    let mut cpu = u32::MAX;
+    let mut numa_node = u32::MAX;
+    let result = unsafe {
+        syscall!(
+            SYS_getcpu,
+            core::ptr::addr_of_mut!(cpu),
+            core::ptr::addr_of_mut!(numa_node),
+            core::ptr::null::<c_void>()
+        )
+    };
+    Error::from_syscall("getcpu", result)?;
+    Ok((cpu, numa_node))
+}
+
 pub fn sys_socketpair(domain: u32, kind: u32, protocol: u32) -> Result<(Fd, Fd), Error> {
     let mut output: [c_int; 2] = [-1, -1];
-    let fd = unsafe { syscall_readonly!(SYS_socketpair, domain, kind, protocol, &mut output[..]) };
+    let fd = unsafe { syscall!(SYS_socketpair, domain, kind, protocol, &mut output[..]) };
     Error::from_syscall("socketpair", fd)?;
     Ok((Fd(output[0] as c_int), Fd(output[1] as c_int)))
 }
 
 pub fn sys_pipe2(flags: c_uint) -> Result<(Fd, Fd), Error> {
     let mut pipes: [c_int; 2] = [-1, -1];
-    let result = unsafe { syscall_readonly!(SYS_pipe2, pipes.as_mut_ptr(), flags) };
+    let result = unsafe { syscall!(SYS_pipe2, pipes.as_mut_ptr(), flags) };
     Error::from_syscall("pipe2", result)?;
     Ok((Fd::from_raw_unchecked(pipes[0]), Fd::from_raw_unchecked(pipes[1])))
 }
@@ -2086,9 +2125,15 @@ pub fn sys_set_tid_address(address: *const u32) -> Result<(), Error> {
     Ok(())
 }
 
+pub fn sys_gettid() -> Result<pid_t, Error> {
+    let result = unsafe { syscall_readonly!(SYS_gettid) };
+    Error::from_syscall("gettid", result)?;
+    Ok(result as pid_t)
+}
+
 pub unsafe fn sys_rt_sigaction(signal: u32, new_action: &kernel_sigaction, old_action: Option<&mut kernel_sigaction>) -> Result<(), Error> {
     let result = unsafe {
-        syscall_readonly!(
+        syscall!(
             SYS_rt_sigaction,
             signal,
             new_action as *const kernel_sigaction,
@@ -2102,7 +2147,7 @@ pub unsafe fn sys_rt_sigaction(signal: u32, new_action: &kernel_sigaction, old_a
 
 pub unsafe fn sys_rt_sigprocmask(how: u32, new_sigset: &kernel_sigset_t, old_sigset: Option<&mut kernel_sigset_t>) -> Result<(), Error> {
     let result = unsafe {
-        syscall_readonly!(
+        syscall!(
             SYS_rt_sigprocmask,
             how,
             new_sigset as *const kernel_sigset_t,
@@ -2116,7 +2161,7 @@ pub unsafe fn sys_rt_sigprocmask(how: u32, new_sigset: &kernel_sigset_t, old_sig
 
 pub unsafe fn sys_sigaltstack(new_stack: &stack_t, old_stack: Option<&mut stack_t>) -> Result<(), Error> {
     let result = unsafe {
-        syscall_readonly!(
+        syscall!(
             SYS_sigaltstack,
             new_stack as *const stack_t,
             old_stack.map_or(core::ptr::null_mut(), |old_stack| old_stack as *mut stack_t)
@@ -2128,7 +2173,7 @@ pub unsafe fn sys_sigaltstack(new_stack: &stack_t, old_stack: Option<&mut stack_
 
 pub fn sys_clock_gettime(clock_id: u32) -> Result<Duration, Error> {
     let mut output = timespec { tv_sec: 0, tv_nsec: 0 };
-    let result = unsafe { syscall_readonly!(SYS_clock_gettime, clock_id, core::ptr::addr_of_mut!(output)) };
+    let result = unsafe { syscall!(SYS_clock_gettime, clock_id, core::ptr::addr_of_mut!(output)) };
     Error::from_syscall("clock_gettime", result)?;
 
     let duration = Duration::new(output.tv_sec as u64, output.tv_nsec as u32);
@@ -2142,7 +2187,7 @@ pub fn sys_nanosleep(duration: Duration) -> Result<Option<Duration>, Error> {
     };
 
     let mut remaining = timespec { tv_sec: 0, tv_nsec: 0 };
-    let result = unsafe { syscall_readonly!(SYS_nanosleep, core::ptr::addr_of!(duration), core::ptr::addr_of_mut!(remaining)) };
+    let result = unsafe { syscall!(SYS_nanosleep, core::ptr::addr_of!(duration), core::ptr::addr_of_mut!(remaining)) };
     let error = Error::from_syscall("nanosleep", result);
     if let Err(error) = error {
         if error.errno() == EINTR {
@@ -2158,7 +2203,7 @@ pub fn sys_nanosleep(duration: Duration) -> Result<Option<Duration>, Error> {
 
 pub fn sys_waitid(which: u32, pid: pid_t, info: &mut siginfo_t, options: u32, usage: Option<&mut rusage>) -> Result<(), Error> {
     let result = unsafe {
-        syscall_readonly!(
+        syscall!(
             SYS_waitid,
             which,
             pid,

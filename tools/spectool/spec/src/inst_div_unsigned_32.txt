@@ -3,6 +3,8 @@ pre: a1 = 7
 
 pub @main:
     i32 a2 = a0 /u a1
+    pub @expected_exit: %no_fallthrough
+        trap
 
 post: a2 = 0x0000000012492494
 post: gas = 9940

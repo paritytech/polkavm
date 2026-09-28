@@ -146,9 +146,24 @@ extern "C" fn atomic_fetch_min_unsigned(value: usize) -> usize {
     }
 }
 
+#[cfg(any(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"), doc))]
+#[inline]
+fn sbrk(size: usize) -> *mut u8 {
+    // SAFETY: Allocating memory is always safe.
+    unsafe {
+        let address;
+        core::arch::asm!(
+            ".insn r 0xb, 1, 0, {dst}, {size}, zero",
+            size = in(reg) size,
+            dst = lateout(reg) address,
+        );
+        address
+    }
+}
+
 #[polkavm_derive::polkavm_export]
 extern "C" fn call_sbrk(size: usize) -> *mut u8 {
-    polkavm_derive::sbrk(size)
+    sbrk(size)
 }
 
 #[polkavm_derive::polkavm_import]
@@ -454,4 +469,110 @@ fn get_self_address_naked() -> u32 {
     let address = get_self_address_naked_impl();
     assert_eq!(get_self_address_naked_impl as usize, address);
     address as u32
+}
+
+#[unsafe(naked)]
+extern "C" fn infinite_loop_without_relocation() {
+    core::arch::naked_asm!(
+        ".option norvc",
+        "auipc ra, 0",
+        "jalr ra",
+        ".option rvc"
+    )
+}
+
+#[polkavm_derive::polkavm_export]
+fn get_address_dummy() -> usize {
+    // To make sure it's not removed as dead code.
+    infinite_loop_without_relocation as usize
+}
+
+#[cfg(target_pointer_width = "64")]
+#[polkavm_derive::polkavm_export]
+extern "C" fn sub_i32_min_64(a0: u64) -> u64 {
+    unsafe {
+        let output;
+        core::arch::asm!(
+            "lui a1, 0x80000",
+            "sub a0, a0, a1",
+            "lui a1, 1",
+            inout("a0") a0 => output,
+        );
+        output
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+#[polkavm_derive::polkavm_export]
+extern "C" fn sub_i32_min_32(a0: u64) -> u64 {
+    unsafe {
+        let output;
+        core::arch::asm!(
+            "lui a1, 0x80000",
+            "subw a0, a0, a1",
+            "lui a1, 1",
+            inout("a0") a0 => output,
+        );
+        output
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+#[polkavm_derive::polkavm_export]
+extern "C" fn orn_zero_const_64() -> u64 {
+    unsafe {
+        let output;
+        core::arch::asm!(
+            "lui a0, 0x80000",
+            "addi a0, a0, -2",
+            "orn a0, zero, a0",
+            out("a0") output,
+        );
+        output
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+#[polkavm_derive::polkavm_export]
+extern "C" fn xnor_zero_const_64() -> u64 {
+    unsafe {
+        let output;
+        core::arch::asm!(
+            "lui a0, 0x80000",
+            "addi a0, a0, -2",
+            "xnor a0, a0, zero",
+            out("a0") output,
+        );
+        output
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+#[polkavm_derive::polkavm_export]
+extern "C" fn min_zero_const_64() -> u64 {
+    unsafe {
+        let output;
+        core::arch::asm!(
+            "lui a0, 0x80000",
+            "addi a0, a0, -2",
+            "min a0, a0, zero",
+            out("a0") output,
+        );
+        output
+    }
+}
+
+#[cfg(target_pointer_width = "64")]
+#[polkavm_derive::polkavm_export]
+extern "C" fn max_zero_const_64() -> u64 {
+    unsafe {
+        let output;
+        core::arch::asm!(
+            "lui a0, 0x80000",
+            "addi a0, a0, -2",
+            "max a0, a0, zero",
+            out("a0") output,
+        );
+        output
+    }
 }

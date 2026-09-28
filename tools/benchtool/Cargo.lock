@@ -191,6 +191,7 @@ dependencies = [
  "log",
  "object 0.32.2",
  "polkavm",
+ "polkavm-common",
  "pvf-executor",
  "solana_rbpf",
  "wasm3",
@@ -1750,9 +1751,9 @@ checksum = "e3148f5046208a5d56bcfc03053e3ca6334e51da8dfb19b6cdc8b306fae3283e"
 
 [[package]]
 name = "picosimd"
-version = "0.9.2"
+version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af35c838647fef3d6d052e27006ef88ea162336eee33063c50a63f163c18cdeb"
+checksum = "7823ffd00d2b55ebe51750a19f47f2a33cb1f1d135f5cba893379b81c4d44856"
 
 [[package]]
 name = "pin-project-lite"
@@ -1774,7 +1775,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "polkavm"
-version = "0.30.0"
+version = "0.37.0"
 dependencies = [
  "libc",
  "log",
@@ -1786,14 +1787,14 @@ dependencies = [
 
 [[package]]
 name = "polkavm-assembler"
-version = "0.30.0"
+version = "0.37.0"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "polkavm-common"
-version = "0.30.0"
+version = "0.37.0"
 dependencies = [
  "log",
  "picosimd",
@@ -1802,7 +1803,7 @@ dependencies = [
 
 [[package]]
 name = "polkavm-linux-raw"
-version = "0.30.0"
+version = "0.37.0"
 
 [[package]]
 name = "postcard"

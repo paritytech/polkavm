@@ -8,6 +8,7 @@ pub @expected_exit:
     trap
 @target:
     a0 = 0xdeadbeef
+    trap
 
 post: a0 = 1234
 post: gas = 9996

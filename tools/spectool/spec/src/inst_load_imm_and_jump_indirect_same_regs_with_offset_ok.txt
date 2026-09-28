@@ -7,6 +7,8 @@ pub @main:
     trap
 @target:
     a2 = 0xdeadbeef
+    pub @expected_exit: %no_fallthrough
+        trap
 
 post: a0 = 1234
 post: a2 = 0xdeadbeef

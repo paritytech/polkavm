@@ -1,6 +1,7 @@
 use std::{collections::HashMap, io::Write};
 
 use polkavm::CostModelKind;
+use polkavm_common::cast::cast;
 use polkavm_common::program::{ParsedInstruction, ProgramBlob, ProgramCounter};
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
@@ -361,7 +362,7 @@ impl<'a> Disassembler<'a> {
 
             let instruction_s = instruction.display(&disassembly_format);
             let instruction_s = if let polkavm_common::program::Instruction::ecalli(nth_import) = instruction {
-                if let Some(import) = self.blob.imports().get(nth_import) {
+                if let Some(import) = self.blob.imports().get(cast(nth_import).bitwise_as_u32()) {
                     format!("{instruction_s} // {}", import)
                 } else {
                     format!("{instruction_s} // INVALID")
@@ -542,13 +543,13 @@ mod tests {
     #[test]
     fn simple() {
         let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(0x4000).build().unwrap();
-        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
         builder.set_rw_data_size(0x4000);
         builder.add_export_by_basic_block(0, b"main");
         builder.add_import(b"hostcall");
         builder.set_code(
             &[
-                asm::store_imm_u32(memory_map.rw_data_address(), 0x12345678),
+                asm::store_imm_u32(memory_map.rw_data_address().try_into().unwrap(), 0x12345678),
                 asm::add_32(S0, A0, A1),
                 asm::ecalli(0),
                 asm::add_32(A0, A0, S0),
@@ -568,14 +569,14 @@ mod tests {
             "// Stack size = 0 bytes",
             "",
             "// Instructions = 5",
-            "// Code size = 18 bytes",
+            "// Code size = 20 bytes",
             "",
             "      : @0 [export #0: 'main'] (gas: 5)",
             "     0: u32 [0x20000] = 0x12345678",
-            "     9: s0 = a0 + a1",
-            "    12: ecalli 0 // 'hostcall'",
-            "    13: a0 = a0 + s0",
-            "    16: ret",
+            "    10: i32 s0 = a0 + a1",
+            "    13: ecalli 0 // 'hostcall'",
+            "    15: i32 a0 = a0 + s0",
+            "    18: ret",
             "",
         ]
         .join("\n");

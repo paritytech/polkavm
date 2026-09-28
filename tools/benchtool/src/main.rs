@@ -71,6 +71,13 @@ fn benchmark_oneshot<T: Backend>(engine_cache: &mut Option<T::Engine>, count: u6
         .take()
         .unwrap_or_else(|| backend.create(CreateArgs { is_compile_only: false }));
     let blob = backend.load(path);
+    {
+        let module = backend.compile(&mut engine, &blob);
+        let mut instance = backend.spawn(&mut engine, &module);
+        backend.initialize(&mut instance);
+        backend.run(&mut instance);
+    }
+
     let start = std::time::Instant::now();
     for _ in 0..count {
         let module = backend.compile(&mut engine, &blob);
@@ -217,19 +224,25 @@ fn find_benchmarks_in(root_path: &Path) -> Result<Vec<Benchmark>, std::io::Error
 
 fn find_benchmarks() -> Result<Vec<Benchmark>, std::io::Error> {
     let mut output = Vec::new();
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest-programs");
-    let paths = [
-        root.join("target/riscv32emac-unknown-none-polkavm/release"),
-        root.join("target/riscv64emac-unknown-none-polkavm/release"),
-        root.join("target/riscv64imac-unknown-none-elf/release"),
-        root.join("target/wasm32-unknown-unknown/release"),
-        root.join("target/sbf-solana-solana/release"),
-        #[cfg(target_arch = "x86_64")]
-        root.join("target/x86_64-unknown-linux-gnu/release"),
-        #[cfg(target_arch = "x86")]
-        root.join("target/i686-unknown-linux-gnu/release"),
-        PathBuf::from("."),
-    ];
+    let mut roots = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest-programs/target")];
+    if let Ok(root) = std::env::var("CARGO_TARGET_DIR") {
+        roots.push(PathBuf::from(root));
+    }
+
+    let mut paths = vec![PathBuf::from(".")];
+    for root in roots {
+        paths.extend([
+            root.join("riscv32emac-unknown-none-polkavm/release"),
+            root.join("riscv64emac-unknown-none-polkavm/release"),
+            root.join("riscv64imac-unknown-none-elf/release"),
+            root.join("wasm32-unknown-unknown/release"),
+            root.join("sbf-solana-solana/release"),
+            #[cfg(target_arch = "x86_64")]
+            root.join("x86_64-unknown-linux-gnu/release"),
+            #[cfg(target_arch = "x86")]
+            root.join("i686-unknown-linux-gnu/release"),
+        ]);
+    }
 
     for path in paths {
         if !path.exists() {
@@ -453,6 +466,24 @@ enum Args {
 
     /// Benchmarks PolkaVM's memset.
     BenchMemset,
+
+    /// Benchmarks ecalli overhead.
+    BenchEcalli {
+        #[clap(long)]
+        interpreter: bool,
+    },
+
+    /// Benchmarks memory access overhead.
+    BenchMemoryAccess {
+        #[clap(long)]
+        interpreter: bool,
+
+        #[clap(long)]
+        dynamic_paging: bool,
+
+        #[clap(long)]
+        store: bool,
+    },
 }
 
 fn disable_aslr() {
@@ -460,17 +491,27 @@ fn disable_aslr() {
     crate::utils::restart_with_disabled_aslr().unwrap();
 }
 
-fn format_time(elapsed: Duration) -> String {
-    let s = elapsed.as_secs_f64();
-    if elapsed.as_secs() > 0 {
+fn format_time_with_div(elapsed: Duration, divisor: u32) -> String {
+    let e = elapsed / divisor;
+    let s = e.as_secs_f64();
+    if e.as_secs() > 0 {
         format!("{:.03}s", s)
-    } else if elapsed.as_millis() > 9 {
+    } else if e.as_millis() > 9 {
         format!("{:.02}ms", s * 1000.0)
-    } else if elapsed.as_micros() > 0 {
+    } else if e.as_micros() > 9 {
         format!("{:.02}us", s * 1000000.0)
     } else {
-        format!("{}ns", elapsed.as_nanos())
+        let p = (elapsed.as_nanos() * 1000) / u128::from(divisor);
+        if e.as_nanos() > 9 {
+            format!("{:.02}ns", (p as f32) / 1000.0)
+        } else {
+            format!("{}ps", p)
+        }
     }
+}
+
+fn format_time(elapsed: Duration) -> String {
+    format_time_with_div(elapsed, 1)
 }
 
 fn main() {
@@ -529,6 +570,11 @@ fn main() {
                         list.push((name, variant, bench, backend));
                     }
                 }
+            }
+
+            if list.is_empty() {
+                eprintln!("No benchmarks found; exiting!");
+                std::process::exit(1);
             }
 
             struct Stats {
@@ -724,16 +770,29 @@ fn main() {
         Args::BenchMemset => {
             let config = polkavm::Config::from_env().unwrap();
             let engine = polkavm::Engine::new(&config).unwrap();
-            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest-programs/target/riscv64emac-unknown-none-polkavm/release/bench-memset.polkavm");
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../guest-programs/target/riscv64emac-unknown-none-polkavm/release/bench-memset.polkavm");
             let raw_blob = std::fs::read(path).unwrap();
             let blob = polkavm::ProgramBlob::parse(raw_blob.into()).unwrap();
             let mut config = polkavm::ModuleConfig::default();
             config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
             let module = polkavm::Module::from_blob(&engine, &config, blob).unwrap();
             let ext_initialize = module.exports().find(|export| export == "initialize").unwrap().program_counter();
-            let ext_run_accelerated = module.exports().find(|export| export == "benchmark_custom_accelerated").unwrap().program_counter();
-            let ext_run_naive = module.exports().find(|export| export == "benchmark_custom_naive").unwrap().program_counter();
-            let ext_run_compiler_builtins = module.exports().find(|export| export == "benchmark_custom_compiler_builtins").unwrap().program_counter();
+            let ext_run_accelerated = module
+                .exports()
+                .find(|export| export == "benchmark_custom_accelerated")
+                .unwrap()
+                .program_counter();
+            let ext_run_naive = module
+                .exports()
+                .find(|export| export == "benchmark_custom_naive")
+                .unwrap()
+                .program_counter();
+            let ext_run_compiler_builtins = module
+                .exports()
+                .find(|export| export == "benchmark_custom_compiler_builtins")
+                .unwrap()
+                .program_counter();
             let linker = polkavm::Linker::<()>::new();
             let instance_pre = linker.instantiate_pre(&module).unwrap();
             let mut instance = instance_pre.instantiate().unwrap();
@@ -750,17 +809,121 @@ fn main() {
 
             for (size, times) in sizes {
                 for (offset, offset_name) in [(0, "aligned"), (1, "unaligned")] {
-                    for (kind, kind_name) in [(ext_run_accelerated, "accelerated"), (ext_run_compiler_builtins, "compiler_builtins"), (ext_run_naive, "naive")] {
+                    for (kind, kind_name) in [
+                        (ext_run_accelerated, "accelerated"),
+                        (ext_run_compiler_builtins, "compiler_builtins"),
+                        (ext_run_naive, "naive"),
+                    ] {
                         instance.call_typed(&mut (), kind, (offset, size, times)).unwrap();
 
                         let timestamp = std::time::Instant::now();
-                        // for _ in 0..REPEAT_COUNT {
-                            instance.call_typed(&mut (), kind, (offset, size, times)).unwrap();
-                        // }
-                        let elapsed = timestamp.elapsed() / times;
-                        println!("{kind_name:<18} {size:<8} {offset_name:<10}: {}", format_time(elapsed));
+                        instance.call_typed(&mut (), kind, (offset, size, times)).unwrap();
+                        println!(
+                            "{kind_name:<18} {size:<8} {offset_name:<10}: {}",
+                            format_time_with_div(timestamp.elapsed(), times)
+                        );
                     }
                 }
+            }
+        }
+        Args::BenchEcalli { interpreter } => {
+            use polkavm_common::program::{asm, InstructionSetKind, ProgramBlob};
+            let mut builder = polkavm_common::writer::ProgramBlobBuilder::new(InstructionSetKind::JamV1);
+            builder.add_export_by_basic_block(0, b"main");
+            builder.set_code(&[asm::ecalli(0), asm::jump(0)], &[]);
+            let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+            let mut config = polkavm::Config::from_env().unwrap();
+            if interpreter {
+                config.set_backend(Some(polkavm::BackendKind::Interpreter));
+            } else {
+                config.set_backend(Some(polkavm::BackendKind::Compiler));
+            }
+
+            let times = 1000000;
+            let engine = polkavm::Engine::new(&config).unwrap();
+            let module = polkavm::Module::from_blob(&engine, &polkavm::ModuleConfig::default(), blob).unwrap();
+            let mut instance = module.instantiate().unwrap();
+            instance.set_next_program_counter(polkavm::ProgramCounter(0));
+
+            for _ in 0..50 {
+                let timestamp = std::time::Instant::now();
+                for _ in 0..times {
+                    assert!(matches!(instance.run().unwrap(), polkavm::InterruptKind::Ecalli(0)));
+                }
+
+                println!("{}", format_time_with_div(timestamp.elapsed(), times));
+            }
+        }
+        Args::BenchMemoryAccess {
+            interpreter,
+            dynamic_paging,
+            store,
+        } => {
+            use polkavm::{MemoryProtection, Reg};
+            use polkavm_common::abi::MemoryMapBuilder;
+            use polkavm_common::program::{asm, InstructionSetKind, ProgramBlob};
+
+            let times = if interpreter { 1000000 } else { 20000000 };
+
+            let memory_map = MemoryMapBuilder::new(4096).rw_data_size(4096).build().unwrap();
+
+            let mut builder = polkavm_common::writer::ProgramBlobBuilder::new(InstructionSetKind::JamV1);
+            builder.add_export_by_basic_block(0, b"main");
+            builder.set_rw_data_size(4096 * 64);
+            builder.set_stack_size(4096);
+            builder.set_code(
+                &[
+                    if store {
+                        asm::store_u64(Reg::A1, memory_map.rw_data_address().try_into().unwrap())
+                    } else {
+                        asm::load_u64(Reg::A0, memory_map.rw_data_address().try_into().unwrap())
+                    },
+                    asm::add_imm_64(Reg::A1, Reg::A1, 1),
+                    asm::branch_less_unsigned_imm(Reg::A1, times, 0),
+                    asm::ret(),
+                ],
+                &[],
+            );
+            let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+            let mut config = polkavm::Config::from_env().unwrap();
+            if interpreter {
+                config.set_backend(Some(polkavm::BackendKind::Interpreter));
+            } else {
+                config.set_backend(Some(polkavm::BackendKind::Compiler));
+            }
+            config.set_allow_dynamic_paging(dynamic_paging);
+
+            let engine = polkavm::Engine::new(&config).unwrap();
+            let mut module_config = polkavm::ModuleConfig::default();
+            module_config.set_dynamic_paging(dynamic_paging);
+            let module = polkavm::Module::from_blob(&engine, &module_config, blob).unwrap();
+            let mut instance = module.instantiate().unwrap();
+            instance.set_reg(Reg::RA, polkavm::RETURN_TO_HOST);
+
+            if dynamic_paging {
+                instance
+                    .zero_memory_with_memory_protection(memory_map.stack_address_low(), 4096, MemoryProtection::ReadWrite)
+                    .unwrap();
+
+                for n in (0..64).step_by(2) {
+                    let address = memory_map.rw_data_address() + 4096 * n;
+
+                    instance
+                        .zero_memory_with_memory_protection(address, 4096, MemoryProtection::ReadWrite)
+                        .unwrap();
+
+                    instance.write_u64(address, u64::from(n)).unwrap();
+                }
+            } else {
+                instance.write_u64(memory_map.rw_data_address(), 0).unwrap();
+            }
+
+            for _ in 0..50 {
+                instance.set_next_program_counter(polkavm::ProgramCounter(0));
+                instance.set_reg(Reg::A1, 0);
+                let timestamp = std::time::Instant::now();
+                assert!(matches!(instance.run().unwrap(), polkavm::InterruptKind::Finished));
+                println!("{}", format_time_with_div(timestamp.elapsed(), times.try_into().unwrap()));
             }
         }
     }

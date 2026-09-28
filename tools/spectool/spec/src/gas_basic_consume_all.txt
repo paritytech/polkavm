@@ -2,3 +2,5 @@ pre: gas = 2
 
 pub @main:
     nop
+    pub @expected_exit: %no_fallthrough
+        trap

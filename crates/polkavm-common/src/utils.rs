@@ -291,17 +291,17 @@ pub fn parse_imm(text: &str) -> Option<i32> {
 
 #[derive(Debug, PartialEq)]
 pub enum ParsedImmediate {
-    U32(u32),
+    I32(i32),
     U64(u64),
 }
 
-impl TryFrom<ParsedImmediate> for u32 {
+impl TryFrom<ParsedImmediate> for i32 {
     type Error = &'static str;
 
     fn try_from(value: ParsedImmediate) -> Result<Self, Self::Error> {
         match value {
-            ParsedImmediate::U32(v) => Ok(v),
-            ParsedImmediate::U64(_) => Err("value is too large for u32"),
+            ParsedImmediate::I32(v) => Ok(v),
+            ParsedImmediate::U64(_) => Err("value is too large for an 32-bit immediate"),
         }
     }
 }
@@ -309,7 +309,7 @@ impl TryFrom<ParsedImmediate> for u32 {
 impl From<ParsedImmediate> for u64 {
     fn from(value: ParsedImmediate) -> Self {
         match value {
-            ParsedImmediate::U32(v) => cast(v).to_u64_sign_extend(),
+            ParsedImmediate::I32(v) => cast(cast(v).to_i64_sign_extend()).bitwise_as_u64(),
             ParsedImmediate::U64(v) => v,
         }
     }
@@ -325,25 +325,42 @@ pub fn parse_immediate(text: &str) -> Option<ParsedImmediate> {
     };
 
     let value = if let Some(text) = text.strip_prefix("0x") {
-        u64::from_str_radix(text, 16).ok()?
+        ParsedImmediate::U64(u64::from_str_radix(text, 16).ok()?)
     } else if let Some(text) = text.strip_prefix("0b") {
-        u64::from_str_radix(text, 2).ok()?
+        ParsedImmediate::U64(u64::from_str_radix(text, 2).ok()?)
+    } else if let Ok(value) = text.parse::<i64>() {
+        if let Ok(value) = value.try_into() {
+            ParsedImmediate::I32(value)
+        } else if value >= 0 {
+            ParsedImmediate::U64(cast(value).bitwise_as_u64())
+        } else {
+            return None;
+        }
+    } else if let Ok(value) = text.parse::<u64>() {
+        ParsedImmediate::U64(value)
     } else {
-        match text.parse::<i64>() {
-            Ok(signed) => signed as u64,
-            Err(_) => return None,
+        return None;
+    };
+
+    let value = if force_imm64 {
+        match value {
+            ParsedImmediate::I32(value) => ParsedImmediate::U64(cast(cast(value).to_i64_sign_extend()).bitwise_as_u64()),
+            ParsedImmediate::U64(value) => ParsedImmediate::U64(value),
+        }
+    } else {
+        match value {
+            ParsedImmediate::I32(value) => ParsedImmediate::I32(value),
+            ParsedImmediate::U64(value) => {
+                if let Ok(value) = cast(value).bitwise_as_i64().try_into() {
+                    ParsedImmediate::I32(value)
+                } else {
+                    ParsedImmediate::U64(value)
+                }
+            }
         }
     };
 
-    if force_imm64 {
-        return Some(ParsedImmediate::U64(value));
-    }
-
-    if value < 0x7fffffff || cast(cast(value).truncate_to_u32()).to_u64_sign_extend() == value {
-        Some(ParsedImmediate::U32(cast(value).truncate_to_u32()))
-    } else {
-        Some(ParsedImmediate::U64(value))
-    }
+    Some(value)
 }
 
 #[cfg(feature = "alloc")]
@@ -393,22 +410,23 @@ impl BitnessT for B64 {
 fn test_parse_immediate() {
     // "special cases"
     assert_eq!(parse_immediate("0xffffffff"), Some(ParsedImmediate::U64(0xffffffff)));
-    assert_eq!(parse_immediate("0xffffffff87654321"), Some(ParsedImmediate::U32(0x87654321)));
+    assert_eq!(
+        parse_immediate("0xffffffff87654321"),
+        Some(ParsedImmediate::I32(cast(0x87654321).bitwise_as_i32()))
+    );
     assert_eq!(parse_immediate("0x80000075"), Some(ParsedImmediate::U64(0x80000075)));
     // "normal cases"
-    assert_eq!(parse_immediate("0x1234"), Some(ParsedImmediate::U32(0x1234)));
-    assert_eq!(parse_immediate("0x12345678"), Some(ParsedImmediate::U32(0x12345678)));
+    assert_eq!(parse_immediate("0x1234"), Some(ParsedImmediate::I32(0x1234)));
+    assert_eq!(parse_immediate("0x12345678"), Some(ParsedImmediate::I32(0x12345678)));
     assert_eq!(parse_immediate("0x1234567890"), Some(ParsedImmediate::U64(0x1234567890)));
-    assert_eq!(parse_immediate("-1"), Some(ParsedImmediate::U32(0xffffffff)));
-    assert_eq!(parse_immediate("-2"), Some(ParsedImmediate::U32(0xfffffffe)));
+    assert_eq!(parse_immediate("-1"), Some(ParsedImmediate::I32(-1)));
+    assert_eq!(parse_immediate("-2"), Some(ParsedImmediate::I32(-2)));
     assert_eq!(parse_immediate("i64 0xffffffff"), Some(ParsedImmediate::U64(0xffffffff)));
     assert_eq!(parse_immediate("0xdeadbeef"), Some(ParsedImmediate::U64(0xdeadbeef)));
     assert_eq!(
         parse_immediate("0xffffffff00000000"),
         Some(ParsedImmediate::U64(0xffffffff00000000))
     );
-    assert_eq!(parse_immediate("0xf000000e").map(Into::into), Some(0xf000000eu64));
-    assert_eq!(parse_immediate("0x80000075").and_then(|imm| imm.try_into().ok()), None::<u32>);
 }
 
 pub fn parse_reg(text: &str) -> Option<Reg> {

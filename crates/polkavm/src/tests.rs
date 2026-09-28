@@ -1,7 +1,7 @@
 use crate::mutex::Mutex;
 use crate::{
-    BackendKind, CallError, Caller, Config, Engine, GasMeteringKind, InterruptKind, Linker, MemoryAccessError, MemoryProtection, Module,
-    ModuleConfig, ProgramBlob, ProgramCounter, Reg, Segfault, SetCacheSizeLimitArgs,
+    BackendKind, CallError, Caller, CompileError, Config, Engine, GasMeteringKind, InterruptKind, Linker, MemoryAccessError,
+    MemoryProtection, Module, ModuleConfig, ProgramBlob, ProgramCounter, Reg, Segfault, SetCacheSizeLimitArgs,
 };
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -11,13 +11,15 @@ use alloc::vec::Vec;
 
 use polkavm_common::abi::MemoryMapBuilder;
 use polkavm_common::cast::cast;
-use polkavm_common::program::{asm, InstructionSetKind};
-use polkavm_common::program::{BlobLen, Reg::*, INTERPRETER_CACHE_ENTRY_SIZE, INTERPRETER_CACHE_RESERVED_ENTRIES};
+use polkavm_common::program::{asm, InstructionSet, InstructionSetKind, Opcode};
+use polkavm_common::program::{BlobLen, Reg::*, INTERPRETER_CACHE_ENTRY_SIZE};
 use polkavm_common::utils::align_to_next_page_u32;
 use polkavm_common::writer::ProgramBlobBuilder;
 use polkavm_linker::TargetInstructionSet;
 
 use paste::paste;
+
+const INVALID_RAW_OPCODE: u8 = 254;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum TestProgram {
@@ -38,9 +40,16 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
         .join(std::env!("CARGO_MANIFEST_DIR"))
         .join("../../guest-programs");
 
-    let envs: alloc::collections::BTreeMap<String, String> = std::env::vars()
+    let mut envs: alloc::collections::BTreeMap<String, String> = std::env::vars()
         .filter(|(k, _)| !["CARGO", "RUSTC", "RUSTUP"].iter().any(|e| k.contains(e)))
         .collect();
+
+    let target_dir = if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
+        envs.insert("CARGO_TARGET_DIR".to_owned(), target_dir.clone());
+        std::path::PathBuf::from(target_dir)
+    } else {
+        path.join("target")
+    };
 
     let mut args = polkavm_linker::TargetJsonArgs::default();
     args.is_64_bit = is_64_bit;
@@ -84,9 +93,7 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
         panic!("{}", String::from_utf8_lossy(&res.stderr));
     }
 
-    let blob = std::fs::read(path.join("target").join(target).join(profile).join(filename))
-        .unwrap()
-        .leak();
+    let blob = std::fs::read(target_dir.join(target).join(profile).join(filename)).unwrap().leak();
 
     elf_map.insert((kind, is_64_bit), blob);
     blob
@@ -96,9 +103,7 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
 fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
     match (kind, is_64_bit) {
         (TestProgram::Pinky, true) => include_bytes!("../../../guest-programs/target/riscv64emac-unknown-none-polkavm/release/bench-pinky"),
-        (TestProgram::Pinky, false) => {
-            include_bytes!("../../../guest-programs/target/riscv32emac-unknown-none-polkavm/release/bench-pinky")
-        }
+        (TestProgram::Pinky, false) => unreachable!(),
         (TestProgram::TestBlob, true) => include_bytes!("../../../guest-programs/target/riscv64emac-unknown-none-polkavm/no-lto/test-blob"),
         (TestProgram::TestBlob, false) => {
             include_bytes!("../../../guest-programs/target/riscv32emac-unknown-none-polkavm/no-lto/test-blob")
@@ -130,51 +135,51 @@ fn assert_out_of_range_access<T>(result: Result<T, MemoryAccessError>, expected_
     }
 }
 
-macro_rules! run_tests {
-    ($($test_name:ident)+) => {
+macro_rules! run_tests_on_isa {
+    ($isa_suffix:ident, $isa:expr, $($test_name:ident)+) => {
         if_compiler_is_supported! {
             $(
                 paste! {
                     #[cfg(target_os = "linux")]
                     #[test]
-                    fn [<compiler_linux_ $test_name>]() {
+                    fn [<compiler_linux_ $isa_suffix _ $test_name>]() {
                         let mut config = crate::Config::default();
                         config.set_worker_count(1);
                         config.set_backend(Some(crate::BackendKind::Compiler));
                         config.set_sandbox(Some(crate::SandboxKind::Linux));
-                        $test_name(config);
+                        $test_name(config, $isa);
                     }
 
                     #[cfg(target_os = "linux")]
                     #[test]
-                    fn [<tracing_linux_ $test_name>]() {
+                    fn [<tracing_linux_ $isa_suffix _ $test_name>]() {
                         let mut config = crate::Config::default();
                         config.set_backend(Some(crate::BackendKind::Compiler));
                         config.set_sandbox(Some(crate::SandboxKind::Linux));
                         config.set_allow_experimental(true);
                         config.set_crosscheck(true);
-                        $test_name(config);
+                        $test_name(config, $isa);
                     }
 
                     #[cfg(feature = "generic-sandbox")]
                     #[test]
-                    fn [<compiler_generic_ $test_name>]() {
+                    fn [<compiler_generic_ $isa_suffix _ $test_name>]() {
                         let mut config = crate::Config::default();
                         config.set_backend(Some(crate::BackendKind::Compiler));
                         config.set_sandbox(Some(crate::SandboxKind::Generic));
                         config.set_allow_experimental(true);
-                        $test_name(config);
+                        $test_name(config, $isa);
                     }
 
                     #[cfg(feature = "generic-sandbox")]
                     #[test]
-                    fn [<tracing_generic_ $test_name>]() {
+                    fn [<tracing_generic_ $isa_suffix _ $test_name>]() {
                         let mut config = crate::Config::default();
                         config.set_backend(Some(crate::BackendKind::Compiler));
                         config.set_sandbox(Some(crate::SandboxKind::Generic));
                         config.set_allow_experimental(true);
                         config.set_crosscheck(true);
-                        $test_name(config);
+                        $test_name(config, $isa);
                     }
                 }
             )+
@@ -183,99 +188,116 @@ macro_rules! run_tests {
         $(
             paste! {
                 #[test]
-                fn [<interpreter_ $test_name>]() {
+                fn [<interpreter_ $isa_suffix _ $test_name>]() {
                     let mut config = crate::Config::default();
                     config.set_backend(Some(crate::BackendKind::Interpreter));
-                    $test_name(config);
+                    $test_name(config, $isa);
                 }
             }
         )+
     }
 }
 
+macro_rules! run_tests {
+    ($($test_name:ident)+) => {
+        run_tests_on_isa! { latest64, InstructionSetKind::Latest64, $($test_name)+ }
+        run_tests_on_isa! { revive_v1, InstructionSetKind::ReviveV1, $($test_name)+ }
+    }
+}
+
 macro_rules! run_test_blob_tests {
     ($($test_name:ident)+) => {
         paste! {
-            run_tests! {
+            run_tests_on_isa! { latest32, InstructionSetKind::Latest32,
                 $([<unoptimized_bin_32_ $test_name>])+
-                $([<unoptimized_bin_64_ $test_name>])+
                 $([<unoptimized_cdylib_32_ $test_name>])+
-                $([<unoptimized_cdylib_64_ $test_name>])+
                 $([<optimized_bin_32_ $test_name>])+
-                $([<optimized_bin_64_ $test_name>])+
                 $([<optimized_cdylib_32_ $test_name>])+
+            }
+            run_tests! {
+                $([<unoptimized_bin_64_ $test_name>])+
+                $([<unoptimized_cdylib_64_ $test_name>])+
+                $([<optimized_bin_64_ $test_name>])+
                 $([<optimized_cdylib_64_ $test_name>])+
             }
         }
 
         $(
             paste! {
-                fn [<unoptimized_bin_32_ $test_name>](config: Config) {
+                fn [<unoptimized_bin_32_ $test_name>](config: Config, isa: InstructionSetKind) {
                     $test_name(TestBlobArgs {
                         config,
+                        isa,
                         optimize: false,
                         is_64_bit: false,
                         is_cdylib: false
                     })
                 }
 
-                fn [<unoptimized_bin_64_ $test_name>](config: Config) {
+                fn [<unoptimized_bin_64_ $test_name>](config: Config, isa: InstructionSetKind) {
                     $test_name(TestBlobArgs {
                         config,
+                        isa,
                         optimize: false,
                         is_64_bit: true,
                         is_cdylib: false
                     })
                 }
 
-                fn [<unoptimized_cdylib_32_ $test_name>](config: Config) {
+                fn [<unoptimized_cdylib_32_ $test_name>](config: Config, isa: InstructionSetKind) {
                     $test_name(TestBlobArgs {
                         config,
+                        isa,
                         optimize: false,
                         is_64_bit: false,
                         is_cdylib: true
                     })
                 }
 
-                fn [<unoptimized_cdylib_64_ $test_name>](config: Config) {
+                fn [<unoptimized_cdylib_64_ $test_name>](config: Config, isa: InstructionSetKind) {
                     $test_name(TestBlobArgs {
                         config,
+                        isa,
                         optimize: false,
                         is_64_bit: true,
                         is_cdylib: true
                     })
                 }
 
-                fn [<optimized_bin_32_ $test_name>](config: Config) {
+                fn [<optimized_bin_32_ $test_name>](config: Config, isa: InstructionSetKind) {
                     $test_name(TestBlobArgs {
                         config,
+                        isa,
                         optimize: true,
                         is_64_bit: false,
                         is_cdylib: false
                     })
                 }
 
-                fn [<optimized_bin_64_ $test_name>](config: Config) {
+                fn [<optimized_bin_64_ $test_name>](config: Config, isa: InstructionSetKind) {
                     $test_name(TestBlobArgs {
                         config,
+                        isa,
                         optimize: true,
                         is_64_bit: true,
                         is_cdylib: false
                     })
                 }
 
-                fn [<optimized_cdylib_32_ $test_name>](config: Config) {
+                fn [<optimized_cdylib_32_ $test_name>](config: Config, isa: InstructionSetKind) {
                     $test_name(TestBlobArgs {
                         config,
+                        isa,
                         optimize: true,
                         is_64_bit: false,
                         is_cdylib: true
                     })
                 }
 
-                fn [<optimized_cdylib_64_ $test_name>](config: Config) {
+                fn [<optimized_cdylib_64_ $test_name>](config: Config, isa: InstructionSetKind) {
                     $test_name(TestBlobArgs {
                         config,
+                        isa,
                         optimize: true,
                         is_64_bit: true,
                         is_cdylib: true
@@ -297,27 +319,27 @@ macro_rules! run_asm_tests {
 
         $(
             paste! {
-                fn [<unoptimized_64_ $test_name>](config: Config) {
-                    $test_name(config, false)
+                fn [<unoptimized_64_ $test_name>](config: Config, isa: InstructionSetKind) {
+                    $test_name(config, isa, false)
                 }
 
-                fn [<optimized_64_ $test_name>](config: Config) {
-                    $test_name(config, true)
+                fn [<optimized_64_ $test_name>](config: Config, isa: InstructionSetKind) {
+                    $test_name(config, isa, true)
                 }
             }
         )+
     }
 }
 
-fn basic_test_blob() -> ProgramBlob {
+fn basic_test_blob(isa: InstructionSetKind) -> ProgramBlob {
     let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(0x4000).build().unwrap();
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.set_rw_data_size(0x4000);
     builder.add_export_by_basic_block(0, b"main");
     builder.add_import(b"hostcall");
     builder.set_code(
         &[
-            asm::store_imm_u32(memory_map.rw_data_address(), 0x12345678),
+            asm::store_imm_u32(memory_map.rw_data_address().try_into().unwrap(), 0x12345678),
             asm::add_32(S0, A0, A1),
             asm::ecalli(0),
             asm::add_32(A0, A0, S0),
@@ -328,9 +350,9 @@ fn basic_test_blob() -> ProgramBlob {
     ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap()
 }
 
-fn basic_test(config: Config) {
+fn basic_test(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
-    let blob = basic_test_blob();
+    let blob = basic_test_blob(isa);
     let engine = Engine::new(&config).unwrap();
     let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
     let mut linker: Linker<State, MemoryAccessError> = Linker::new();
@@ -358,9 +380,9 @@ fn basic_test(config: Config) {
     assert_eq!(result, 111);
 }
 
-fn fallback_hostcall_handler_works(config: Config) {
+fn fallback_hostcall_handler_works(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
-    let blob = basic_test_blob();
+    let blob = basic_test_blob(isa);
     let engine = Engine::new(&config).unwrap();
     let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
     let mut linker = Linker::new();
@@ -391,9 +413,9 @@ macro_rules! match_interrupt {
     };
 }
 
-fn step_tracing_basic(engine_config: Config) {
+fn step_tracing_basic(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
-    let blob = basic_test_blob();
+    let blob = basic_test_blob(isa);
     let engine = Engine::new(&engine_config).unwrap();
     let mut config = ModuleConfig::new();
     config.set_step_tracing(true);
@@ -479,21 +501,20 @@ fn step_tracing_basic(engine_config: Config) {
         log::trace!("Testing trap at: {}", offset);
         instance.set_next_program_counter(ProgramCounter(offset));
         assert!(instance.program_counter().is_none()); // Calling `set_next_program_counter` clears the program counter.
-        match_interrupt!(instance.run().unwrap(), InterruptKind::Step);
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
         assert_eq!(instance.program_counter(), Some(ProgramCounter(offset)));
         assert_eq!(instance.next_program_counter(), Some(ProgramCounter(offset)));
 
         match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
         assert_eq!(instance.program_counter(), Some(ProgramCounter(offset)));
-        assert_eq!(instance.next_program_counter(), None);
-        assert!(instance.next_native_program_counter().is_none());
+        assert_eq!(instance.next_program_counter(), Some(ProgramCounter(offset)));
     }
 }
 
-fn reclaim_cache_memory(config: Config) {
+fn reclaim_cache_memory(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -534,7 +555,7 @@ fn reclaim_cache_memory(config: Config) {
     assert_eq!(instance.reg(Reg::A2), 0x4567);
 }
 
-fn bounded_interpreter_cache(config: Config) {
+fn bounded_interpreter_cache(config: Config, isa: InstructionSetKind) {
     // this test is only relevant for the interpreter backend
     if config.backend() != Some(crate::BackendKind::Interpreter) {
         return;
@@ -542,7 +563,7 @@ fn bounded_interpreter_cache(config: Config) {
 
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"entry_0");
     builder.add_export_by_basic_block(1, b"entry_1");
     builder.add_export_by_basic_block(2, b"entry_2");
@@ -598,9 +619,8 @@ fn bounded_interpreter_cache(config: Config) {
     let mut instance = module.instantiate().unwrap();
 
     assert_eq!(INTERPRETER_CACHE_ENTRY_SIZE, 24);
-    assert_eq!(INTERPRETER_CACHE_RESERVED_ENTRIES, 10);
 
-    let minimum_cache_size = 24 * (10 + 2);
+    let minimum_cache_size = 24 * 2;
 
     for max_cache_size_bytes in 0..minimum_cache_size {
         log::debug!("Testing with max_cache_size_bytes: {}", max_cache_size_bytes);
@@ -673,13 +693,13 @@ fn bounded_interpreter_cache(config: Config) {
     }
 }
 
-fn step_tracing_invalid_store(engine_config: Config) {
+fn step_tracing_invalid_store(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
     let mut config = ModuleConfig::new();
     config.set_step_tracing(true);
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::fallthrough(), asm::store_imm_u32(0, 0x12345678), asm::ret()], &[]);
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
@@ -693,13 +713,13 @@ fn step_tracing_invalid_store(engine_config: Config) {
     assert_eq!(instance.next_program_counter(), None);
 }
 
-fn step_tracing_invalid_load(engine_config: Config) {
+fn step_tracing_invalid_load(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
     let mut config = ModuleConfig::new();
     config.set_step_tracing(true);
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::fallthrough(), asm::load_i32(Reg::A0, 0), asm::ret()], &[]);
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
@@ -713,14 +733,14 @@ fn step_tracing_invalid_load(engine_config: Config) {
     assert_eq!(instance.next_program_counter(), None);
 }
 
-fn step_tracing_out_of_gas(engine_config: Config) {
+fn step_tracing_out_of_gas(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
     let mut config = ModuleConfig::new();
     config.set_step_tracing(true);
     config.set_gas_metering(Some(GasMeteringKind::Sync));
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -789,32 +809,28 @@ fn step_tracing_out_of_gas(engine_config: Config) {
         }
     }
 
-    instance.set_next_program_counter(ProgramCounter(cast(module.blob().code().len()).assert_always_fits_in_u32()));
-    match_interrupt!(instance.run().unwrap(), InterruptKind::Step);
-    assert_eq!(instance.gas(), 2);
+    instance.set_next_program_counter(ProgramCounter(cast(module.blob().code().len()).to_u32_or_panic()));
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
-    assert_eq!(instance.gas(), 1);
+    assert_eq!(instance.gas(), 2);
 
     instance.set_next_program_counter(ProgramCounter(10000));
-    match_interrupt!(instance.run().unwrap(), InterruptKind::Step);
-    assert_eq!(instance.gas(), 1);
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
-    assert_eq!(instance.gas(), 0);
+    assert_eq!(instance.gas(), 2);
 }
 
-fn zero_memory(engine_config: Config) {
+fn zero_memory(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
 
     let memory_map = MemoryMapBuilder::new(0x4000).rw_data_size(0x4000).build().unwrap();
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.set_rw_data_size(0x4000);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
-            asm::store_imm_u32(memory_map.rw_data_address(), 0x12345678),
+            asm::store_imm_u32(memory_map.rw_data_address().try_into().unwrap(), 0x12345678),
             asm::ecalli(0),
-            asm::load_i32(A0, memory_map.rw_data_address()),
+            asm::load_i32(A0, memory_map.rw_data_address().try_into().unwrap()),
             asm::ret(),
         ],
         &[],
@@ -849,7 +865,7 @@ fn expect_segfault(interrupt: InterruptKind) -> Segfault {
     }
 }
 
-fn dynamic_jump_to_null(engine_config: Config) {
+fn dynamic_jump_to_null(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
     let programs = [
@@ -859,7 +875,7 @@ fn dynamic_jump_to_null(engine_config: Config) {
 
     for code in programs {
         log::info!("Testing program...");
-        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+        let mut builder = ProgramBlobBuilder::new(isa);
         builder.add_export_by_basic_block(0, b"main");
         builder.set_code(&code, &[]);
 
@@ -875,10 +891,10 @@ fn dynamic_jump_to_null(engine_config: Config) {
     }
 }
 
-fn simple_test(engine_config: Config) {
+fn simple_test(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_imm(A0, 0x1234), asm::add_imm_32(A1, A1, 100), asm::ret()], &[]);
 
@@ -895,28 +911,28 @@ fn simple_test(engine_config: Config) {
     assert_eq!(instance.reg(Reg::A1), 100);
 }
 
-fn out_of_range_execution(engine_config: Config) {
+fn out_of_range_execution(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_imm(A0, 1), asm::load_imm(A0, 2), asm::branch_eq_imm(RA, 0, 0)], &[]);
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
-    let next_offsets: Vec<_> = module.blob().instructions().map(|inst| inst.next_offset).collect();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(ProgramCounter(0));
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
-    assert_eq!(instance.program_counter(), Some(next_offsets[2]));
+    assert_eq!(instance.program_counter(), Some(offsets[2]));
 }
 
-fn jump_into_middle_of_basic_block_from_outside(engine_config: Config) {
+fn jump_into_middle_of_basic_block_from_outside(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -971,10 +987,10 @@ fn jump_into_middle_of_basic_block_from_outside(engine_config: Config) {
     assert_eq!(instance.gas(), 975);
 }
 
-fn jump_into_middle_of_basic_block_from_within(engine_config: Config) {
+fn jump_into_middle_of_basic_block_from_within(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::jump(1), asm::add_imm_32(A0, A0, 100), asm::ret()], &[]);
 
@@ -1036,17 +1052,43 @@ fn jump_into_middle_of_basic_block_from_within(engine_config: Config) {
     assert_eq!(instance.gas(), 999);
 }
 
-fn jump_after_invalid_instruction_from_within(engine_config: Config) {
+fn entry_into_the_middle_of_an_instruction_is_rejected(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
-    builder.set_code(&[asm::trap(), asm::add_imm_32(A0, A0, 100), asm::jump(1)], &[]);
+    builder.set_code(&[asm::load_imm(A0, 0x11223344), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut module_config: ModuleConfig = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    let instructions: Vec<_> = module.blob().instructions().collect();
+    assert!(instructions[0].next_offset.0 > instructions[0].offset.0 + 1);
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    for offset in instructions[0].offset.0 + 1..instructions[0].next_offset.0 {
+        instance.set_gas(1000);
+        instance.set_next_program_counter(ProgramCounter(offset));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+        assert_eq!(instance.program_counter(), Some(ProgramCounter(offset)));
+        assert_eq!(instance.gas(), 1000);
+    }
+}
+
+fn invalid_instruction_is_a_trap(engine_config: Config, isa: InstructionSetKind, make_invalid: impl FnOnce(&mut ProgramBlob)) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap(), asm::load_imm(A0, 42), asm::ret(), asm::jump(1)], &[]);
 
     let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-    let mut raw_code = blob.code().to_vec();
-    raw_code[0] = 255;
-    blob.set_code(raw_code.into());
+    make_invalid(&mut blob);
+
     let instructions: Vec<_> = blob.instructions().collect();
     assert_eq!(
         instructions[0],
@@ -1057,24 +1099,390 @@ fn jump_after_invalid_instruction_from_within(engine_config: Config) {
         }
     );
 
+    assert_eq!(instructions[3].kind, asm::jump(instructions[0].next_offset.0));
+
     let mut module_config: ModuleConfig = ModuleConfig::new();
     module_config.set_page_size(get_native_page_size().try_into().unwrap());
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
-    let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    let run_from = |program_counter| {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_gas(1000);
+        instance.set_next_program_counter(program_counter);
+        let interrupt = instance.run().unwrap();
+        (interrupt, instance.reg(A0), instance.gas())
+    };
+
+    let (interrupt, a0, gas) = run_from(instructions[3].offset);
+    match_interrupt!(interrupt, InterruptKind::Finished);
+    assert_eq!((a0, gas), (42, 997));
+
+    let (interrupt, a0, gas) = run_from(instructions[1].offset);
+    match_interrupt!(interrupt, InterruptKind::Finished);
+    assert_eq!((a0, gas), (42, 998));
+
+    let (interrupt, a0, gas) = run_from(instructions[0].offset);
+    match_interrupt!(interrupt, InterruptKind::Trap);
+    assert_eq!((a0, gas), (0, 999));
+}
+
+fn jump_after_invalid_instruction_from_within(engine_config: Config, isa: InstructionSetKind) {
+    invalid_instruction_is_a_trap(engine_config, isa, |blob| {
+        let mut raw_code = blob.code().to_vec();
+        raw_code[0] = INVALID_RAW_OPCODE;
+        blob.set_code(raw_code.into());
+    });
+}
+
+fn jump_after_an_injected_invalid_instruction(engine_config: Config, isa: InstructionSetKind) {
+    if !isa.is_legacy() {
+        return;
+    }
+
+    invalid_instruction_is_a_trap(engine_config, isa, |blob| {
+        let mut raw_bitmask = blob.bitmask().to_vec();
+        raw_bitmask[0] &= !1;
+        blob.set_bitmask(raw_bitmask.into());
+    });
+}
+
+fn serialize_padded(isa: InstructionSetKind, length: usize, groups: &[(u32, &[polkavm_common::program::Instruction])]) -> Vec<u8> {
+    use polkavm_common::program::MAX_INSTRUCTION_LENGTH;
+
+    let opcode_unlikely = isa.opcode_to_raw(Opcode::unlikely, 0).unwrap().0 as u8;
+    let mut code = vec![opcode_unlikely; length];
+    for &(start, instructions) in groups {
+        let mut position = start;
+        for &instruction in instructions {
+            let mut buffer = [0; MAX_INSTRUCTION_LENGTH];
+            let instruction_length = instruction.serialize_into(isa, position, &mut buffer) as u32;
+            code[position as usize..(position + instruction_length) as usize].copy_from_slice(&buffer[..instruction_length as usize]);
+            position += instruction_length;
+        }
+    }
+
+    code
+}
+
+fn jump_to_macro_block_boundary_is_always_valid(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    if isa.is_legacy() {
+        return;
+    }
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let code = serialize_padded(
+        isa,
+        1040,
+        &[
+            (0, &[asm::jump(1024)]),
+            (1023, &[asm::fallthrough()]),
+            (1024, &[asm::load_imm(A1, 42), asm::ret()]),
+        ],
+    );
+    blob.set_code(code.into());
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    // A direct jump to the boundary.
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(1000);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A1), 42);
+    assert_eq!(instance.gas(), 997);
+
+    // An arbitrary entry landing exactly on the boundary.
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(1000);
+    instance.set_next_program_counter(ProgramCounter(1024));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A1), 42);
+    assert_eq!(instance.gas(), 998);
+
+    // An arbitrary entry into the `unlikely` run before the boundary.
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(3000);
+    instance.set_next_program_counter(ProgramCounter(5));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A1), 42);
+    assert_eq!(instance.gas(), 3000 - ((1024 - 3) + 2));
+}
+
+fn unterminated_macro_block_traps_at_its_last_instruction(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    if isa.is_legacy() {
+        return;
+    }
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let code = serialize_padded(isa, 1040, &[(1024, &[asm::load_imm(A1, 42), asm::ret()])]);
+    blob.set_code(code.into());
+
+    let instructions: Vec<_> = blob.instructions_bounded_at(ProgramCounter(1023)).collect();
+    assert_eq!(instructions[0].kind, crate::program::Instruction::invalid);
+    assert_eq!(instructions[0].next_offset, ProgramCounter(1024));
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(3000);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.reg(Reg::A1), 0);
+    assert_eq!(instance.program_counter(), Some(ProgramCounter(1023)));
+    assert_eq!(instance.gas(), 3000 - 1024);
+}
+
+fn instructions_across_macro_block_boundary_are_traps_1(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    if isa.is_legacy() {
+        return;
+    }
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let code = serialize_padded(
+        isa,
+        1040,
+        &[
+            (0, &[asm::jump(1019)]),
+            (1018, &[asm::fallthrough()]),
+            (1019, &[asm::load_imm64(A1, 0x112233)]),
+        ],
+    );
+    blob.set_code(code.into());
+
+    let instructions: Vec<_> = blob.instructions_bounded_at(ProgramCounter(1019)).collect();
+    assert_eq!(instructions[0].kind, crate::program::Instruction::invalid);
+    assert_eq!(instructions[0].next_offset, ProgramCounter(1024));
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_gas(1000);
-
-    instance.set_next_program_counter(instructions[1].offset);
+    instance.set_next_program_counter(ProgramCounter(0));
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.reg(Reg::A1), 0);
+    assert_eq!(instance.program_counter(), Some(ProgramCounter(1019)));
     assert_eq!(instance.gas(), 998);
 }
 
-fn jump_indirect_simple(engine_config: Config) {
+fn instructions_across_macro_block_boundary_are_traps_2(engine_config: Config, isa: InstructionSetKind) {
+    use polkavm_common::program::MAX_INSTRUCTION_LENGTH;
+
+    let _ = env_logger::try_init();
+    if isa.is_legacy() {
+        return;
+    }
+
+    const BOUNDARY: u32 = 1024;
+    const TARGET: u32 = 2048;
+
+    let branch = asm::branch_eq(A0, A1, TARGET);
+    let branch_offset = BOUNDARY - 2;
+    let branch_length = {
+        let mut buffer = [0; MAX_INSTRUCTION_LENGTH];
+        branch.serialize_into(isa, branch_offset, &mut buffer) as u32
+    };
+
+    assert!(branch_offset + branch_length > BOUNDARY);
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let code = serialize_padded(
+        isa,
+        3072,
+        &[
+            (branch_offset - 1, &[asm::fallthrough()]),
+            (branch_offset, &[branch]),
+            (branch_offset + branch_length, &[asm::add_imm_64(A0, A0, 1)]),
+            (TARGET, &[asm::load_imm(A1, 42), asm::ret()]),
+        ],
+    );
+    blob.set_code(code.into());
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    module_config.set_cost_model(Some(crate::CostModelKind::Full(crate::CacheModel::L1Hit)));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(1000);
+    instance.set_next_program_counter(ProgramCounter(branch_offset));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.reg(Reg::A1), 0);
+    assert_eq!(instance.gas(), 998);
+}
+
+fn instructions_across_code_blob_boundary_are_traps(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    if isa.is_legacy() {
+        return;
+    }
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut code = serialize_padded(isa, 17, &[]);
+
+    // A `load_imm` whose argument byte is past the end of the code; the decoder pads with zeros.
+    *code.last_mut().unwrap() = isa.opcode_to_raw(Opcode::load_imm, 1).unwrap().0 as u8;
+    blob.set_code(code.into());
+
+    let instructions: Vec<_> = blob.instructions().collect();
+    let [.., overshooting] = instructions.as_slice() else {
+        unreachable!()
+    };
+    assert_eq!(
+        (overshooting.kind, overshooting.offset, overshooting.next_offset),
+        (crate::program::Instruction::invalid, ProgramCounter(16), ProgramCounter(17))
+    );
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(1000);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.program_counter(), Some(ProgramCounter(16)));
+}
+
+#[test]
+fn linear_decode_matches_the_instruction_iterator() {
+    use polkavm_common::program::OpcodeVisitor;
+
+    #[derive(Copy, Clone)]
+    struct CollectOffsets(InstructionSetKind);
+
+    impl OpcodeVisitor for CollectOffsets {
+        type State = Vec<ProgramCounter>;
+        type ReturnTy = ();
+        type InstructionSet = InstructionSetKind;
+
+        fn instruction_set(self) -> Self::InstructionSet {
+            self.0
+        }
+
+        fn dispatch(self, state: &mut Self::State, _opcode: usize, _chunk: u128, offset: u32, _length: u32) {
+            state.push(ProgramCounter(offset));
+        }
+    }
+
+    let _ = env_logger::try_init();
+    let isa = InstructionSetKind::Latest64;
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.set_code(&[asm::trap()], &[]);
+
+    let code_length = 32;
+    for tail in [&[asm::trap()][..], &[][..]] {
+        let mut blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+        let code = serialize_padded(
+            isa,
+            code_length,
+            &[(0, &[asm::load_imm(A1, 42), asm::ret()]), (code_length as u32 - 1, tail)],
+        );
+        blob.set_code(code.into());
+
+        let mut linear = Vec::new();
+        blob.visit(CollectOffsets(isa), &mut linear);
+
+        let iterated: Vec<_> = blob.instructions().map(|instruction| instruction.offset).collect();
+        assert_eq!(linear, iterated);
+    }
+}
+
+fn jump_to_an_injected_invalid_instruction(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    if !isa.is_legacy() {
+        return;
+    }
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_imm(A1, 1), asm::load_imm(A1, 42), asm::ret(), asm::jump(0)], &[]);
+
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut raw_bitmask = blob.bitmask().to_vec();
+    raw_bitmask[0] &= !1;
+    blob.set_bitmask(raw_bitmask.into());
+
+    let instructions: Vec<_> = blob.instructions().collect();
+    assert_eq!(instructions[0].kind, crate::program::Instruction::invalid);
+    assert_eq!(instructions[0].offset, ProgramCounter(0));
+    assert_eq!(instructions[1].kind, asm::load_imm(A1, 42));
+    assert_eq!(instructions[3].kind, asm::jump(0));
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(get_native_page_size().try_into().unwrap());
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(1000);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.reg(Reg::A1), 0);
+    assert_eq!(instance.gas(), 999);
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(1000);
+    instance.set_next_program_counter(instructions[3].offset);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(instance.reg(Reg::A1), 0);
+    assert_eq!(instance.gas(), 998);
+}
+
+fn jump_indirect_simple(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -1114,10 +1522,10 @@ fn jump_indirect_simple(engine_config: Config) {
     }
 }
 
-fn jump_indirect_big_table(engine_config: Config) {
+fn jump_indirect_big_table(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[asm::jump_indirect(A0, 1024 * 1024), asm::trap(), asm::ret()],
@@ -1133,14 +1541,39 @@ fn jump_indirect_big_table(engine_config: Config) {
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
 }
 
-fn dynamic_paging_basic(mut engine_config: Config) {
+fn jump_indirect_truncates_the_target_to_32_bits(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&engine_config).unwrap();
+
+    let jump_to = |offset: i32, target: u64| {
+        let mut builder = ProgramBlobBuilder::new(isa);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::jump_indirect(A0, offset), asm::load_imm(A1, 100), asm::ret()], &[1]);
+
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
+
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(Reg::A0, target);
+        instance.set_next_program_counter(ProgramCounter(0));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+        instance.reg(Reg::A1)
+    };
+
+    assert_eq!(jump_to(0, 0x00000001_00000002), 100);
+    assert_eq!(jump_to(2, 0x00000001_00000000), 100);
+    assert_eq!(jump_to(4, 0x00000000_fffffffe), 100);
+}
+
+fn dynamic_paging_basic(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -1148,7 +1581,7 @@ fn dynamic_paging_basic(mut engine_config: Config) {
             asm::store_imm_u32(0x10004, 1),
             asm::load_i32(Reg::A0, 0x10004),
             asm::load_i32(Reg::A1, 0x10008),
-            asm::load_i32(Reg::A2, 0x10000 + page_size),
+            asm::load_i32(Reg::A2, 0x10000 + cast(page_size).to_i32_or_panic()),
             asm::ret(),
         ],
         &[],
@@ -1247,14 +1680,14 @@ fn dynamic_paging_basic(mut engine_config: Config) {
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
 }
 
-fn dynamic_paging_freeing_pages(mut engine_config: Config) {
+fn dynamic_paging_freeing_pages(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_i32(Reg::A0, 0x10000), asm::ret()], &[]);
 
@@ -1283,7 +1716,7 @@ fn dynamic_paging_freeing_pages(mut engine_config: Config) {
     expect_segfault(instance.run().unwrap());
 }
 
-fn dynamic_paging_protect_memory(mut engine_config: Config) {
+fn dynamic_paging_protect_memory(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     if engine_config.crosscheck() {
@@ -1295,7 +1728,7 @@ fn dynamic_paging_protect_memory(mut engine_config: Config) {
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[asm::load_i32(Reg::A0, 0x10000), asm::store_imm_u32(0x10000, 0x12345678), asm::ret()],
@@ -1346,16 +1779,47 @@ fn dynamic_paging_protect_memory(mut engine_config: Config) {
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
 }
 
-#[cfg(not(feature = "std"))]
-fn dynamic_paging_stress_test(_engine_config: Config) {}
+#[cfg(feature = "std")]
+mod stress_test {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static STRESS_TEST_LOCK: AtomicBool = AtomicBool::new(false);
+    pub struct StressTestLock;
+
+    impl StressTestLock {
+        pub fn new() -> StressTestLock {
+            while STRESS_TEST_LOCK
+                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                std::thread::sleep(core::time::Duration::from_millis(50));
+            }
+
+            Self
+        }
+    }
+
+    impl Drop for StressTestLock {
+        fn drop(&mut self) {
+            STRESS_TEST_LOCK.store(false, Ordering::Relaxed);
+        }
+    }
+}
 
 #[cfg(feature = "std")]
-fn dynamic_paging_stress_test(mut engine_config: Config) {
+use self::stress_test::StressTestLock;
+
+#[cfg(not(feature = "std"))]
+fn dynamic_paging_stress_test(_engine_config: Config, _: InstructionSetKind) {}
+
+#[cfg(feature = "std")]
+fn dynamic_paging_stress_test(mut engine_config: Config, isa: InstructionSetKind) {
+    let _lock = StressTestLock::new();
     let _ = env_logger::try_init();
     engine_config.set_allow_dynamic_paging(true);
     engine_config.set_worker_count(0);
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_i32(Reg::A0, 0x10000), asm::ret()], &[]);
 
@@ -1392,19 +1856,19 @@ fn dynamic_paging_stress_test(mut engine_config: Config) {
     }
 }
 
-fn dynamic_paging_initialize_multiple_pages(mut engine_config: Config) {
+fn dynamic_paging_initialize_multiple_pages(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
             asm::load_i32(Reg::A0, 0x10004),
-            asm::load_i32(Reg::A1, 0x10004 + page_size),
+            asm::load_i32(Reg::A1, 0x10004 + cast(page_size).to_i32_or_panic()),
             asm::ret(),
         ],
         &[],
@@ -1429,19 +1893,19 @@ fn dynamic_paging_initialize_multiple_pages(mut engine_config: Config) {
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
 }
 
-fn dynamic_paging_preinitialize_pages(mut engine_config: Config) {
+fn dynamic_paging_preinitialize_pages(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
             asm::load_i32(Reg::A0, 0x10004),
-            asm::load_i32(Reg::A1, 0x10004 + page_size),
+            asm::load_i32(Reg::A1, 0x10004 + cast(page_size).to_i32_or_panic()),
             asm::ret(),
         ],
         &[],
@@ -1463,14 +1927,14 @@ fn dynamic_paging_preinitialize_pages(mut engine_config: Config) {
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
 }
 
-fn dynamic_paging_reading_does_not_resolve_segfaults(mut engine_config: Config) {
+fn dynamic_paging_reading_does_not_resolve_segfaults(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_i32(Reg::A0, 0x10000), asm::ret()], &[]);
 
@@ -1492,14 +1956,14 @@ fn dynamic_paging_reading_does_not_resolve_segfaults(mut engine_config: Config) 
     assert_eq!(segfault.page_address, 0x10000);
 }
 
-fn dynamic_paging_read_at_page_boundary(mut engine_config: Config) {
+fn dynamic_paging_read_at_page_boundary(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_i32(Reg::A0, 0x10ffe), asm::ret()], &[]);
 
@@ -1530,16 +1994,16 @@ fn dynamic_paging_read_at_page_boundary(mut engine_config: Config) {
     assert_eq!(instance.reg(Reg::A0), 0x00bbaa00);
 }
 
-fn dynamic_paging_read_at_top_of_address_space(mut engine_config: Config) {
+fn dynamic_paging_read_at_top_of_address_space(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
-    builder.set_code(&[asm::load_i32(Reg::A0, 0xffffffff), asm::ret()], &[]);
+    builder.set_code(&[asm::load_i32(Reg::A0, cast(0xffffffff_u32).bitwise_as_i32()), asm::ret()], &[]);
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let mut module_config = ModuleConfig::new();
@@ -1555,14 +2019,14 @@ fn dynamic_paging_read_at_top_of_address_space(mut engine_config: Config) {
     assert_eq!(segfault.page_address, 0xfffff000);
 }
 
-fn dynamic_paging_read_with_upper_bits_set(mut engine_config: Config) {
+fn dynamic_paging_read_with_upper_bits_set(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -1587,14 +2051,14 @@ fn dynamic_paging_read_with_upper_bits_set(mut engine_config: Config) {
     assert_eq!(segfault.page_address, 0x10000000);
 }
 
-fn dynamic_paging_read_at_bottom_of_address_space(mut engine_config: Config) {
+fn dynamic_paging_read_at_bottom_of_address_space(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_i32(Reg::A0, 1), asm::ret()], &[]);
 
@@ -1611,14 +2075,56 @@ fn dynamic_paging_read_at_bottom_of_address_space(mut engine_config: Config) {
     assert_eq!(instance.run().unwrap(), InterruptKind::Trap);
 }
 
-fn dynamic_paging_read_memory_which_is_not_paged_in(mut engine_config: Config) {
+fn dynamic_paging_read_below_the_guard_threshold(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+
+    // Runs a program which does a single 4-byte load from `address` and returns how it stopped.
+    let run_load = |address: i32| {
+        let mut builder = ProgramBlobBuilder::new(isa);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::load_i32(Reg::A0, address), asm::ret()], &[]);
+
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let mut module_config = ModuleConfig::new();
+        module_config.set_page_size(page_size);
+        module_config.set_dynamic_paging(true);
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
+
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(offsets[0]);
+        instance.run().unwrap()
+    };
+
+    // Reads fully inside the lowest 64KB of the address space must trap instead of
+    // producing a recoverable segfault, on every backend. (See #390.)
+    for address in [0x1000, 0x4000, 0xf000] {
+        assert_eq!(run_load(address), InterruptKind::Trap);
+    }
+
+    // A read straddling the boundary (partially below 0x10000 and partially at/above it) must
+    // also trap, since its lowest byte still lands in the inaccessible zone.
+    assert_eq!(run_load(0xfffe), InterruptKind::Trap);
+
+    // ...while a read fully at 0x10000 is the first one which segfaults recoverably.
+    let segfault = expect_segfault(run_load(0x10000));
+    assert_eq!(segfault.page_address, 0x10000);
+}
+
+fn dynamic_paging_read_memory_which_is_not_paged_in(mut engine_config: Config, isa: InstructionSetKind) {
+    engine_config.set_allow_dynamic_paging(true);
+
+    let _ = env_logger::try_init();
+
+    let engine = Engine::new(&engine_config).unwrap();
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::ret()], &[]);
 
@@ -1627,7 +2133,7 @@ fn dynamic_paging_read_memory_which_is_not_paged_in(mut engine_config: Config) {
     module_config.set_page_size(page_size);
     module_config.set_dynamic_paging(true);
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let instance = module.instantiate().unwrap();
+    let mut instance = module.instantiate().unwrap();
 
     #[allow(clippy::match_wildcard_for_single_variants)]
     match instance.read_memory(0x10000, page_size).unwrap_err() {
@@ -1639,14 +2145,14 @@ fn dynamic_paging_read_memory_which_is_not_paged_in(mut engine_config: Config) {
     }
 }
 
-fn dynamic_paging_write_at_page_boundary_with_no_pages(mut engine_config: Config) {
+fn dynamic_paging_write_at_page_boundary_with_no_pages(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::store_imm_u32(0x10ffe, 0x12345678), asm::ret()], &[]);
 
@@ -1677,14 +2183,14 @@ fn dynamic_paging_write_at_page_boundary_with_no_pages(mut engine_config: Config
     assert_eq!(instance.read_memory(0x10ffe, 2).unwrap(), vec![0x78, 0x56]);
 }
 
-fn dynamic_paging_write_at_page_boundary_with_first_page(mut engine_config: Config) {
+fn dynamic_paging_write_at_page_boundary_with_first_page(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::store_imm_u32(0x10ffe, 0x12345678), asm::ret()], &[]);
 
@@ -1713,14 +2219,14 @@ fn dynamic_paging_write_at_page_boundary_with_first_page(mut engine_config: Conf
     assert_eq!(instance.read_memory(0x10ffe, 2).unwrap(), vec![0x78, 0x56]);
 }
 
-fn dynamic_paging_write_at_page_boundary_with_second_page(mut engine_config: Config) {
+fn dynamic_paging_write_at_page_boundary_with_second_page(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::store_imm_u32(0x10ffe, 0x12345678), asm::ret()], &[]);
 
@@ -1749,14 +2255,14 @@ fn dynamic_paging_write_at_page_boundary_with_second_page(mut engine_config: Con
     assert_eq!(instance.read_memory(0x11000, 2).unwrap(), vec![0x34, 0x12]);
 }
 
-fn dynamic_paging_change_written_value_and_address_during_segfault(mut engine_config: Config) {
+fn dynamic_paging_change_written_value_and_address_during_segfault(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::store_indirect_u32(Reg::A0, Reg::A1, 0), asm::ret()], &[]);
 
@@ -1783,39 +2289,46 @@ fn dynamic_paging_change_written_value_and_address_during_segfault(mut engine_co
     assert_eq!(instance.read_memory(0x10000, 6).unwrap(), vec![0, 0, 0x88, 0x77, 0x66, 0x55]);
 }
 
-fn dynamic_paging_cancel_segfault_by_changing_address(mut engine_config: Config) {
+fn dynamic_paging_cancel_segfault_by_changing_address(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
-    let engine = Engine::new(&engine_config).unwrap();
-    let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
-    builder.add_export_by_basic_block(0, b"main");
-    builder.set_code(&[asm::store_imm_indirect_u32(Reg::A0, 0, 0x12345678), asm::ret()], &[]);
+    // The offset here matters: the recompiler can compute the address of an access into a
+    // scratch register, which then has to be recalculated when the address is changed.
+    for store_offset in [0, 4] {
+        let engine = Engine::new(&engine_config).unwrap();
+        let page_size = get_native_page_size() as u32;
+        let mut builder = ProgramBlobBuilder::new(isa);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::store_imm_indirect_u32(Reg::A0, store_offset, 0x12345678), asm::ret()], &[]);
 
-    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-    let mut module_config = ModuleConfig::new();
-    module_config.set_page_size(page_size);
-    module_config.set_dynamic_paging(true);
-    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let mut module_config = ModuleConfig::new();
+        module_config.set_page_size(page_size);
+        module_config.set_dynamic_paging(true);
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
 
-    let mut instance = module.instantiate().unwrap();
-    instance
-        .zero_memory_with_memory_protection(0x11000, page_size, MemoryProtection::ReadWrite)
-        .unwrap();
-    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
-    instance.set_next_program_counter(offsets[0]);
-    instance.set_reg(Reg::A0, 0x10000);
-    let segfault = expect_segfault(instance.run().unwrap());
-    assert_eq!(segfault.page_address, 0x10000);
-    instance.set_reg(Reg::A0, 0x11000);
-    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
-    assert_eq!(instance.read_memory(0x11000, 4).unwrap(), vec![0x78, 0x56, 0x34, 0x12]);
+        let mut instance = module.instantiate().unwrap();
+        instance
+            .zero_memory_with_memory_protection(0x11000, page_size, MemoryProtection::ReadWrite)
+            .unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(offsets[0]);
+        instance.set_reg(Reg::A0, 0x10000);
+        let segfault = expect_segfault(instance.run().unwrap());
+        assert_eq!(segfault.page_address, 0x10000);
+        instance.set_reg(Reg::A0, 0x11000);
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+        assert_eq!(
+            instance.read_memory(0x11000 + store_offset as u32, 4).unwrap(),
+            vec![0x78, 0x56, 0x34, 0x12]
+        );
+    }
 }
 
-fn dynamic_paging_worker_recycle_turn_dynamic_paging_on_and_off(mut engine_config: Config) {
+fn dynamic_paging_worker_recycle_turn_dynamic_paging_on_and_off(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
     engine_config.set_worker_count(1);
 
@@ -1823,7 +2336,7 @@ fn dynamic_paging_worker_recycle_turn_dynamic_paging_on_and_off(mut engine_confi
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_rw_data_size(1);
     builder.set_code(&[asm::store_imm_u32(0x20000, 0x12345678), asm::ret()], &[]);
@@ -1875,7 +2388,7 @@ fn dynamic_paging_worker_recycle_turn_dynamic_paging_on_and_off(mut engine_confi
     }
 }
 
-fn dynamic_paging_worker_recycle_during_segfault(mut engine_config: Config) {
+fn dynamic_paging_worker_recycle_during_segfault(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
     engine_config.set_worker_count(1);
 
@@ -1884,7 +2397,7 @@ fn dynamic_paging_worker_recycle_during_segfault(mut engine_config: Config) {
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
     let blob_1 = {
-        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+        let mut builder = ProgramBlobBuilder::new(isa);
         builder.add_export_by_basic_block(0, b"main");
         builder.set_rw_data_size(1);
         builder.set_code(&[asm::store_imm_u32(0x20000, 0x12345678), asm::ret()], &[]);
@@ -1893,7 +2406,7 @@ fn dynamic_paging_worker_recycle_during_segfault(mut engine_config: Config) {
     };
 
     let blob_2 = {
-        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+        let mut builder = ProgramBlobBuilder::new(isa);
         builder.add_export_by_basic_block(0, b"main");
         builder.set_rw_data_size(1);
         builder.set_code(&[asm::store_imm_u32(0x20000, 0x11223344), asm::ret()], &[]);
@@ -1928,14 +2441,14 @@ fn dynamic_paging_worker_recycle_during_segfault(mut engine_config: Config) {
     assert_eq!(instance.read_u32(0x20000).unwrap(), 0x11223344);
 }
 
-fn dynamic_paging_change_program_counter_during_segfault(mut engine_config: Config) {
+fn dynamic_paging_change_program_counter_during_segfault(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -1970,14 +2483,14 @@ fn dynamic_paging_change_program_counter_during_segfault(mut engine_config: Conf
     assert_eq!(instance.read_u32(0x11000).unwrap(), 2);
 }
 
-fn dynamic_paging_run_out_of_gas(mut engine_config: Config) {
+fn dynamic_paging_run_out_of_gas(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[asm::load_imm(Reg::A0, 1), asm::fallthrough(), asm::load_imm(Reg::A0, 2), asm::ret()],
@@ -2002,10 +2515,10 @@ fn dynamic_paging_run_out_of_gas(mut engine_config: Config) {
 }
 
 #[cfg(not(feature = "std"))]
-fn dynamic_paging_receive_from_another_thread_and_run(_: Config) {}
+fn dynamic_paging_receive_from_another_thread_and_run(_: Config, _: InstructionSetKind) {}
 
 #[cfg(feature = "std")]
-fn dynamic_paging_receive_from_another_thread_and_run(mut engine_config: Config) {
+fn dynamic_paging_receive_from_another_thread_and_run(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
@@ -2013,7 +2526,7 @@ fn dynamic_paging_receive_from_another_thread_and_run(mut engine_config: Config)
     let mut instance = std::thread::spawn(move || {
         let engine = Engine::new(&engine_config).unwrap();
         let page_size = get_native_page_size() as u32;
-        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+        let mut builder = ProgramBlobBuilder::new(isa);
         builder.add_export_by_basic_block(0, b"main");
         builder.set_code(
             &[
@@ -2048,17 +2561,17 @@ fn dynamic_paging_receive_from_another_thread_and_run(mut engine_config: Config)
 }
 
 #[cfg(not(feature = "std"))]
-fn dynamic_paging_instantiate_on_another_thread(_: Config) {}
+fn dynamic_paging_instantiate_on_another_thread(_: Config, _: InstructionSetKind) {}
 
 #[cfg(feature = "std")]
-fn dynamic_paging_instantiate_on_another_thread(mut engine_config: Config) {
+fn dynamic_paging_instantiate_on_another_thread(mut engine_config: Config, isa: InstructionSetKind) {
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -2116,17 +2629,18 @@ fn dynamic_paging_instantiate_on_another_thread(mut engine_config: Config) {
 }
 
 #[cfg(not(feature = "std"))]
-fn dynamic_paging_parallel_page_fault_stress_test(_: Config) {}
+fn dynamic_paging_parallel_page_fault_stress_test(_: Config, _: InstructionSetKind) {}
 
 #[cfg(feature = "std")]
-fn dynamic_paging_parallel_page_fault_stress_test(mut engine_config: Config) {
+fn dynamic_paging_parallel_page_fault_stress_test(mut engine_config: Config, isa: InstructionSetKind) {
+    let _lock = StressTestLock::new();
     engine_config.set_allow_dynamic_paging(true);
 
     let _ = env_logger::try_init();
 
     let engine = Engine::new(&engine_config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -2216,6 +2730,35 @@ fn dynamic_paging_parallel_page_fault_stress_test(mut engine_config: Config) {
     }
 }
 
+fn memory_access_with_upper_address_bits_set(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+
+    let engine = Engine::new(&engine_config).unwrap();
+    const ADDRESS: u64 = 0xffffffff_fffffffc;
+
+    let run = |code: &[polkavm_common::program::Instruction]| {
+        let mut builder = ProgramBlobBuilder::new(isa);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(code, &[]);
+
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+        let offset = module.blob().instructions().next().unwrap().offset;
+
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(Reg::A0, ADDRESS);
+        instance.set_next_program_counter(offset);
+        instance.run().unwrap()
+    };
+
+    match_interrupt!(run(&[asm::load_indirect_u32(Reg::A1, Reg::A0, 0), asm::ret()]), InterruptKind::Trap);
+    match_interrupt!(
+        run(&[asm::store_indirect_u32(Reg::A1, Reg::A0, 0), asm::ret()]),
+        InterruptKind::Trap
+    );
+}
+
 fn decompress_zstd(mut bytes: &[u8]) -> Vec<u8> {
     use ruzstd::io::Read;
     let mut output = Vec::new();
@@ -2234,32 +2777,51 @@ fn decompress_zstd(mut bytes: &[u8]) -> Vec<u8> {
     output
 }
 
-static BLOB_MAP: Mutex<Option<BTreeMap<(bool, bool, &'static [u8]), ProgramBlob>>> = Mutex::new(None);
-
-fn get_blob(elf: &'static [u8]) -> ProgramBlob {
-    get_blob_impl(true, false, elf)
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct BlobMapKey {
+    optimize: bool,
+    strip: bool,
+    isa: InstructionSetKind,
+    elf: &'static [u8],
+    is_permissive: bool,
 }
 
-fn get_blob_impl(optimize: bool, strip: bool, elf: &'static [u8]) -> ProgramBlob {
+static BLOB_MAP: Mutex<Option<BTreeMap<BlobMapKey, ProgramBlob>>> = Mutex::new(None);
+
+fn get_blob(elf: &'static [u8], isa: InstructionSetKind) -> ProgramBlob {
+    get_blob_impl(BlobMapKey {
+        optimize: true,
+        strip: false,
+        isa,
+        elf,
+        is_permissive: false,
+    })
+}
+
+fn get_blob_impl(key: BlobMapKey) -> ProgramBlob {
     let mut blob_map = BLOB_MAP.lock();
     let blob_map = blob_map.get_or_insert_with(BTreeMap::new);
     blob_map
-        .entry((optimize, strip, elf))
+        .entry(key)
         .or_insert_with(|| {
             // This is slow, so cache it.
-            let decompress = !elf.starts_with(&[0x7f, b'E', b'L', b'F']);
-            let elf = if decompress { decompress_zstd(elf) } else { elf.to_vec() };
+            let decompress = !key.elf.starts_with(&[0x7f, b'E', b'L', b'F']);
+            let elf = if decompress { decompress_zstd(key.elf) } else { key.elf.to_vec() };
             let mut config = polkavm_linker::Config::default();
-            config.set_optimize(optimize);
-            config.set_strip(strip);
+            config.set_optimize(key.optimize);
+            config.set_strip(key.strip);
+            config.set_allow_unsupported_instructions(key.is_permissive && !key.isa.supports_opcode(Opcode::sbrk));
 
-            let bytes = polkavm_linker::program_from_elf(config, TargetInstructionSet::Latest, &elf).unwrap();
-            ProgramBlob::parse(bytes.into()).unwrap()
+            let bytes = polkavm_linker::program_from_elf(config, key.isa.into(), &elf).unwrap();
+            let blob = ProgramBlob::parse(bytes.into()).unwrap();
+            assert_eq!(blob.isa(), key.isa);
+
+            blob
         })
         .clone()
 }
 
-fn doom(config: Config, elf: &'static [u8]) {
+fn doom_impl(config: Config, isa: InstructionSetKind, elf: &'static [u8]) {
     if config.backend() == Some(crate::BackendKind::Interpreter) || config.crosscheck() {
         // The interpreter is currently too slow to run doom.
         return;
@@ -2273,7 +2835,7 @@ fn doom(config: Config, elf: &'static [u8]) {
     const DOOM_WAD: &[u8] = include_bytes!("../../../examples/doom/roms/doom1.wad");
 
     let _ = env_logger::try_init();
-    let blob = get_blob(elf);
+    let blob = get_blob(elf, isa);
     let engine = Engine::new(&config).unwrap();
     let mut module_config = ModuleConfig::default();
     module_config.set_page_size(16 * 1024); // TODO: Also test with other page sizes.
@@ -2384,47 +2946,54 @@ fn doom(config: Config, elf: &'static [u8]) {
     // }
 }
 
-fn doom_o3_dwarf5(config: Config) {
-    doom(config, include_bytes!("../../../test-data/doom_O3_dwarf5.elf.zst"));
+fn doom_o3_dwarf5(config: Config, isa: InstructionSetKind) {
+    if isa.is_64_bit() {
+        return;
+    }
+
+    doom_impl(config, isa, include_bytes!("../../../test-data/doom_O3_dwarf5.elf.zst"));
 }
 
-fn doom_o1_dwarf5(config: Config) {
-    doom(config, include_bytes!("../../../test-data/doom_O1_dwarf5.elf.zst"));
+fn doom_o1_dwarf5(config: Config, isa: InstructionSetKind) {
+    if isa.is_64_bit() {
+        return;
+    }
+
+    doom_impl(config, isa, include_bytes!("../../../test-data/doom_O1_dwarf5.elf.zst"));
 }
 
-fn doom_o3_dwarf2(config: Config) {
-    doom(config, include_bytes!("../../../test-data/doom_O3_dwarf2.elf.zst"));
+fn doom_o3_dwarf2(config: Config, isa: InstructionSetKind) {
+    if isa.is_64_bit() {
+        return;
+    }
+
+    doom_impl(config, isa, include_bytes!("../../../test-data/doom_O3_dwarf2.elf.zst"));
 }
 
-fn doom_64(config: Config) {
-    doom(config, include_bytes!("../../../test-data/doom_64.elf.zst"));
+fn doom(config: Config, isa: InstructionSetKind) {
+    if !isa.is_64_bit() {
+        return;
+    }
+
+    doom_impl(config, isa, include_bytes!("../../../test-data/doom_64.elf.zst"));
 }
 
-fn pinky_dynamic_paging_32(mut config: Config) {
+fn pinky_dynamic_paging(mut config: Config, isa: InstructionSetKind) {
     config.set_allow_dynamic_paging(true);
-    pinky_impl(config, false);
+    pinky_impl(config, isa);
 }
 
-fn pinky_dynamic_paging_64(mut config: Config) {
-    config.set_allow_dynamic_paging(true);
-    pinky_impl(config, true);
+fn pinky_standard(config: Config, isa: InstructionSetKind) {
+    pinky_impl(config, isa)
 }
 
-fn pinky_standard_32(config: Config) {
-    pinky_impl(config, false)
-}
-
-fn pinky_standard_64(config: Config) {
-    pinky_impl(config, true)
-}
-
-fn pinky_impl(config: Config, is_64_bit: bool) {
+fn pinky_impl(config: Config, isa: InstructionSetKind) {
     if (config.backend() == Some(crate::BackendKind::Interpreter) && cfg!(debug_assertions)) || config.crosscheck() {
         return; // Too slow.
     }
 
     let _ = env_logger::try_init();
-    let blob = get_blob(get_test_program(TestProgram::Pinky, is_64_bit));
+    let blob = get_blob(get_test_program(TestProgram::Pinky, isa.is_64_bit()), isa);
 
     let engine = Engine::new(&config).unwrap();
     let mut module_config = ModuleConfig::default();
@@ -2454,11 +3023,11 @@ fn pinky_impl(config: Config, is_64_bit: bool) {
     }
 }
 
-fn dispatch_table(config: Config) {
+fn dispatch_table(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"block_0");
     builder.add_export_by_basic_block(1, b"block_1");
     builder.add_export_by_basic_block(2, b"block_2");
@@ -2501,11 +3070,11 @@ fn dispatch_table(config: Config) {
     assert_eq!(instance.reg(Reg::A0), 11);
 }
 
-fn fallthrough_into_already_compiled_block(config: Config) {
+fn fallthrough_into_already_compiled_block(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -2548,11 +3117,11 @@ fn fallthrough_into_already_compiled_block(config: Config) {
     assert_eq!(gas, instance.gas());
 }
 
-fn implicit_trap_after_fallthrough(config: Config) {
+fn implicit_trap_after_fallthrough(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::fallthrough()], &[]);
 
@@ -2564,14 +3133,14 @@ fn implicit_trap_after_fallthrough(config: Config) {
     let mut instance = module.instantiate().unwrap();
     instance.set_next_program_counter(ProgramCounter(0));
     match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
-    assert_eq!(instance.program_counter().unwrap().0, 1);
+    assert_eq!(instance.program_counter().unwrap().0, 0);
     assert_eq!(instance.next_program_counter(), None);
 }
 
-fn invalid_instruction_after_fallthrough(engine_config: Config) {
+fn invalid_instruction_after_fallthrough(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::fallthrough(), asm::fallthrough(), asm::ret()], &[]);
 
@@ -2579,7 +3148,7 @@ fn invalid_instruction_after_fallthrough(engine_config: Config) {
     let instructions: Vec<_> = blob.instructions().collect();
 
     let mut raw_code = blob.code().to_vec();
-    raw_code[instructions[1].offset.0 as usize] = 255;
+    raw_code[instructions[1].offset.0 as usize] = INVALID_RAW_OPCODE;
     blob.set_code(raw_code.into());
 
     let instructions: Vec<_> = blob.instructions().collect();
@@ -2608,10 +3177,10 @@ fn invalid_instruction_after_fallthrough(engine_config: Config) {
     assert_eq!(instance.next_program_counter(), None);
 }
 
-fn invalid_branch_target(engine_config: Config) {
+fn invalid_branch_target(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -2620,6 +3189,12 @@ fn invalid_branch_target(engine_config: Config) {
             asm::trap(),
             asm::load_imm(Reg::A1, 2),
             asm::trap(),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 3),
         ],
         &[],
     );
@@ -2659,7 +3234,7 @@ fn invalid_branch_target(engine_config: Config) {
         assert_eq!(instance.reg(Reg::A1), 2);
     }
 
-    // Invalid branch.
+    // Invalid branch (true case).
     {
         let mut blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
         let mut raw_code = blob.code().to_vec();
@@ -2668,34 +3243,101 @@ fn invalid_branch_target(engine_config: Config) {
 
         let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
 
-        // False branch.
-        let mut instance = module.instantiate().unwrap();
-        instance.set_gas(100);
-        instance.set_next_program_counter(instructions[0].offset);
-        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
-        assert_eq!(instance.gas(), 97);
-        assert_eq!(instance.program_counter().unwrap(), instructions[2].offset);
-        assert_eq!(instance.next_program_counter(), None);
-        assert_eq!(instance.reg(Reg::A1), 1);
+        for _ in 0..2 {
+            // False branch.
+            let mut instance = module.instantiate().unwrap();
+            instance.set_gas(100);
+            instance.set_next_program_counter(instructions[0].offset);
+            match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+            assert_eq!(instance.gas(), 99);
+            assert_eq!(instance.program_counter().unwrap(), instructions[0].offset);
+            assert_eq!(instance.next_program_counter(), None);
+            assert_eq!(instance.reg(Reg::A1), 0);
 
-        // True branch.
-        let mut instance = module.instantiate().unwrap();
-        instance.set_reg(Reg::A0, 33);
-        instance.set_gas(100);
-        instance.set_next_program_counter(instructions[0].offset);
-        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
-        assert_eq!(instance.gas(), 99);
-        assert_eq!(instance.program_counter().unwrap(), instructions[0].offset);
-        assert_eq!(instance.next_program_counter(), None);
-        assert_eq!(instance.reg(Reg::A1), 0);
+            // True branch.
+            let mut instance = module.instantiate().unwrap();
+            instance.set_reg(Reg::A0, 33);
+            instance.set_gas(100);
+            instance.set_next_program_counter(instructions[0].offset);
+            match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+            assert_eq!(instance.gas(), 99);
+            assert_eq!(instance.program_counter().unwrap(), instructions[0].offset);
+            assert_eq!(instance.next_program_counter(), None);
+            assert_eq!(instance.reg(Reg::A1), 0);
+        }
+    }
+
+    // Invalid branch (false case).
+    if isa.is_legacy() {
+        // TODO: Also test on non-legacy.
+        let mut blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+        let mut raw_bitmask = blob.bitmask().to_vec();
+        raw_bitmask.fill(0);
+        raw_bitmask[0] = 1;
+        blob.set_bitmask(raw_bitmask.into());
+
+        let instructions: Vec<_> = blob.instructions().collect();
+        let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+
+        for _ in 0..2 {
+            // False branch.
+            let mut instance = module.instantiate().unwrap();
+            instance.set_gas(100);
+            instance.set_next_program_counter(instructions[0].offset);
+            match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+            assert_eq!(instance.gas(), 99);
+            assert_eq!(instance.program_counter().unwrap(), instructions[0].offset);
+            assert_eq!(instance.next_program_counter(), None);
+            assert_eq!(instance.reg(Reg::A1), 0);
+
+            // True branch.
+            let mut instance = module.instantiate().unwrap();
+            instance.set_reg(Reg::A0, 33);
+            instance.set_gas(100);
+            instance.set_next_program_counter(instructions[0].offset);
+            match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+            assert_eq!(instance.gas(), 99);
+            assert_eq!(instance.program_counter().unwrap(), instructions[0].offset);
+            assert_eq!(instance.next_program_counter(), None);
+            assert_eq!(instance.reg(Reg::A1), 0);
+        }
     }
 }
 
-fn aux_data_works(config: Config) {
+fn branch_gas_cost_consistent_across_backends(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let blob = crate::program::assemble(
+        Some(isa),
+        "
+            a0 = a1 + a2
+            jump @skip if a0 == a1
+            trap
+            @skip:
+            a0 = a0 + a1
+            trap
+        ",
+    )
+    .unwrap();
+    let blob = ProgramBlob::parse(blob.into()).unwrap();
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    module_config.set_cost_model(Some(crate::CostModelKind::Full(crate::CacheModel::L1Hit)));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_gas(100);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    assert!(instance.gas() >= 0);
+}
+
+fn aux_data_works(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -2730,11 +3372,11 @@ fn aux_data_works(config: Config) {
     assert_eq!(instance.read_u32(module.memory_map().aux_data_address()).unwrap(), 0);
 }
 
-fn aux_data_accessible_area(config: Config) {
+fn aux_data_accessible_area(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::load_indirect_i32(Reg::A1, Reg::A0, 0), asm::ret()], &[]);
 
@@ -2906,11 +3548,11 @@ fn aux_data_accessible_area(config: Config) {
         .is_err());
 }
 
-fn access_memory_from_host(config: Config) {
+fn access_memory_from_host(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::trap()], &[]);
     builder.set_ro_data_size(1);
@@ -2984,47 +3626,489 @@ fn access_memory_from_host(config: Config) {
     assert!(instance.write_memory(0xffffffff, &[]).is_ok());
     assert!(instance.zero_memory(0, 0).is_ok());
     assert!(instance.zero_memory(0xffffffff, 0).is_ok());
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+    builder.set_ro_data_size(4);
+    builder.set_ro_data([1, 2, 3, 4].into());
+    builder.set_rw_data_size(4);
+    builder.set_rw_data([5, 6, 7, 8].into());
+    builder.set_stack_size(4096 + 1);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_aux_data_size(4096 + 1);
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let memory_map = module.memory_map();
+
+    let mut instance = module.instantiate().unwrap();
+    assert_eq!(
+        instance.read_memory(memory_map.ro_data_range().start + 2, 4).unwrap(),
+        vec![3, 4, 0, 0]
+    );
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_range().start + 2, 4).unwrap(),
+        vec![7, 8, 0, 0]
+    );
+    assert!(instance.write_memory(memory_map.aux_data_range().start, &[9, 10, 11, 12]).is_ok());
+    assert_eq!(
+        instance.read_memory(memory_map.aux_data_range().start + 2, 4).unwrap(),
+        vec![11, 12, 0, 0]
+    );
+
+    assert!(instance
+        .write_memory(memory_map.aux_data_range().start + 4096 - 2, &[13, 14])
+        .is_ok());
+    assert_eq!(
+        instance.read_memory(memory_map.aux_data_range().start + 4096 - 2, 4).unwrap(),
+        vec![13, 14, 0, 0]
+    );
+
+    assert!(instance.write_memory(memory_map.stack_range().start + 4096 - 2, &[15, 16]).is_ok());
+    assert_eq!(
+        instance.read_memory(memory_map.stack_range().start + 4096 - 2, 4).unwrap(),
+        vec![15, 16, 0, 0]
+    );
 }
 
-fn sbrk_knob_works(config: Config) {
+fn access_memory_from_within(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::ret()], &[]);
+    builder.set_ro_data_size(page_size * 3);
+    builder.set_rw_data_size(page_size * 3);
+    builder.set_stack_size(page_size * 2);
+    builder.set_ro_data((0..page_size - 2).map(|_| 0x42_u8).collect());
+    builder.set_rw_data((0..page_size - 2).map(|_| 0x73_u8).collect());
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_aux_data_size(page_size * 2);
+
+    let memory_map = Module::from_blob(
+        &engine,
+        &module_config,
+        ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap(),
+    )
+    .unwrap()
+    .memory_map()
+    .clone();
+
+    let mut spawn = move |code: &[polkavm_common::program::Instruction]| -> crate::RawInstance {
+        builder.set_code(code, &[]);
+        let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance
+    };
+
+    // RO data
+    let mut instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.ro_data_address() + page_size * 3 - 3).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.ro_data_address() + page_size * 3 - 4).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0);
+
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.ro_data_address()).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x42424242);
+
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.ro_data_address() + page_size - 6).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x42424242);
+
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.ro_data_address() + page_size - 2).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0);
+
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.ro_data_address() + page_size - 4).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x00004242);
+
+    // RW data
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.rw_data_address() + page_size * 3 - 3).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.rw_data_address() + page_size * 3 - 4).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0);
+
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.rw_data_address()).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x73737373);
+
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.rw_data_address() + page_size - 6).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x73737373);
+
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.rw_data_address() + page_size - 2).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0);
+
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.rw_data_address() + page_size - 4).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x00007373);
+
+    instance = spawn(&[
+        asm::load_imm(Reg::A1, 0x12345678),
+        asm::store_u32(Reg::A1, cast(memory_map.rw_data_address() + page_size - 4).bitwise_as_i32()),
+        asm::load_u32(Reg::A0, cast(memory_map.rw_data_address() + page_size - 3).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x00123456);
+
+    instance = spawn(&[
+        asm::store_imm_u32(cast(memory_map.rw_data_address() + page_size * 3 - 3).bitwise_as_i32(), 0),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+    // Stack.
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.stack_address_high() - 4).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0);
+
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.stack_address_high() - 3).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.stack_address_low()).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0);
+
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.stack_address_low() - 1).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+    instance = spawn(&[
+        asm::load_imm(Reg::A1, 0x12345678),
+        asm::store_u32(Reg::A1, cast(memory_map.stack_address_low() + page_size - 4).bitwise_as_i32()),
+        asm::load_u32(Reg::A0, cast(memory_map.stack_address_low() + page_size - 2).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x00001234);
+
+    instance = spawn(&[
+        asm::store_imm_u32(cast(memory_map.stack_address_low() - 1).bitwise_as_i32(), 0),
+        asm::ret(),
+    ]);
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+    // Aux data.
+    instance = spawn(&[
+        asm::load_u32(Reg::A0, cast(memory_map.aux_data_address() + page_size - 2).bitwise_as_i32()),
+        asm::ret(),
+    ]);
+    instance
+        .write_memory(memory_map.aux_data_address(), &vec![0x23_u8; cast(page_size - 1).to_usize()])
+        .unwrap();
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 0x00000023);
+}
+
+#[test]
+fn interpreter_max_allocation_size() {
+    let _ = env_logger::try_init();
+    let mut config = crate::Config::default();
+    config.set_backend(Some(crate::BackendKind::Interpreter));
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::store_imm_indirect_u32(Reg::A0, 0, 0x12345678), asm::ret()], &[]);
+    builder.set_rw_data_size(1024 * 1024 * 512);
+    builder.set_stack_size(128 * 1024);
+    let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+
+    let limit: usize = 1024 * 32;
+    let limit_u32 = cast(limit).to_u32_or_panic();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_aux_data_size(128 * 1024);
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let memory_map = module.memory_map();
+    {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_max_allocation_size(Some(limit));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_address()));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    }
+    {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_max_allocation_size(Some(limit));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_address() + limit_u32 - 4));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    }
+
+    {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_max_allocation_size(Some(limit));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_address() + limit_u32 - 3));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+        assert!(instance.write_u32(memory_map.rw_data_address() + limit_u32 - 4, 0x77777777).is_ok());
+        assert!(matches!(
+            instance.write_u32(memory_map.rw_data_address() + limit_u32 - 3, 0x66666666),
+            Err(MemoryAccessError::MemoryLimitReached)
+        ));
+        assert_eq!(instance.read_u32(memory_map.rw_data_address() + limit_u32 - 3).unwrap(), 0x00777777);
+    }
+}
+
+#[test]
+fn interpreter_guest_memory_limit() {
+    let _ = env_logger::try_init();
+    let mut config = crate::Config::default();
+    config.set_backend(Some(crate::BackendKind::Interpreter));
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::store_imm_indirect_u32(Reg::A0, 0, 0x12345678), asm::ret()], &[]);
+    builder.set_rw_data_size(1024 * 1024 * 512);
+    builder.set_stack_size(1024 * 1024 * 512);
+    let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+
+    let limit: usize = 1024 * 32;
+    let limit_u32 = cast(limit).to_u32_or_panic();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_aux_data_size(128 * 1024);
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let memory_map = module.memory_map();
+    {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_max_allocation_size(Some(limit));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_address() + limit_u32 - 4));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    }
+    {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_max_allocation_size(Some(limit));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_address() + limit_u32 - 3));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    }
+    {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_guest_memory_limit(Some(limit));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_address() + limit_u32 / 2 - 4));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.stack_address_high() - limit_u32 / 2));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(memory_map.rw_data_address() + limit_u32 / 2 - 3));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+        assert!(matches!(
+            instance.write_u32(memory_map.rw_data_range().end - 4, 0x66666666),
+            Err(MemoryAccessError::MemoryLimitReached)
+        ));
+        assert!(matches!(
+            instance.write_u32(memory_map.stack_range().start, 0x66666666),
+            Err(MemoryAccessError::MemoryLimitReached)
+        ));
+        assert!(matches!(
+            instance.write_u32(memory_map.aux_data_range().end - 4, 0x66666666),
+            Err(MemoryAccessError::MemoryLimitReached)
+        ));
+
+        assert_eq!(instance.read_u32(memory_map.rw_data_range().end - 4).unwrap(), 0);
+        assert_eq!(instance.read_u32(memory_map.stack_range().end - 4).unwrap(), 0);
+        assert_eq!(instance.read_u32(memory_map.aux_data_range().end - 4).unwrap(), 0);
+    }
+}
+
+fn write_read_memory_from_host(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::trap()], &[]);
+    builder.set_rw_data_size(page_size * 32);
+    builder.set_stack_size(page_size * 32);
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_aux_data_size(page_size * 32);
+
+    let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let memory_map = module.memory_map().clone();
+    let mut instance = module.instantiate().unwrap();
+
+    instance.write_memory(memory_map.rw_data_address() + page_size * 4, &[1]).unwrap();
+    instance.write_memory(memory_map.rw_data_address() + page_size, &[2]).unwrap();
+    instance.write_memory(memory_map.rw_data_address() + page_size * 16, &[3]).unwrap();
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_address() + page_size * 4, 1).unwrap(),
+        vec![1]
+    );
+    assert_eq!(instance.read_memory(memory_map.rw_data_address() + page_size, 1).unwrap(), vec![2]);
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_address() + page_size * 16, 1).unwrap(),
+        vec![3]
+    );
+
+    instance.write_memory(memory_map.aux_data_address() + page_size * 4, &[4]).unwrap();
+    instance.write_memory(memory_map.aux_data_address() + page_size, &[5]).unwrap();
+    instance.write_memory(memory_map.aux_data_address() + page_size * 16, &[6]).unwrap();
+    assert_eq!(
+        instance.read_memory(memory_map.aux_data_address() + page_size * 4, 1).unwrap(),
+        vec![4]
+    );
+    assert_eq!(instance.read_memory(memory_map.aux_data_address() + page_size, 1).unwrap(), vec![5]);
+    assert_eq!(
+        instance.read_memory(memory_map.aux_data_address() + page_size * 16, 1).unwrap(),
+        vec![6]
+    );
+
+    instance.write_memory(memory_map.stack_address_low() + page_size * 4, &[7]).unwrap();
+    instance.write_memory(memory_map.stack_address_low() + page_size, &[8]).unwrap();
+    instance
+        .write_memory(memory_map.stack_address_low() + page_size * 16, &[9])
+        .unwrap();
+    assert_eq!(
+        instance.read_memory(memory_map.stack_address_low() + page_size * 4, 1).unwrap(),
+        vec![7]
+    );
+    assert_eq!(
+        instance.read_memory(memory_map.stack_address_low() + page_size, 1).unwrap(),
+        vec![8]
+    );
+    assert_eq!(
+        instance.read_memory(memory_map.stack_address_low() + page_size * 16, 1).unwrap(),
+        vec![9]
+    );
+
+    let mut instance = module.instantiate().unwrap();
+    instance
+        .write_memory(memory_map.stack_address_high() - page_size * 4, &[7])
+        .unwrap();
+    instance.write_memory(memory_map.stack_address_high() - page_size, &[8]).unwrap();
+    instance
+        .write_memory(memory_map.stack_address_high() - page_size * 16, &[9])
+        .unwrap();
+    assert_eq!(
+        instance.read_memory(memory_map.stack_address_high() - page_size * 4, 1).unwrap(),
+        vec![7]
+    );
+    assert_eq!(
+        instance.read_memory(memory_map.stack_address_high() - page_size, 1).unwrap(),
+        vec![8]
+    );
+    assert_eq!(
+        instance.read_memory(memory_map.stack_address_high() - page_size * 16, 1).unwrap(),
+        vec![9]
+    );
+}
+
+fn sbrk_knob_works(config: Config, isa: InstructionSetKind) {
+    let sbrk_allowed = isa.supports_opcode(Opcode::sbrk);
+
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let page_size = get_native_page_size() as u32;
-    for sbrk_allowed in [true, false] {
-        let isa = if sbrk_allowed {
-            InstructionSetKind::Latest64
-        } else {
-            InstructionSetKind::ReviveV1
-        };
 
-        let mut builder = ProgramBlobBuilder::new(isa);
-        builder.add_export_by_basic_block(0, b"main");
-        builder.set_code(&[asm::sbrk(Reg::A0, Reg::A0), asm::ret()], &[]);
-        builder.set_ignore_instruction_set_incompatibility(true);
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::sbrk(Reg::A0, Reg::A0), asm::ret()], &[]);
+    builder.set_ignore_instruction_set_incompatibility(true);
 
-        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
 
-        let mut module_config: ModuleConfig = ModuleConfig::new();
-        module_config.set_page_size(page_size);
-        module_config.set_gas_metering(Some(GasMeteringKind::Sync));
-        let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+    let mut module_config: ModuleConfig = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
 
-        let mut instance = module.instantiate().unwrap();
-        instance.set_reg(Reg::A0, 0);
-        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A0, 0);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
 
-        instance.set_gas(5);
-        instance.set_next_program_counter(ProgramCounter(0));
+    instance.set_gas(5);
+    instance.set_next_program_counter(ProgramCounter(0));
 
-        #[allow(clippy::branches_sharing_code)]
-        if sbrk_allowed {
-            match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
-            assert_eq!(instance.gas(), 3);
-        } else {
-            match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
-            assert_eq!(instance.program_counter(), Some(ProgramCounter(0)));
-            assert_eq!(instance.gas(), 4);
-        }
+    #[allow(clippy::branches_sharing_code)]
+    if sbrk_allowed {
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+        assert_eq!(instance.gas(), 3);
+    } else {
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+        assert_eq!(instance.program_counter(), Some(ProgramCounter(0)));
+        assert_eq!(instance.gas(), 4);
     }
 }
 
@@ -3034,11 +4118,17 @@ struct TestInstance {
 }
 
 impl TestInstance {
-    fn new(config: &Config, elf: &'static [u8], optimize: bool) -> Self {
+    fn new(args: &TestBlobArgs, elf: &'static [u8]) -> Self {
         let _ = env_logger::try_init();
-        let blob = get_blob_impl(optimize, false, elf);
+        let blob = get_blob_impl(BlobMapKey {
+            optimize: args.optimize,
+            strip: false,
+            isa: args.isa,
+            elf,
+            is_permissive: true,
+        });
 
-        let engine = Engine::new(config).unwrap();
+        let engine = Engine::new(&args.config).unwrap();
         let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
         let mut linker = Linker::new();
         linker
@@ -3116,6 +4206,7 @@ impl TestInstance {
 
 struct TestBlobArgs {
     config: Config,
+    isa: InstructionSetKind,
     optimize: bool,
     is_64_bit: bool,
     is_cdylib: bool,
@@ -3136,7 +4227,7 @@ impl TestBlobArgs {
 
 fn test_blob_basic_test(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     assert_eq!(i.call::<(), u32>("push_one_to_global_vec", ()).unwrap(), 1);
     assert_eq!(i.call::<(), u32>("push_one_to_global_vec", ()).unwrap(), 2);
     assert_eq!(i.call::<(), u32>("push_one_to_global_vec", ()).unwrap(), 3);
@@ -3144,7 +4235,7 @@ fn test_blob_basic_test(args: TestBlobArgs) {
 
 fn test_blob_atomic_fetch_add(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_add", (1,)).unwrap(), 0);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_add", (1,)).unwrap(), 1);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_add", (1,)).unwrap(), 2);
@@ -3156,7 +4247,7 @@ fn test_blob_atomic_fetch_add(args: TestBlobArgs) {
 
 fn test_blob_atomic_fetch_swap(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (10,)).unwrap(), 0);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (100,)).unwrap(), 10);
     assert_eq!(i.call::<(u32,), u32>("atomic_fetch_swap", (1000,)).unwrap(), 100);
@@ -3185,7 +4276,7 @@ fn test_blob_atomic_fetch_minmax(args: TestBlobArgs) {
     ];
 
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     for (name, cb) in list {
         for a in [-10, 0, 10] {
             for b in [-10, 0, 10] {
@@ -3200,37 +4291,49 @@ fn test_blob_atomic_fetch_minmax(args: TestBlobArgs) {
 
 fn test_blob_hostcall(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     assert_eq!(i.call::<(u32,), u32>("test_multiply_by_6", (10,)).unwrap(), 60);
 }
 
 fn test_blob_define_abi(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     assert!(i.call::<(), ()>("test_define_abi", ()).is_ok());
 }
 
 fn test_blob_input_registers(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     assert!(i.call::<(), ()>("test_input_registers", ()).is_ok());
 }
 
 fn test_blob_call_sbrk_from_guest(args: TestBlobArgs) {
+    if !args.isa.supports_opcode(Opcode::sbrk) {
+        return;
+    }
+
     test_blob_call_sbrk_impl(args, |i, size| i.call::<(u32,), u32>("call_sbrk", (size,)).unwrap())
 }
 
 fn test_blob_call_sbrk_from_host_instance(args: TestBlobArgs) {
+    if !args.isa.supports_opcode(Opcode::sbrk) {
+        return;
+    }
+
     test_blob_call_sbrk_impl(args, |i, size| i.instance.sbrk(size).unwrap().unwrap_or(0))
 }
 
 fn test_blob_call_sbrk_from_host_function(args: TestBlobArgs) {
+    if !args.isa.supports_opcode(Opcode::sbrk) {
+        return;
+    }
+
     test_blob_call_sbrk_impl(args, |i, size| i.call::<(u32,), u32>("call_sbrk_indirectly", (size,)).unwrap())
 }
 
 fn test_blob_program_memory_can_be_reused_and_cleared(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     let address = i.call::<(), u32>("get_global_address", ()).unwrap();
 
     assert_eq!(i.instance.read_memory(address, 4).unwrap(), [0x00, 0x00, 0x00, 0x00]);
@@ -3250,7 +4353,7 @@ fn test_blob_program_memory_can_be_reused_and_cleared(args: TestBlobArgs) {
 
 fn test_blob_out_of_bounds_memory_access_generates_a_trap(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     let address = i.call::<(), u32>("get_global_address", ()).unwrap();
     assert_eq!(i.call::<(u32,), u32>("read_u32", (address,)).unwrap(), 0);
     i.call::<(), ()>("increment_global", ()).unwrap();
@@ -3264,7 +4367,7 @@ fn test_blob_out_of_bounds_memory_access_generates_a_trap(args: TestBlobArgs) {
 
 fn test_blob_call_sbrk_impl(args: TestBlobArgs, mut call_sbrk: impl FnMut(&mut TestInstance, u32) -> u32) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     let memory_map = i.module.memory_map().clone();
     let heap_base = memory_map.heap_base();
     let page_size = memory_map.page_size();
@@ -3320,7 +4423,7 @@ fn test_blob_call_sbrk_impl(args: TestBlobArgs, mut call_sbrk: impl FnMut(&mut T
 
 fn test_blob_add_u32(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     assert_eq!(i.call::<(u32, u32), u32>("add_u32", (1, 2,)).unwrap(), 3);
     assert_eq!(i.instance.reg(Reg::A0), 3);
 
@@ -3338,7 +4441,7 @@ fn test_blob_add_u32(args: TestBlobArgs) {
 
 fn test_blob_add_u64(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     assert_eq!(i.call::<(u64, u64), u64>("add_u64", (1, 2,)).unwrap(), 3);
     assert_eq!(i.instance.reg(Reg::A0), 3);
     assert_eq!(
@@ -3349,7 +4452,7 @@ fn test_blob_add_u64(args: TestBlobArgs) {
 
 fn test_blob_xor_imm_u32(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     for value in [0, 0xaaaaaaaa, 0x55555555, 0x12345678, 0xffffffff] {
         assert_eq!(i.call::<(u32,), u32>("xor_imm_u32", (value,)).unwrap(), value ^ 0xfb8f5c1e);
     }
@@ -3357,13 +4460,13 @@ fn test_blob_xor_imm_u32(args: TestBlobArgs) {
 
 fn test_blob_branch_less_than_zero(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     i.call::<(), ()>("test_branch_less_than_zero", ()).unwrap();
 }
 
 fn test_blob_fetch_add_atomic_u64(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     assert_eq!(i.call::<(u64,), u64>("fetch_add_atomic_u64", (1,)).unwrap(), 0);
     assert_eq!(i.call::<(u64,), u64>("fetch_add_atomic_u64", (0,)).unwrap(), 1);
     assert_eq!(i.call::<(u64,), u64>("fetch_add_atomic_u64", (0,)).unwrap(), 1);
@@ -3373,25 +4476,25 @@ fn test_blob_fetch_add_atomic_u64(args: TestBlobArgs) {
 
 fn test_blob_cmov_if_zero_with_zero_reg(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     i.call::<(), ()>("cmov_if_zero_with_zero_reg", ()).unwrap();
 }
 
 fn test_blob_cmov_if_not_zero_with_zero_reg(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     i.call::<(), ()>("cmov_if_not_zero_with_zero_reg", ()).unwrap();
 }
 
 fn test_blob_min_stack_size(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let i = TestInstance::new(&args.config, elf, args.optimize);
+    let i = TestInstance::new(&args, elf);
     assert_eq!(i.instance.module().memory_map().stack_size(), 65536);
 }
 
 fn test_blob_negate_and_add(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     if !args.is_64_bit {
         assert_eq!(i.call::<(u32, u32), u32>("negate_and_add", (123, 1,)).unwrap(), 15);
     } else {
@@ -3401,13 +4504,13 @@ fn test_blob_negate_and_add(args: TestBlobArgs) {
 
 fn test_blob_return_tuple_from_import(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     i.call::<(), ()>("test_return_tuple", ()).unwrap();
 }
 
 fn test_blob_return_tuple_from_export(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     if args.is_64_bit {
         let a0 = 0x123456789abcdefe_u64;
         let a1 = 0x1122334455667788_u64;
@@ -3437,30 +4540,91 @@ fn test_blob_return_tuple_from_export(args: TestBlobArgs) {
 
 fn test_blob_get_heap_base(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     let heap_base = i.call::<(), u32>("get_heap_base", ()).unwrap();
     assert_eq!(heap_base, i.instance.module().memory_map().heap_base());
 }
 
 fn test_blob_get_self_address(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     let addr = i.call::<(), u32>("get_self_address", ()).unwrap();
     assert_ne!(addr, 0);
 }
 
 fn test_blob_get_self_address_naked(args: TestBlobArgs) {
     let elf = args.get_test_program();
-    let mut i = TestInstance::new(&args.config, elf, args.optimize);
+    let mut i = TestInstance::new(&args, elf);
     let addr = i.call::<(), u32>("get_self_address_naked", ()).unwrap();
     assert_ne!(addr, 0);
 }
 
-fn test_asm_reloc_add_sub(config: Config, optimize: bool) {
+fn test_blob_sub_i32_min_64(args: TestBlobArgs) {
+    if !args.is_64_bit {
+        return;
+    }
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args, elf);
+    assert_eq!(i.call::<(u64,), u64>("sub_i32_min_64", (0,)).unwrap(), 0x80000000);
+}
+
+fn test_blob_sub_i32_min_32(args: TestBlobArgs) {
+    if !args.is_64_bit {
+        return;
+    }
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args, elf);
+    assert_eq!(i.call::<(u64,), u64>("sub_i32_min_32", (0,)).unwrap(), 0xffffffff80000000);
+}
+
+fn test_blob_orn_zero_const_64(args: TestBlobArgs) {
+    if !args.is_64_bit {
+        return;
+    }
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args, elf);
+    assert_eq!(i.call::<(), u64>("orn_zero_const_64", ()).unwrap(), 0x80000001);
+}
+
+fn test_blob_xnor_zero_const_64(args: TestBlobArgs) {
+    if !args.is_64_bit {
+        return;
+    }
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args, elf);
+    assert_eq!(i.call::<(), u64>("xnor_zero_const_64", ()).unwrap(), 0x80000001);
+}
+
+fn test_blob_min_zero_const_64(args: TestBlobArgs) {
+    if !args.is_64_bit {
+        return;
+    }
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args, elf);
+    assert_eq!(i.call::<(), u64>("min_zero_const_64", ()).unwrap(), 0xffffffff7ffffffe);
+}
+
+fn test_blob_max_zero_const_64(args: TestBlobArgs) {
+    if !args.is_64_bit {
+        return;
+    }
+    let elf = args.get_test_program();
+    let mut i = TestInstance::new(&args, elf);
+    assert_eq!(i.call::<(), u64>("max_zero_const_64", ()).unwrap(), 0);
+}
+
+fn test_asm_reloc_add_sub(config: Config, isa: InstructionSetKind, optimize: bool) {
+    let args = TestBlobArgs {
+        config,
+        isa,
+        optimize,
+        is_64_bit: true,
+        is_cdylib: false,
+    };
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_add_sub_64.elf");
 
     let elf = BLOB_64;
-    let mut i = TestInstance::new(&config, elf, optimize);
+    let mut i = TestInstance::new(&args, elf);
 
     let address = i.call::<(u32,), u32>("get_string", (0,)).unwrap();
     assert_eq!(i.instance.read_u32(address).unwrap(), 0x01010101);
@@ -3472,11 +4636,18 @@ fn test_asm_reloc_add_sub(config: Config, optimize: bool) {
     assert_eq!(i.instance.read_u32(address).unwrap(), 0x03030303);
 }
 
-fn test_asm_reloc_hi_lo(config: Config, optimize: bool) {
+fn test_asm_reloc_hi_lo(config: Config, isa: InstructionSetKind, optimize: bool) {
+    let args = TestBlobArgs {
+        config,
+        isa,
+        optimize,
+        is_64_bit: true,
+        is_cdylib: false,
+    };
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_hi_lo_64.elf");
 
     let elf = BLOB_64;
-    let mut i = TestInstance::new(&config, elf, optimize);
+    let mut i = TestInstance::new(&args, elf);
 
     let address = i.call::<(u32,), u32>("get_string", (0,)).unwrap();
     assert_eq!(i.instance.read_u32(address).unwrap(), 0xA1010101);
@@ -3492,7 +4663,7 @@ fn test_asm_reloc_hi_lo(config: Config, optimize: bool) {
 /// address it names: a trap at the bottom; at the top a trap, or under dynamic paging a page fault
 /// that resumes once the host maps the page. A load into `x0` is made through a spilled scratch
 /// register, so every register is as it was when it finishes.
-fn test_asm_x0_access(config: Config, optimize: bool) {
+fn test_asm_x0_access(config: Config, isa: InstructionSetKind, optimize: bool) {
     const ELF: &[u8] = include_bytes!("../../../test-data/x0-access.o");
 
     // (export, the top-of-memory address it touches, the register it writes)
@@ -3510,7 +4681,13 @@ fn test_asm_x0_access(config: Config, optimize: bool) {
         ("trap_idiom", None, None),
     ];
 
-    let blob = get_blob_impl(optimize, false, ELF);
+    let blob = get_blob_impl(BlobMapKey {
+        optimize,
+        strip: false,
+        isa,
+        elf: ELF,
+        is_permissive: false,
+    });
     for dynamic_paging in [false, true] {
         let mut engine_config = config.clone();
         engine_config.set_allow_dynamic_paging(dynamic_paging);
@@ -3561,10 +4738,10 @@ fn test_asm_x0_access(config: Config, optimize: bool) {
     }
 }
 
-fn basic_gas_metering(config: Config, gas_metering_kind: GasMeteringKind) {
+fn basic_gas_metering(config: Config, isa: InstructionSetKind, gas_metering_kind: GasMeteringKind) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::fallthrough(), asm::add_imm_32(A0, A0, 666), asm::ret()], &[]);
 
@@ -3686,19 +4863,19 @@ fn basic_gas_metering(config: Config, gas_metering_kind: GasMeteringKind) {
     }
 }
 
-fn basic_gas_metering_sync(config: Config) {
-    basic_gas_metering(config, GasMeteringKind::Sync);
+fn basic_gas_metering_sync(config: Config, isa: InstructionSetKind) {
+    basic_gas_metering(config, isa, GasMeteringKind::Sync);
 }
 
-fn basic_gas_metering_async(config: Config) {
-    basic_gas_metering(config, GasMeteringKind::Async);
+fn basic_gas_metering_async(config: Config, isa: InstructionSetKind) {
+    basic_gas_metering(config, isa, GasMeteringKind::Async);
 }
 
 #[test]
 fn per_instruction_gas_metering() {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -3753,10 +4930,10 @@ fn per_instruction_gas_metering() {
     assert_eq!(instance.next_program_counter(), Some(offsets[4]));
 }
 
-fn consume_gas_in_host_function(config: Config, gas_metering_kind: GasMeteringKind) {
+fn consume_gas_in_host_function(config: Config, isa: InstructionSetKind, gas_metering_kind: GasMeteringKind) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.add_import(b"hostfn");
     builder.set_code(&[asm::ecalli(0), asm::ret()], &[]);
@@ -3801,18 +4978,18 @@ fn consume_gas_in_host_function(config: Config, gas_metering_kind: GasMeteringKi
     }
 }
 
-fn consume_gas_in_host_function_sync(config: Config) {
-    consume_gas_in_host_function(config, GasMeteringKind::Sync);
+fn consume_gas_in_host_function_sync(config: Config, isa: InstructionSetKind) {
+    consume_gas_in_host_function(config, isa, GasMeteringKind::Sync);
 }
 
-fn consume_gas_in_host_function_async(config: Config) {
-    consume_gas_in_host_function(config, GasMeteringKind::Async);
+fn consume_gas_in_host_function_async(config: Config, isa: InstructionSetKind) {
+    consume_gas_in_host_function(config, isa, GasMeteringKind::Async);
 }
 
-fn gas_metering_with_more_than_one_basic_block(config: Config) {
+fn gas_metering_with_more_than_one_basic_block(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"export_1");
     builder.add_export_by_basic_block(1, b"export_2");
     builder.set_code(
@@ -3851,10 +5028,10 @@ fn gas_metering_with_more_than_one_basic_block(config: Config) {
     }
 }
 
-fn gas_metering_with_implicit_trap(config: Config) {
+fn gas_metering_with_implicit_trap(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::add_imm_32(A0, A0, 666)], &[]);
 
@@ -3874,10 +5051,10 @@ fn gas_metering_with_implicit_trap(config: Config) {
     assert_eq!(instance.gas(), 8);
 }
 
-fn gas_gets_charged_when_jumping_in_the_middle_of_a_basic_block(config: Config) {
+fn gas_gets_charged_when_jumping_in_the_middle_of_a_basic_block(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(
         &[
@@ -3965,10 +5142,10 @@ fn gas_gets_charged_when_jumping_in_the_middle_of_a_basic_block(config: Config) 
     assert_eq!(instance.reg(Reg::A0), 2 + 4 + 8);
 }
 
-fn trapping_preserves_all_registers_normal_trap(config: Config) {
+fn trapping_preserves_all_registers_normal_trap(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::trap()], &[]);
 
@@ -3986,10 +5163,10 @@ fn trapping_preserves_all_registers_normal_trap(config: Config) {
     }
 }
 
-fn trapping_preserves_all_registers_segfault(config: Config) {
+fn trapping_preserves_all_registers_segfault(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::store_imm_u32(0, 0x12345678), asm::ret()], &[]);
 
@@ -4007,10 +5184,14 @@ fn trapping_preserves_all_registers_segfault(config: Config) {
     }
 }
 
-fn memset_basic(config: Config) {
+fn memset_basic(config: Config, isa: InstructionSetKind) {
+    if !isa.supports_opcode(Opcode::memset) {
+        return;
+    }
+
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.set_ro_data_size(1);
     builder.set_rw_data_size(1);
     builder.set_ro_data(vec![0x00]);
@@ -4135,12 +5316,16 @@ fn memset_basic(config: Config) {
     assert_eq!(instance.gas(), 45);
 }
 
-fn memset_with_dynamic_paging(mut config: Config) {
+fn memset_with_dynamic_paging(mut config: Config, isa: InstructionSetKind) {
+    if !isa.supports_opcode(Opcode::memset) {
+        return;
+    }
+
     let _ = env_logger::try_init();
 
     config.set_allow_dynamic_paging(true);
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&[asm::memset(), asm::ret()], &[]);
 
@@ -4215,11 +5400,465 @@ fn memset_with_dynamic_paging(mut config: Config) {
         vec![0, 0x7a, 0, 0x7b, 0x7b, 0]
     );
     assert_eq!(instance.gas(), 95);
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_gas(100);
+    instance.set_reg(Reg::A0, 0xffffffff_00000000 | u64::from(memory_map.rw_data_range().start));
+    instance.set_reg(Reg::A1, 0x1234567a);
+    instance.set_reg(Reg::A2, 3);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(offsets[0]);
+    let segfault = expect_segfault(instance.run().unwrap());
+    assert_eq!(segfault.page_address, memory_map.rw_data_range().start);
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_range().start));
+    instance
+        .zero_memory_with_memory_protection(segfault.page_address, segfault.page_size, MemoryProtection::ReadWrite)
+        .unwrap();
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.reg(Reg::A0), u64::from(memory_map.rw_data_range().start + 3));
+    assert_eq!(instance.reg(Reg::A2), 0);
+    assert_eq!(
+        instance.read_memory(memory_map.rw_data_range().start, 4).unwrap(),
+        vec![0x7a, 0x7a, 0x7a, 0]
+    );
 }
 
-fn test_basic_debug_info(raw_blob: &'static [u8]) {
+fn memset_truncates_a0_and_a2(config: Config, isa: InstructionSetKind) {
+    if isa != InstructionSetKind::Latest64 {
+        return;
+    }
     let _ = env_logger::try_init();
-    let program = get_blob(raw_blob);
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::memset(), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A0, 0x0000000100000000);
+    instance.set_reg(Reg::A1, 0);
+    instance.set_reg(Reg::A2, 0x0000000100000000);
+    instance.set_reg(Reg::A3, 0xffffffffff08bdbd);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.reg(Reg::A0), 0);
+    assert_eq!(instance.reg(Reg::A2), 0);
+    assert_eq!(instance.reg(Reg::A3), 0xffffffffff08bdbd);
+}
+
+fn memset_truncates_the_destination_to_32_bits(config: Config, isa: InstructionSetKind) {
+    if !isa.supports_opcode(Opcode::memset) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.set_rw_data_size(64);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::memset(), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+    let address = module.memory_map().rw_data_address();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A0, 0xffffffff_00000000 | u64::from(address));
+    instance.set_reg(Reg::A1, 0x7a);
+    instance.set_reg(Reg::A2, 3);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.read_memory(address, 4).unwrap(), vec![0x7a, 0x7a, 0x7a, 0]);
+    assert_eq!(instance.reg(Reg::A0), u64::from(address) + 3);
+    assert_eq!(instance.reg(Reg::A2), 0);
+}
+
+fn memset_truncates_the_count_to_32_bits(config: Config, isa: InstructionSetKind) {
+    if !isa.supports_opcode(Opcode::memset) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+
+    let memset = |gas: Option<i64>, count: u64| {
+        let mut builder = ProgramBlobBuilder::new(isa);
+        builder.set_rw_data_size(64);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&[asm::memset(), asm::ret()], &[]);
+
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let engine = Engine::new(&config).unwrap();
+        let mut module_config = ModuleConfig::new();
+        module_config.set_gas_metering(gas.map(|_| GasMeteringKind::Sync));
+        let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+        let address = module.memory_map().rw_data_address();
+
+        let mut instance = module.instantiate().unwrap();
+        if let Some(gas) = gas {
+            instance.set_gas(gas);
+        }
+        instance.set_reg(Reg::A0, u64::from(address));
+        instance.set_reg(Reg::A1, 0x7a);
+        instance.set_reg(Reg::A2, count);
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        let interrupt = instance.run().unwrap();
+        let written = instance.read_memory(address, 8).unwrap().iter().filter(|&&b| b == 0x7a).count();
+        (interrupt, written, instance.reg(Reg::A2))
+    };
+
+    assert_eq!(memset(None, 0x00000001_00000000), (InterruptKind::Finished, 0, 0));
+    assert_eq!(memset(None, 0x00000001_00000003), (InterruptKind::Finished, 3, 0));
+    assert_eq!(memset(Some(100), 0x00000001_00000003), (InterruptKind::Finished, 3, 0));
+
+    let (interrupt, written, remaining) = memset(Some(5), 0x00000001_00000008);
+    assert_eq!(interrupt, InterruptKind::NotEnoughGas);
+    assert_eq!(written + usize::try_from(remaining).unwrap(), 8);
+}
+
+fn count_leading_zero_bits_32_with_zero_input(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::count_leading_zero_bits_32(Reg::A0, Reg::A1), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A1, 0);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.reg(Reg::A0), 32);
+}
+
+fn count_leading_zero_bits_64_with_zero_input(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::count_leading_zero_bits_64(Reg::A0, Reg::A1), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A1, 0);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.reg(Reg::A0), 64);
+}
+
+fn count_leading_zero_bits_64_with_ffff0000(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::count_leading_zero_bits_64(Reg::A0, Reg::A1), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A1, 0xffff0000);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.reg(Reg::A0), 32);
+}
+
+fn count_trailing_zero_bits_32_with_zero_input(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::count_trailing_zero_bits_32(Reg::A0, Reg::A1), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A1, 0);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.reg(Reg::A0), 32);
+}
+
+fn count_trailing_zero_bits_64_with_zero_input(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::count_trailing_zero_bits_64(Reg::A0, Reg::A1), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A1, 0);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.reg(Reg::A0), 64);
+}
+
+fn count_trailing_zero_bits_64_with_ffff0000(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::count_trailing_zero_bits_64(Reg::A0, Reg::A1), asm::ret()], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A1, 0xffff0000);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.reg(Reg::A0), 16);
+}
+
+fn rotate_right_imm_alt_64(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::rotate_right_imm_alt_64(Reg::A0, Reg::A0, cast(0x80000000_u32).bitwise_as_i32()),
+            asm::ret(),
+        ],
+        &[],
+    );
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A0, 0xffffffff80000000);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+    assert_eq!(instance.reg(Reg::A0), 0xffffffff80000000);
+}
+
+fn jam_validate_ok(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_imm(Reg::A0, 0x12345678), asm::ret()], &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    assert!(blob.validate_code_with_isa(isa).is_ok());
+    Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+}
+
+fn jam_validate_invalid_opcode(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_imm(Reg::A0, 0x12345678), asm::ret()], &[]);
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut raw_code = blob.code().to_vec();
+    raw_code[0] = INVALID_RAW_OPCODE;
+    blob.set_code(raw_code.into());
+    assert!(blob.validate_code_with_isa(isa).is_err());
+    assert!(matches!(
+        Module::from_blob(&engine, &ModuleConfig::new(), blob),
+        Err(CompileError::ValidationFailed(..))
+    ));
+}
+
+fn jam_validate_invalid_fallthrough(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::load_imm(Reg::A0, 0x12345678), asm::fallthrough()], &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    assert!(blob.validate_code_with_isa(isa).is_err());
+    assert!(matches!(
+        Module::from_blob(&engine, &ModuleConfig::new(), blob),
+        Err(CompileError::ValidationFailed(..))
+    ));
+}
+
+fn jam_validate_invalid_branch(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::branch_eq_imm(Reg::A0, 33, 2),
+            asm::load_imm(Reg::A1, 1),
+            asm::trap(),
+            asm::load_imm(Reg::A1, 2),
+            asm::trap(),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 3),
+            asm::trap(),
+        ],
+        &[],
+    );
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let instructions: Vec<_> = blob.instructions().collect();
+    let mut raw_code = blob.code().to_vec();
+    raw_code[instructions[0].next_offset.0 as usize - 1] -= 1;
+    blob.set_code(raw_code.into());
+    assert!(blob.validate_code_with_isa(isa).is_ok());
+    Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+}
+
+fn jam_validate_invalid_skip(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::branch_eq_imm(Reg::A0, 33, 2),
+            asm::load_imm(Reg::A1, 1),
+            asm::trap(),
+            asm::load_imm(Reg::A1, 2),
+            asm::trap(),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 2),
+            asm::load_imm(Reg::A1, 3),
+            asm::trap(),
+        ],
+        &[],
+    );
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let mut raw_bitmask = blob.bitmask().to_vec();
+    assert!(raw_bitmask.len() >= 5);
+    raw_bitmask[0..4].fill(0);
+    raw_bitmask[0] = 1;
+    blob.set_bitmask(raw_bitmask.into());
+    assert!(blob.validate_code_with_isa(isa).is_err());
+    assert!(matches!(
+        Module::from_blob(&engine, &ModuleConfig::new(), blob),
+        Err(CompileError::ValidationFailed(..))
+    ));
+}
+
+fn jam_branch_target_just_past_the_end_of_code(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::branch_eq_imm(Reg::A0, 33, 1), asm::trap()], &[]);
+
+    // Patch the branch so that its target is exactly `code_length + 2`;
+    // compiling this used to panic on the compiler backend. (See #392.)
+    let mut blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let code_length = cast(blob.code().len()).to_u32_or_panic();
+    let instructions: Vec<_> = blob.instructions().collect();
+    let mut raw_code = blob.code().to_vec();
+    raw_code[instructions[0].next_offset.0 as usize - 1] += (code_length + 2 - instructions[0].next_offset.0) as u8;
+    blob.set_code(raw_code.into());
+    assert!(matches!(
+        blob.instructions().next().unwrap().kind,
+        polkavm_common::program::Instruction::branch_eq_imm(_, _, target) if target == code_length + 2
+    ));
+
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+
+    // Taking the branch must trap instead of crashing the VM.
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A0, 33);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+}
+
+fn jam_reg_nibble_clamped_to_a5(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    // Register nibbles greater than 12 are clamped to 12 (see `RawReg::get`), so a `load_imm`
+    // whose destination nibble is 13, 14 or 15 must still write to A5 and not to T2.
+    // (See https://github.com/paritytech/polkavm/issues/391.)
+    for nibble in 13..=15 {
+        let (mut blob, position) = {
+            let mut builder = ProgramBlobBuilder::new(isa);
+            builder.add_export_by_basic_block(0, b"main");
+            builder.set_code(&[asm::load_imm(Reg::A4, 0x12345678), asm::ret()], &[]);
+            let blob_a = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+            let mut builder = ProgramBlobBuilder::new(isa);
+            builder.add_export_by_basic_block(0, b"main");
+            builder.set_code(&[asm::load_imm(Reg::A5, 0x12345678), asm::ret()], &[]);
+            let blob_b = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+            // Automatically detect where the register is encoded.
+            let position = blob_a
+                .code()
+                .iter()
+                .copied()
+                .zip(blob_b.code().iter().copied())
+                .take_while(|(a, b)| a == b)
+                .count();
+
+            (blob_b, position)
+        };
+
+        // Rewrite `load_imm`'s destination register nibble from 12 to the out-of-bounds value.
+        let mut raw_code = blob.code().to_vec();
+        assert_eq!(raw_code[position], 12);
+        raw_code[position] = nibble;
+        blob.set_code(raw_code.into());
+        assert!(blob.validate_code_with_isa(isa).is_ok());
+
+        let module = Module::from_blob(&engine, &ModuleConfig::new(), blob).unwrap();
+        let mut instance = module.instantiate().unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        assert!(matches!(instance.run().unwrap(), InterruptKind::Finished));
+        assert_eq!(instance.reg(Reg::A5), 0x12345678);
+        assert_eq!(instance.reg(Reg::T2), 0);
+    }
+}
+
+fn test_basic_debug_info(raw_blob: &'static [u8], isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let program = get_blob(raw_blob, isa);
     let entry_point = program.exports().find(|export| export == "read_u32").unwrap().program_counter();
     let mut line_program = program.get_debug_line_program_at(entry_point).unwrap().unwrap();
     let info = line_program.run().unwrap().unwrap();
@@ -4243,13 +5882,46 @@ fn test_basic_debug_info(raw_blob: &'static [u8]) {
 #[ignore]
 #[test]
 fn test_basic_debug_info_32() {
-    test_basic_debug_info(get_test_program(TestProgram::TestBlob, false));
+    test_basic_debug_info(get_test_program(TestProgram::TestBlob, false), InstructionSetKind::Latest32);
 }
 
 #[ignore]
 #[test]
 fn test_basic_debug_info_64() {
-    test_basic_debug_info(get_test_program(TestProgram::TestBlob, true));
+    test_basic_debug_info(get_test_program(TestProgram::TestBlob, true), InstructionSetKind::Latest64);
+}
+
+#[test]
+fn test_advance_pc_and_const_add_pc_debug_info_64() {
+    // This ELF file was generated from Revive's unit test tests::unit::messages::transfer_suppressed
+    // To generate it again, either update Revive's source code to dump ELF file after linking and
+    // run `cargo t -p resolc -- --test 'tests::unit::messages::transfer_suppressed' --exact`
+    // or extract the solidity file from Revive's repo and run `resolc --solc solc test --debug-output-dir /tmp/test`
+    let elf = decompress_zstd(include_bytes!("../../../test-data/revive-transfer-example.zst"));
+
+    let mut config = polkavm_linker::Config::default();
+    config.set_optimize(true);
+    config.set_strip(false);
+
+    // Since the ELF file has been generated from Revive, use ReviveV1 instruction set to test it.
+    let bytes = polkavm_linker::program_from_elf(config, TargetInstructionSet::ReviveV1, elf.as_slice());
+    assert!(bytes.is_ok());
+    let program = ProgramBlob::parse(bytes.unwrap().into()).unwrap();
+
+    let pc = ProgramCounter(0x222);
+
+    let frame = program
+        .get_frame_info_for(pc, None)
+        .find(|frame| frame.kind() == polkavm_common::program::FrameKind::Line)
+        .unwrap();
+
+    assert_eq!(frame.full_name().unwrap().to_string(), "__revive_store_immutable_data");
+    assert_eq!(
+        frame.path().unwrap().unwrap(),
+        "/tmp/bad_debug_info/_tmp_bad_debug_info.sol.TransferExample.yul"
+    );
+    assert_eq!(frame.line().unwrap(), 35);
+    assert_eq!(frame.column().unwrap(), 13);
 }
 
 #[test]
@@ -4259,13 +5931,14 @@ fn blob_len_works() {
 }
 
 #[cfg(not(feature = "std"))]
-fn spawn_stress_test(_config: Config) {}
+fn spawn_stress_test(_config: Config, _: InstructionSetKind) {}
 
 #[cfg(feature = "std")]
-fn spawn_stress_test(mut config: Config) {
+fn spawn_stress_test(mut config: Config, isa: InstructionSetKind) {
+    let _lock = StressTestLock::new();
     let _ = env_logger::try_init();
 
-    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest32);
+    let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_ro_data_size(1);
     builder.set_rw_data_size(1);
@@ -4282,7 +5955,7 @@ fn spawn_stress_test(mut config: Config) {
         let linker: Linker = Linker::new();
         let instance_pre = linker.instantiate_pre(&module).unwrap();
 
-        const THREAD_COUNT: usize = 32;
+        const THREAD_COUNT: usize = 24;
         let barrier = alloc::sync::Arc::new(std::sync::Barrier::new(THREAD_COUNT));
 
         let mut threads = Vec::new();
@@ -4310,13 +5983,39 @@ fn spawn_stress_test(mut config: Config) {
     }
 }
 
+fn spawn_inner_vm(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::ret()], &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::default(), blob).unwrap();
+    let mut outer = module.instantiate().unwrap();
+    let mut inner_1 = module.instantiate_nested(&outer).unwrap();
+    let mut inner_2 = module.instantiate_nested(&outer).unwrap();
+    for instance in [&mut outer, &mut inner_1, &mut inner_2] {
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+    }
+}
+
 #[cfg(not(feature = "module-cache"))]
-fn module_cache(_config: Config) {}
+fn module_cache(_config: Config, _: InstructionSetKind) {}
 
 #[cfg(feature = "module-cache")]
-fn module_cache(mut config: Config) {
+fn module_cache(mut config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
-    let blob = get_blob(get_test_program(TestProgram::TestBlob, false));
+    let blob = get_blob_impl(BlobMapKey {
+        optimize: true,
+        strip: false,
+        isa,
+        elf: get_test_program(TestProgram::TestBlob, true),
+        is_permissive: true,
+    });
 
     config.set_worker_count(0);
 
@@ -4364,13 +6063,18 @@ fn module_cache(mut config: Config) {
     assert!(Module::from_cache(&engine_with_lru_cache, &Default::default(), &blob).is_some());
 }
 
-fn run_riscv_test(engine_config: Config, elf: &[u8], testnum_reg: Reg, optimize: bool) {
+fn run_riscv_test(engine_config: Config, isa: InstructionSetKind, elf: &[u8], testnum_reg: Reg, optimize: bool) {
+    let is_64_bit = elf[4] == 2;
+    if is_64_bit != isa.is_64_bit() {
+        return;
+    }
+
     let _ = env_logger::try_init();
     let mut linker_config = polkavm_linker::Config::default();
     linker_config.set_optimize(optimize);
     linker_config.set_strip(true);
     linker_config.set_min_stack_size(0);
-    let raw_blob = polkavm_linker::program_from_elf(linker_config, TargetInstructionSet::Latest, elf).unwrap();
+    let raw_blob = polkavm_linker::program_from_elf(linker_config, isa.into(), elf).unwrap();
 
     let _ = env_logger::try_init();
     let blob = ProgramBlob::parse(raw_blob.into()).unwrap();
@@ -4395,9 +6099,10 @@ fn run_riscv_test(engine_config: Config, elf: &[u8], testnum_reg: Reg, optimize:
 
 macro_rules! riscv_test {
     ($test_name:ident, $elf_path:expr, $testnum_reg:ident, $is_optimized:expr) => {
-        fn $test_name(engine_config: Config) {
+        fn $test_name(engine_config: Config, isa: InstructionSetKind) {
             run_riscv_test(
                 engine_config,
+                isa,
                 &include_bytes!($elf_path)[..],
                 Reg::$testnum_reg,
                 $is_optimized,
@@ -4410,6 +6115,89 @@ macro_rules! riscv_test {
 
 include!("tests_riscv.rs");
 
+#[cfg(all(not(miri), target_os = "linux", target_arch = "x86_64", feature = "std"))]
+#[test]
+fn core_pinning() {
+    use crate::config::CorePinning;
+    use crate::sandbox::linux::CpuMask;
+
+    let _ = env_logger::try_init();
+    let original_affinity = CpuMask::get_affinity(0).unwrap();
+    assert!(
+        original_affinity.count() > 1,
+        "thread pinned to only a single core; can't run the test"
+    );
+
+    let blob = basic_test_blob(InstructionSetKind::Latest64);
+
+    let mut engine_config = Config::new();
+    engine_config.set_core_pinning(CorePinning::Disabled);
+    {
+        let engine = Engine::new(&engine_config).unwrap();
+        let module = Module::from_blob(&engine, &Default::default(), blob.clone()).unwrap();
+        let _instance = module.instantiate().unwrap();
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+    }
+
+    {
+        engine_config.set_core_pinning(CorePinning::PinToCore);
+        let engine = Engine::new(&engine_config).unwrap();
+        let module = Module::from_blob(&engine, &Default::default(), blob.clone()).unwrap();
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+        let instance = module.instantiate().unwrap();
+        let current_affinity = CpuMask::get_affinity(0).unwrap();
+        assert_ne!(current_affinity, original_affinity);
+        assert_eq!(current_affinity.count(), 1);
+        core::mem::drop(instance);
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+    }
+
+    assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+
+    {
+        engine_config.set_core_pinning(CorePinning::PinToCcx);
+        let engine = Engine::new(&engine_config).unwrap();
+        let module = Module::from_blob(&engine, &Default::default(), blob.clone()).unwrap();
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+        let instance = module.instantiate().unwrap();
+        let current_affinity = CpuMask::get_affinity(0).unwrap();
+        assert!(current_affinity.count() > 1);
+        core::mem::drop(instance);
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+    }
+
+    assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+
+    {
+        engine_config.set_core_pinning(CorePinning::PinToCore);
+        let engine_1 = Engine::new(&engine_config).unwrap();
+        let engine_2 = Engine::new(&engine_config).unwrap();
+        let module_1 = Module::from_blob(&engine_1, &Default::default(), blob.clone()).unwrap();
+        let module_2 = Module::from_blob(&engine_2, &Default::default(), blob).unwrap();
+
+        let instance_1 = module_1.instantiate().unwrap();
+        let current_affinity = CpuMask::get_affinity(0).unwrap();
+        assert_ne!(current_affinity, original_affinity);
+        assert_eq!(current_affinity.count(), 1);
+
+        let instance_2 = module_2.instantiate().unwrap();
+        assert_eq!(current_affinity, CpuMask::get_affinity(0).unwrap());
+
+        core::mem::drop(instance_1);
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+
+        core::mem::drop(instance_2);
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+
+        let instance_2 = module_2.instantiate().unwrap();
+        let current_affinity = CpuMask::get_affinity(0).unwrap();
+        assert_ne!(current_affinity, original_affinity);
+        assert_eq!(current_affinity.count(), 1);
+        core::mem::drop(instance_2);
+        assert_eq!(CpuMask::get_affinity(0).unwrap(), original_affinity);
+    }
+}
+
 run_tests! {
     simple_test
     basic_test
@@ -4421,9 +6209,18 @@ run_tests! {
     dynamic_jump_to_null
     jump_into_middle_of_basic_block_from_outside
     jump_into_middle_of_basic_block_from_within
+    entry_into_the_middle_of_an_instruction_is_rejected
     jump_after_invalid_instruction_from_within
+    jump_after_an_injected_invalid_instruction
+    jump_to_macro_block_boundary_is_always_valid
+    unterminated_macro_block_traps_at_its_last_instruction
+    instructions_across_macro_block_boundary_are_traps_1
+    instructions_across_macro_block_boundary_are_traps_2
+    instructions_across_code_blob_boundary_are_traps
+    jump_to_an_injected_invalid_instruction
     jump_indirect_simple
     jump_indirect_big_table
+    jump_indirect_truncates_the_target_to_32_bits
     dynamic_paging_basic
     dynamic_paging_freeing_pages
     dynamic_paging_protect_memory
@@ -4434,6 +6231,7 @@ run_tests! {
     dynamic_paging_read_at_page_boundary
     dynamic_paging_read_at_top_of_address_space
     dynamic_paging_read_at_bottom_of_address_space
+    dynamic_paging_read_below_the_guard_threshold
     dynamic_paging_read_with_upper_bits_set
     dynamic_paging_read_memory_which_is_not_paged_in
     dynamic_paging_write_at_page_boundary_with_no_pages
@@ -4448,23 +6246,25 @@ run_tests! {
     dynamic_paging_receive_from_another_thread_and_run
     dynamic_paging_instantiate_on_another_thread
     dynamic_paging_parallel_page_fault_stress_test
+    memory_access_with_upper_address_bits_set
     zero_memory
     doom_o3_dwarf5
     doom_o1_dwarf5
     doom_o3_dwarf2
-    doom_64
-    pinky_standard_32
-    pinky_standard_64
-    pinky_dynamic_paging_32
-    pinky_dynamic_paging_64
+    doom
+    pinky_standard
+    pinky_dynamic_paging
     dispatch_table
     fallthrough_into_already_compiled_block
     implicit_trap_after_fallthrough
     invalid_instruction_after_fallthrough
     invalid_branch_target
+    branch_gas_cost_consistent_across_backends
     aux_data_works
     aux_data_accessible_area
     access_memory_from_host
+    access_memory_from_within
+    write_read_memory_from_host
     sbrk_knob_works
 
     basic_gas_metering_sync
@@ -4486,8 +6286,31 @@ run_tests! {
     memset_basic
     memset_with_dynamic_paging
 
+    jam_validate_ok
+    jam_validate_invalid_branch
+    jam_branch_target_just_past_the_end_of_code
+    jam_reg_nibble_clamped_to_a5
+
     spawn_stress_test
+    spawn_inner_vm
     module_cache
+
+    rotate_right_imm_alt_64
+    count_leading_zero_bits_32_with_zero_input
+    count_leading_zero_bits_64_with_zero_input
+    count_leading_zero_bits_64_with_ffff0000
+    count_trailing_zero_bits_32_with_zero_input
+    count_trailing_zero_bits_64_with_zero_input
+    count_trailing_zero_bits_64_with_ffff0000
+    memset_truncates_a0_and_a2
+    memset_truncates_the_count_to_32_bits
+    memset_truncates_the_destination_to_32_bits
+}
+
+run_tests_on_isa! { jam_v1, InstructionSetKind::JamV1,
+    jam_validate_invalid_opcode
+    jam_validate_invalid_fallthrough
+    jam_validate_invalid_skip
 }
 
 run_test_blob_tests! {
@@ -4517,6 +6340,12 @@ run_test_blob_tests! {
     test_blob_get_heap_base
     test_blob_get_self_address
     test_blob_get_self_address_naked
+    test_blob_sub_i32_min_64
+    test_blob_sub_i32_min_32
+    test_blob_orn_zero_const_64
+    test_blob_xnor_zero_const_64
+    test_blob_min_zero_const_64
+    test_blob_max_zero_const_64
 }
 
 run_asm_tests! {

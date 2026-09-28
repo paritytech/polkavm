@@ -5,5 +5,7 @@ pre: gas = 10000
 
 pub @main:
     u64 [0x20000] = a0
+    pub @expected_exit: %no_fallthrough
+        trap
 
 post: gas = 9975

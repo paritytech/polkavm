@@ -1,5 +1,6 @@
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -9,7 +10,7 @@ use polkavm_common::program::{FrameKind, Imports, InstructionSetKind, Instructio
 use polkavm_common::utils::{ArcBytes, AsUninitSliceMut, B32, B64};
 
 use crate::config::{BackendKind, Config, GasMeteringKind, ModuleConfig, SandboxKind};
-use crate::error::{bail, bail_static, Error};
+use crate::error::{bail, Error};
 use crate::gas::{CostModel, CostModelKind, GasVisitor};
 use crate::interpreter::InterpretedInstance;
 use crate::utils::{GuestInit, InterruptKind};
@@ -37,7 +38,6 @@ if_compiler_is_supported! {
         pub(crate) struct EngineState {
             pub(crate) sandboxing_enabled: bool,
             pub(crate) sandbox_global: Option<crate::sandbox::GlobalStateKind>,
-            pub(crate) sandbox_cache: Option<crate::sandbox::WorkerCacheKind>,
             compiler_cache: CompilerCache,
             imperfect_logger_filtering_workaround: bool,
             #[cfg(feature = "module-cache")]
@@ -126,7 +126,7 @@ impl Engine {
             }
         }
 
-        if config.default_cost_model.is_some() && !config.allow_experimental {
+        if !matches!(config.default_cost_model, None | Some(CostModelKind::Full(..))) && !config.allow_experimental {
             bail!("cannot override the default gas cost model: `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` is not enabled");
         }
 
@@ -172,15 +172,10 @@ impl Engine {
                     }
 
                     let sandbox_global = crate::sandbox::GlobalStateKind::new(selected_sandbox, config)?;
-                    let sandbox_cache = crate::sandbox::WorkerCacheKind::new(selected_sandbox, config);
-                    for _ in 0..config.worker_count {
-                        sandbox_cache.spawn(&sandbox_global)?;
-                    }
 
                     let state = Arc::new(EngineState {
                         sandboxing_enabled: config.sandboxing_enabled,
                         sandbox_global: Some(sandbox_global),
-                        sandbox_cache: Some(sandbox_cache),
                         compiler_cache: Default::default(),
 
                         imperfect_logger_filtering_workaround: config.imperfect_logger_filtering_workaround,
@@ -193,7 +188,6 @@ impl Engine {
                     (None, Arc::new(EngineState {
                         sandboxing_enabled: config.sandboxing_enabled,
                         sandbox_global: None,
-                        sandbox_cache: None,
                         compiler_cache: Default::default(),
 
                         imperfect_logger_filtering_workaround: config.imperfect_logger_filtering_workaround,
@@ -234,7 +228,7 @@ impl Engine {
     pub fn idle_worker_pids(&self) -> Vec<u32> {
         if_compiler_is_supported! {
             {
-                self.state.sandbox_cache.as_ref().map(|cache| cache.idle_worker_pids()).unwrap_or_default()
+                self.state.sandbox_global.as_ref().map(|global| global.idle_worker_pids()).unwrap_or_default()
             } else {
                 Vec::new()
             }
@@ -267,6 +261,7 @@ impl CompiledModuleKind {
 pub(crate) struct ModulePrivate {
     #[allow(dead_code)]
     engine_state: Option<Arc<EngineState>>,
+    #[allow(dead_code)]
     crosscheck: bool,
 
     blob: ProgramBlob,
@@ -311,6 +306,10 @@ impl Module {
         }
     }
 
+    fn engine_state_pointer(&self) -> *const EngineState {
+        self.state().engine_state.as_ref().map(Arc::as_ptr).unwrap_or(core::ptr::null())
+    }
+
     pub(crate) fn is_per_instruction_metering(&self) -> bool {
         self.state().is_per_instruction_metering
     }
@@ -338,19 +337,23 @@ impl Module {
     }
 
     pub(crate) fn code_len(&self) -> u32 {
-        cast(self.state().blob.code().len()).assert_always_fits_in_u32()
+        cast(self.state().blob.code().len()).to_u32_or_debug_panic()
     }
 
     pub(crate) fn instructions_bounded_at(&self, offset: ProgramCounter) -> Instructions<InstructionSetKind> {
         self.state().blob.instructions_bounded_at(offset)
     }
 
-    pub(crate) fn is_jump_target_valid(&self, offset: ProgramCounter) -> bool {
-        self.state().blob.is_jump_target_valid(self.state().blob.isa(), offset)
+    pub(crate) fn instructions_bounded_at_known_boundary(&self, offset: ProgramCounter) -> Instructions<InstructionSetKind> {
+        self.state().blob.instructions_bounded_at_known_boundary(offset)
     }
 
-    pub(crate) fn find_start_of_basic_block(&self, offset: ProgramCounter) -> Option<ProgramCounter> {
-        polkavm_common::program::find_start_of_basic_block(
+    pub(crate) fn scan_is_jump_target_valid(&self, offset: ProgramCounter) -> bool {
+        self.state().blob.scan_is_jump_target_valid(self.state().blob.isa(), offset)
+    }
+
+    pub(crate) fn scan_find_start_of_basic_block(&self, offset: ProgramCounter) -> Option<ProgramCounter> {
+        polkavm_common::program::scan_find_start_of_basic_block(
             self.state().blob.isa(),
             self.state().blob.code(),
             self.state().blob.bitmask(),
@@ -383,17 +386,6 @@ impl Module {
         self.round_to_page_size_down(value) + (u32::from((value & self.state().page_size_mask) != 0) << self.state().page_shift)
     }
 
-    pub(crate) fn get_trap_gas_cost(&self) -> u32 {
-        if self.gas_metering().is_some() {
-            match self.cost_model() {
-                CostModelKind::Simple(cost_model) => crate::gas::trap_cost(GasVisitor::new(cost_model.clone())),
-                CostModelKind::Full(cost_model) => polkavm_common::simulator::trap_cost(self.blob().isa(), *cost_model),
-            }
-        } else {
-            0
-        }
-    }
-
     /// Returns the cost model associated with this module.
     pub fn cost_model(&self) -> &CostModelKind {
         &self.state().cost_model
@@ -406,29 +398,28 @@ impl Module {
     }
 
     /// Creates a new module by deserializing the program from the given `bytes`.
-    pub fn new(engine: &Engine, config: &ModuleConfig, bytes: ArcBytes) -> Result<Self, Error> {
-        let blob = match ProgramBlob::parse(bytes) {
-            Ok(blob) => blob,
-            Err(error) => {
-                bail!("failed to parse blob: {}", error);
-            }
-        };
-
+    pub fn new(engine: &Engine, config: &ModuleConfig, bytes: ArcBytes) -> Result<Self, CompileError> {
+        let blob = ProgramBlob::parse(bytes).map_err(|error| CompileError::ValidationFailed(error.into()))?;
         Self::from_blob(engine, config, blob)
     }
 
     /// Creates a new module from a deserialized program `blob`.
-    pub fn from_blob(engine: &Engine, config: &ModuleConfig, blob: ProgramBlob) -> Result<Self, Error> {
+    pub fn from_blob(engine: &Engine, config: &ModuleConfig, blob: ProgramBlob) -> Result<Self, CompileError> {
         if config.dynamic_paging() && !engine.allow_dynamic_paging {
-            bail!("dynamic paging was not enabled; use `Config::set_allow_dynamic_paging` to enable it");
+            return Err(
+                Error::from_static_str("dynamic paging was not enabled; use `Config::set_allow_dynamic_paging` to enable it").into(),
+            );
         }
 
         if config.custom_codegen.is_some() && !engine.allow_experimental {
-            bail!("cannot use custom codegen: `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` is not enabled");
+            return Err(Error::from_static_str(
+                "cannot use custom codegen: `set_allow_experimental`/`POLKAVM_ALLOW_EXPERIMENTAL` is not enabled",
+            )
+            .into());
         }
 
         if config.is_per_instruction_metering && engine.selected_backend == BackendKind::Compiler {
-            bail!("per instruction metering is not supported with the recompiler");
+            return Err(Error::from_static_str("per instruction metering is not supported with the recompiler").into());
         }
 
         log::trace!(
@@ -438,13 +429,23 @@ impl Module {
 
         let cost_model = config.cost_model.clone().unwrap_or_else(|| engine.default_cost_model.clone());
         if config.is_per_instruction_metering && !cost_model.is_naive() {
-            bail!("per instruction metering is not supported with a non-naive gas cost model");
+            return Err(Error::from_static_str("per instruction metering is not supported with a non-naive gas cost model").into());
         }
 
-        // TODO: Use cpuid instead so that we don't have to gate this to 'std'-only.
-        #[cfg(all(target_arch = "x86_64", feature = "std"))]
-        if matches!(cost_model, CostModelKind::Full(..)) && !std::is_x86_feature_detected!("avx2") {
-            bail!("on AMD64 the full gas cost model is only supported on CPUs with AVX2 support");
+        #[cfg(target_arch = "x86_64")]
+        if engine.selected_backend == BackendKind::Compiler && !crate::cpuid::is_bmi2_supported() {
+            return Err(Error::from_static_str("on AMD64 the recompiler backend requires a CPU with BMI2 support").into());
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if matches!(cost_model, CostModelKind::Full(..)) && !crate::cpuid::is_avx2_supported() {
+            return Err(Error::from_static_str("on AMD64 the full gas cost model is only supported on CPUs with AVX2 support").into());
+        }
+
+        if engine.selected_backend == BackendKind::Interpreter && matches!(blob.isa(), InstructionSetKind::JamV1) {
+            if let Err(pc) = blob.validate_code_with_isa(polkavm_common::program::ISA_JamV1) {
+                return Err(CompileError::ValidationFailed(format!("validation failed at offset {pc}")));
+            }
         }
 
         #[cfg(feature = "module-cache")]
@@ -463,7 +464,7 @@ impl Module {
             .stack_size(blob.stack_size())
             .aux_data_size(config.aux_data_size())
             .build()
-            .map_err(Error::from_static_str)?;
+            .map_err(|error| CompileError::ValidationFailed(error.into()))?;
 
         if config.is_strict || cfg!(debug_assertions) {
             log::trace!("Checking imports...");
@@ -473,7 +474,7 @@ impl Module {
                 } else {
                     log::trace!("  Import #{}: INVALID", nth_import);
                     if config.is_strict {
-                        bail_static!("found an invalid import");
+                        return Err(Error::from_static_str("found an invalid import").into());
                     }
                 }
             }
@@ -486,7 +487,7 @@ impl Module {
                         blob.code().len()
                     );
                     if config.is_strict {
-                        bail_static!("out of range jump table entry found");
+                        return Err(Error::from_static_str("out of range jump table entry found").into());
                     }
                 }
             }
@@ -499,12 +500,12 @@ impl Module {
                 for export in blob.exports() {
                     log::trace!("  Export at {}: {}", export.program_counter(), export.symbol());
                     if config.is_strict && cast(export.program_counter().0).to_usize() >= blob.code().len() {
-                        bail!(
+                        return Err(Error::from_display(format!(
                             "out of range export found; export {} points to code offset {}, while the code blob is only {} bytes",
                             export.symbol(),
                             export.program_counter(),
                             blob.code().len(),
-                        );
+                        )).into());
                     }
 
                     exports.push(export);
@@ -567,7 +568,7 @@ impl Module {
                     blob.bitmask(),
                     &exports,
                     config.step_tracing || engine.crosscheck,
-                    cast(blob.code().len()).assert_always_fits_in_u32(),
+                    cast(blob.code().len()).to_u32_or_panic(),
                     init,
                     $gas_visitor,
                 )?;
@@ -640,7 +641,7 @@ impl Module {
             log::debug!("Backend used: 'interpreted'");
         }
 
-        let memory_map = init.memory_map().map_err(Error::from_static_str)?;
+        let memory_map = init.memory_map().map_err(|error| CompileError::ValidationFailed(error.into()))?;
         log::debug!(
             "  Memory map: RO data: 0x{:08x}..0x{:08x} ({}/{} bytes, non-zero until 0x{:08x})",
             memory_map.ro_data_range().start,
@@ -724,6 +725,22 @@ impl Module {
 
     /// Instantiates a new module.
     pub fn instantiate(&self) -> Result<RawInstance, Error> {
+        self.instantiate_impl(None)
+    }
+
+    /// Instantiates a new module with a given outer instance.
+    ///
+    /// This should be used over plain `instantiate` in cases where the given `outer_instance`
+    /// is going to control the newly spawned instance.
+    ///
+    /// Currently this makes no functional difference and only affects performance.
+    ///
+    /// The outer instance *must* come from the same `Engine`.
+    pub fn instantiate_nested(&self, outer_instance: &RawInstance) -> Result<RawInstance, Error> {
+        self.instantiate_impl(Some(outer_instance))
+    }
+
+    fn instantiate_impl(&self, outer_instance: Option<&RawInstance>) -> Result<RawInstance, Error> {
         let compiled_module = &self.state().compiled_module;
         let Some(engine_state) = self.state().engine_state.as_ref() else {
             return Err(Error::from_static_str("failed to instantiate module: empty module"));
@@ -734,12 +751,34 @@ impl Module {
                 match compiled_module {
                     #[cfg(target_os = "linux")]
                     CompiledModuleKind::Linux(..) => {
-                        let compiled_instance = SandboxInstance::<SandboxLinux>::spawn_and_load_module(Arc::clone(engine_state), self)?;
+                        let outer_instance = match outer_instance {
+                            Some(outer_instance) => {
+                                let outer_module = &outer_instance.module;
+                                #[allow(clippy::match_wildcard_for_single_variants)]
+                                match outer_instance.backend {
+                                    InstanceBackend::CompiledLinux(ref outer_instance) if outer_module.engine_state_pointer() == self.engine_state_pointer() => Some(outer_instance),
+                                    _ => return Err(Error::from_static_str("failed to instantiate module: received incompatible outer instance")),
+                                }
+                            },
+                            None => None,
+                        };
+                        let compiled_instance = SandboxInstance::<SandboxLinux>::spawn_and_load_module(Arc::clone(engine_state), self, outer_instance)?;
                         Some(InstanceBackend::CompiledLinux(compiled_instance))
                     },
                     #[cfg(feature = "generic-sandbox")]
                     CompiledModuleKind::Generic(..) => {
-                        let compiled_instance = SandboxInstance::<SandboxGeneric>::spawn_and_load_module(Arc::clone(engine_state), self)?;
+                        let outer_instance = match outer_instance {
+                            Some(outer_instance) => {
+                                let outer_module = &outer_instance.module;
+                                #[allow(clippy::match_wildcard_for_single_variants)]
+                                match outer_instance.backend {
+                                    InstanceBackend::CompiledGeneric(ref outer_instance) if outer_module.engine_state_pointer() == self.engine_state_pointer() => Some(outer_instance),
+                                    _ => return Err(Error::from_static_str("failed to instantiate module: received incompatible outer instance")),
+                                }
+                            },
+                            None => None,
+                        };
+                        let compiled_instance = SandboxInstance::<SandboxGeneric>::spawn_and_load_module(Arc::clone(engine_state), self, outer_instance)?;
                         Some(InstanceBackend::CompiledGeneric(compiled_instance))
                     },
                     CompiledModuleKind::Unavailable => None
@@ -753,17 +792,38 @@ impl Module {
 
         let backend = match backend {
             Some(backend) => backend,
-            None => InstanceBackend::Interpreted(InterpretedInstance::new_from_module(
-                self.clone(),
-                false,
-                engine_state.imperfect_logger_filtering_workaround,
-            )),
+            None => {
+                if let Some(outer_instance) = outer_instance {
+                    let outer_module = &outer_instance.module;
+                    #[allow(clippy::match_wildcard_for_single_variants)]
+                    match outer_instance.backend {
+                        InstanceBackend::Interpreted(..) if outer_module.engine_state_pointer() == self.engine_state_pointer() => {}
+                        _ => {
+                            return Err(Error::from_static_str(
+                                "failed to instantiate module: received incompatible outer instance",
+                            ))
+                        }
+                    }
+                }
+
+                InstanceBackend::Interpreted(InterpretedInstance::new_from_module(
+                    self.clone(),
+                    false,
+                    engine_state.imperfect_logger_filtering_workaround,
+                ))
+            }
         };
 
-        let crosscheck_instance = if self.state().crosscheck && !matches!(backend, InstanceBackend::Interpreted(..)) {
-            Some(Box::new(InterpretedInstance::new_from_module(self.clone(), true, false)))
-        } else {
-            None
+        let crosscheck_instance = if_compiler_is_supported! {
+            {
+                if self.state().crosscheck && !matches!(backend, InstanceBackend::Interpreted(..)) {
+                    Some(Box::new(InterpretedInstance::new_from_module(self.clone(), true, false)))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         };
 
         Ok(RawInstance {
@@ -868,7 +928,7 @@ impl Module {
     /// Will return `None` if the given `code_offset` is invalid.
     /// Mostly only useful for debugging.
     pub fn calculate_gas_cost_for(&self, code_offset: ProgramCounter) -> Option<Gas> {
-        if !self.is_jump_target_valid(code_offset) && code_offset.0 < self.code_len() {
+        if !self.scan_is_jump_target_valid(code_offset) && code_offset.0 < self.code_len() {
             return None;
         }
 
@@ -989,6 +1049,7 @@ if_compiler_is_supported! {
 #[derive(Debug)]
 pub enum MemoryAccessError {
     OutOfRangeAccess { address: u32, length: u64 },
+    MemoryLimitReached,
     Error(Error),
 }
 
@@ -1006,6 +1067,9 @@ impl core::fmt::Display for MemoryAccessError {
                     length
                 )
             }
+            MemoryAccessError::MemoryLimitReached => {
+                write!(fmt, "memory limit reached")
+            }
             MemoryAccessError::Error(error) => {
                 write!(fmt, "memory access failed: {error}")
             }
@@ -1016,6 +1080,48 @@ impl core::fmt::Display for MemoryAccessError {
 impl From<MemoryAccessError> for alloc::string::String {
     fn from(error: MemoryAccessError) -> alloc::string::String {
         alloc::string::ToString::to_string(&error)
+    }
+}
+
+/// Compilation failed.
+#[derive(Debug)]
+pub enum CompileError {
+    /// The module has failed validation.
+    ValidationFailed(String),
+    Error(Error),
+}
+
+impl From<Error> for CompileError {
+    fn from(error: Error) -> Self {
+        Self::Error(error)
+    }
+}
+
+impl From<CompileError> for Error {
+    fn from(error: CompileError) -> Self {
+        match error {
+            CompileError::Error(error) => error,
+            error @ CompileError::ValidationFailed(..) => Error::from_display(error),
+        }
+    }
+}
+
+impl From<CompileError> for String {
+    fn from(error: CompileError) -> Self {
+        error.to_string()
+    }
+}
+
+impl core::error::Error for CompileError {}
+
+impl core::fmt::Display for CompileError {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
+            CompileError::ValidationFailed(error) => {
+                write!(fmt, "module validation failed: {error}")
+            }
+            CompileError::Error(error) => error.fmt(fmt),
+        }
     }
 }
 
@@ -1090,8 +1196,13 @@ impl RawInstance {
     }
 
     #[cold]
+    #[inline(never)]
     fn on_trap(&self) {
         use crate::program::Instruction;
+
+        if !log::log_enabled!(log::Level::Debug) {
+            return;
+        }
 
         if let Some(program_counter) = self.program_counter() {
             self.module.debug_print_location(log::Level::Debug, program_counter);
@@ -1130,7 +1241,7 @@ impl RawInstance {
                     _ => return,
                 };
 
-                let mut offset = u64::from(offset);
+                let mut offset = cast(i64::from(offset)).bitwise_as_u64();
                 if let Some(base) = base {
                     offset = offset.wrapping_add(self.reg(base.get()));
                 }
@@ -1159,6 +1270,7 @@ impl RawInstance {
     }
 
     /// Starts or resumes the execution.
+    #[inline(always)]
     pub fn run(&mut self) -> Result<InterruptKind, Error> {
         if self.next_program_counter().is_none() {
             return Err(Error::from_static_str("failed to run: next program counter is not set"));
@@ -1168,67 +1280,100 @@ impl RawInstance {
             return Ok(InterruptKind::NotEnoughGas);
         }
 
+        if self.crosscheck_instance.is_some() || log::log_enabled!(log::Level::Debug) {
+            self.run_impl_debug()
+        } else {
+            self.run_impl::<false>()
+        }
+    }
+
+    #[inline(never)]
+    #[cold]
+    fn run_impl_debug(&mut self) -> Result<InterruptKind, Error> {
+        self.run_impl::<true>()
+    }
+
+    #[inline(always)]
+    fn run_impl<const DEBUG: bool>(&mut self) -> Result<InterruptKind, Error> {
+        #[allow(clippy::never_loop)]
         loop {
-            let interruption = access_backend!(self.backend, |mut backend| backend
-                .run()
-                .map_err(|error| format!("execution failed: {error}")))?;
-            log::trace!("Interrupted: {:?}", interruption);
+            let (interruption, gas) = access_backend!(self.backend, |mut backend| {
+                let interruption = backend.run().map_err(|error| format!("execution failed: {error}"));
+                let gas = backend.gas();
+                (interruption, gas)
+            });
 
-            if matches!(interruption, InterruptKind::Trap) && log::log_enabled!(log::Level::Debug) {
-                self.on_trap();
-            }
-
-            if let Some(ref mut crosscheck) = self.crosscheck_instance {
-                let is_step = matches!(interruption, InterruptKind::Step);
-                let expected_interruption = crosscheck.run().expect("crosscheck failed");
-                if interruption != expected_interruption {
-                    panic!("run: crosscheck mismatch, interpreter = {expected_interruption:?}, backend = {interruption:?}");
-                }
-
-                if self.module.gas_metering() != Some(GasMeteringKind::Async) {
-                    for reg in Reg::ALL {
-                        let value = access_backend!(self.backend, |backend| backend.reg(reg));
-                        let expected_value = crosscheck.reg(reg);
-                        if value != expected_value {
-                            panic!("run: crosscheck mismatch for {reg}, interpreter = 0x{expected_value:x}, backend = 0x{value:x}");
-                        }
-                    }
-                }
-
-                let crosscheck_gas = crosscheck.gas();
-                let crosscheck_program_counter = crosscheck.program_counter();
-                let crosscheck_next_program_counter = crosscheck.next_program_counter();
-                if self.module.gas_metering() != Some(GasMeteringKind::Async) {
-                    let gas = self.gas();
-                    if gas != crosscheck_gas {
-                        panic!("run: crosscheck mismatch for gas, interpreter = {crosscheck_gas}, backend = {gas}");
-                    }
-                }
-
-                if self.program_counter() != crosscheck_program_counter {
-                    panic!(
-                        "run: crosscheck mismatch for program counter, interpreter = {crosscheck_program_counter:?}, backend = {:?}",
-                        self.program_counter()
-                    );
-                }
-
-                if self.next_program_counter() != crosscheck_next_program_counter {
-                    panic!(
-                        "run: crosscheck mismatch for next program counter, interpreter = {crosscheck_next_program_counter:?}, backend = {:?}",
-                        self.next_program_counter()
-                    );
-                }
-
-                if is_step && !self.module().state().step_tracing {
-                    continue;
+            let mut interruption = interruption?;
+            if DEBUG {
+                log::trace!("Interrupted: {:?}", interruption);
+                if matches!(interruption, InterruptKind::Trap) {
+                    self.on_trap();
                 }
             }
 
-            if self.gas() < 0 {
-                return Ok(InterruptKind::NotEnoughGas);
+            if_compiler_is_supported! {
+                if DEBUG && self.crosscheck_instance.is_some() {
+                    let is_step = matches!(interruption, InterruptKind::Step);
+                    self.crosscheck(interruption.clone());
+
+                    if is_step && !self.module().state().step_tracing {
+                        continue;
+                    }
+                }
+            }
+
+            if gas < 0 {
+                interruption = InterruptKind::NotEnoughGas;
             }
 
             break Ok(interruption);
+        }
+    }
+
+    #[allow(dead_code)]
+    #[inline(never)]
+    #[cold]
+    fn crosscheck(&mut self, interruption: InterruptKind) {
+        let Some(ref mut crosscheck) = self.crosscheck_instance else {
+            unreachable!()
+        };
+        let expected_interruption = crosscheck.run().expect("crosscheck failed");
+        if interruption != expected_interruption {
+            panic!("run: crosscheck mismatch, interpreter = {expected_interruption:?}, backend = {interruption:?}");
+        }
+
+        if self.module.gas_metering() != Some(GasMeteringKind::Async) {
+            for reg in Reg::ALL {
+                let value = access_backend!(self.backend, |backend| backend.reg(reg));
+                let expected_value = crosscheck.reg(reg);
+                if value != expected_value {
+                    panic!("run: crosscheck mismatch for {reg}, interpreter = 0x{expected_value:x}, backend = 0x{value:x}");
+                }
+            }
+        }
+
+        let crosscheck_gas = crosscheck.gas();
+        let crosscheck_program_counter = crosscheck.program_counter();
+        let crosscheck_next_program_counter = crosscheck.next_program_counter();
+        if self.module.gas_metering() != Some(GasMeteringKind::Async) {
+            let gas = self.gas();
+            if gas != crosscheck_gas {
+                panic!("run: crosscheck mismatch for gas, interpreter = {crosscheck_gas}, backend = {gas}");
+            }
+        }
+
+        if self.program_counter() != crosscheck_program_counter {
+            panic!(
+                "run: crosscheck mismatch for program counter, interpreter = {crosscheck_program_counter:?}, backend = {:?}",
+                self.program_counter()
+            );
+        }
+
+        if self.next_program_counter() != crosscheck_next_program_counter {
+            panic!(
+                "run: crosscheck mismatch for next program counter, interpreter = {crosscheck_next_program_counter:?}, backend = {:?}",
+                self.next_program_counter()
+            );
         }
     }
 
@@ -1407,7 +1552,7 @@ impl RawInstance {
     /// Reads the VM's memory.
     ///
     /// The whole memory region must be readable.
-    pub fn read_memory_into<'slice, B>(&self, address: u32, buffer: &'slice mut B) -> Result<&'slice mut [u8], MemoryAccessError>
+    pub fn read_memory_into<'slice, B>(&mut self, address: u32, buffer: &'slice mut B) -> Result<&'slice mut [u8], MemoryAccessError>
     where
         B: ?Sized + AsUninitSliceMut,
     {
@@ -1434,8 +1579,8 @@ impl RawInstance {
         }
 
         let length = slice.len();
-        let result = access_backend!(self.backend, |backend| backend.read_memory_into(address, slice));
-        if let Some(ref crosscheck) = self.crosscheck_instance {
+        let result = access_backend!(self.backend, |mut backend| backend.read_memory_into(address, slice));
+        if let Some(ref mut crosscheck) = self.crosscheck_instance {
             let mut expected_data: Vec<core::mem::MaybeUninit<u8>> = alloc::vec![core::mem::MaybeUninit::new(0xfa); length];
             let expected_result = crosscheck.read_memory_into(address, &mut expected_data);
             let expected_success = expected_result.is_ok();
@@ -1458,7 +1603,7 @@ impl RawInstance {
         }
 
         if cfg!(debug_assertions) {
-            let is_inaccessible = !self.is_memory_accessible(address, cast(length).assert_always_fits_in_u32(), MemoryProtection::Read);
+            let is_inaccessible = !self.is_memory_accessible(address, cast(length).to_u32_or_panic(), MemoryProtection::Read);
             if is_inaccessible != matches!(result, Err(MemoryAccessError::OutOfRangeAccess { .. })) {
                 panic!(
                     "'read_memory_into' doesn't match with 'is_memory_accessible' for 0x{:x}-0x{:x} (read_memory_into = {:?}, is_memory_accessible = {})",
@@ -1516,8 +1661,7 @@ impl RawInstance {
         }
 
         if cfg!(debug_assertions) {
-            let is_inaccessible =
-                !self.is_memory_accessible(address, cast(data.len()).assert_always_fits_in_u32(), MemoryProtection::ReadWrite);
+            let is_inaccessible = !self.is_memory_accessible(address, cast(data.len()).to_u32_or_panic(), MemoryProtection::ReadWrite);
             if is_inaccessible != matches!(result, Err(MemoryAccessError::OutOfRangeAccess { .. })) {
                 panic!(
                     "'write_memory' doesn't match with 'is_memory_accessible' for 0x{:x}-0x{:x} (write_memory = {:?}, is_memory_accessible = {})",
@@ -1535,7 +1679,7 @@ impl RawInstance {
     /// Reads the VM's memory.
     ///
     /// The whole memory region must be readable.
-    pub fn read_memory(&self, address: u32, length: u32) -> Result<Vec<u8>, MemoryAccessError> {
+    pub fn read_memory(&mut self, address: u32, length: u32) -> Result<Vec<u8>, MemoryAccessError> {
         let mut buffer = Vec::new();
         buffer.reserve_exact(cast(length).to_usize());
 
@@ -1559,7 +1703,7 @@ impl RawInstance {
     /// A convenience function to read an `u64` from the VM's memory.
     ///
     /// This is equivalent to calling [`RawInstance::read_memory_into`].
-    pub fn read_u64(&self, address: u32) -> Result<u64, MemoryAccessError> {
+    pub fn read_u64(&mut self, address: u32) -> Result<u64, MemoryAccessError> {
         let mut buffer = [0; 8];
         self.read_memory_into(address, &mut buffer)?;
 
@@ -1576,7 +1720,7 @@ impl RawInstance {
     /// A convenience function to read an `u32` from the VM's memory.
     ///
     /// This is equivalent to calling [`RawInstance::read_memory_into`].
-    pub fn read_u32(&self, address: u32) -> Result<u32, MemoryAccessError> {
+    pub fn read_u32(&mut self, address: u32) -> Result<u32, MemoryAccessError> {
         let mut buffer = [0; 4];
         self.read_memory_into(address, &mut buffer)?;
 
@@ -1593,7 +1737,7 @@ impl RawInstance {
     /// A convenience function to read an `u16` from the VM's memory.
     ///
     /// This is equivalent to calling [`RawInstance::read_memory_into`].
-    pub fn read_u16(&self, address: u32) -> Result<u16, MemoryAccessError> {
+    pub fn read_u16(&mut self, address: u32) -> Result<u16, MemoryAccessError> {
         let mut buffer = [0; 2];
         self.read_memory_into(address, &mut buffer)?;
 
@@ -1610,7 +1754,7 @@ impl RawInstance {
     /// A convenience function to read an `u8` from the VM's memory.
     ///
     /// This is equivalent to calling [`RawInstance::read_memory_into`].
-    pub fn read_u8(&self, address: u32) -> Result<u8, MemoryAccessError> {
+    pub fn read_u8(&mut self, address: u32) -> Result<u8, MemoryAccessError> {
         let mut buffer = [0; 1];
         self.read_memory_into(address, &mut buffer)?;
 
@@ -1893,5 +2037,40 @@ impl RawInstance {
             backend.set_interpreter_cache_size_limit(cache_info)?
         }
         Ok(())
+    }
+
+    /// Sets the maximum size of a single non-read-only guest memory region.
+    ///
+    /// When set this will enforce a strict single-allocation size limit on the interpreter
+    /// for RW data, stack and aux data regions.
+    ///
+    /// For example, if you set this to 1MB then the guest will be allowed to access at most
+    /// 1MB of address space for stack and RW data, regardless of how much space the module
+    /// itself has declared that it wants, and any access over this 1MB limit will trap.
+    ///
+    /// Setting this is *not* retroactive and will only affect new allocations or reallocations.
+    ///
+    /// Only has an effect on the interpreter, and only for modules which don't use dynamic paging.
+    ///
+    /// Default: `None`
+    pub fn set_interpreter_max_allocation_size(&mut self, value: Option<usize>) {
+        #[allow(irrefutable_let_patterns)]
+        if let InstanceBackend::Interpreted(ref mut backend) = self.backend {
+            backend.set_interpreter_max_allocation_size(value);
+        }
+    }
+
+    /// Sets the total maximum amount of memory for all of the guest's non-read-only memory regions.
+    ///
+    /// Setting this is *not* retroactive and will only affect new allocations or reallocations.
+    ///
+    /// Only has an effect on the interpreter, and only for modules which don't use dynamic paging.
+    ///
+    /// Default: `None`
+    pub fn set_interpreter_guest_memory_limit(&mut self, value: Option<usize>) {
+        #[allow(irrefutable_let_patterns)]
+        if let InstanceBackend::Interpreted(ref mut backend) = self.backend {
+            backend.set_interpreter_guest_memory_limit(value);
+        }
     }
 }

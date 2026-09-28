@@ -21,14 +21,11 @@ POLKAVM_TRACE_EXECUTION=1 POLKAVM_ALLOW_INSECURE=1 POLKAVM_BACKEND=interpreter c
 echo ">> cargo run (examples, compiler, linux, x86_64-unknown-linux-gnu)"
 POLKAVM_TRACE_EXECUTION=1 POLKAVM_ALLOW_INSECURE=1 POLKAVM_BACKEND=compiler POLKAVM_SANDBOX=linux cargo run --target=x86_64-unknown-linux-gnu -p hello-world-host
 
-# echo ">> cargo run (examples, compiler, generic, x86_64-unknown-linux-gnu)"
-# POLKAVM_TRACE_EXECUTION=1 POLKAVM_ALLOW_INSECURE=1 POLKAVM_BACKEND=compiler POLKAVM_SANDBOX=generic cargo run --target=x86_64-unknown-linux-gnu -p hello-world-host
+echo ">> cargo run (examples, compiler, generic, x86_64-unknown-linux-gnu)"
+POLKAVM_TRACE_EXECUTION=1 POLKAVM_ALLOW_EXPERIMENTAL=1 POLKAVM_BACKEND=compiler POLKAVM_SANDBOX=generic cargo run --target=x86_64-unknown-linux-gnu -p hello-world-host --features polkavm/generic-sandbox
 
 echo ">> cargo test (generic-sandbox)"
-cargo test --features generic-sandbox -p polkavm -- \
-    tests::compiler_generic_ \
-    --skip tests::compiler_generic_memset_basic \
-    --skip tests::compiler_generic_memset_with_dynamic_paging
+cargo test --features generic-sandbox -p polkavm -- tests::compiler_generic_
 
 echo ">> cargo check (polkatool, i686-unknown-linux-musl)"
 cargo check --target=i686-unknown-linux-musl -p polkatool

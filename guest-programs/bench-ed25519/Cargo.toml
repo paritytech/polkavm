@@ -1,0 +1,29 @@
+[package]
+name = "bench-ed25519"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "bench_ed25519"
+path = "src/main.rs"
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "bench-ed25519"
+path = "src/main.rs"
+
+[dependencies]
+ed25519-dalek = { version = "2", default-features = false }
+
+[target.'cfg(not(target_os = "solana"))'.dependencies]
+picoalloc = { workspace = true }
+
+[target.'cfg(target_os = "solana")'.dependencies]
+simplealloc = { path = "../simplealloc" }
+
+[target.'cfg(target_env = "polkavm")'.dependencies]
+polkavm-derive = { path = "../../crates/polkavm-derive" }
+
+[lints]
+workspace = true

@@ -67,6 +67,8 @@ impl syn::parse::Parse for ExportBlockAttributes {
 pub fn is_no_mangle(attr: &syn::Attribute) -> bool {
     if let syn::Meta::Path(ref path) = attr.meta {
         is_path_eq(path, "no_mangle")
+    } else if let syn::Meta::List(syn::MetaList { ref path, ref tokens, .. }) = attr.meta {
+        is_path_eq(path, "unsafe") && tokens.to_string() == "no_mangle"
     } else {
         false
     }

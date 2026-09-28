@@ -321,7 +321,7 @@ impl BenchmarkKind {
                         BackendKind::PolkaVM_Compiler64_NoGas,
                         BackendKind::PolkaVM_Compiler64_SimpleModel_AsyncGas,
                         BackendKind::PolkaVM_Compiler64_SimpleModel_SyncGas,
-                        BackendKind::PolkaVM_Compiler64_FullModel_SyncGas
+                        BackendKind::PolkaVM_Compiler64_FullModel_SyncGas,
                     ]);
                 }
 

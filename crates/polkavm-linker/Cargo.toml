@@ -26,6 +26,7 @@ polkavm = { workspace = true }
 polkavm-disassembler = { workspace = true }
 proptest = { workspace = true }
 yansi = { workspace = true }
+object = { workspace = true, features = ["write"] }
 
 [lints]
 workspace = true
