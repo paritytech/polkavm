@@ -13,6 +13,7 @@ use polkavm_common::{
         self,
         AddressTableRaw, ExtTableRaw, VmCtx as VmCtxInner,
         VmMap, VmFd, JmpBuf,
+        JUMP_TABLE_INVALID_ADDRESS,
         VM_ADDR_JUMP_TABLE_RETURN_TO_HOST,
         VM_ADDR_JUMP_TABLE,
         VM_ADDR_NATIVE_CODE,
@@ -668,6 +669,12 @@ unsafe fn initialize(mut stack: *mut usize) {
     )
     .unwrap_or_else(|error| abort_with_error("failed to map the sysreturn jump table", error));
 
+    core::slice::from_raw_parts_mut(
+        VM_ADDR_JUMP_TABLE_RETURN_TO_HOST as *mut u64,
+        page_size / core::mem::size_of::<u64>(),
+    )
+    .fill(JUMP_TABLE_INVALID_ADDRESS);
+
     if fsgsbase_supported {
         trace!("fsgsbase is supported");
         unsafe {
@@ -1157,7 +1164,7 @@ unsafe fn recycle() {
     )
     .unwrap_or_else(|error| abort_with_error("failed to unmap jump table", error));
 
-    *(VM_ADDR_JUMP_TABLE_RETURN_TO_HOST as *mut u64) = 0;
+    *(VM_ADDR_JUMP_TABLE_RETURN_TO_HOST as *mut u64) = JUMP_TABLE_INVALID_ADDRESS;
 }
 
 #[inline(never)]

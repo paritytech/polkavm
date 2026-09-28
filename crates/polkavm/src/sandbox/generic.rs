@@ -5,7 +5,7 @@ use polkavm_common::{
     program::Reg,
     utils::{align_to_next_page_usize, byte_slice_init, Bitness},
     zygote::{
-        AddressTable, AddressTableRaw, CacheAligned, VM_ADDR_JUMP_TABLE, VM_ADDR_JUMP_TABLE_RETURN_TO_HOST,
+        AddressTable, AddressTableRaw, CacheAligned, JUMP_TABLE_INVALID_ADDRESS, VM_ADDR_JUMP_TABLE, VM_ADDR_JUMP_TABLE_RETURN_TO_HOST,
         VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE, VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE,
     },
 };
@@ -1349,6 +1349,9 @@ impl super::Sandbox for Sandbox {
         })?;
 
         map.modify_and_protect(sysreturn_offset, native_page_size, PROT_READ, |slice| {
+            for entry in slice.chunks_exact_mut(8) {
+                entry.copy_from_slice(&JUMP_TABLE_INVALID_ADDRESS.to_le_bytes());
+            }
             slice[..8].copy_from_slice(&init.sysreturn_address.to_le_bytes());
         })?;
 

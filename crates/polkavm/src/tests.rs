@@ -1522,6 +1522,28 @@ fn jump_indirect_simple(engine_config: Config, isa: InstructionSetKind) {
     }
 }
 
+fn jump_indirect_into_return_to_host_page(engine_config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&engine_config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&[asm::jump_indirect(A0, 0)], &[]);
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::A0, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(ProgramCounter(0));
+    match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+
+    for pointer in (crate::RETURN_TO_HOST + 1..=crate::RETURN_TO_HOST + 0x1000).chain([u64::from(u32::MAX)]) {
+        instance.set_reg(Reg::A0, pointer);
+        instance.set_next_program_counter(ProgramCounter(0));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    }
+}
+
 fn jump_indirect_big_table(engine_config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&engine_config).unwrap();
@@ -6128,6 +6150,7 @@ run_tests! {
     step_tracing_invalid_load
     step_tracing_out_of_gas
     dynamic_jump_to_null
+    jump_indirect_into_return_to_host_page
     jump_into_middle_of_basic_block_from_outside
     jump_into_middle_of_basic_block_from_within
     entry_into_the_middle_of_an_instruction_is_rejected
