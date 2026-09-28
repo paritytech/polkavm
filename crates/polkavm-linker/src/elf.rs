@@ -11,6 +11,10 @@ type ElfSectionIndex = object::read::SectionIndex;
 pub struct SectionIndex(usize);
 
 impl SectionIndex {
+    /// An index no section has: indices come from the ELF's own table or from
+    /// `add_empty_data_section`, and both count up from zero. Marks a literal address.
+    pub(crate) const LITERAL_ADDRESS: SectionIndex = SectionIndex(usize::MAX);
+
     #[cfg(test)]
     pub fn new(value: usize) -> Self {
         SectionIndex(value)
@@ -198,6 +202,7 @@ pub struct Elf<'data> {
     section_index_by_name: HashMap<String, Vec<SectionIndex>>,
     symbols: Vec<Symbol>,
     is_64_bit: bool,
+    is_relocatable: bool,
 }
 
 impl<'data> Elf<'data> {
@@ -229,6 +234,7 @@ impl<'data> Elf<'data> {
         }
 
         let is_64_bit = elf.is_64();
+        let is_relocatable = elf.elf_header().e_type(LittleEndian) == object::elf::ET_REL;
 
         let mut relocation_sections_for_section = HashMap::new();
         let mut relocations_in_section = HashMap::new();
@@ -472,6 +478,7 @@ impl<'data> Elf<'data> {
             section_index_by_name,
             symbols,
             is_64_bit,
+            is_relocatable,
         })
     }
 
@@ -539,6 +546,12 @@ impl<'data> Elf<'data> {
 
     pub fn is_64(&self) -> bool {
         self.is_64_bit
+    }
+
+    /// An object file (`ET_REL`): no section has an address yet - each is 0 - and no relocation
+    /// has been applied, so none can have been lost.
+    pub fn is_relocatable(&self) -> bool {
+        self.is_relocatable
     }
 
     pub fn section_to_function_name(&self) -> BTreeMap<SectionTarget, String> {

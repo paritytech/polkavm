@@ -571,17 +571,72 @@ impl From<i32> for RegImm {
     }
 }
 
+use absolute_target::{AbsoluteTarget, Place};
+
+mod absolute_target {
+    use super::{cast, SectionIndex, SectionTarget};
+
+    /// Where an absolute load or store lands; read it with [`place`](Self::place).
+    ///
+    /// Almost always an offset into a section. The exception is an access through `x0` (see
+    /// `zero_register_address`): a literal address in the bottom or top 2 KiB, kept as it is so the
+    /// VM reports the fault it would have.
+    ///
+    /// Not an enum: that is 24 octets and would grow `BasicInst` from 32 to 40 for every
+    /// instruction, to serve a handful per program. So the literal is packed into the
+    /// `SectionTarget` under an index no section has; the field is private, so only `place` reads it.
+    #[derive(Copy, Clone, PartialEq, Eq)]
+    pub(super) struct AbsoluteTarget(SectionTarget);
+
+    /// What an [`AbsoluteTarget`] is.
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+    pub(super) enum Place {
+        Section(SectionTarget),
+        Address(u32),
+    }
+
+    impl AbsoluteTarget {
+        pub(super) fn address(address: u32) -> Self {
+            AbsoluteTarget(SectionTarget {
+                section_index: SectionIndex::LITERAL_ADDRESS,
+                offset: u64::from(address),
+            })
+        }
+
+        pub(super) fn place(self) -> Place {
+            if self.0.section_index == SectionIndex::LITERAL_ADDRESS {
+                Place::Address(cast(self.0.offset).to_u32_or_panic())
+            } else {
+                Place::Section(self.0)
+            }
+        }
+    }
+
+    impl From<SectionTarget> for AbsoluteTarget {
+        fn from(target: SectionTarget) -> Self {
+            debug_assert_ne!(target.section_index, SectionIndex::LITERAL_ADDRESS);
+            AbsoluteTarget(target)
+        }
+    }
+
+    impl core::fmt::Debug for AbsoluteTarget {
+        fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+            self.place().fmt(fmt)
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 enum BasicInst<T> {
     LoadAbsolute {
         kind: LoadKind,
         dst: Reg,
-        target: SectionTarget,
+        target: AbsoluteTarget,
     },
     StoreAbsolute {
         kind: StoreKind,
         src: RegImm,
-        target: SectionTarget,
+        target: AbsoluteTarget,
     },
     LoadIndirect {
         kind: LoadKind,
@@ -732,6 +787,8 @@ impl<T> BasicInst<T> {
             | BasicInst::StoreAbsolute { .. }
             | BasicInst::StoreIndirect { .. }
             | BasicInst::Memset => true,
+            // A literal address is outside the memory map, so the load faults - never "unnecessary".
+            BasicInst::LoadAbsolute { target, .. } if matches!(target.place(), Place::Address(_)) => true,
             BasicInst::LoadAbsolute { .. } | BasicInst::LoadIndirect { .. } => !config.elide_unnecessary_loads,
             BasicInst::Nop
             | BasicInst::Epilogue { .. }
@@ -929,7 +986,11 @@ impl<T> BasicInst<T> {
         T: Copy,
     {
         match self {
-            BasicInst::LoadAbsolute { target, .. } | BasicInst::StoreAbsolute { target, .. } => (Some(*target), None),
+            BasicInst::LoadAbsolute { target, .. } | BasicInst::StoreAbsolute { target, .. } => match target.place() {
+                Place::Section(target) => (Some(target), None),
+                // A literal address lies in a guard region: it references, and keeps alive, no section.
+                Place::Address(_) => (None, None),
+            },
             BasicInst::LoadAddress { target, .. } | BasicInst::LoadAddressIndirect { target, .. } => (None, Some(*target)),
             BasicInst::Nop
             | BasicInst::Prologue { .. }
@@ -1970,15 +2031,68 @@ fn emit_or_combine_byte(
     }
 }
 
+/// Does `[address, address + width)` intersect `[start, start + size)`? The whole access, not just
+/// its first octet - and in `u128`, so neither range wraps at the top of a 64-bit address space.
+/// (Not `AddressRange::is_overlapping`: its exclusive `end` can't hold 2^64.)
+fn ranges_overlap(address: u64, width: u64, start: u64, size: u64) -> bool {
+    let (address, start) = (u128::from(address), u128::from(start));
+    address < start.wrapping_add(u128::from(size)) && start < address.wrapping_add(u128::from(width))
+}
+
+/// Links an access or jump through `x0`, whose address is its sign-extended 12-bit offset - so the
+/// bottom or top 2 KiB of the address space. Returns that offset as the immediate.
+///
+/// - Nothing loaded there: it faults - fatally at the bottom; at the top, as a page fault that
+///   dynamic paging may resolve. Typically a null dereference left on a path LLVM assumes never
+///   runs. Linked as it is, with a warning.
+/// - A loaded section there (`guard_sections`): the instruction lost its relocation
+///   (relaxation, or no `--emit-relocs`), so linking it would silently retarget it. An error.
+fn zero_register_address(
+    elf: &Elf,
+    guard_sections: &[SectionIndex],
+    current_location: SectionTarget,
+    what: &str,
+    offset: i32,
+    width: u64,
+) -> Result<u32, ProgramFromElfError> {
+    // A 12-bit signed immediate: so the address can only be in the bottom or the top 2 KiB.
+    debug_assert!((-2048..2048).contains(&offset), "{what} offset {offset} is not a 12-bit immediate");
+    let address = if elf.is_64() {
+        cast(cast(offset).to_i64_sign_extend()).bitwise_as_u64()
+    } else {
+        u64::from(cast(offset).bitwise_as_u32())
+    };
+
+    if let Some(section) = guard_sections
+        .iter()
+        .map(|&index| elf.section_by_index(index))
+        .find(|section| ranges_overlap(address, width, section.original_address(), section.size()))
+    {
+        return Err(ProgramFromElfError::other(format!(
+            "found an unrelocated absolute {what} at {} to 0x{address:x}, inside section '{}'; is the program linked with relocations (--emit-relocs) and without relaxation (--no-relax)?",
+            current_location.fmt_human_readable(elf),
+            section.name(),
+        )));
+    }
+
+    log::warn!(
+        "{what} through the zero register at {}: 0x{address:x} is outside the memory map, so it faults - resumably only at the top, under dynamic paging (typically a null dereference on a path LLVM assumes never runs); linking it as it is",
+        current_location.fmt_human_readable(elf),
+    );
+
+    Ok(cast(offset).bitwise_as_u32())
+}
+
 fn convert_instruction(
     elf: &Elf,
     section: &Section,
+    guard_sections: &[SectionIndex],
     current_location: SectionTarget,
     instruction: Inst,
     instruction_size: u64,
-    rv64: bool,
     mut emit: impl FnMut(InstExt<SectionTarget, SectionTarget>),
 ) -> Result<(), ProgramFromElfError> {
+    let rv64 = elf.is_64();
     match instruction {
         Inst::LoadUpperImmediate { dst, value } => {
             let Some(dst) = cast_reg_non_zero(dst)? else {
@@ -2038,7 +2152,11 @@ fn convert_instruction(
         }
         Inst::JumpAndLinkRegister { dst, base, value } => {
             let Some(base) = cast_reg_non_zero(base)? else {
-                return Err(ProgramFromElfError::other("found an unrelocated JALR instruction"));
+                // A jump to a literal address. Where no code lives there it can only fault, and an
+                // ELF address would mean nothing to the jump table anyway, so it is a trap.
+                zero_register_address(elf, guard_sections, current_location, "jump", value, 1)?;
+                emit(InstExt::Control(ControlInst::Unimplemented));
+                return Ok(());
             };
 
             let next = if let Some(dst) = cast_reg_non_zero(dst)? {
@@ -2074,15 +2192,21 @@ fn convert_instruction(
                 return Ok(());
             }
 
+            // LLVM riscv-enable-dead-defs pass may rewrite dst to the zero register.
+            let dst = cast_reg_non_zero(dst)?;
             let Some(base) = cast_reg_non_zero(base)? else {
-                return Err(ProgramFromElfError::other(format!(
-                    "found an unrelocated absolute load at {}",
-                    current_location.fmt_human_readable(elf)
-                )));
+                let address = zero_register_address(elf, guard_sections, current_location, "load", offset, kind.width())?;
+                emit(InstExt::Basic(BasicInst::LoadAbsolute {
+                    kind,
+                    // With no destination the fault is all the load does, and must stay resumable at
+                    // the top under dynamic paging: so load into the scratch `E0`, spilled later.
+                    dst: dst.unwrap_or(Reg::E0),
+                    target: AbsoluteTarget::address(address),
+                }));
+                return Ok(());
             };
 
-            // LLVM riscv-enable-dead-defs pass may rewrite dst to the zero register.
-            match cast_reg_non_zero(dst)? {
+            match dst {
                 Some(dst) => emit(InstExt::Basic(BasicInst::LoadIndirect { kind, dst, base, offset })),
                 None => emit(InstExt::Basic(BasicInst::Nop)),
             }
@@ -2095,14 +2219,17 @@ fn convert_instruction(
                 return Ok(());
             }
 
+            let src = cast_reg_any(src)?;
             let Some(base) = cast_reg_non_zero(base)? else {
-                return Err(ProgramFromElfError::other(format!(
-                    "found an unrelocated absolute store at {}",
-                    current_location.fmt_human_readable(elf)
-                )));
+                let address = zero_register_address(elf, guard_sections, current_location, "store", offset, kind.width())?;
+                emit(InstExt::Basic(BasicInst::StoreAbsolute {
+                    kind,
+                    src,
+                    target: AbsoluteTarget::address(address),
+                }));
+                return Ok(());
             };
 
-            let src = cast_reg_any(src)?;
             emit(InstExt::Basic(BasicInst::StoreIndirect { kind, src, base, offset }));
             Ok(())
         }
@@ -2471,9 +2598,10 @@ fn convert_instruction(
             };
 
             let Some(src) = cast_reg_non_zero(src)? else {
-                return Err(ProgramFromElfError::other(
-                    "found an atomic load with a zero register as the source",
-                ));
+                // Address 0: a guard region, so a certain fault - and at the bottom, a trap exactly.
+                zero_register_address(elf, guard_sections, current_location, "atomic load", 0, 4)?;
+                emit(InstExt::Control(ControlInst::Unimplemented));
+                return Ok(());
             };
 
             emit(InstExt::Basic(BasicInst::LoadIndirect {
@@ -2493,9 +2621,10 @@ fn convert_instruction(
             };
 
             let Some(src) = cast_reg_non_zero(src)? else {
-                return Err(ProgramFromElfError::other(
-                    "found an atomic load with a zero register as the source",
-                ));
+                // Address 0: a guard region, so a certain fault - and at the bottom, a trap exactly.
+                zero_register_address(elf, guard_sections, current_location, "atomic load", 0, 8)?;
+                emit(InstExt::Control(ControlInst::Unimplemented));
+                return Ok(());
             };
 
             emit(InstExt::Basic(BasicInst::LoadIndirect {
@@ -2509,9 +2638,10 @@ fn convert_instruction(
         }
         Inst::StoreConditional32 { src, addr, dst, .. } => {
             let Some(addr) = cast_reg_non_zero(addr)? else {
-                return Err(ProgramFromElfError::other(
-                    "found an atomic store with a zero register as the address",
-                ));
+                // Address 0: a guard region, so a certain fault - and at the bottom, a trap exactly.
+                zero_register_address(elf, guard_sections, current_location, "atomic store", 0, 4)?;
+                emit(InstExt::Control(ControlInst::Unimplemented));
+                return Ok(());
             };
 
             let src = cast_reg_any(src)?;
@@ -2531,9 +2661,10 @@ fn convert_instruction(
         }
         Inst::StoreConditional64 { src, addr, dst, .. } if rv64 => {
             let Some(addr) = cast_reg_non_zero(addr)? else {
-                return Err(ProgramFromElfError::other(
-                    "found an atomic store with a zero register as the address",
-                ));
+                // Address 0: a guard region, so a certain fault - and at the bottom, a trap exactly.
+                zero_register_address(elf, guard_sections, current_location, "atomic store", 0, 8)?;
+                emit(InstExt::Control(ControlInst::Unimplemented));
+                return Ok(());
             };
 
             let src = cast_reg_any(src)?;
@@ -2561,12 +2692,6 @@ fn convert_instruction(
             src: operand,
             ..
         } => {
-            let Some(addr) = cast_reg_non_zero(addr)? else {
-                return Err(ProgramFromElfError::other(
-                    "found an atomic operation with a zero register as the address",
-                ));
-            };
-
             let is_64_bit = match kind {
                 AtomicKind::Swap32
                 | AtomicKind::Add32
@@ -2587,6 +2712,14 @@ fn convert_instruction(
                 | AtomicKind::And64
                 | AtomicKind::Or64
                 | AtomicKind::Xor64 => true,
+            };
+
+            let Some(addr) = cast_reg_non_zero(addr)? else {
+                // Address 0: a guard region, so a certain fault - and at the bottom, a trap exactly.
+                let width = if is_64_bit { 8 } else { 4 };
+                zero_register_address(elf, guard_sections, current_location, "atomic operation", 0, width)?;
+                emit(InstExt::Control(ControlInst::Unimplemented));
+                return Ok(());
             };
 
             let mut operand = cast_reg_non_zero(operand)?;
@@ -2980,6 +3113,7 @@ fn try_parse_prologue(
 fn parse_code_section(
     elf: &Elf,
     section: &Section,
+    guard_sections: &[SectionIndex],
     decoder_config: &DecoderConfig,
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     imports: &mut Vec<Import>,
@@ -3284,7 +3418,7 @@ fn parse_code_section(
             }
 
             let original_length = output.len();
-            convert_instruction(elf, section, current_location, original_inst, inst_size, elf.is_64(), |inst| {
+            convert_instruction(elf, section, guard_sections, current_location, original_inst, inst_size, |inst| {
                 output.push((source, inst));
             })?;
 
@@ -5345,11 +5479,8 @@ impl BlockRegs {
             }
             BasicInst::LoadIndirect { kind, dst, base, offset } => {
                 if let RegValue::DataAddress(base) = self.get_reg(base) {
-                    return Some(BasicInst::LoadAbsolute {
-                        kind,
-                        dst,
-                        target: base.map_offset_i64(|base| base.wrapping_add(cast(offset).to_i64_sign_extend())),
-                    });
+                    let target = AbsoluteTarget::from(base.map_offset_i64(|base| base.wrapping_add(cast(offset).to_i64_sign_extend())));
+                    return Some(BasicInst::LoadAbsolute { kind, dst, target });
                 }
             }
             BasicInst::LoadAddressIndirect { dst, target } => {
@@ -5357,11 +5488,8 @@ impl BlockRegs {
             }
             BasicInst::StoreIndirect { kind, src, base, offset } => {
                 if let RegValue::DataAddress(base) = self.get_reg(base) {
-                    return Some(BasicInst::StoreAbsolute {
-                        kind,
-                        src,
-                        target: base.map_offset_i64(|base| base.wrapping_add(cast(offset).to_i64_sign_extend())),
-                    });
+                    let target = AbsoluteTarget::from(base.map_offset_i64(|base| base.wrapping_add(cast(offset).to_i64_sign_extend())));
+                    return Some(BasicInst::StoreAbsolute { kind, src, target });
                 }
 
                 if let RegImm::Reg(src) = src {
@@ -5875,7 +6003,15 @@ fn perform_constant_propagation(
             all_blocks[current.index()].ops[nth_instruction].1 = new_instruction;
         }
 
-        if let &BasicInst::LoadAbsolute { kind, dst, target } = &instruction {
+        // Only a load from a section can be folded; a literal address has no contents in the image.
+        let foldable = match instruction {
+            BasicInst::LoadAbsolute { kind, dst, target } => match target.place() {
+                Place::Section(target) => Some((kind, dst, target)),
+                Place::Address(_) => None,
+            },
+            _ => None,
+        };
+        if let Some((kind, dst, target)) = foldable {
             let section = elf.section_by_index(target.section_index);
             if section.is_allocated() && !section.is_writable() {
                 let value = match kind {
@@ -6481,6 +6617,21 @@ mod test {
     use super::*;
     use polkavm::Reg;
 
+    /// An absolute address in test assembly: a literal in a guard region, as the linker makes of an
+    /// access through `x0`, and otherwise an offset into the builder's data section. The immediate's
+    /// 32-bit pattern is the guest address, so a negative one is in the top 64 KiB.
+    fn absolute_target(data_section: SectionIndex, address: i32) -> AbsoluteTarget {
+        let address = cast(address).bitwise_as_u32();
+        if address < 0x10000 || address >= 0xffff_0000 {
+            AbsoluteTarget::address(address)
+        } else {
+            AbsoluteTarget::from(SectionTarget {
+                section_index: data_section,
+                offset: u64::from(address),
+            })
+        }
+    }
+
     struct ProgramBuilder {
         data_section: SectionIndex,
         current_section: SectionIndex,
@@ -6555,6 +6706,7 @@ mod test {
         }
 
         fn append_assembly(&mut self, assembly: &str) {
+            let data_section = self.data_section;
             let isa = InstructionSetKind::Latest64;
             let raw_blob = polkavm_common::assembler::assemble(Some(isa), assembly).unwrap();
             let blob = ProgramBlob::parse(raw_blob.into()).unwrap();
@@ -6639,10 +6791,15 @@ mod test {
                         *out = BasicInst::StoreAbsolute {
                             kind: StoreKind::U32,
                             src: src.into(),
-                            target: SectionTarget {
-                                section_index: self.data_section,
-                                offset: address.try_into().unwrap(),
-                            },
+                            target: absolute_target(data_section, address),
+                        }
+                        .into();
+                    }
+                    Instruction::load_i32(dst, address) => {
+                        *out = BasicInst::LoadAbsolute {
+                            kind: LoadKind::I32,
+                            dst: dst.into(),
+                            target: absolute_target(data_section, address),
                         }
                         .into();
                     }
@@ -6952,6 +7109,173 @@ mod test {
             ",
             expect_finished,
             expect_regs([(Reg::A0, 10), (Reg::A1, 8)]),
+        )
+    }
+
+    /// `test-data/x0-access.s`: one exported row per case of `convert_instruction`'s handling of
+    /// `x0` as a base or address. A relocatable object, so every section sits at 0.
+    const X0_FIXTURE: &[u8] = include_bytes!("../../../test-data/x0-access.o");
+
+    fn x0_fixture() -> Elf<'static> {
+        Elf::parse::<object::elf::FileHeader64<object::endian::LittleEndian>>(X0_FIXTURE).unwrap()
+    }
+
+    /// Converts the instruction of `row` (8 octets per row: it, then `ret`).
+    fn x0_convert(
+        elf: &Elf,
+        guard_sections: &[SectionIndex],
+        row: usize,
+    ) -> Result<Vec<InstExt<SectionTarget, SectionTarget>>, ProgramFromElfError> {
+        let section = elf.section_by_name(".text").next().expect("the fixture has .text");
+        let offset = row.checked_mul(8).expect("row offset overflows");
+        let raw = u32::from_le_bytes(section.data()[offset..][..4].try_into().unwrap());
+        let inst = Inst::decode(&DecoderConfig::new_64bit(), raw).unwrap_or_else(|| panic!("row {row} ({raw:#010x}) decodes"));
+        let at = SectionTarget {
+            section_index: section.index(),
+            offset: cast(offset).to_u64(),
+        };
+        let mut emitted = Vec::new();
+        convert_instruction(elf, section, guard_sections, at, inst, 4, |i| emitted.push(i))?;
+        Ok(emitted)
+    }
+
+    /// The whole fixture through the real linker. A relocatable object keeps every relocation and
+    /// puts every section at 0, so an access through `x0` in it cannot be a lost relocation - and
+    /// must not be mistaken for an access into `.text` because 8 happens to be an offset in it.
+    #[test]
+    fn test_x0_access_in_a_relocatable_object_links() {
+        for optimize in [false, true] {
+            let mut config = Config::default();
+            config.set_optimize(optimize);
+            if let Err(error) = program_from_elf(config, TargetInstructionSet::Latest, X0_FIXTURE) {
+                panic!("optimize = {optimize}: {error}");
+            }
+        }
+    }
+
+    /// Every instruction LLVM can emit with `x0` as its base or address, decoded from
+    /// `test-data/x0-access.s` and converted with the guard list of a relocatable object: none. A
+    /// load or store becomes the absolute access it is, at its literal address, so the VM reports
+    /// exactly the fault it would have - a trap at the bottom, a resumable page fault at the top
+    /// under dynamic paging. A load into `x0` loads into the scratch `E0`, spilled later, since its
+    /// fault is all it does. What has no literal form - an atomic, a jump to an ELF address - is a
+    /// trap, exact at address 0. LLVM emits the load/store forms at `-O3` for a null dereference
+    /// on a path it assumes never runs.
+    ///
+    /// Not a `ProgramBuilder` test: that assembles PolkaVM code, which has no `x0`, straight into
+    /// the optimizer's IR. The conversion is the stage before it; `crates/polkavm`'s
+    /// `test_asm_x0_access` runs the linked rows on every backend.
+    #[test]
+    fn test_convert_x0_access_emitted_at_o3() {
+        enum Want {
+            Store(u32),
+            Load(super::Reg, u32),
+            Trap,
+        }
+        use Want::*;
+        let elf = x0_fixture();
+        let want = [
+            Store(0x8),
+            Load(super::Reg::A1, 0x10),
+            Store(0xffff_fff0),
+            Load(super::Reg::A1, 0xffff_ffe8),
+            Load(super::Reg::E0, 0x18),        // ld zero, 24(zero)
+            Load(super::Reg::E0, 0xffff_ffe0), // ld zero, -32(zero)
+            Trap,                              // lr.w
+            Trap,                              // sc.w
+            Trap,                              // amoadd.w
+            Trap,                              // jalr ra, 32(zero)
+            Trap,                              // sw zero, 0(zero)
+        ];
+        for (row, want) in want.into_iter().enumerate() {
+            let emitted = x0_convert(&elf, &[], row).unwrap_or_else(|e| panic!("row {row} must link: {e}"));
+            let ok = match (want, emitted.as_slice()) {
+                (Store(a), [InstExt::Basic(BasicInst::StoreAbsolute { target, .. })]) => target.place() == Place::Address(a),
+                (Load(r, a), [InstExt::Basic(BasicInst::LoadAbsolute { dst, target, .. })]) => {
+                    *dst == r && target.place() == Place::Address(a)
+                }
+                (Trap, [InstExt::Control(ControlInst::Unimplemented)]) => true,
+                _ => false,
+            };
+            assert!(ok, "row {row} converted to {emitted:?}");
+        }
+    }
+
+    /// ...but in a *linked* ELF, an access through `x0` into a section the linker loads means the
+    /// instruction lost its relocation (linker relaxation, or no `--emit-relocs`): the program lives
+    /// there, so it is refused rather than silently pointed at a guard region. The guard list here
+    /// is what such an ELF with `.text` at 0 yields.
+    #[test]
+    fn test_convert_x0_access_into_a_loaded_section_is_refused() {
+        let elf = x0_fixture();
+        let text = elf.section_by_name(".text").next().unwrap().index();
+        // `sd a0, 8(zero)`: address 8 lies inside `.text`.
+        let error = x0_convert(&elf, &[text], 0).unwrap_err().to_string();
+        assert!(error.contains("inside section '.text'"), "{error}");
+        // Past `.text`'s end (0x58), nothing is laid out: the top-of-memory store still links.
+        assert!(x0_convert(&elf, &[text], 2).is_ok());
+    }
+
+    /// The misbuild check compares the whole access with each section, not its first octet: `sd`
+    /// at 8 touches `[8, 16)`, so a section starting at 12 is hit and one starting at 16 is not.
+    #[test]
+    fn test_ranges_overlap_is_the_whole_access() {
+        assert!(!ranges_overlap(8, 8, 16, 4), "touching at the end");
+        assert!(ranges_overlap(8, 8, 15, 4), "one octet in at the end");
+        assert!(ranges_overlap(8, 8, 12, 100), "a section starting mid-access");
+        assert!(!ranges_overlap(8, 8, 0, 8), "touching at the start");
+        assert!(ranges_overlap(8, 8, 0, 9), "one octet in at the start");
+        assert!(!ranges_overlap(8, 8, 0, 0), "an empty section");
+        assert!(ranges_overlap(u64::MAX - 7, 8, u64::MAX - 3, 4), "at the top of a 64-bit space");
+        assert!(!ranges_overlap(u64::MAX - 7, 8, 0, 8), "which does not wrap to the bottom");
+    }
+
+    fn expect_same_fault(a: &mut polkavm::RawInstance, b: &mut polkavm::RawInstance) {
+        let (a, b) = (a.run().unwrap(), b.run().unwrap());
+        assert!(!matches!(a, polkavm::InterruptKind::Finished), "a guard-region access must fault");
+        assert_eq!(format!("{a:?}"), format!("{b:?}"), "-O2 must fault exactly as -O0 does");
+    }
+
+    /// A load from a literal address outside the memory map faults, so the optimizer must not
+    /// elide it as an unused load - otherwise `-O2` runs on past a null dereference `-O0` stops at.
+    #[test]
+    fn test_optimize_04_dead_load_from_a_literal_address_is_kept() {
+        ProgramBuilder::test_optimize_oneshot(
+            "
+            pub @main:
+                a1 = i32 [0xfffff000]
+                a1 = 0x2
+                ret
+            ",
+            "
+            @0 [export #0: 'main']
+                a1 = i32 [0xfffffffffffff000]
+                a1 = 0x2
+                ret
+            ",
+            |_| {},
+            expect_same_fault,
+        )
+    }
+
+    /// A store to a literal guard-region address faults identically at every optimization level.
+    #[test]
+    fn test_optimize_05_store_to_a_literal_address_faults() {
+        ProgramBuilder::test_optimize_oneshot(
+            "
+            pub @main:
+                a0 = 0x1
+                u32 [0x8] = a0
+                ret
+            ",
+            "
+            @0 [export #0: 'main']
+                a0 = 0x1
+                u32 [0x8] = a0
+                ret
+            ",
+            |_| {},
+            expect_same_fault,
         )
     }
 }
@@ -7427,10 +7751,10 @@ fn spill_fake_registers(
                         BasicInst::LoadAbsolute {
                             kind: if is_rv64 { LoadKind::U64 } else { LoadKind::I32 },
                             dst: dst_reg,
-                            target: SectionTarget {
+                            target: AbsoluteTarget::from(SectionTarget {
                                 section_index: section_regspill,
                                 offset: cast(offset).to_u64(),
-                            },
+                            }),
                         }
                     }
                     (None, Some(src_reg)) => {
@@ -7441,10 +7765,10 @@ fn spill_fake_registers(
                         BasicInst::StoreAbsolute {
                             kind: if is_rv64 { StoreKind::U64 } else { StoreKind::U32 },
                             src: src_reg.into(),
-                            target: SectionTarget {
+                            target: AbsoluteTarget::from(SectionTarget {
                                 section_index: section_regspill,
                                 offset: cast(offset).to_u64(),
-                            },
+                            }),
                         }
                     }
                     (Some(dst_reg), Some(src_reg)) => {
@@ -8322,6 +8646,13 @@ fn emit_code(
         }
     };
 
+    let get_absolute_address = |source: &SourceStack, target: AbsoluteTarget| -> Result<i32, ProgramFromElfError> {
+        match target.place() {
+            Place::Section(target) => get_data_address(source, target),
+            Place::Address(address) => Ok(cast(address).bitwise_as_i32()),
+        }
+    };
+
     let get_jump_target = |target: BlockTarget| -> Result<JumpTarget, ProgramFromElfError> {
         let Some(jump_target) = jump_target_for_block[target.index()] else {
             return Err(ProgramFromElfError::other("out of range jump target"));
@@ -8396,7 +8727,7 @@ fn emit_code(
                 ),
                 BasicInst::LoadAbsolute { kind, dst, target } => {
                     codegen! {
-                        args = (conv_reg(dst), get_data_address(source, target)?),
+                        args = (conv_reg(dst), get_absolute_address(source, target)?),
                         kind = kind,
                         {
                             LoadKind::I8 => load_i8,
@@ -8410,7 +8741,7 @@ fn emit_code(
                     }
                 }
                 BasicInst::StoreAbsolute { kind, src, target } => {
-                    let target = get_data_address(source, target)?;
+                    let target = get_absolute_address(source, target)?;
                     match src {
                         RegImm::Reg(src) => {
                             codegen! {
@@ -9669,6 +10000,7 @@ fn harvest_code_relocations(
                                 offset: _,
                             } => {
                                 if let Some(dst) = cast_reg_non_zero(dst)? {
+                                    let target = AbsoluteTarget::from(target);
                                     InstExt::Basic(BasicInst::LoadAbsolute { kind, dst, target })
                                 } else {
                                     InstExt::nop()
@@ -9707,7 +10039,7 @@ fn harvest_code_relocations(
                             } => InstExt::Basic(BasicInst::StoreAbsolute {
                                 kind,
                                 src: cast_reg_any(src)?,
-                                target,
+                                target: AbsoluteTarget::from(target),
                             }),
                             _ => {
                                 return Err(ProgramFromElfError::other(format!(
@@ -9902,6 +10234,7 @@ fn harvest_code_relocations(
                 }
                 Inst::Load { kind, base, dst, .. } => {
                     if let Some(dst) = cast_reg_non_zero(dst)? {
+                        let target = AbsoluteTarget::from(target);
                         (base, InstExt::Basic(BasicInst::LoadAbsolute { kind, dst, target }))
                     } else {
                         (base, InstExt::nop())
@@ -9912,7 +10245,7 @@ fn harvest_code_relocations(
                     InstExt::Basic(BasicInst::StoreAbsolute {
                         kind,
                         src: cast_reg_any(src)?,
-                        target,
+                        target: AbsoluteTarget::from(target),
                     }),
                 ),
                 _ => {
@@ -10313,12 +10646,31 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
     let mut imports = Vec::new();
     let mut metadata_to_nth_import = HashMap::new();
 
+    // Loaded sections an `x0` access can reach - the bottom or top 2 KiB; an access landing in one
+    // has lost its relocation. `.dynsym`, `.rela.dyn` and the like are allocated but never loaded,
+    // so they aren't in these lists. Empty for an object file: its sections all sit at a
+    // placeholder 0, and keep their relocations.
+    let top = if elf.is_64() { u64::MAX } else { u64::from(u32::MAX) };
+    let guard_sections: Vec<SectionIndex> = sections_code
+        .iter()
+        .chain(&sections_ro_data)
+        .chain(&sections_rw_data)
+        .chain(&sections_bss)
+        .copied()
+        .filter(|&index| {
+            let section = elf.section_by_index(index);
+            let (start, size) = (section.original_address(), section.size());
+            !elf.is_relocatable() && (ranges_overlap(0, 2048, start, size) || ranges_overlap(top.wrapping_sub(2047), 2048, start, size))
+        })
+        .collect();
+
     for &section_index in &sections_code {
         let section = elf.section_by_index(section_index);
         let initial_instruction_count = instructions.len();
         parse_code_section(
             &elf,
             section,
+            &guard_sections,
             &decoder_config,
             &relocations,
             &mut imports,

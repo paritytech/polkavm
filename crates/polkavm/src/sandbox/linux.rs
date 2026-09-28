@@ -2446,7 +2446,8 @@ impl super::Sandbox for Sandbox {
             }
         } else {
             let page_start = module.address_to_page(module.round_to_page_size_down(address));
-            let page_end = module.address_to_page(module.round_to_page_size_down(address + length - 1));
+            // `length` is non-zero, and `address + length` may be exactly 2^32: the top page.
+            let page_end = module.address_to_page(module.round_to_page_size_down(address + (length - 1)));
 
             if memory_protection.is_some() {
                 debug_assert!(module.is_multiple_of_page_size(address));

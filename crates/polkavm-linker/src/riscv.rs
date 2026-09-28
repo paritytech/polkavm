@@ -137,6 +137,16 @@ impl LoadKind {
             _ => None,
         }
     }
+
+    /// The access width, in octets.
+    pub const fn width(self) -> u64 {
+        match self {
+            LoadKind::I8 | LoadKind::U8 => 1,
+            LoadKind::I16 | LoadKind::U16 => 2,
+            LoadKind::I32 | LoadKind::U32 => 4,
+            LoadKind::U64 => 8,
+        }
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, Hash)]
@@ -157,6 +167,16 @@ impl StoreKind {
             0b010 => Some(StoreKind::U32),
             0b011 => Some(StoreKind::U64),
             _ => None,
+        }
+    }
+
+    /// The access width, in octets.
+    pub const fn width(self) -> u64 {
+        match self {
+            StoreKind::U8 => 1,
+            StoreKind::U16 => 2,
+            StoreKind::U32 => 4,
+            StoreKind::U64 => 8,
         }
     }
 }
