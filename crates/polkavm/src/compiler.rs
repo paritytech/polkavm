@@ -7,7 +7,7 @@ use polkavm_common::abi::VM_CODE_ADDRESS_ALIGNMENT;
 use polkavm_common::cast::cast;
 use polkavm_common::program::{scan_is_jump_target_valid, InstructionSetKind, JumpTable, ProgramCounter, ProgramExport, RawReg};
 use polkavm_common::utils::{Bitness, BitnessT, GasVisitorT};
-use polkavm_common::zygote::VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH;
+use polkavm_common::zygote::{JUMP_TABLE_INVALID_ADDRESS, VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH};
 
 use crate::error::Error;
 
@@ -25,24 +25,6 @@ pub use crate::compiler::amd64::{extract_gas_cost, on_page_fault, on_signal_trap
 
 #[cfg(all(target_arch = "x86_64", feature = "generic-sandbox"))]
 pub(crate) use crate::compiler::amd64::{are_we_executing_memset, indirect_memory_operand, MemsetKind};
-
-/// The address to which to jump to for invalid dynamic jumps.
-///
-/// This needs to be at least 0x800000000000 on modern CPUs, but ideally should have
-/// the most significant bit set to be future proof.
-///
-/// Why 0x800000000000? This constant is 48-bit (a single '1' followed by 47 '0's) which is
-/// how many bits of virtual address space most modern CPUs support, and we deliberately want
-/// to have an address which is bigger than this.
-///
-/// If the CPU encounters a jump instruction, and that instruction tells it to go to an address which
-/// fits into 48 bits, then that might be a jump to somewhere valid, so the CPU has no choice but to
-/// execute it, and clobber the instruction pointer with the target address in the process.
-///
-/// However, if it is a jump to an address that does *not* fit into 48 bits then the CPU can immediately
-/// generate a page fault without even trying to jump there, leaving the original value of the instruction
-/// pointer alone, which is exactly what we want.
-pub const JUMP_TABLE_INVALID_ADDRESS: usize = 0xfa6f29540376ba8a;
 
 const CONTINUE_BASIC_BLOCK: usize = 0;
 const END_BASIC_BLOCK_UNCONDITIONAL: usize = 1;
@@ -363,19 +345,20 @@ where
         let native_page_size = crate::sandbox::get_native_page_size();
         let vm_code_address_alignment = VM_CODE_ADDRESS_ALIGNMENT as usize;
 
+        let invalid_address = JUMP_TABLE_INVALID_ADDRESS as usize;
         let jump_table_length = (self.jump_table.len() as usize + 1) * vm_code_address_alignment;
         let mut native_jump_table = S::allocate_jump_table(global, jump_table_length).map_err(Error::from_display)?;
         assert_eq!(core::mem::size_of_val(native_jump_table.as_ref()) % native_page_size, 0);
         {
             let native_jump_table = native_jump_table.as_mut();
-            native_jump_table[..vm_code_address_alignment].fill(JUMP_TABLE_INVALID_ADDRESS); // First entry is always invalid.
-            native_jump_table[jump_table_length..].fill(JUMP_TABLE_INVALID_ADDRESS); // Fill in the padding, since the size is page-aligned.
+            native_jump_table[..vm_code_address_alignment].fill(invalid_address); // First entry is always invalid.
+            native_jump_table[jump_table_length..].fill(invalid_address); // Fill in the padding, since the size is page-aligned.
 
             let native_jump_table = &mut native_jump_table[vm_code_address_alignment..jump_table_length];
             assert_eq!(native_jump_table.len(), self.jump_table.len() as usize * vm_code_address_alignment);
 
             for (jump_table_index, code_offset) in self.jump_table.iter().enumerate() {
-                let mut address = JUMP_TABLE_INVALID_ADDRESS;
+                let mut address = invalid_address;
                 if let Some(label) = self.program_counter_to_label.get(code_offset.0) {
                     if let Some(native_code_offset) = self.asm.get_label_origin_offset(label) {
                         address = native_code_origin.checked_add_signed(native_code_offset as i64).expect("overflow") as usize;
@@ -384,7 +367,7 @@ where
 
                 let offset = jump_table_index * vm_code_address_alignment;
                 native_jump_table[offset] = address;
-                native_jump_table[offset + 1..offset + vm_code_address_alignment].fill(JUMP_TABLE_INVALID_ADDRESS);
+                native_jump_table[offset + 1..offset + vm_code_address_alignment].fill(invalid_address);
             }
         }
 

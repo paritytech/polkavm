@@ -99,6 +99,24 @@ pub const VM_ADDR_JUMP_TABLE: u64 = 0x800000000;
 /// The address where the return-to-host jump table vector physically resides.
 pub const VM_ADDR_JUMP_TABLE_RETURN_TO_HOST: u64 = VM_ADDR_JUMP_TABLE + ((crate::abi::VM_ADDR_RETURN_TO_HOST as u64) << 3);
 
+/// The address to which to jump to for invalid dynamic jumps.
+///
+/// This needs to be at least 0x800000000000 on modern CPUs, but ideally should have
+/// the most significant bit set to be future proof.
+///
+/// Why 0x800000000000? This constant is 48-bit (a single '1' followed by 47 '0's) which is
+/// how many bits of virtual address space most modern CPUs support, and we deliberately want
+/// to have an address which is bigger than this.
+///
+/// If the CPU encounters a jump instruction, and that instruction tells it to go to an address which
+/// fits into 48 bits, then that might be a jump to somewhere valid, so the CPU has no choice but to
+/// execute it, and clobber the instruction pointer with the target address in the process.
+///
+/// However, if it is a jump to an address that does *not* fit into 48 bits then the CPU can immediately
+/// generate a page fault without even trying to jump there, leaving the original value of the instruction
+/// pointer alone, which is exactly what we want.
+pub const JUMP_TABLE_INVALID_ADDRESS: u64 = 0xfa6f29540376ba8a;
+
 /// The address of the global per-VM context struct.
 pub const VM_ADDR_VMCTX: u64 = 0x400000000;
 
