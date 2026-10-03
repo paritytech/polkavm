@@ -1539,7 +1539,7 @@ fn jump_indirect_into_return_to_host_page(engine_config: Config, isa: Instructio
     builder.set_code(&[asm::jump_indirect(A0, 0)], &[]);
 
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-    let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
+    let module = Module::from_blob(&engine, &test_module_config(), blob).unwrap();
 
     let mut instance = module.instantiate().unwrap();
     instance.set_reg(Reg::A0, crate::RETURN_TO_HOST);
