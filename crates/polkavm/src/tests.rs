@@ -3840,6 +3840,51 @@ fn access_memory_from_host(config: Config, isa: InstructionSetKind) {
     );
 }
 
+fn non_power_of_two_stack_growth(config: Config, isa: InstructionSetKind) {
+    let engine = Engine::new(&config).unwrap();
+    for stack_size in [192 * 1024, 384 * 1024, 768 * 1024] {
+        let mut builder = ProgramBlobBuilder::new(isa);
+        builder.set_stack_size(stack_size);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(
+            &[
+                asm::load_indirect_u32(Reg::A1, Reg::A0, 0),
+                asm::store_indirect_u32(Reg::A1, Reg::A2, 0),
+                asm::ret(),
+            ],
+            &[],
+        );
+        let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+        let module = Module::from_blob(&engine, &test_module_config(), blob).unwrap();
+        let stack = module.memory_map().stack_range();
+        let mut instance = module.instantiate().unwrap();
+        instance.write_memory(stack.end - 4, &[1, 2, 3, 4]).unwrap();
+        instance.write_memory(stack.start, &[5, 6, 7, 8]).unwrap();
+        assert_eq!(instance.read_memory(stack.end - 4, 4).unwrap(), [1, 2, 3, 4]);
+        assert_eq!(instance.read_memory(stack.start, 8).unwrap(), [5, 6, 7, 8, 0, 0, 0, 0]);
+        assert_eq!(instance.read_memory(stack.start + stack_size / 2, 4).unwrap(), [0; 4]);
+        assert_out_of_range_access(instance.read_memory(stack.start - 1, 1), stack.start - 1, 1);
+        assert_out_of_range_access(instance.write_memory(stack.start - 1, &[9]), stack.start - 1, 1);
+
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(Reg::A0, u64::from(stack.end - 4));
+        instance.set_reg(Reg::A2, u64::from(stack.start));
+        instance.set_next_program_counter(ProgramCounter(0));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+        assert_eq!(instance.reg(Reg::A1), 0x04030201);
+        assert_eq!(instance.read_memory(stack.start, 4).unwrap(), [1, 2, 3, 4]);
+
+        instance.set_reg(Reg::A2, u64::from(stack.start - 4));
+        instance.set_next_program_counter(ProgramCounter(0));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+
+        instance.set_reg(Reg::A0, u64::from(stack.start - 4));
+        instance.set_reg(Reg::A2, u64::from(stack.start));
+        instance.set_next_program_counter(ProgramCounter(0));
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+    }
+}
+
 fn access_memory_from_within(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
@@ -6356,6 +6401,7 @@ run_tests! {
     aux_data_content_after_shrink
     access_memory_from_host
     access_memory_from_within
+    non_power_of_two_stack_growth
     write_read_memory_from_host
     sbrk_knob_works
 
