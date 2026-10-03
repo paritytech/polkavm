@@ -8,7 +8,11 @@ fn main() {
 
     let config = Config::from_env().unwrap();
     let engine = Engine::new(&config).unwrap();
-    let module = Module::from_blob(&engine, &Default::default(), blob).unwrap();
+    let mut module_config = polkavm::ModuleConfig::default();
+    if cfg!(target_os = "macos") {
+        module_config.set_page_size(16_384);
+    }
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
 
     // High-level API.
     let mut linker: Linker = Linker::new();
