@@ -7086,7 +7086,10 @@ impl ProgramBlob {
             }
 
             let jump_table_entry_size = reader.read_byte()?;
-            let legacy_code_length = if blob.isa.is_legacy() { Some(reader.read_varint()?) } else { None };
+            let code_length = reader.read_varint()?;
+            if code_length > VM_MAXIMUM_CODE_SIZE {
+                return Err(ProgramParseError(ProgramParseErrorKind::Other("the code section is too long")));
+            }
 
             if !matches!(jump_table_entry_size, 0..=4) {
                 return Err(ProgramParseError(ProgramParseErrorKind::Other("invalid jump table entry size")));
@@ -7098,23 +7101,19 @@ impl ProgramBlob {
 
             blob.jump_table_entry_size = jump_table_entry_size;
             blob.jump_table = reader.read_slice_as_bytes(jump_table_length as usize)?;
-
-            let code_length = match legacy_code_length {
-                Some(code_length) => cast(code_length).to_usize(),
-                None => parts.code_and_jump_table.len() - (reader.position - initial_position),
-            };
-
-            if code_length > cast(VM_MAXIMUM_CODE_SIZE).to_usize() {
-                return Err(ProgramParseError(ProgramParseErrorKind::Other("the code section is too long")));
-            }
-
-            blob.code = reader.read_slice_as_bytes(code_length)?;
+            blob.code = reader.read_slice_as_bytes(code_length as usize)?;
 
             if blob.code.len() > (i32::MAX as usize) {
                 return Err(ProgramParseError(ProgramParseErrorKind::Other("the program blob is too large")));
             }
 
-            if blob.isa.is_legacy() {
+            if !blob.isa.is_legacy() {
+                if reader.position - initial_position != parts.code_and_jump_table.len() {
+                    return Err(ProgramParseError(ProgramParseErrorKind::Other(
+                        "unexpected data after the end of the code",
+                    )));
+                }
+            } else {
                 let bitmask_length = parts.code_and_jump_table.len() - (reader.position - initial_position);
                 blob.bitmask = reader.read_slice_as_bytes(bitmask_length)?;
 
@@ -8500,4 +8499,17 @@ fn test_instruction_formatting() {
     assert_eq!(self::asm::store_imm_indirect_u8(Reg::A0, 0, 2).to_string(), "u8 [a0] = 0x2");
     assert_eq!(self::asm::store_imm_indirect_u8(Reg::A0, 1, 2).to_string(), "u8 [a0 + 1] = 0x2");
     assert_eq!(self::asm::store_imm_indirect_u8(Reg::A0, -1, 2).to_string(), "u8 [a0 - 1] = 0x2");
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn test_existing_latest64_blob_instructions() {
+    let bytes = [
+        80, 86, 77, 0, 2, 39, 0, 0, 0, 0, 0, 0, 0, 1, 4, 0, 0, 144, 0, 5, 7, 1, 0, 4, 109, 97, 105, 110, 6, 8, 0, 0, 5, 5, 7, 42, 3, 0, 0,
+    ];
+    let blob = ProgramBlob::parse(bytes.as_slice().into()).unwrap();
+    let mut instructions = blob.instructions();
+    assert_eq!(instructions.next().unwrap().kind, asm::load_imm(Reg::A0, 42));
+    assert_eq!(instructions.next().unwrap().kind, asm::ret());
+    assert!(instructions.next().is_none());
 }
