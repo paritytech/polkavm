@@ -5718,6 +5718,7 @@ impl BlockRegs {
 fn perform_constant_propagation(
     imports: &[Import],
     elf: &Elf,
+    relocations: &BTreeMap<SectionTarget, RelocationKind>,
     all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>],
     info_for_block: &mut [BlockInfo],
     unknown_counter: &mut u64,
@@ -5877,7 +5878,8 @@ fn perform_constant_propagation(
 
         if let &BasicInst::LoadAbsolute { kind, dst, target } = &instruction {
             let section = elf.section_by_index(target.section_index);
-            if section.is_allocated() && !section.is_writable() {
+            let relocated_bytes = target.map_offset_i64(|offset| offset.saturating_sub(7).max(0))..target.add(8);
+            if section.is_allocated() && !section.is_writable() && relocations.range(relocated_bytes).next().is_none() {
                 let value = match kind {
                     LoadKind::U64 => section
                         .data()
@@ -6260,6 +6262,7 @@ fn gather_terminators(all_blocks: &[BasicBlock<AnyTarget, BlockTarget>]) -> Vec<
 fn optimize_program(
     config: &Config,
     elf: &Elf,
+    relocations: &BTreeMap<SectionTarget, RelocationKind>,
     isa: InstructionSetKind,
     imports: &[Import],
     all_blocks: &mut [BasicBlock<AnyTarget, BlockTarget>],
@@ -6388,6 +6391,7 @@ fn optimize_program(
                 if perform_constant_propagation(
                     imports,
                     elf,
+                    relocations,
                     all_blocks,
                     &mut info_for_block,
                     &mut unknown_counter,
@@ -6693,7 +6697,16 @@ mod test {
             let mut reachability_graph =
                 calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations).unwrap();
             if matches!(config.opt_level, OptLevel::O2 | OptLevel::Oexperimental) {
-                optimize_program(&config, &elf, isa, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
+                optimize_program(
+                    &config,
+                    &elf,
+                    &relocations,
+                    isa,
+                    &imports,
+                    &mut all_blocks,
+                    &mut reachability_graph,
+                    &mut exports,
+                );
             }
             let mut used_blocks = collect_used_blocks(&all_blocks, &reachability_graph);
 
@@ -10385,7 +10398,16 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
     if matches!(config.opt_level, OptLevel::O1 | OptLevel::O2 | OptLevel::Oexperimental) {
         reachability_graph = calculate_reachability(&section_to_block, &all_blocks, &data_sections_set, &exports, &relocations)?;
         if matches!(config.opt_level, OptLevel::O2 | OptLevel::Oexperimental) {
-            info_for_block = optimize_program(&config, &elf, isa, &imports, &mut all_blocks, &mut reachability_graph, &mut exports);
+            info_for_block = optimize_program(
+                &config,
+                &elf,
+                &relocations,
+                isa,
+                &imports,
+                &mut all_blocks,
+                &mut reachability_graph,
+                &mut exports,
+            );
         } else {
             for current in (0..all_blocks.len()).map(BlockTarget::from_raw) {
                 perform_nop_elimination(&mut all_blocks, current);
