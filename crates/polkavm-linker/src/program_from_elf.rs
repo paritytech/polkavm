@@ -5878,8 +5878,18 @@ fn perform_constant_propagation(
 
         if let &BasicInst::LoadAbsolute { kind, dst, target } = &instruction {
             let section = elf.section_by_index(target.section_index);
-            let relocated_bytes = target.map_offset_i64(|offset| offset.saturating_sub(7).max(0))..target.add(8);
-            if section.is_allocated() && !section.is_writable() && relocations.range(relocated_bytes).next().is_none() {
+            let is_relocated = relocations
+                .range(..target.add(kind.size()))
+                .next_back()
+                .is_some_and(|(relocation_target, relocation)| {
+                    relocation_target.section_index == target.section_index
+                        && relocation_target
+                            .offset
+                            .saturating_add(relocation.size(section.data(), relocation_target.offset))
+                            > target.offset
+                });
+
+            if section.is_allocated() && !section.is_writable() && !is_relocated {
                 let value = match kind {
                     LoadKind::U64 => section
                         .data()
@@ -8973,6 +8983,17 @@ pub(crate) enum RelocationSize {
     U64,
 }
 
+impl RelocationSize {
+    fn size(self) -> u64 {
+        match self {
+            RelocationSize::U8 => 1,
+            RelocationSize::U16 => 2,
+            RelocationSize::U32 => 4,
+            RelocationSize::U64 => 8,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum SizeRelocationSize {
     SixBits,
@@ -9003,6 +9024,29 @@ impl RelocationKind {
             RelocationKind::Abs { target, .. } => [Some(*target), None],
             RelocationKind::Offset { origin, target, .. } => [Some(*origin), Some(*target)],
             RelocationKind::JumpTable { target_code, target_base } => [Some(*target_code), Some(*target_base)],
+        }
+    }
+
+    fn size(&self, section_data: &[u8], offset: u64) -> u64 {
+        match self {
+            RelocationKind::Abs { size, .. }
+            | RelocationKind::Offset {
+                size: SizeRelocationSize::Generic(size),
+                ..
+            } => size.size(),
+            RelocationKind::Offset {
+                size: SizeRelocationSize::SixBits,
+                ..
+            } => 1,
+            RelocationKind::Offset {
+                size: SizeRelocationSize::Uleb128,
+                ..
+            } => section_data
+                .iter()
+                .skip(offset as usize)
+                .position(|byte| byte & 0x80 == 0)
+                .map_or(0, |position| (position as u64).saturating_add(1)),
+            RelocationKind::JumpTable { .. } => 4,
         }
     }
 }
