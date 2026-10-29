@@ -620,7 +620,7 @@ fn bounded_interpreter_cache(config: Config, isa: InstructionSetKind) {
 
     assert_eq!(INTERPRETER_CACHE_ENTRY_SIZE, 24);
 
-    let minimum_cache_size = 24 * 2;
+    let minimum_cache_size = 24 * 4;
 
     for max_cache_size_bytes in 0..minimum_cache_size {
         log::debug!("Testing with max_cache_size_bytes: {}", max_cache_size_bytes);
@@ -690,6 +690,85 @@ fn bounded_interpreter_cache(config: Config, isa: InstructionSetKind) {
                 assert_eq!(instance.reg(Reg::A5), 0x1);
             }
         }
+    }
+}
+
+fn lazy_branch_target_steps_and_charges_gas(config: Config, isa: InstructionSetKind) {
+    // The branch targets basic block 2, the big block, which starts at instruction 3.
+    const BIG_BLOCK_START: usize = 3;
+    const BIG_BLOCK_ADDS: u64 = 32;
+    // The adds followed by a `ret`.
+    const BIG_BLOCK_LENGTH: usize = BIG_BLOCK_ADDS as usize + 1;
+
+    let mut code = vec![asm::branch_eq_imm(A0, 0, 2), asm::add_imm_32(A1, A1, 1), asm::ret()];
+    assert_eq!(code.len(), BIG_BLOCK_START);
+    code.extend((0..BIG_BLOCK_ADDS).map(|_| asm::add_imm_32(A2, A2, 1)));
+    code.push(asm::ret());
+    assert_eq!(code.len(), BIG_BLOCK_START + BIG_BLOCK_LENGTH);
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&code, &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_step_tracing(true);
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
+
+    let mut instance = module.instantiate().unwrap();
+    let mut run = |a0: u64, gas: i64| {
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(Reg::A0, a0);
+        instance.set_reg(Reg::A2, 0);
+        instance.set_gas(gas);
+        instance.set_next_program_counter(offsets[0]);
+
+        let mut steps = Vec::new();
+        loop {
+            match instance.run().unwrap() {
+                InterruptKind::Step => steps.push(instance.program_counter().unwrap()),
+                interrupt => return (steps, interrupt, instance.program_counter(), instance.gas(), instance.reg(Reg::A2)),
+            }
+        }
+    };
+
+    // Every instruction costs one unit of gas.
+    let (small_blocks, big_block) = offsets.split_at(BIG_BLOCK_START);
+    let branch_cost = 1;
+    let big_block_cost = i64::try_from(BIG_BLOCK_LENGTH).unwrap();
+    let big_block_steps: Vec<_> = core::iter::once(offsets[0]).chain(big_block.iter().copied()).collect();
+    let small_blocks_cost = i64::try_from(BIG_BLOCK_START).unwrap();
+
+    assert_eq!(
+        run(1, 100),
+        (small_blocks.to_vec(), InterruptKind::Finished, None, 100 - small_blocks_cost, 0)
+    );
+    assert_eq!(
+        run(0, big_block_cost),
+        (
+            vec![offsets[0], big_block[0]],
+            InterruptKind::NotEnoughGas,
+            Some(big_block[0]),
+            big_block_cost - branch_cost,
+            0
+        )
+    );
+
+    for _ in 0..2 {
+        assert_eq!(
+            run(0, 100),
+            (
+                big_block_steps.clone(),
+                InterruptKind::Finished,
+                None,
+                100 - branch_cost - big_block_cost,
+                BIG_BLOCK_ADDS
+            )
+        );
     }
 }
 
@@ -6353,6 +6432,7 @@ run_tests! {
 
     reclaim_cache_memory
     bounded_interpreter_cache
+    lazy_branch_target_steps_and_charges_gas
 
     memset_basic
     memset_with_dynamic_paging

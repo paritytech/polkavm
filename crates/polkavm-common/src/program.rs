@@ -7669,7 +7669,8 @@ impl ProgramBlob {
             } => (page_size, instruction_count, basic_block_count),
         };
 
-        let cache_entry_count_upper_bound = cast(instruction_count).to_usize() + cast(basic_block_count).to_usize();
+        // Every basic block can have a gas metering handler and a stub after a conditional branch.
+        let cache_entry_count_upper_bound = cast(instruction_count).to_usize() + 2 * cast(basic_block_count).to_usize();
         let cache_size_upper_bound = interpreter_calculate_cache_size(cache_entry_count_upper_bound);
 
         let mut purgeable_ram_consumption = match args {
@@ -7679,10 +7680,11 @@ impl ProgramBlob {
                 max_block_size,
                 ..
             } => {
+                // Must match the minimum the interpreter accepts: two blocks, each with a gas metering handler and a branch stub.
                 let max_cache_size_bytes = cast(max_cache_size_bytes).to_usize();
-                let cache_entry_count_hard_limit = cast(max_block_size).to_usize();
-                let cache_bytes_hard_limit = interpreter_calculate_cache_size(cache_entry_count_hard_limit);
-                if cache_bytes_hard_limit > max_cache_size_bytes {
+                let cache_entry_count_minimum = (cast(max_block_size).to_usize() + 2) * 2;
+                let cache_bytes_minimum = interpreter_calculate_cache_size(cache_entry_count_minimum);
+                if cache_bytes_minimum > max_cache_size_bytes {
                     return Err("maximum cache size is too small for the given max block size");
                 }
 
@@ -7746,7 +7748,7 @@ fn test_estimate_interpreter_memory_usage_accounts_for_the_jump_target_bitmaps()
             })
             .unwrap();
 
-        let cache = interpreter_calculate_cache_size(code.len() + 1);
+        let cache = interpreter_calculate_cache_size(code.len() + 2);
         let flat_map = (blob.code().len() + 1) * INTERPRETER_FLATMAP_ENTRY_SIZE as usize;
         (
             blob.code().len(),
@@ -7762,6 +7764,28 @@ fn test_estimate_interpreter_memory_usage_accounts_for_the_jump_target_bitmaps()
         extra,
         code_length.div_ceil(CODE_BLOCK_SIZE) * (core::mem::size_of::<CodeBlockBitmap>() + 8)
     );
+}
+
+#[cfg(feature = "alloc")]
+#[test]
+fn test_estimate_interpreter_memory_usage_bounded_cache_minimum() {
+    let mut builder = crate::writer::ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.set_code(&[asm::trap()], &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let estimate = |max_cache_size_bytes: usize| {
+        blob.estimate_interpreter_memory_usage(EstimateInterpreterMemoryUsageArgs::BoundedCache {
+            instruction_count: 1000,
+            basic_block_count: 100,
+            max_cache_size_bytes: cast(max_cache_size_bytes).to_u32_or_panic(),
+            max_block_size: 5,
+            page_size: 0x4000,
+        })
+    };
+
+    // Two blocks of five instructions, each with a gas metering handler and a branch stub.
+    let minimum = interpreter_calculate_cache_size(2 * (5 + 2));
+    assert!(estimate(minimum - 1).is_err());
+    assert!(estimate(minimum).is_ok());
 }
 
 #[cfg(feature = "alloc")]
