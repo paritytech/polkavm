@@ -1,5 +1,9 @@
 use core::ops::Range;
 
+use object::elf::{FileHeader64, PF_R, PF_W, PF_X, PT_LOAD};
+use object::read::elf::{ElfFile, FileHeader, ProgramHeader};
+use object::{LittleEndian, Object};
+
 use crate::riscv::{DecoderConfig, Inst, Reg};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -104,6 +108,36 @@ impl Interpreter {
         self.stop_address = Some(address);
     }
 
+    pub fn load_elf(&mut self, data: &[u8]) -> Result<(), object::Error> {
+        self.load_elf_class::<FileHeader64<LittleEndian>>(data)
+    }
+
+    fn load_elf_class<Elf: FileHeader>(&mut self, data: &[u8]) -> Result<(), object::Error> {
+        let file: ElfFile<Elf> = ElfFile::parse(data)?;
+        let endian = file.endian();
+        for header in file.elf_program_headers() {
+            let is_loadable = header.p_type(endian) == PT_LOAD;
+            let memory_size: u64 = header.p_memsz(endian).into();
+            if !is_loadable || memory_size == 0 {
+                continue;
+            }
+
+            let address: u64 = header.p_vaddr(endian).into();
+            let flags = header.p_flags(endian);
+            let protection = MemoryProtection {
+                read: flags & PF_R != 0,
+                write: flags & PF_W != 0,
+                execute: flags & PF_X != 0,
+            };
+            self.map_region(address, memory_size, protection);
+            self.write_memory(address, header.data(endian, data).unwrap()).unwrap();
+        }
+
+        self.set_program_counter(file.entry());
+
+        Ok(())
+    }
+
     pub fn map_region(&mut self, address: u64, size: u64, protection: MemoryProtection) {
         let end = address.checked_add(size).unwrap();
         assert!(!self.regions.iter().any(|region| region.overlaps(address..end)));
@@ -203,12 +237,17 @@ impl Interpreter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
 
+    use crate::riscv::RegImmKind;
+
+    const RV64_CATEGORIES: &[&str] = &["rv64ua", "rv64uc", "rv64ui", "rv64um", "rv64uzbb"];
     const REGISTERS_RANGE: Range<u32> = 0..32;
     const CODE_ADDRESS: u64 = 0x10000;
     const STOP_ADDRESS: u64 = 0xffff0000;
     const REGION_ADDRESS: u64 = 0x1000;
     const REGION_SIZE: u64 = 0x100;
+    const CORPUS_TEXT_ADDRESS: u64 = 0x10000;
     const NOP: u32 = 0x00000013;
     const INSTRUCTION_BYTE_LENGTH: u64 = 4;
     const COMPRESSED_INSTRUCTION_BYTE_LENGTH: u64 = 2;
@@ -221,6 +260,11 @@ mod tests {
         read: true,
         write: true,
         execute: false,
+    };
+    const READ_EXECUTE: MemoryProtection = MemoryProtection {
+        read: true,
+        write: false,
+        execute: true,
     };
 
     fn map_region_with_data(interpreter: &mut Interpreter, address: u64, data: &[u8], protection: MemoryProtection) {
@@ -246,6 +290,31 @@ mod tests {
         let stop_reason = interpreter.run(max_steps);
 
         (stop_reason, interpreter)
+    }
+
+    fn corpus_output_directory() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest-programs/riscv-tests/output")
+    }
+
+    fn corpus_elfs(category: &str) -> Vec<(String, Vec<u8>)> {
+        let directory = corpus_output_directory().join(category);
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "elf"))
+            .collect();
+        paths.sort();
+        assert!(!paths.is_empty());
+
+        paths
+            .into_iter()
+            .map(|path| {
+                (
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    std::fs::read(&path).unwrap(),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -476,5 +545,127 @@ mod tests {
             interpreter.fetch_instruction(CODE_ADDRESS + code.len() as u64),
             Err(Exception::InstructionAccessFault)
         );
+    }
+
+    #[test]
+    fn every_rv64_category_is_represented() {
+        let mut all_categories: Vec<String> = std::fs::read_dir(corpus_output_directory())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("rv64"))
+            .collect();
+        all_categories.sort();
+
+        assert_eq!(RV64_CATEGORIES, all_categories);
+    }
+
+    #[test]
+    fn every_rv64_elf_loads_and_decodes_entry_instruction() {
+        const ELF64_ENTRY_FIELD: Range<usize> = 0x18..0x20;
+        const ELF_MAGIC: &[u8] = b"\x7fELF";
+        for category in RV64_CATEGORIES {
+            for (_, elf) in corpus_elfs(category) {
+                let mut interpreter = Interpreter::new_64bit();
+                interpreter.load_elf(&elf).unwrap();
+                assert_eq!(
+                    interpreter.read_memory(CORPUS_TEXT_ADDRESS, ELF_MAGIC.len() as u64),
+                    Some(ELF_MAGIC)
+                );
+
+                let entry = u64::from_le_bytes(elf[ELF64_ENTRY_FIELD].try_into().unwrap());
+                assert_eq!(interpreter.program_counter(), entry);
+                let entry_offset = (entry - CORPUS_TEXT_ADDRESS) as usize;
+                let entry_word = u32::from_le_bytes(elf[entry_offset..][..INSTRUCTION_BYTE_LENGTH as usize].try_into().unwrap());
+                assert_eq!(interpreter.fetch_instruction(entry), Ok((entry_word, INSTRUCTION_BYTE_LENGTH)));
+                assert!(Inst::decode(&DecoderConfig::new_64bit(), entry_word).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn loads_add_elf() {
+        const ENTRY: u64 = 0x100f8;
+        const TEXT_SIZE: usize = 0x5f4;
+        let elf = include_bytes!("../../../guest-programs/riscv-tests/output/rv64ui/add.elf");
+        let mut interpreter = Interpreter::new_64bit();
+        interpreter.load_elf(elf).unwrap();
+        assert_eq!(memory_layout(&interpreter), [(CORPUS_TEXT_ADDRESS, TEXT_SIZE, READ_EXECUTE)]);
+        assert_eq!(
+            interpreter.read_memory(CORPUS_TEXT_ADDRESS, TEXT_SIZE as u64),
+            Some(&elf[..TEXT_SIZE])
+        );
+
+        assert_eq!(interpreter.program_counter(), ENTRY);
+        let (word, length) = interpreter.fetch_instruction(ENTRY).unwrap();
+        assert_eq!(length, INSTRUCTION_BYTE_LENGTH);
+        assert_eq!(
+            Inst::decode(&DecoderConfig::new_64bit(), word),
+            Some(Inst::RegImm {
+                kind: RegImmKind::Add64,
+                dst: Reg::S0,
+                src: Reg::Zero,
+                imm: 2
+            })
+        );
+    }
+
+    #[test]
+    fn loads_bss_tail_of_amoadd_d_elf() {
+        const TEXT_SIZE: usize = 0x170;
+        const DATA_ADDRESS: u64 = 0x11170;
+        const DATA_FILE_OFFSET: usize = 0x170;
+        const DATA_FILE_SIZE: usize = 0x20;
+        const DATA_FILE_RANGE: Range<usize> = DATA_FILE_OFFSET..DATA_FILE_OFFSET + DATA_FILE_SIZE;
+        const DATA_MEMORY_SIZE: usize = 0x28;
+        const BSS_TAIL: Range<usize> = DATA_FILE_SIZE..DATA_MEMORY_SIZE;
+        const BSS_TAIL_SIZE: usize = DATA_MEMORY_SIZE - DATA_FILE_SIZE;
+        let elf = include_bytes!("../../../guest-programs/riscv-tests/output/rv64ua/amoadd_d.elf");
+        let mut interpreter = Interpreter::new_64bit();
+        interpreter.load_elf(elf).unwrap();
+        assert_eq!(
+            memory_layout(&interpreter),
+            [
+                (CORPUS_TEXT_ADDRESS, TEXT_SIZE, READ_EXECUTE),
+                (DATA_ADDRESS, DATA_MEMORY_SIZE, READ_WRITE)
+            ]
+        );
+        let segment = interpreter.read_memory(DATA_ADDRESS, DATA_MEMORY_SIZE as u64).unwrap();
+        assert_eq!(segment[..DATA_FILE_SIZE], elf[DATA_FILE_RANGE]);
+        assert_eq!(segment[BSS_TAIL], [0; BSS_TAIL_SIZE]);
+    }
+
+    #[test]
+    fn skips_loading_non_loadable_segment() {
+        const ELF64_PROGRAM_HEADERS_OFFSET: usize = 0x40;
+        const ELF64_PROGRAM_HEADER_SIZE: usize = 0x38;
+        const P_MEMSZ_OFFSET: usize = 0x28;
+        let elf = include_bytes!("../../../guest-programs/riscv-tests/output/rv64ui/add.elf");
+        let mut patched_elf = elf.to_vec();
+        let non_zero_size = 0x40_u64;
+        let attributes_header = 0;
+        let attributes_mem_size_field_start = ELF64_PROGRAM_HEADERS_OFFSET + attributes_header * ELF64_PROGRAM_HEADER_SIZE + P_MEMSZ_OFFSET;
+        let attributes_mem_size_field_range =
+            attributes_mem_size_field_start..attributes_mem_size_field_start + core::mem::size_of::<u64>();
+
+        // The attributes header has a zero memory size. Patch it with a non-zero
+        // size to test that loading is skipped due to being a non-loadable segment.
+        patched_elf[attributes_mem_size_field_range].copy_from_slice(&non_zero_size.to_le_bytes());
+
+        let mut interpreter_with_patched_elf = Interpreter::new_64bit();
+        interpreter_with_patched_elf.load_elf(&patched_elf).unwrap();
+        let mut interpreter = Interpreter::new_64bit();
+        interpreter.load_elf(elf).unwrap();
+        assert_eq!(memory_layout(&interpreter_with_patched_elf), memory_layout(&interpreter));
+    }
+
+    #[test]
+    fn rejects_loading_32bit_elf() {
+        let mut interpreter = Interpreter::new_64bit();
+        interpreter.set_program_counter(0x1234);
+        let elf = include_bytes!("../../../guest-programs/riscv-tests/output/rv32ui/add.elf");
+        assert!(interpreter.load_elf(elf).is_err());
+        assert_eq!(interpreter.program_counter(), 0x1234);
+        assert_eq!(interpreter.read_memory(CORPUS_TEXT_ADDRESS, 1), None);
+        assert!(interpreter.load_elf(b"not an elf").is_err());
     }
 }
