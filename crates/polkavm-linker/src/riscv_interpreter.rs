@@ -317,6 +317,36 @@ mod tests {
             .collect()
     }
 
+    fn run_corpus(category: &str) {
+        const CORPUS_MAX_STEPS: u64 = 100_000;
+        let mut failures = Vec::new();
+        for (name, elf) in corpus_elfs(category) {
+            let mut interpreter = Interpreter::new_64bit();
+            interpreter.load_elf(&elf).unwrap();
+            interpreter.set_stop_address(STOP_ADDRESS);
+            interpreter.set_reg(Reg::RA, STOP_ADDRESS);
+
+            let stop_reason = interpreter.run(CORPUS_MAX_STEPS);
+            if stop_reason != StopReason::Finished {
+                failures.push(describe_failure(&name, stop_reason, &interpreter));
+            }
+        }
+        assert!(failures.is_empty(), "unexpected failure(s):\n{}", failures.join("\n"));
+    }
+
+    fn describe_failure(name: &str, stop_reason: StopReason, interpreter: &Interpreter) -> String {
+        let registers: Vec<String> = REGISTERS_RANGE
+            .map(Reg::decode)
+            .map(|reg| format!("{}={:#x}", reg.name(), interpreter.reg(reg)))
+            .collect();
+
+        format!(
+            "{name}: {stop_reason:?} at {:#x}. Registers: {}",
+            interpreter.program_counter(),
+            registers.join(" ")
+        )
+    }
+
     #[test]
     fn registers_are_zero_at_construction() {
         let interpreter = Interpreter::new_64bit();
@@ -667,5 +697,35 @@ mod tests {
         assert_eq!(interpreter.program_counter(), 0x1234);
         assert_eq!(interpreter.read_memory(CORPUS_TEXT_ADDRESS, 1), None);
         assert!(interpreter.load_elf(b"not an elf").is_err());
+    }
+
+    #[ignore = "enable once the base integer ISA is implemented"]
+    #[test]
+    fn corpus_rv64ui() {
+        run_corpus("rv64ui");
+    }
+
+    #[ignore = "enable once the C extension is implemented"]
+    #[test]
+    fn corpus_rv64uc() {
+        run_corpus("rv64uc");
+    }
+
+    #[ignore = "enable once the M extension is implemented"]
+    #[test]
+    fn corpus_rv64um() {
+        run_corpus("rv64um");
+    }
+
+    #[ignore = "enable once the A extension is implemented"]
+    #[test]
+    fn corpus_rv64ua() {
+        run_corpus("rv64ua");
+    }
+
+    #[ignore = "enable once the Zbb extension is implemented"]
+    #[test]
+    fn corpus_rv64uzbb() {
+        run_corpus("rv64uzbb");
     }
 }
