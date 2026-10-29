@@ -639,17 +639,15 @@ impl LookupTable {
     }
 }
 
-pub const INTERPRETER_CACHE_ENTRY_SIZE: u32 = {
-    if cfg!(target_pointer_width = "32") {
-        20
-    } else if cfg!(target_pointer_width = "64") {
-        24
-    } else {
-        panic!("unsupported target pointer width")
-    }
-};
+/// The size in bytes of an interpreter cache entry for the cache size limit.
+///
+/// The limit uses 24 bytes per entry on every target, so the cache resets at the same points everywhere.
+pub const INTERPRETER_CACHE_ENTRY_SIZE: u32 = 24;
 
 pub const INTERPRETER_FLATMAP_ENTRY_SIZE: u32 = 4;
+
+/// The size in bytes of the interpreter's record of a compiled basic block.
+pub const INTERPRETER_COMPILED_BLOCK_RECORD_SIZE: u32 = 8;
 
 pub fn interpreter_calculate_cache_size(count: usize) -> usize {
     count * INTERPRETER_CACHE_ENTRY_SIZE as usize
@@ -7693,6 +7691,11 @@ impl ProgramBlob {
         let code_length = self.code.len();
         purgeable_ram_consumption = purgeable_ram_consumption.saturating_add((code_length + 1) * INTERPRETER_FLATMAP_ENTRY_SIZE as usize);
 
+        // At most one record per basic block between cache resets, in a vector which doubles from four.
+        let block_record_count = core::cmp::max(4, 2 * cast(basic_block_count).to_usize());
+        purgeable_ram_consumption =
+            purgeable_ram_consumption.saturating_add(block_record_count * INTERPRETER_COMPILED_BLOCK_RECORD_SIZE as usize);
+
         if !self.isa.is_legacy() {
             purgeable_ram_consumption = purgeable_ram_consumption.saturating_add(
                 code_length.div_ceil(CODE_BLOCK_SIZE) * (core::mem::size_of::<CodeBlockBitmap>() + core::mem::size_of::<usize>()),
@@ -7748,9 +7751,10 @@ fn test_estimate_interpreter_memory_usage_accounts_for_the_jump_target_bitmaps()
 
         let cache = interpreter_calculate_cache_size(code.len() + 1);
         let flat_map = (blob.code().len() + 1) * INTERPRETER_FLATMAP_ENTRY_SIZE as usize;
+        let block_records = 4 * INTERPRETER_COMPILED_BLOCK_RECORD_SIZE as usize;
         (
             blob.code().len(),
-            cast(info.purgeable_ram_consumption).to_usize() - cache - flat_map,
+            cast(info.purgeable_ram_consumption).to_usize() - cache - flat_map - block_records,
         )
     }
 

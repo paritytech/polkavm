@@ -89,9 +89,22 @@ where
     }
 
     #[inline]
+    pub fn is_allocated(&self) -> bool {
+        self.inner.capacity() != 0
+    }
+
+    #[inline]
     pub fn reset(&mut self) {
         self.inner.clear();
         self.inner.shrink_to_fit();
+    }
+
+    #[inline]
+    pub fn remove_range(&mut self, keys: core::ops::Range<u32>) {
+        let end = core::cmp::min(keys.end as usize, self.inner.len());
+        if let Some(values) = self.inner.get_mut(keys.start as usize..end) {
+            values.fill(None);
+        }
     }
 }
 

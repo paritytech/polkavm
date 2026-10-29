@@ -9,7 +9,7 @@ use polkavm_common::cast::cast;
 use polkavm_common::program::{FrameKind, Imports, InstructionSetKind, Instructions, JumpTable, ProgramBlob, Reg};
 use polkavm_common::utils::{ArcBytes, AsUninitSliceMut, B32, B64};
 
-use crate::config::{BackendKind, Config, GasMeteringKind, ModuleConfig, SandboxKind};
+use crate::config::{BackendKind, Config, GasMeteringKind, InterpreterCompilationCost, ModuleConfig, SandboxKind};
 use crate::error::{bail, Error};
 use crate::gas::{CostModel, CostModelKind, GasVisitor};
 use crate::interpreter::InterpretedInstance;
@@ -278,6 +278,7 @@ pub(crate) struct ModulePrivate {
     pub(crate) module_key: Option<ModuleKey>,
 
     is_per_instruction_metering: bool,
+    interpreter_compilation_cost: Option<InterpreterCompilationCost>,
 }
 
 /// A compiled PolkaVM program module.
@@ -312,6 +313,10 @@ impl Module {
 
     pub(crate) fn is_per_instruction_metering(&self) -> bool {
         self.state().is_per_instruction_metering
+    }
+
+    pub(crate) fn interpreter_compilation_cost(&self) -> Option<InterpreterCompilationCost> {
+        self.state().interpreter_compilation_cost
     }
 
     pub(crate) fn is_strict(&self) -> bool {
@@ -420,6 +425,10 @@ impl Module {
 
         if config.is_per_instruction_metering && engine.selected_backend == BackendKind::Compiler {
             return Err(Error::from_static_str("per instruction metering is not supported with the recompiler").into());
+        }
+
+        if config.is_per_instruction_metering && config.interpreter_compilation_cost.is_some() {
+            return Err(Error::from_static_str("compilation cost is not supported with per instruction gas metering").into());
         }
 
         log::trace!(
@@ -676,6 +685,13 @@ impl Module {
         let page_shift = memory_map.page_size().ilog2();
         let page_size_mask = (1 << page_shift) - 1;
 
+        // Only the interpreter charges for compilation, and not when it's crosschecking the recompiler.
+        let interpreter_compilation_cost = if compiled_module.is_some() {
+            None
+        } else {
+            config.interpreter_compilation_cost
+        };
+
         let module = Arc::new(ModulePrivate {
             engine_state: Some(Arc::clone(&engine.state)),
 
@@ -691,6 +707,7 @@ impl Module {
             page_shift,
             cost_model,
             is_per_instruction_metering: config.is_per_instruction_metering,
+            interpreter_compilation_cost,
 
             #[cfg(feature = "module-cache")]
             module_key,
@@ -2023,14 +2040,24 @@ impl RawInstance {
     }
 
     /// Reset cache and therefore reclaim cache backed memory.
-    pub fn reset_interpreter_cache(&mut self) {
+    ///
+    /// On the interpreter, fails with gas metering other than per instruction unless the module has a
+    /// compilation cost (see [`ModuleConfig::set_interpreter_compilation_cost`]). A suspended
+    /// instance can still be resumed, and pays for compiling its current block again.
+    pub fn reset_interpreter_cache(&mut self) -> Result<(), Error> {
         #[allow(irrefutable_let_patterns)]
         if let InstanceBackend::Interpreted(ref mut backend) = self.backend {
-            backend.reset_interpreter_cache();
+            backend.reset_interpreter_cache()?
         }
+        Ok(())
     }
 
-    /// Set a tight upper limit on the interpreter cache size (in bytes).
+    /// Set an upper limit on the interpreter cache size (in bytes).
+    ///
+    /// Step tracing and debug logging handlers aren't counted. A limit without room for one more
+    /// block clears the cache. On the interpreter, setting a limit fails with gas metering other
+    /// than per instruction unless the module has a compilation cost (see
+    /// [`ModuleConfig::set_interpreter_compilation_cost`]).
     pub fn set_interpreter_cache_size_limit(&mut self, cache_info: Option<SetCacheSizeLimitArgs>) -> Result<(), Error> {
         #[allow(irrefutable_let_patterns)]
         if let InstanceBackend::Interpreted(ref mut backend) = self.backend {
@@ -2040,6 +2067,8 @@ impl RawInstance {
     }
 
     /// Gets the current interpreter cache size.
+    ///
+    /// Step tracing and debug logging handlers aren't included, as for the cache size limit.
     ///
     /// Will return `None` when not running under an interpreter.
     pub fn interpreter_cache_size(&self) -> Option<usize> {
