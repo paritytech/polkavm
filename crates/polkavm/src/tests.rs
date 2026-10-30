@@ -620,7 +620,7 @@ fn bounded_interpreter_cache(config: Config, isa: InstructionSetKind) {
 
     assert_eq!(INTERPRETER_CACHE_ENTRY_SIZE, 24);
 
-    let minimum_cache_size = 24 * 4;
+    let minimum_cache_size = 24 * 2;
 
     for max_cache_size_bytes in 0..minimum_cache_size {
         log::debug!("Testing with max_cache_size_bytes: {}", max_cache_size_bytes);
