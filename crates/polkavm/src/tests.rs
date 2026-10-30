@@ -4146,7 +4146,6 @@ fn interpreter_stack_size_not_power_of_two() {
         ],
         &[],
     );
-    // Puts the heap top right below the stack gap.
     builder.set_ro_data_size(0xffd60000);
     builder.set_stack_size(0x41000);
     let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
@@ -4174,15 +4173,11 @@ fn interpreter_stack_size_not_power_of_two() {
     {
         let mut instance = module.instantiate().unwrap();
         instance.set_interpreter_guest_memory_limit(Some(cast(stack_size).to_usize()));
-        instance.write_memory(low, &[1]).unwrap();
-    }
-    {
-        let mut instance = module.instantiate().unwrap();
-        instance.set_interpreter_max_allocation_size(Some(cast(stack_size + 0x1000).to_usize()));
-        assert!(instance.sbrk(stack_size).unwrap().is_some());
-        instance.write_memory(low, &[1]).unwrap();
-        instance.write_memory(memory_map.rw_data_address() + stack_size - 1, &[1]).unwrap();
-        instance.write_memory(memory_map.aux_data_address() + stack_size, &[1]).unwrap();
+        assert!(matches!(
+            instance.write_memory(low, &[1]),
+            Err(MemoryAccessError::MemoryLimitReached)
+        ));
+        instance.write_memory(memory_map.stack_address_high() - 0x40000, &[1]).unwrap();
     }
 }
 
