@@ -4129,6 +4129,58 @@ fn interpreter_guest_memory_limit() {
     }
 }
 
+#[test]
+fn interpreter_stack_size_not_power_of_two() {
+    let _ = env_logger::try_init();
+    let mut config = crate::Config::default();
+    config.set_backend(Some(crate::BackendKind::Interpreter));
+    let engine = Engine::new(&config).unwrap();
+
+    let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[
+            asm::load_indirect_u64(Reg::A1, Reg::A0, 0),
+            asm::store_indirect_u64(Reg::A2, Reg::A0, 0),
+            asm::ret(),
+        ],
+        &[],
+    );
+    builder.set_ro_data_size(0xffd60000);
+    builder.set_stack_size(0x41000);
+    let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_aux_data_size(0x100000);
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let memory_map = module.memory_map();
+    let stack_size = memory_map.stack_size();
+    let low = memory_map.stack_address_low();
+    let heap_address = memory_map.heap_base() + memory_map.max_heap_size() - 8;
+    {
+        let mut instance = module.instantiate().unwrap();
+        assert!(instance.sbrk(memory_map.max_heap_size()).unwrap().is_some());
+        instance.write_u64(heap_address, 0x1111).unwrap();
+        instance.write_memory(low, &[1]).unwrap();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(ProgramCounter(0));
+        instance.set_reg(Reg::A0, u64::from(heap_address));
+        instance.set_reg(Reg::A2, 0x2222);
+        match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
+        assert_eq!(instance.reg(Reg::A1), 0x1111);
+        assert_eq!(instance.read_u64(heap_address).unwrap(), 0x2222);
+    }
+    {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_guest_memory_limit(Some(cast(stack_size).to_usize()));
+        assert!(matches!(
+            instance.write_memory(low, &[1]),
+            Err(MemoryAccessError::MemoryLimitReached)
+        ));
+        instance.write_memory(memory_map.stack_address_high() - 0x40000, &[1]).unwrap();
+    }
+}
+
 fn write_read_memory_from_host(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
@@ -4213,6 +4265,55 @@ fn write_read_memory_from_host(config: Config, isa: InstructionSetKind) {
         instance.read_memory(memory_map.stack_address_high() - page_size * 16, 1).unwrap(),
         vec![9]
     );
+}
+
+fn stack_size_not_power_of_two(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+
+    let page_size = get_native_page_size() as u32;
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"load");
+    builder.add_export_by_basic_block(1, b"store");
+    builder.set_code(
+        &[
+            asm::load_indirect_u64(Reg::A1, Reg::A0, 0),
+            asm::ret(),
+            asm::store_indirect_u64(Reg::A1, Reg::A0, 0),
+            asm::ret(),
+        ],
+        &[],
+    );
+    builder.set_stack_size(page_size * 24);
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_page_size(page_size);
+
+    let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let exports: Vec<_> = module.exports().map(|export| export.program_counter()).collect();
+    let low = module.memory_map().stack_address_low();
+    let high = module.memory_map().stack_address_high();
+
+    let mut instance = module.instantiate().unwrap();
+    let writes = [(high - 1, 1), (high - page_size - 1, 2), (low + page_size, 3), (low, 4)];
+    for (address, value) in writes {
+        instance.write_memory(address, &[value]).unwrap();
+    }
+    for (address, value) in writes {
+        assert_eq!(instance.read_memory(address, 1).unwrap(), vec![value]);
+    }
+
+    assert!(instance.read_memory(low - 1, 1).is_err());
+    assert!(instance.write_memory(low - 1, &[1]).is_err());
+    for address in [low - 4, low - 8, low - page_size] {
+        for &pc in &exports {
+            instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+            instance.set_reg(Reg::A0, u64::from(address));
+            instance.set_next_program_counter(pc);
+            match_interrupt!(instance.run().unwrap(), InterruptKind::Trap);
+        }
+    }
 }
 
 fn sbrk_knob_works(config: Config, isa: InstructionSetKind) {
@@ -6336,6 +6437,7 @@ run_tests! {
     access_memory_from_host
     access_memory_from_within
     write_read_memory_from_host
+    stack_size_not_power_of_two
     sbrk_knob_works
 
     basic_gas_metering_sync
