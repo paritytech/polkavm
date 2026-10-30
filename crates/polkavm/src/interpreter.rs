@@ -458,7 +458,6 @@ impl StandardMemory {
             return false;
         }
 
-        debug_assert!(self.rw_data.capacity().is_power_of_two());
         debug_assert!(self.rw_data.capacity() <= self.max_allocation_size);
 
         let new_length = self.rw_data.capacity().min(required_size.next_multiple_of(RESIZE_GRANULARITY));
@@ -492,14 +491,13 @@ impl StandardMemory {
         if !reserve_memory(
             &mut new_stack,
             required_size,
-            self.max_allocation_size,
+            self.max_allocation_size.min(self.stack_size),
             self.guest_memory_limit,
             self.rw_data.capacity() + self.aux.capacity(),
         ) {
             return false;
         }
 
-        debug_assert!(new_stack.capacity().is_power_of_two());
         debug_assert!(new_stack.capacity() <= self.max_allocation_size);
 
         let new_size = new_stack.capacity().min(self.stack_size);
@@ -554,7 +552,6 @@ impl StandardMemory {
             return false;
         }
 
-        debug_assert!(self.aux.capacity().is_power_of_two());
         debug_assert!(self.aux.capacity() <= self.max_allocation_size);
 
         let new_length = self.aux.capacity().min(required_size.next_multiple_of(RESIZE_GRANULARITY));
