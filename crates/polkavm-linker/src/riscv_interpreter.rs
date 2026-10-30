@@ -64,12 +64,64 @@ impl MemoryRegion {
     }
 }
 
+#[derive(Default)]
+struct Memory {
+    regions: Vec<MemoryRegion>,
+}
+
+impl Memory {
+    fn map_region(&mut self, address: u64, size: u64, protection: MemoryProtection) {
+        let end = address.checked_add(size).unwrap();
+        assert!(!self.regions.iter().any(|region| region.overlaps(address..end)));
+
+        let index = self.regions.partition_point(|region| region.address < address);
+        let region = MemoryRegion {
+            address,
+            data: vec![0; usize::try_from(size).unwrap()],
+            protection,
+        };
+        self.regions.insert(index, region);
+    }
+
+    fn find_region(&self, address: u64, length: u64) -> Option<(usize, Range<usize>)> {
+        let end = address.checked_add(length)?;
+        let index = self.regions.iter().position(|region| region.contains(address..end))?;
+        let offset = (address - self.regions[index].address) as usize;
+
+        Some((index, offset..offset + length as usize))
+    }
+
+    fn read(&self, address: u64, length: u64) -> Option<&[u8]> {
+        let (index, range) = self.find_region(address, length)?;
+
+        Some(&self.regions[index].data[range])
+    }
+
+    #[must_use]
+    fn write(&mut self, address: u64, data: &[u8]) -> Option<()> {
+        let (index, range) = self.find_region(address, data.len() as u64)?;
+        self.regions[index].data[range].copy_from_slice(data);
+
+        Some(())
+    }
+
+    fn read_as_guest(&self, address: u64, length: u64, access: MemoryAccess) -> Option<&[u8]> {
+        let (index, range) = self.find_region(address, length)?;
+        let region = &self.regions[index];
+        if !region.allows_access(access) {
+            return None;
+        }
+
+        Some(&region.data[range])
+    }
+}
+
 pub struct Interpreter {
     decoder_config: DecoderConfig,
     stop_address: Option<u64>,
     program_counter: u64,
     regs: [u64; 32],
-    regions: Vec<MemoryRegion>,
+    memory: Memory,
 }
 
 impl Interpreter {
@@ -82,7 +134,7 @@ impl Interpreter {
             stop_address: None,
             program_counter: 0,
             regs: [0; 32],
-            regions: Vec::new(),
+            memory: Memory::default(),
         }
     }
 
@@ -139,48 +191,16 @@ impl Interpreter {
     }
 
     pub fn map_region(&mut self, address: u64, size: u64, protection: MemoryProtection) {
-        let end = address.checked_add(size).unwrap();
-        assert!(!self.regions.iter().any(|region| region.overlaps(address..end)));
-
-        let index = self.regions.partition_point(|region| region.address < address);
-        let region = MemoryRegion {
-            address,
-            data: vec![0; usize::try_from(size).unwrap()],
-            protection,
-        };
-        self.regions.insert(index, region);
-    }
-
-    fn find_region(&self, address: u64, length: u64) -> Option<(usize, Range<usize>)> {
-        let end = address.checked_add(length)?;
-        let index = self.regions.iter().position(|region| region.contains(address..end))?;
-        let offset = (address - self.regions[index].address) as usize;
-
-        Some((index, offset..offset + length as usize))
+        self.memory.map_region(address, size, protection);
     }
 
     pub fn read_memory(&self, address: u64, length: u64) -> Option<&[u8]> {
-        let (index, range) = self.find_region(address, length)?;
-
-        Some(&self.regions[index].data[range])
+        self.memory.read(address, length)
     }
 
     #[must_use]
     pub fn write_memory(&mut self, address: u64, data: &[u8]) -> Option<()> {
-        let (index, range) = self.find_region(address, data.len() as u64)?;
-        self.regions[index].data[range].copy_from_slice(data);
-
-        Some(())
-    }
-
-    fn read_guest_memory(&self, address: u64, length: u64, access: MemoryAccess) -> Option<&[u8]> {
-        let (index, range) = self.find_region(address, length)?;
-        let region = &self.regions[index];
-        if !region.allows_access(access) {
-            return None;
-        }
-
-        Some(&region.data[range])
+        self.memory.write(address, data)
     }
 
     pub fn run(&mut self, max_steps: u64) -> StopReason {
@@ -215,12 +235,14 @@ impl Interpreter {
 
     fn fetch_instruction(&self, program_counter: u64) -> Result<(u32, u64), Exception> {
         let first_byte = self
-            .read_guest_memory(program_counter, 1, MemoryAccess::Fetch)
+            .memory
+            .read_as_guest(program_counter, 1, MemoryAccess::Fetch)
             .ok_or(Exception::InstructionAccessFault)?[0];
-        // Compressed instructions are 16 bits, otherwise 32 (https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html#base-instruction-length-encoding).
+        // Instruction lengths: https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html#base-instruction-length-encoding
         let length = if Inst::is_compressed(first_byte) { 2 } else { 4 };
         let parcels = self
-            .read_guest_memory(program_counter, length, MemoryAccess::Fetch)
+            .memory
+            .read_as_guest(program_counter, length, MemoryAccess::Fetch)
             .ok_or(Exception::InstructionAccessFault)?;
         let mut word_bytes = [0; 4];
         word_bytes[..parcels.len()].copy_from_slice(parcels);
@@ -274,6 +296,7 @@ mod tests {
 
     fn memory_layout(interpreter: &Interpreter) -> Vec<(u64, usize, MemoryProtection)> {
         interpreter
+            .memory
             .regions
             .iter()
             .map(|region| (region.address, region.data.len(), region.protection))
