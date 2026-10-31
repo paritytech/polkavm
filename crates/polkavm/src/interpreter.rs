@@ -1873,6 +1873,12 @@ impl InterpretedInstance {
         self.compile_block::<DEBUG>(program_counter, !self.module.blob().isa().is_legacy())
     }
 
+    /// Resolve a jump from *within* the program only if its target is already compiled.
+    fn resolve_compiled_jump(&self, program_counter: ProgramCounter) -> Option<Target> {
+        let (is_jump_target_valid, target) = Self::unpack_target(self.compiled_offset_for_block.get(program_counter.0)?);
+        is_jump_target_valid.then_some(target)
+    }
+
     #[inline(always)]
     fn handlers<const DEBUG: bool>(&self) -> &Handlers {
         if DEBUG {
@@ -3183,6 +3189,94 @@ macro_rules! define_interpreter {
         $body
     }};
 
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: Reg, $a1:ident: Reg, $a2:ident: Target, $a3:ident: ProgramCounter) => {{
+        impl Args {
+            #[allow(clippy::needless_update)]
+            pub fn $handler_name(a0: impl Into<Reg>, a1: impl Into<Reg>, a2: Target, a3: ProgramCounter) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    a2,
+                    a3: a3.0,
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_reg(args.a0);
+        let $a1 = transmute_reg(args.a1);
+        let $a2 = args.a2;
+        let $a3 = ProgramCounter(args.a3);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: Reg, $a1:ident: Reg, $a2:ident: ProgramCounter, $a3:ident: Target) => {{
+        impl Args {
+            #[allow(clippy::needless_update)]
+            pub fn $handler_name(a0: impl Into<Reg>, a1: impl Into<Reg>, a2: ProgramCounter, a3: Target) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: a1.into().to_u32(),
+                    a2: a2.0,
+                    a3,
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_reg(args.a0);
+        let $a1 = transmute_reg(args.a1);
+        let $a2 = ProgramCounter(args.a2);
+        let $a3 = args.a3;
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: Reg, $a1:ident: i32, $a2:ident: Target, $a3:ident: ProgramCounter) => {{
+        impl Args {
+            #[allow(clippy::needless_update)]
+            pub fn $handler_name(a0: impl Into<Reg>, a1: i32, a2: Target, a3: ProgramCounter) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: cast(a1).bitwise_as_u32(),
+                    a2,
+                    a3: a3.0,
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_reg(args.a0);
+        let $a1 = cast(args.a1).bitwise_as_i32();
+        let $a2 = args.a2;
+        let $a3 = ProgramCounter(args.a3);
+        $body
+    }};
+
+    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: Reg, $a1:ident: i32, $a2:ident: ProgramCounter, $a3:ident: Target) => {{
+        impl Args {
+            #[allow(clippy::needless_update)]
+            pub fn $handler_name(a0: impl Into<Reg>, a1: i32, a2: ProgramCounter, a3: Target) -> Args {
+                Args {
+                    a0: a0.into().to_u32(),
+                    a1: cast(a1).bitwise_as_u32(),
+                    a2: a2.0,
+                    a3,
+                    ..Args::default()
+                }
+            }
+        }
+
+        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
+        let $a0 = transmute_reg(args.a0);
+        let $a1 = cast(args.a1).bitwise_as_i32();
+        let $a2 = ProgramCounter(args.a2);
+        let $a3 = args.a3;
+        $body
+    }};
+
     (@arg_names $handler_name:ident, $a0:ident: $a0_ty:ty, $a1:ident: $a1_ty:ty, $a2:ident: $a2_ty:ty) => {
         asm::$handler_name($a0, $a1, $a2)
     };
@@ -3262,30 +3356,85 @@ fn not_enough_gas_impl<const DEBUG: bool>(
     visitor.trigger_interrupt(InterruptKind::NotEnoughGas)
 }
 
-macro_rules! handle_unresolved_branch {
-    ($debug:expr, $visitor:ident, $compiled_offset:ident, $s1:ident, $s2:ident, $tt:ident, $tf:ident, $name:ident) => {{
-        if DEBUG {
-            log::trace!("[{}]: jump {} if {} {} {}", $compiled_offset, $tt, $s1, $debug, $s2);
-        }
-
-        let offset = $compiled_offset;
-
-        let target_true = $visitor.resolve_jump::<DEBUG>($tt);
-        let target_false = $visitor.resolve_jump::<DEBUG>($tf);
-        if let (Some(target_true), Some(target_false)) = (target_true, target_false) {
-            $visitor.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::$name::<DEBUG>);
-            $visitor.compiled_args[cast(offset).to_usize()] = Args::$name($s1, $s2, target_true, target_false);
+macro_rules! resolve_branch {
+    ($visitor:ident, $compiled_offset:ident, $program_counter:ident, |$target:ident| $replacement:expr) => {{
+        let offset = cast($compiled_offset).to_usize();
+        if let Some($target) = $visitor.resolve_jump::<DEBUG>($program_counter) {
+            let (handler, args) = $replacement;
+            $visitor.compiled_handlers[offset] = handler;
+            $visitor.compiled_args[offset] = args;
+            $visitor.go_to_target($target)
         } else {
             // This should never happen since we've already prevalidated the targets.
             if cfg!(debug_assertions) {
                 panic!("internal error: failed to resolve a branch");
             }
 
-            $visitor.compiled_handlers[cast(offset).to_usize()] = cast_handler!(raw_handlers::invalid_branch_trap::<DEBUG>);
-            $visitor.compiled_args[cast(offset).to_usize()] = Args::invalid_branch_trap($tf);
+            $visitor.compiled_handlers[offset] = cast_handler!(raw_handlers::invalid_branch_trap::<DEBUG>);
+            $visitor.compiled_args[offset] = Args::invalid_branch_trap($program_counter);
+            $visitor.go_to_target($compiled_offset)
+        }
+    }};
+}
+
+macro_rules! handle_unresolved_branch {
+    ($debug:expr, $visitor:ident, $compiled_offset:ident, $s1:ident, $s2:ident, $tt:ident, $tf:ident, $name:ident, $true_resolved:ident, $false_resolved:ident, $get:ident, $op:tt) => {{
+        if DEBUG {
+            log::trace!("[{}]: jump? {} if {} {} {}", $compiled_offset, $tt, $s1, $debug, $s2);
         }
 
-        $visitor.go_to_target(offset)
+        // Only compile the side which is taken now; the other one is compiled when it's first taken.
+        let lhs = $visitor.$get::<DEBUG>($s1);
+        let rhs = $visitor.$get::<DEBUG>($s2);
+        if lhs $op rhs {
+            resolve_branch!($visitor, $compiled_offset, $tt, |target_true| match $visitor.resolve_compiled_jump($tf) {
+                Some(target_false) => (cast_handler!(raw_handlers::$name::<DEBUG>), Args::$name($s1, $s2, target_true, target_false)),
+                None => (cast_handler!(raw_handlers::$true_resolved::<DEBUG>), Args::$true_resolved($s1, $s2, target_true, $tf)),
+            })
+        } else {
+            resolve_branch!($visitor, $compiled_offset, $tf, |target_false| match $visitor.resolve_compiled_jump($tt) {
+                Some(target_true) => (cast_handler!(raw_handlers::$name::<DEBUG>), Args::$name($s1, $s2, target_true, target_false)),
+                None => (cast_handler!(raw_handlers::$false_resolved::<DEBUG>), Args::$false_resolved($s1, $s2, $tt, target_false)),
+            })
+        }
+    }};
+}
+
+macro_rules! handle_true_resolved_branch {
+    ($debug:expr, $visitor:ident, $compiled_offset:ident, $s1:ident, $s2:ident, $tt:ident, $tf:ident, $name:ident, $get:ident, $op:tt) => {{
+        if DEBUG {
+            log::trace!("[{}]: jump ~{} if {} {} {}, else? {}", $compiled_offset, $tt, $s1, $debug, $s2, $tf);
+        }
+
+        let lhs = $visitor.$get::<DEBUG>($s1);
+        let rhs = $visitor.$get::<DEBUG>($s2);
+        if lhs $op rhs {
+            $visitor.go_to_target($tt)
+        } else {
+            resolve_branch!($visitor, $compiled_offset, $tf, |target_false| (
+                cast_handler!(raw_handlers::$name::<DEBUG>),
+                Args::$name($s1, $s2, $tt, target_false)
+            ))
+        }
+    }};
+}
+
+macro_rules! handle_false_resolved_branch {
+    ($debug:expr, $visitor:ident, $compiled_offset:ident, $s1:ident, $s2:ident, $tt:ident, $tf:ident, $name:ident, $get:ident, $op:tt) => {{
+        if DEBUG {
+            log::trace!("[{}]: jump? {} if {} {} {}, else ~{}", $compiled_offset, $tt, $s1, $debug, $s2, $tf);
+        }
+
+        let lhs = $visitor.$get::<DEBUG>($s1);
+        let rhs = $visitor.$get::<DEBUG>($s2);
+        if lhs $op rhs {
+            resolve_branch!($visitor, $compiled_offset, $tt, |target_true| (
+                cast_handler!(raw_handlers::$name::<DEBUG>),
+                Args::$name($s1, $s2, target_true, $tf)
+            ))
+        } else {
+            $visitor.go_to_target($tf)
+        }
     }};
 }
 
@@ -4713,67 +4862,195 @@ define_interpreter! {
     }
 
     fn unresolved_branch_less_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!("<u", visitor, compiled_offset, s1, s2, tt, tf, branch_less_unsigned)
+        handle_unresolved_branch!("<u", visitor, compiled_offset, s1, s2, tt, tf, branch_less_unsigned, true_resolved_branch_less_unsigned, false_resolved_branch_less_unsigned, get_u64, <)
     }
 
     fn unresolved_branch_less_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!("<u", visitor, compiled_offset, s1, s2, tt, tf, branch_less_unsigned_imm)
+        handle_unresolved_branch!("<u", visitor, compiled_offset, s1, s2, tt, tf, branch_less_unsigned_imm, true_resolved_branch_less_unsigned_imm, false_resolved_branch_less_unsigned_imm, get_u64, <)
     }
 
     fn unresolved_branch_less_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!("<s", visitor, compiled_offset, s1, s2, tt, tf, branch_less_signed)
+        handle_unresolved_branch!("<s", visitor, compiled_offset, s1, s2, tt, tf, branch_less_signed, true_resolved_branch_less_signed, false_resolved_branch_less_signed, get_i64, <)
     }
 
     fn unresolved_branch_less_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!("<s", visitor, compiled_offset, s1, s2, tt, tf, branch_less_signed_imm)
+        handle_unresolved_branch!("<s", visitor, compiled_offset, s1, s2, tt, tf, branch_less_signed_imm, true_resolved_branch_less_signed_imm, false_resolved_branch_less_signed_imm, get_i64, <)
     }
 
     fn unresolved_branch_eq<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!("==", visitor, compiled_offset, s1, s2, tt, tf, branch_eq)
+        handle_unresolved_branch!("==", visitor, compiled_offset, s1, s2, tt, tf, branch_eq, true_resolved_branch_eq, false_resolved_branch_eq, get_u64, ==)
     }
 
     fn unresolved_branch_eq_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!("==", visitor, compiled_offset, s1, s2, tt, tf, branch_eq_imm)
+        handle_unresolved_branch!("==", visitor, compiled_offset, s1, s2, tt, tf, branch_eq_imm, true_resolved_branch_eq_imm, false_resolved_branch_eq_imm, get_u64, ==)
     }
 
     fn unresolved_branch_not_eq<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!("!=", visitor, compiled_offset, s1, s2, tt, tf, branch_not_eq)
+        handle_unresolved_branch!("!=", visitor, compiled_offset, s1, s2, tt, tf, branch_not_eq, true_resolved_branch_not_eq, false_resolved_branch_not_eq, get_u64, !=)
     }
 
     fn unresolved_branch_not_eq_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!("!=", visitor, compiled_offset, s1, s2, tt, tf, branch_not_eq_imm)
+        handle_unresolved_branch!("!=", visitor, compiled_offset, s1, s2, tt, tf, branch_not_eq_imm, true_resolved_branch_not_eq_imm, false_resolved_branch_not_eq_imm, get_u64, !=)
     }
 
     fn unresolved_branch_greater_or_equal_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!(">=u", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_unsigned)
+        handle_unresolved_branch!(">=u", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_unsigned, true_resolved_branch_greater_or_equal_unsigned, false_resolved_branch_greater_or_equal_unsigned, get_u64, >=)
     }
 
     fn unresolved_branch_greater_or_equal_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!(">=u", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_unsigned_imm)
+        handle_unresolved_branch!(">=u", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_unsigned_imm, true_resolved_branch_greater_or_equal_unsigned_imm, false_resolved_branch_greater_or_equal_unsigned_imm, get_u64, >=)
     }
 
     fn unresolved_branch_greater_or_equal_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!(">=s", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_signed)
+        handle_unresolved_branch!(">=s", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_signed, true_resolved_branch_greater_or_equal_signed, false_resolved_branch_greater_or_equal_signed, get_i64, >=)
     }
 
     fn unresolved_branch_greater_or_equal_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!(">=s", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_signed_imm)
+        handle_unresolved_branch!(">=s", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_signed_imm, true_resolved_branch_greater_or_equal_signed_imm, false_resolved_branch_greater_or_equal_signed_imm, get_i64, >=)
     }
 
     fn unresolved_branch_greater_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!(">u", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_unsigned_imm)
+        handle_unresolved_branch!(">u", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_unsigned_imm, true_resolved_branch_greater_unsigned_imm, false_resolved_branch_greater_unsigned_imm, get_u64, >)
     }
 
     fn unresolved_branch_greater_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!(">s", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_signed_imm)
+        handle_unresolved_branch!(">s", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_signed_imm, true_resolved_branch_greater_signed_imm, false_resolved_branch_greater_signed_imm, get_i64, >)
     }
 
     fn unresolved_branch_less_or_equal_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!("<=u", visitor, compiled_offset, s1, s2, tt, tf, branch_less_or_equal_unsigned_imm)
+        handle_unresolved_branch!("<=u", visitor, compiled_offset, s1, s2, tt, tf, branch_less_or_equal_unsigned_imm, true_resolved_branch_less_or_equal_unsigned_imm, false_resolved_branch_less_or_equal_unsigned_imm, get_u64, <=)
     }
 
     fn unresolved_branch_less_or_equal_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: ProgramCounter) -> Target {
-        handle_unresolved_branch!("<=s", visitor, compiled_offset, s1, s2, tt, tf, branch_less_or_equal_signed_imm)
+        handle_unresolved_branch!("<=s", visitor, compiled_offset, s1, s2, tt, tf, branch_less_or_equal_signed_imm, true_resolved_branch_less_or_equal_signed_imm, false_resolved_branch_less_or_equal_signed_imm, get_i64, <=)
+    }
+
+    fn true_resolved_branch_less_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!("<u", visitor, compiled_offset, s1, s2, tt, tf, branch_less_unsigned, get_u64, <)
+    }
+
+    fn true_resolved_branch_less_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!("<u", visitor, compiled_offset, s1, s2, tt, tf, branch_less_unsigned_imm, get_u64, <)
+    }
+
+    fn true_resolved_branch_less_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!("<s", visitor, compiled_offset, s1, s2, tt, tf, branch_less_signed, get_i64, <)
+    }
+
+    fn true_resolved_branch_less_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!("<s", visitor, compiled_offset, s1, s2, tt, tf, branch_less_signed_imm, get_i64, <)
+    }
+
+    fn true_resolved_branch_eq<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!("==", visitor, compiled_offset, s1, s2, tt, tf, branch_eq, get_u64, ==)
+    }
+
+    fn true_resolved_branch_eq_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!("==", visitor, compiled_offset, s1, s2, tt, tf, branch_eq_imm, get_u64, ==)
+    }
+
+    fn true_resolved_branch_not_eq<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!("!=", visitor, compiled_offset, s1, s2, tt, tf, branch_not_eq, get_u64, !=)
+    }
+
+    fn true_resolved_branch_not_eq_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!("!=", visitor, compiled_offset, s1, s2, tt, tf, branch_not_eq_imm, get_u64, !=)
+    }
+
+    fn true_resolved_branch_greater_or_equal_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!(">=u", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_unsigned, get_u64, >=)
+    }
+
+    fn true_resolved_branch_greater_or_equal_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!(">=u", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_unsigned_imm, get_u64, >=)
+    }
+
+    fn true_resolved_branch_greater_or_equal_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!(">=s", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_signed, get_i64, >=)
+    }
+
+    fn true_resolved_branch_greater_or_equal_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!(">=s", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_signed_imm, get_i64, >=)
+    }
+
+    fn true_resolved_branch_greater_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!(">u", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_unsigned_imm, get_u64, >)
+    }
+
+    fn true_resolved_branch_greater_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!(">s", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_signed_imm, get_i64, >)
+    }
+
+    fn true_resolved_branch_less_or_equal_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!("<=u", visitor, compiled_offset, s1, s2, tt, tf, branch_less_or_equal_unsigned_imm, get_u64, <=)
+    }
+
+    fn true_resolved_branch_less_or_equal_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: Target, tf: ProgramCounter) -> Target {
+        handle_true_resolved_branch!("<=s", visitor, compiled_offset, s1, s2, tt, tf, branch_less_or_equal_signed_imm, get_i64, <=)
+    }
+
+    fn false_resolved_branch_less_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!("<u", visitor, compiled_offset, s1, s2, tt, tf, branch_less_unsigned, get_u64, <)
+    }
+
+    fn false_resolved_branch_less_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!("<u", visitor, compiled_offset, s1, s2, tt, tf, branch_less_unsigned_imm, get_u64, <)
+    }
+
+    fn false_resolved_branch_less_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!("<s", visitor, compiled_offset, s1, s2, tt, tf, branch_less_signed, get_i64, <)
+    }
+
+    fn false_resolved_branch_less_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!("<s", visitor, compiled_offset, s1, s2, tt, tf, branch_less_signed_imm, get_i64, <)
+    }
+
+    fn false_resolved_branch_eq<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!("==", visitor, compiled_offset, s1, s2, tt, tf, branch_eq, get_u64, ==)
+    }
+
+    fn false_resolved_branch_eq_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!("==", visitor, compiled_offset, s1, s2, tt, tf, branch_eq_imm, get_u64, ==)
+    }
+
+    fn false_resolved_branch_not_eq<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!("!=", visitor, compiled_offset, s1, s2, tt, tf, branch_not_eq, get_u64, !=)
+    }
+
+    fn false_resolved_branch_not_eq_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!("!=", visitor, compiled_offset, s1, s2, tt, tf, branch_not_eq_imm, get_u64, !=)
+    }
+
+    fn false_resolved_branch_greater_or_equal_unsigned<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!(">=u", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_unsigned, get_u64, >=)
+    }
+
+    fn false_resolved_branch_greater_or_equal_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!(">=u", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_unsigned_imm, get_u64, >=)
+    }
+
+    fn false_resolved_branch_greater_or_equal_signed<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: Reg, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!(">=s", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_signed, get_i64, >=)
+    }
+
+    fn false_resolved_branch_greater_or_equal_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!(">=s", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_or_equal_signed_imm, get_i64, >=)
+    }
+
+    fn false_resolved_branch_greater_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!(">u", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_unsigned_imm, get_u64, >)
+    }
+
+    fn false_resolved_branch_greater_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!(">s", visitor, compiled_offset, s1, s2, tt, tf, branch_greater_signed_imm, get_i64, >)
+    }
+
+    fn false_resolved_branch_less_or_equal_unsigned_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!("<=u", visitor, compiled_offset, s1, s2, tt, tf, branch_less_or_equal_unsigned_imm, get_u64, <=)
+    }
+
+    fn false_resolved_branch_less_or_equal_signed_imm<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, s1: Reg, s2: i32, tt: ProgramCounter, tf: Target) -> Target {
+        handle_false_resolved_branch!("<=s", visitor, compiled_offset, s1, s2, tt, tf, branch_less_or_equal_signed_imm, get_i64, <=)
     }
 
     fn unresolved_jump<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, jump_to: ProgramCounter) -> Target {
@@ -5545,5 +5822,276 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
 
     fn load_imm_and_jump_indirect(&mut self, ra: RawReg, base: RawReg, value: i32, offset: i32) -> Self::ReturnTy {
         emit!(self, load_imm_and_jump_indirect(self.program_counter, ra, base, value, offset));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InterpretedInstance;
+    use crate::{BackendKind, Config, Engine, GasMeteringKind, InterruptKind, Module, ModuleConfig, ProgramCounter, SetCacheSizeLimitArgs};
+    use alloc::vec::Vec;
+    use polkavm_common::cast::cast;
+    use polkavm_common::program::{asm, InstructionSetKind, ProgramBlob, Reg, INTERPRETER_CACHE_ENTRY_SIZE};
+    use polkavm_common::writer::ProgramBlobBuilder;
+
+    const ISAS: [InstructionSetKind; 2] = [InstructionSetKind::Latest64, InstructionSetKind::ReviveV1];
+
+    fn new_module(blob: ProgramBlob, module_config: &ModuleConfig) -> Module {
+        let mut config = Config::default();
+        config.set_backend(Some(BackendKind::Interpreter));
+        let engine = Engine::new(&config).unwrap();
+        Module::from_blob(&engine, module_config, blob).unwrap()
+    }
+
+    fn new_instance(module: &Module) -> InterpretedInstance {
+        InterpretedInstance::new_from_module(module.clone(), false, false)
+    }
+
+    // The branch in `branch_to_big_block_test_blob` targets basic block 2, the big block, which starts at instruction 3.
+    const BIG_BLOCK_START: usize = 3;
+    const BIG_BLOCK_ADDS: u32 = 32;
+    // The adds followed by a `ret`.
+    const BIG_BLOCK_LENGTH: usize = cast(BIG_BLOCK_ADDS).to_usize() + 1;
+
+    fn branch_to_big_block_test_blob(isa: InstructionSetKind) -> ProgramBlob {
+        let mut code = alloc::vec![asm::branch_eq_imm(Reg::A0, 0, 2), asm::add_imm_32(Reg::A1, Reg::A1, 1), asm::ret()];
+        assert_eq!(code.len(), BIG_BLOCK_START);
+        code.extend((0..BIG_BLOCK_ADDS).map(|_| asm::add_imm_32(Reg::A2, Reg::A2, 1)));
+        code.push(asm::ret());
+        assert_eq!(code.len(), BIG_BLOCK_START + BIG_BLOCK_LENGTH);
+
+        let mut builder = ProgramBlobBuilder::new(isa);
+        builder.add_export_by_basic_block(0, b"main");
+        builder.set_code(&code, &[]);
+        ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap()
+    }
+
+    #[test]
+    fn lazy_branch_target_is_compiled_when_first_taken() {
+        let _ = env_logger::try_init();
+        for isa in ISAS {
+            let module = new_module(branch_to_big_block_test_blob(isa), &ModuleConfig::new());
+            for (first, second) in [(1, 0), (0, 1)] {
+                let mut instance = new_instance(&module);
+                let mut run = |a0: u64| {
+                    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+                    instance.set_reg(Reg::A0, a0);
+                    instance.set_reg(Reg::A1, 0);
+                    instance.set_reg(Reg::A2, 0);
+                    instance.set_next_program_counter(ProgramCounter(0));
+                    let cycles = instance.cycle_counter;
+                    assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+
+                    let expected = if a0 == 0 { (0, u64::from(BIG_BLOCK_ADDS)) } else { (1, 0) };
+                    assert_eq!((instance.reg(Reg::A1), instance.reg(Reg::A2)), expected);
+                    (instance.compiled_handlers.len(), instance.cycle_counter - cycles)
+                };
+
+                let (count_1, _) = run(first);
+                let (count_2, cycles_2) = run(second);
+                let (count_3, cycles_3) = run(second);
+                let (count_4, _) = run(first);
+
+                if second == 0 {
+                    assert!(count_1 < BIG_BLOCK_LENGTH, "expected the untaken big block to not be compiled");
+                    assert!(
+                        count_2 - count_1 >= BIG_BLOCK_LENGTH,
+                        "expected the big block to be compiled when taken"
+                    );
+                }
+
+                assert!(count_2 > count_1, "expected the deferred target to be compiled when taken");
+                assert_eq!(count_3, count_2, "expected nothing to be compiled on the second take");
+                assert_eq!(count_4, count_3, "expected nothing to be compiled on the second take");
+
+                // `cycle_counter` counts dispatched handlers only in debug mode, which tests always use.
+                assert_eq!(cycles_3, cycles_2, "expected the first take to dispatch no extra handlers");
+
+                // In debug mode the branch's block is a `trace_pc` handler followed by the branch itself.
+                let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
+                let branch = cast(instance.resolve_compiled_jump(offsets[0]).unwrap()).to_usize() + 1;
+                let args = instance.compiled_args[branch];
+                assert_eq!(
+                    (Some(args.a2), Some(args.a3)),
+                    (
+                        instance.resolve_compiled_jump(offsets[BIG_BLOCK_START]),
+                        instance.resolve_compiled_jump(offsets[1])
+                    ),
+                    "expected the branch to hold both compiled targets"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_branch_with_the_other_side_compiled_is_fully_resolved() {
+        let _ = env_logger::try_init();
+        for isa in ISAS {
+            let module = new_module(branch_to_big_block_test_blob(isa), &ModuleConfig::new());
+            let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
+            let run = |instance: &mut InterpretedInstance, a0: u64| {
+                instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+                instance.set_reg(Reg::A0, a0);
+                instance.set_reg(Reg::A1, 0);
+                instance.set_reg(Reg::A2, 0);
+                instance.set_next_program_counter(offsets[0]);
+                assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+
+                let expected = if a0 == 0 { (0, u64::from(BIG_BLOCK_ADDS)) } else { (1, 0) };
+                assert_eq!((instance.reg(Reg::A1), instance.reg(Reg::A2)), expected);
+                instance.compiled_handlers.len()
+            };
+
+            for (precompiled, first) in [(offsets[1], 0), (offsets[BIG_BLOCK_START], 1)] {
+                let mut instance = new_instance(&module);
+                instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+                instance.set_next_program_counter(precompiled);
+                assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+
+                let count = run(&mut instance, first);
+
+                // In debug mode the branch's block is a `trace_pc` handler followed by the branch itself.
+                let branch = cast(instance.resolve_compiled_jump(offsets[0]).unwrap()).to_usize() + 1;
+                let args = instance.compiled_args[branch];
+                assert_eq!(
+                    (Some(args.a2), Some(args.a3)),
+                    (
+                        instance.resolve_compiled_jump(offsets[BIG_BLOCK_START]),
+                        instance.resolve_compiled_jump(offsets[1])
+                    ),
+                    "expected the branch to hold both compiled targets after its first execution"
+                );
+
+                for a0 in [first, 1 - first] {
+                    assert_eq!(
+                        run(&mut instance, a0),
+                        count,
+                        "expected nothing to be compiled once both sides are resolved"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_branch_target_compile_can_reset_the_cache() {
+        let _ = env_logger::try_init();
+        for isa in ISAS {
+            let module = new_module(branch_to_big_block_test_blob(isa), &ModuleConfig::new());
+            let big_block = module.blob().instructions().nth(BIG_BLOCK_START).unwrap().offset;
+
+            let mut instance = new_instance(&module);
+            instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+            instance.set_next_program_counter(big_block);
+            assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+            let big_block_handlers = instance.compiled_handlers.len();
+
+            // Every instruction here compiles to the same number of handlers.
+            assert_eq!(big_block_handlers % BIG_BLOCK_LENGTH, 0);
+            let handlers_per_instruction = big_block_handlers / BIG_BLOCK_LENGTH;
+            let not_taken_handlers = BIG_BLOCK_START * handlers_per_instruction;
+
+            // The soft limit is the hard limit minus `max_block_size + 1`, so the cache fits just the big block
+            // and compiling it after anything else resets the cache.
+            let mut instance = new_instance(&module);
+            instance
+                .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+                    max_block_size: 0,
+                    max_cache_size_bytes: (big_block_handlers + 1) * cast(INTERPRETER_CACHE_ENTRY_SIZE).to_usize(),
+                }))
+                .unwrap();
+
+            for a0 in [1, 0, 1, 0] {
+                instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+                instance.set_reg(Reg::A0, a0);
+                instance.set_reg(Reg::A1, 0);
+                instance.set_reg(Reg::A2, 0);
+                instance.set_next_program_counter(ProgramCounter(0));
+                assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+
+                if a0 == 0 {
+                    assert_eq!((instance.reg(Reg::A1), instance.reg(Reg::A2)), (0, u64::from(BIG_BLOCK_ADDS)));
+                    assert_eq!(
+                        instance.compiled_handlers.len(),
+                        big_block_handlers,
+                        "expected the cache to be reset when the big block was compiled"
+                    );
+                } else {
+                    assert_eq!((instance.reg(Reg::A1), instance.reg(Reg::A2)), (1, 0));
+                    assert_eq!(
+                        instance.compiled_handlers.len(),
+                        not_taken_handlers,
+                        "expected only the first two blocks to be compiled"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_branch_targets_stay_within_the_cache_limit() {
+        const BRANCH_COUNT: u32 = 8;
+
+        let _ = env_logger::try_init();
+        for isa in ISAS {
+            // Every branch jumps to the same final block; the fallthrough side is never taken.
+            let mut code = Vec::new();
+            for _ in 0..BRANCH_COUNT {
+                code.push(asm::add_imm_32(Reg::A1, Reg::A1, 1));
+                code.push(asm::branch_eq_imm(Reg::A0, 0, 2 * BRANCH_COUNT));
+                code.push(asm::trap());
+            }
+            code.push(asm::ret());
+
+            let mut builder = ProgramBlobBuilder::new(isa);
+            builder.set_code(&code, &[]);
+            let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+            let mut module_config = ModuleConfig::new();
+            module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+            let module = new_module(blob, &module_config);
+            let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
+            let (blocks, ret) = offsets.split_at(offsets.len() - 1);
+
+            // In debug mode every instruction takes two handlers (`trace_pc` and the instruction itself), so the
+            // branch blocks take four; the gas metering handler is accounted for on top of that.
+            let max_block_size: u32 = 4;
+            let minimum_cache_entries = 2 * (cast(max_block_size).to_usize() + 1);
+            for max_cache_entries in minimum_cache_entries..100 {
+                let mut instance = new_instance(&module);
+                instance
+                    .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+                        max_block_size,
+                        max_cache_size_bytes: max_cache_entries * cast(INTERPRETER_CACHE_ENTRY_SIZE).to_usize(),
+                    }))
+                    .unwrap();
+
+                let mut run = |program_counter: ProgramCounter, gas: i64| {
+                    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+                    instance.set_reg(Reg::A0, 0);
+                    instance.set_gas(gas);
+                    instance.set_next_program_counter(program_counter);
+                    let interrupt = instance.run().unwrap();
+                    assert!(
+                        instance.compiled_handlers.len() <= max_cache_entries,
+                        "expected the cache to stay within {max_cache_entries} entries"
+                    );
+                    interrupt
+                };
+
+                assert_eq!(run(ret[0], 10), InterruptKind::Finished);
+
+                // Entering a block in its middle without enough gas compiles it without entering it, so a block
+                // compiled past the soft limit stays in the cache until it's entered at its start.
+                for block in blocks.chunks(3) {
+                    assert_eq!(run(block[1], 0), InterruptKind::NotEnoughGas);
+                    assert_eq!(run(block[0], 0), InterruptKind::NotEnoughGas);
+                }
+
+                // Resolving a branch compiles at most its taken side.
+                for block in blocks.chunks(3) {
+                    assert_eq!(run(block[0], 10), InterruptKind::Finished);
+                }
+            }
+        }
     }
 }
