@@ -3380,7 +3380,7 @@ macro_rules! resolve_branch {
 macro_rules! handle_unresolved_branch {
     ($debug:expr, $visitor:ident, $compiled_offset:ident, $s1:ident, $s2:ident, $tt:ident, $tf:ident, $name:ident, $true_resolved:ident, $false_resolved:ident, $get:ident, $op:tt) => {{
         if DEBUG {
-            log::trace!("[{}]: jump {} if {} {} {}", $compiled_offset, $tt, $s1, $debug, $s2);
+            log::trace!("[{}]: jump? {} if {} {} {}", $compiled_offset, $tt, $s1, $debug, $s2);
         }
 
         // Only compile the side which is taken now; the other one is compiled when it's first taken.
@@ -3403,7 +3403,7 @@ macro_rules! handle_unresolved_branch {
 macro_rules! handle_true_resolved_branch {
     ($debug:expr, $visitor:ident, $compiled_offset:ident, $s1:ident, $s2:ident, $tt:ident, $tf:ident, $name:ident, $get:ident, $op:tt) => {{
         if DEBUG {
-            log::trace!("[{}]: jump ~{} if {} {} {}", $compiled_offset, $tt, $s1, $debug, $s2);
+            log::trace!("[{}]: jump ~{} if {} {} {}, else? {}", $compiled_offset, $tt, $s1, $debug, $s2, $tf);
         }
 
         let lhs = $visitor.$get::<DEBUG>($s1);
@@ -3422,7 +3422,7 @@ macro_rules! handle_true_resolved_branch {
 macro_rules! handle_false_resolved_branch {
     ($debug:expr, $visitor:ident, $compiled_offset:ident, $s1:ident, $s2:ident, $tt:ident, $tf:ident, $name:ident, $get:ident, $op:tt) => {{
         if DEBUG {
-            log::trace!("[{}]: jump {} if {} {} {}", $compiled_offset, $tt, $s1, $debug, $s2);
+            log::trace!("[{}]: jump? {} if {} {} {}, else ~{}", $compiled_offset, $tt, $s1, $debug, $s2, $tf);
         }
 
         let lhs = $visitor.$get::<DEBUG>($s1);
