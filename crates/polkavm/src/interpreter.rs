@@ -1398,6 +1398,7 @@ polkavm_common::static_assert!(core::mem::size_of::<CompiledOffset>() == cast(IN
 
 struct Handlers {
     charge_gas: Handler,
+    reset_cache: Handler,
     step: Handler,
     trace_pc: Handler,
 }
@@ -1549,11 +1550,13 @@ impl InterpretedInstance {
             // the same for a given interpreter instance.
             handlers_debug: Handlers {
                 charge_gas: cast_handler!(raw_handlers::charge_gas::<true>),
+                reset_cache: cast_handler!(raw_handlers::reset_cache::<true>),
                 step: cast_handler!(raw_handlers::step::<true>),
                 trace_pc: cast_handler!(raw_handlers::trace_pc::<true>),
             },
             handlers_non_debug: Handlers {
                 charge_gas: cast_handler!(raw_handlers::charge_gas::<false>),
+                reset_cache: cast_handler!(raw_handlers::reset_cache::<false>),
                 step: cast_handler!(raw_handlers::step::<false>),
                 trace_pc: cast_handler!(raw_handlers::trace_pc::<false>),
             },
@@ -1928,6 +1931,7 @@ impl InterpretedInstance {
     /// Resolve a jump from *outside* of the program.
     ///
     /// Unlike jumps from within the program these can start execution anywhere to support suspend/resume of the VM.
+    #[allow(unpredictable_function_pointer_comparisons)]
     fn resolve_arbitrary_jump<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<(Target, i64)> {
         if let Some(compiled_offset) = self.compiled_offset_for_block.get(program_counter.0) {
             return Some(self.extract_target_and_gas::<DEBUG>(compiled_offset));
@@ -1951,7 +1955,12 @@ impl InterpretedInstance {
             log::trace!("  -> Found start of a basic block at: {basic_block_offset}");
         }
 
-        self.compile_block::<DEBUG>(basic_block_offset, false)?;
+        let origin = self.compile_block::<DEBUG>(basic_block_offset, false)?;
+        if self.compiled_handlers[cast(origin).to_usize()] == self.handlers::<DEBUG>().reset_cache {
+            // There's a cache reset already queue for this block; trigger it now.
+            self.reset_interpreter_cache();
+            self.compile_block::<DEBUG>(basic_block_offset, false)?;
+        }
 
         // Reject a program counter pointing into the middle of an instruction.
         let Some(compiled_offset) = self.compiled_offset_for_block.get(program_counter.0) else {
@@ -2130,7 +2139,7 @@ impl InterpretedInstance {
                 );
 
                 self.max_compiled_handlers = Some(compiled_handlers_new_limit);
-                self.compiled_handlers[cast(origin).to_usize()] = cast_handler!(raw_handlers::reset_cache::<DEBUG>);
+                self.compiled_handlers[cast(origin).to_usize()] = self.handlers::<DEBUG>().reset_cache;
                 self.compiled_args[cast(origin).to_usize()] = Args::reset_cache(program_counter);
             } else if self.compiled_handlers.len() > max_compiled_handlers {
                 log::debug!(
@@ -2140,7 +2149,7 @@ impl InterpretedInstance {
                     max_compiled_handlers
                 );
 
-                self.compiled_handlers[cast(origin).to_usize()] = cast_handler!(raw_handlers::reset_cache::<DEBUG>);
+                self.compiled_handlers[cast(origin).to_usize()] = self.handlers::<DEBUG>().reset_cache;
                 self.compiled_args[cast(origin).to_usize()] = Args::reset_cache(program_counter);
             } else if self.compiled_handlers.capacity() > max_compiled_handlers {
                 self.compiled_handlers.shrink_to(max_compiled_handlers);

@@ -950,6 +950,69 @@ fn lazy_branch_target_cache_limit(config: Config, isa: InstructionSetKind) {
     }
 }
 
+fn interpreter_cache_limit_test_module(config: &Config, isa: InstructionSetKind) -> Module {
+    let mut code = Vec::new();
+    for add_count in [2, 6, 3, 9] {
+        code.extend((0..add_count).map(|_| asm::add_imm_32(A0, A0, 1)));
+        code.push(asm::ret());
+    }
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.set_code(&code, &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let engine = Engine::new(config).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    Module::from_blob(&engine, &module_config, blob).unwrap()
+}
+
+fn jump_into_middle_of_each_basic_block(instance: &mut RawInstance, blocks: &[Vec<ProgramCounter>]) -> Vec<Option<usize>> {
+    let mut cache_sizes = Vec::new();
+    for block in blocks.iter().chain(blocks) {
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(Reg::A0, 0);
+        instance.set_gas(1000);
+        instance.set_next_program_counter(block[1]);
+        assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+
+        let add_count_after_entry = cast(block.len() - 2).to_u64();
+        let block_cost = i64::try_from(block.len()).unwrap();
+        assert_eq!((instance.reg(Reg::A0), instance.gas()), (add_count_after_entry, 1000 - block_cost));
+        cache_sizes.push(instance.interpreter_cache_size());
+    }
+    cache_sizes
+}
+
+fn cache_limit_with_middle_of_basic_block_entries(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let module = interpreter_cache_limit_test_module(&config, isa);
+    let blocks = basic_blocks(module.blob());
+    let largest_block = blocks.iter().max_by_key(|block| block.len()).unwrap();
+    for limit in cache_size_limits(&module, largest_block[0]) {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_cache_size_limit(limit).unwrap();
+        for cache_size in jump_into_middle_of_each_basic_block(&mut instance, &blocks) {
+            if let (Some(cache_size), Some(limit)) = (cache_size, limit) {
+                assert!(cache_size <= limit.max_cache_size_bytes);
+            }
+        }
+    }
+}
+
+fn undersized_max_block_size_with_middle_of_basic_block_entries(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let module = interpreter_cache_limit_test_module(&config, isa);
+    let mut instance = module.instantiate().unwrap();
+    instance
+        .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+            max_block_size: 0,
+            max_cache_size_bytes: interpreter_calculate_cache_size(2),
+        }))
+        .unwrap();
+
+    jump_into_middle_of_each_basic_block(&mut instance, &basic_blocks(module.blob()));
+}
+
 fn lazy_branch_target_steps_and_charges_gas(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
@@ -6778,6 +6841,8 @@ run_tests! {
     lazy_branch_target_cache_reset
     lazy_branch_target_cache_limit
     lazy_branch_target_steps_and_charges_gas
+    cache_limit_with_middle_of_basic_block_entries
+    undersized_max_block_size_with_middle_of_basic_block_entries
 
     memset_basic
     memset_with_dynamic_paging
