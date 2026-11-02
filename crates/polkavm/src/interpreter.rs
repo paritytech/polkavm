@@ -19,8 +19,8 @@ use polkavm_common::abi::VM_ADDR_RETURN_TO_HOST;
 use polkavm_common::cast::cast;
 use polkavm_common::operation::*;
 use polkavm_common::program::{
-    asm, interpreter_calculate_cache_num_entries, CodeBlockBitmap, CodeBlockBitmapBox, InstructionSet, InstructionVisitor, RawReg, Reg,
-    CODE_BLOCK_SIZE, INTERPRETER_CACHE_ENTRY_SIZE, INTERPRETER_FLATMAP_ENTRY_SIZE,
+    asm, interpreter_calculate_cache_num_entries, interpreter_calculate_cache_size, CodeBlockBitmap, CodeBlockBitmapBox, InstructionSet,
+    InstructionVisitor, RawReg, Reg, CODE_BLOCK_SIZE, INTERPRETER_CACHE_ENTRY_SIZE, INTERPRETER_FLATMAP_ENTRY_SIZE,
 };
 use polkavm_common::utils::{align_to_next_page_usize, slice_assume_init_mut, ArcBytes, GasVisitorT};
 
@@ -1631,6 +1631,10 @@ impl InterpretedInstance {
         let compiled_handlers_soft_limit = compiled_handlers_hard_limit - (cast(max_block_size).to_usize() + 1);
         self.max_compiled_handlers = Some(compiled_handlers_soft_limit);
         Ok(())
+    }
+
+    pub fn interpreter_cache_size(&self) -> usize {
+        interpreter_calculate_cache_size(self.compiled_handlers.len())
     }
 
     pub fn set_interpreter_max_allocation_size(&mut self, value: Option<usize>) {

@@ -2039,6 +2039,18 @@ impl RawInstance {
         Ok(())
     }
 
+    /// Gets the current interpreter cache size.
+    ///
+    /// Will return `None` when not running under an interpreter.
+    pub fn interpreter_cache_size(&self) -> Option<usize> {
+        #[allow(irrefutable_let_patterns)]
+        if let InstanceBackend::Interpreted(ref backend) = self.backend {
+            Some(backend.interpreter_cache_size())
+        } else {
+            None
+        }
+    }
+
     /// Sets the maximum size of a single non-read-only guest memory region.
     ///
     /// When set this will enforce a strict single-allocation size limit on the interpreter
