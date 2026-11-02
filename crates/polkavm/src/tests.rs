@@ -1,7 +1,7 @@
 use crate::mutex::Mutex;
 use crate::{
     BackendKind, CallError, Caller, CompileError, Config, Engine, GasMeteringKind, InterruptKind, Linker, MemoryAccessError,
-    MemoryProtection, Module, ModuleConfig, ProgramBlob, ProgramCounter, Reg, Segfault, SetCacheSizeLimitArgs,
+    MemoryProtection, Module, ModuleConfig, ProgramBlob, ProgramCounter, RawInstance, Reg, Segfault, SetCacheSizeLimitArgs,
 };
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -12,7 +12,9 @@ use alloc::vec::Vec;
 use polkavm_common::abi::MemoryMapBuilder;
 use polkavm_common::cast::cast;
 use polkavm_common::program::{asm, InstructionSet, InstructionSetKind, Opcode};
-use polkavm_common::program::{BlobLen, Reg::*, INTERPRETER_CACHE_ENTRY_SIZE};
+use polkavm_common::program::{
+    interpreter_calculate_cache_num_entries, interpreter_calculate_cache_size, BlobLen, Reg::*, INTERPRETER_CACHE_ENTRY_SIZE,
+};
 use polkavm_common::utils::align_to_next_page_u32;
 use polkavm_common::writer::ProgramBlobBuilder;
 use polkavm_linker::TargetInstructionSet;
@@ -693,39 +695,277 @@ fn bounded_interpreter_cache(config: Config, isa: InstructionSetKind) {
     }
 }
 
-fn lazy_branch_target_steps_and_charges_gas(config: Config, isa: InstructionSetKind) {
-    // The branch targets basic block 2, the big block, which starts at instruction 3.
-    const BIG_BLOCK_START: usize = 3;
-    const BIG_BLOCK_ADDS: u64 = 32;
-    // The adds followed by a `ret`.
-    const BIG_BLOCK_LENGTH: usize = BIG_BLOCK_ADDS as usize + 1;
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum InterpreterBranchTestSide {
+    Fallthrough,
+    Target,
+}
 
+impl InterpreterBranchTestSide {
+    pub(crate) fn a0(self) -> u64 {
+        match self {
+            InterpreterBranchTestSide::Fallthrough => 1,
+            InterpreterBranchTestSide::Target => 0,
+        }
+    }
+}
+
+pub(crate) struct InterpreterBranchTestBlob {
+    pub(crate) blob: ProgramBlob,
+    pub(crate) branch: ProgramCounter,
+    pub(crate) fallthrough_block: Vec<ProgramCounter>,
+    pub(crate) target_block: Vec<ProgramCounter>,
+}
+
+impl InterpreterBranchTestBlob {
+    const TARGET_BLOCK_ADD_COUNT: u64 = 32;
+
+    pub(crate) const BRANCH_SIDE_ORDERS: [(InterpreterBranchTestSide, InterpreterBranchTestSide); 2] = [
+        (InterpreterBranchTestSide::Fallthrough, InterpreterBranchTestSide::Target),
+        (InterpreterBranchTestSide::Target, InterpreterBranchTestSide::Fallthrough),
+    ];
+
+    fn path(&self, side: InterpreterBranchTestSide) -> Vec<ProgramCounter> {
+        let block = match side {
+            InterpreterBranchTestSide::Fallthrough => &self.fallthrough_block,
+            InterpreterBranchTestSide::Target => &self.target_block,
+        };
+
+        core::iter::once(self.branch).chain(block.iter().copied()).collect()
+    }
+}
+
+pub(crate) fn interpreter_branch_test_blob(isa: InstructionSetKind) -> InterpreterBranchTestBlob {
     let mut code = vec![asm::branch_eq_imm(A0, 0, 2), asm::add_imm_32(A1, A1, 1), asm::ret()];
-    assert_eq!(code.len(), BIG_BLOCK_START);
-    code.extend((0..BIG_BLOCK_ADDS).map(|_| asm::add_imm_32(A2, A2, 1)));
+    code.extend((0..InterpreterBranchTestBlob::TARGET_BLOCK_ADD_COUNT).map(|_| asm::add_imm_32(A2, A2, 1)));
     code.push(asm::ret());
-    assert_eq!(code.len(), BIG_BLOCK_START + BIG_BLOCK_LENGTH);
 
     let mut builder = ProgramBlobBuilder::new(isa);
     builder.add_export_by_basic_block(0, b"main");
     builder.set_code(&code, &[]);
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let [branch_block, fallthrough_block, target_block] = <[Vec<ProgramCounter>; 3]>::try_from(basic_blocks(&blob)).unwrap();
+    let [branch] = <[ProgramCounter; 1]>::try_from(branch_block).unwrap();
+    InterpreterBranchTestBlob {
+        blob,
+        branch,
+        fallthrough_block,
+        target_block,
+    }
+}
 
+fn basic_blocks(blob: &ProgramBlob) -> Vec<Vec<ProgramCounter>> {
+    let instructions: Vec<_> = blob.instructions().collect();
+    instructions
+        .split_inclusive(|instruction| instruction.opcode().starts_new_basic_block())
+        .map(|block| block.iter().map(|instruction| instruction.offset).collect())
+        .collect()
+}
+
+fn run_interpreter_branch_test(instance: &mut RawInstance, test_blob: &InterpreterBranchTestBlob, side: InterpreterBranchTestSide) {
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_reg(Reg::A0, side.a0());
+    instance.set_reg(Reg::A1, 0);
+    instance.set_reg(Reg::A2, 0);
+    instance.set_next_program_counter(test_blob.branch);
+    assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+
+    let expected = match side {
+        InterpreterBranchTestSide::Fallthrough => (1, 0),
+        InterpreterBranchTestSide::Target => (0, InterpreterBranchTestBlob::TARGET_BLOCK_ADD_COUNT),
+    };
+    assert_eq!((instance.reg(Reg::A1), instance.reg(Reg::A2)), expected);
+}
+
+fn lazy_branch_target_compilation_on_first_take(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let test_blob = interpreter_branch_test_blob(isa);
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), test_blob.blob.clone()).unwrap();
+    let target_block_minimum_size = interpreter_calculate_cache_size(test_blob.target_block.len());
+    for (first, second) in InterpreterBranchTestBlob::BRANCH_SIDE_ORDERS {
+        let mut instance = module.instantiate().unwrap();
+        let mut run = |side: InterpreterBranchTestSide| {
+            run_interpreter_branch_test(&mut instance, &test_blob, side);
+            instance.interpreter_cache_size()
+        };
+
+        let (Some(size_1), Some(size_2), Some(size_3), Some(size_4)) = (run(first), run(second), run(second), run(first)) else {
+            continue;
+        };
+
+        if second == InterpreterBranchTestSide::Target {
+            assert!(
+                size_1 < target_block_minimum_size,
+                "expected the untaken big block to not be compiled"
+            );
+            assert!(
+                size_2 - size_1 >= target_block_minimum_size,
+                "expected the big block to be compiled when taken"
+            );
+        }
+
+        assert!(size_2 > size_1, "expected the deferred target to be compiled when taken");
+        assert_eq!(size_3, size_2, "expected nothing to be compiled on the second take");
+        assert_eq!(size_4, size_3, "expected nothing to be compiled on the second take");
+    }
+}
+
+fn lazy_branch_target_cache_reset(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let test_blob = interpreter_branch_test_blob(isa);
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), test_blob.blob.clone()).unwrap();
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_next_program_counter(test_blob.target_block[0]);
+    assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+    let target_block_size = instance.interpreter_cache_size();
+    let fallthrough_path_size = target_block_size.map(|target_block_size| {
+        // Every instruction here compiles to the same number of handlers.
+        assert_eq!(
+            target_block_size % interpreter_calculate_cache_size(test_blob.target_block.len()),
+            0
+        );
+        target_block_size / test_blob.target_block.len() * test_blob.path(InterpreterBranchTestSide::Fallthrough).len()
+    });
+
+    // The soft limit is the hard limit minus `max_block_size + 1`, so the cache fits just the big block
+    // and compiling it after anything else resets the cache.
+    let mut instance = module.instantiate().unwrap();
+    instance
+        .set_interpreter_cache_size_limit(target_block_size.map(|target_block_size| SetCacheSizeLimitArgs {
+            max_block_size: 0,
+            max_cache_size_bytes: target_block_size + interpreter_calculate_cache_size(1),
+        }))
+        .unwrap();
+
+    for side in [
+        InterpreterBranchTestSide::Fallthrough,
+        InterpreterBranchTestSide::Target,
+        InterpreterBranchTestSide::Fallthrough,
+        InterpreterBranchTestSide::Target,
+    ] {
+        run_interpreter_branch_test(&mut instance, &test_blob, side);
+        let Some(cache_size) = instance.interpreter_cache_size() else {
+            continue;
+        };
+
+        match side {
+            InterpreterBranchTestSide::Fallthrough => assert_eq!(
+                Some(cache_size),
+                fallthrough_path_size,
+                "expected only the first two blocks to be compiled"
+            ),
+            InterpreterBranchTestSide::Target => assert_eq!(
+                Some(cache_size),
+                target_block_size,
+                "expected the cache to be reset when the big block was compiled"
+            ),
+        }
+    }
+}
+
+fn cache_size_limits(module: &Module, largest_block_start: ProgramCounter) -> Vec<Option<SetCacheSizeLimitArgs>> {
+    const GAS_METERING_ENTRIES: usize = 1;
+
+    let mut instance = module.instantiate().unwrap();
+    instance.set_gas(0);
+    instance.set_next_program_counter(largest_block_start);
+    assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+    let Some(largest_block_size) = instance.interpreter_cache_size() else {
+        return vec![None];
+    };
+
+    let largest_block_entries = interpreter_calculate_cache_num_entries(largest_block_size);
+    let max_block_size = u32::try_from(largest_block_entries - GAS_METERING_ENTRIES).unwrap();
+    (2 * largest_block_entries..100)
+        .map(|max_cache_entries| {
+            Some(SetCacheSizeLimitArgs {
+                max_block_size,
+                max_cache_size_bytes: interpreter_calculate_cache_size(max_cache_entries),
+            })
+        })
+        .collect()
+}
+
+fn lazy_branch_target_cache_limit(config: Config, isa: InstructionSetKind) {
+    const BRANCH_COUNT: u32 = 8;
+
+    let _ = env_logger::try_init();
+
+    // Every branch jumps to the same final block; the fallthrough side is never taken.
+    let mut code = Vec::new();
+    for _ in 0..BRANCH_COUNT {
+        code.push(asm::add_imm_32(A1, A1, 1));
+        code.push(asm::branch_eq_imm(A0, 0, 2 * BRANCH_COUNT));
+        code.push(asm::trap());
+    }
+    code.push(asm::ret());
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.set_code(&code, &[]);
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let engine = Engine::new(&config).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
+    let (blocks, ret) = offsets.split_at(offsets.len() - 1);
+
+    for limit in cache_size_limits(&module, blocks[0]) {
+        let mut instance = module.instantiate().unwrap();
+        instance.set_interpreter_cache_size_limit(limit).unwrap();
+
+        let mut run = |program_counter: ProgramCounter, gas: i64| {
+            instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+            instance.set_reg(Reg::A0, 0);
+            instance.set_gas(gas);
+            instance.set_next_program_counter(program_counter);
+            let interrupt = instance.run().unwrap();
+            if let (Some(cache_size), Some(limit)) = (instance.interpreter_cache_size(), limit) {
+                let max_cache_entries = interpreter_calculate_cache_num_entries(limit.max_cache_size_bytes);
+                assert!(
+                    cache_size <= limit.max_cache_size_bytes,
+                    "expected the cache to stay within {max_cache_entries} entries"
+                );
+            }
+            interrupt
+        };
+
+        assert_eq!(run(ret[0], 10), InterruptKind::Finished);
+
+        // Entering a block in its middle without enough gas compiles it without entering it, so a block
+        // compiled past the soft limit stays in the cache until it's entered at its start.
+        for block in blocks.chunks(3) {
+            assert_eq!(run(block[1], 0), InterruptKind::NotEnoughGas);
+            assert_eq!(run(block[0], 0), InterruptKind::NotEnoughGas);
+        }
+
+        // Resolving a branch compiles at most its taken side.
+        for block in blocks.chunks(3) {
+            assert_eq!(run(block[0], 10), InterruptKind::Finished);
+        }
+    }
+}
+
+fn lazy_branch_target_steps_and_charges_gas(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let mut module_config = ModuleConfig::new();
     module_config.set_step_tracing(true);
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
-    let module = Module::from_blob(&engine, &module_config, blob).unwrap();
-    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
+    let test_blob = interpreter_branch_test_blob(isa);
+    let module = Module::from_blob(&engine, &module_config, test_blob.blob.clone()).unwrap();
 
     let mut instance = module.instantiate().unwrap();
-    let mut run = |a0: u64, gas: i64| {
+    let mut run = |side: InterpreterBranchTestSide, gas: i64| {
         instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
-        instance.set_reg(Reg::A0, a0);
+        instance.set_reg(Reg::A0, side.a0());
         instance.set_reg(Reg::A2, 0);
         instance.set_gas(gas);
-        instance.set_next_program_counter(offsets[0]);
+        instance.set_next_program_counter(test_blob.branch);
 
         let mut steps = Vec::new();
         loop {
@@ -737,36 +977,36 @@ fn lazy_branch_target_steps_and_charges_gas(config: Config, isa: InstructionSetK
     };
 
     // Every instruction costs one unit of gas.
-    let (small_blocks, big_block) = offsets.split_at(BIG_BLOCK_START);
+    let fallthrough_path = test_blob.path(InterpreterBranchTestSide::Fallthrough);
+    let fallthrough_path_cost = i64::try_from(fallthrough_path.len()).unwrap();
     let branch_cost = 1;
-    let big_block_cost = i64::try_from(BIG_BLOCK_LENGTH).unwrap();
-    let big_block_steps: Vec<_> = core::iter::once(offsets[0]).chain(big_block.iter().copied()).collect();
-    let small_blocks_cost = i64::try_from(BIG_BLOCK_START).unwrap();
+    let target_block_start = test_blob.target_block[0];
+    let target_block_cost = i64::try_from(test_blob.target_block.len()).unwrap();
 
     assert_eq!(
-        run(1, 100),
-        (small_blocks.to_vec(), InterruptKind::Finished, None, 100 - small_blocks_cost, 0)
+        run(InterpreterBranchTestSide::Fallthrough, 100),
+        (fallthrough_path, InterruptKind::Finished, None, 100 - fallthrough_path_cost, 0)
     );
     assert_eq!(
-        run(0, big_block_cost),
+        run(InterpreterBranchTestSide::Target, target_block_cost),
         (
-            vec![offsets[0], big_block[0]],
+            vec![test_blob.branch, target_block_start],
             InterruptKind::NotEnoughGas,
-            Some(big_block[0]),
-            big_block_cost - branch_cost,
+            Some(target_block_start),
+            target_block_cost - branch_cost,
             0
         )
     );
 
     for _ in 0..2 {
         assert_eq!(
-            run(0, 100),
+            run(InterpreterBranchTestSide::Target, 100),
             (
-                big_block_steps.clone(),
+                test_blob.path(InterpreterBranchTestSide::Target),
                 InterruptKind::Finished,
                 None,
-                100 - branch_cost - big_block_cost,
-                BIG_BLOCK_ADDS
+                100 - branch_cost - target_block_cost,
+                InterpreterBranchTestBlob::TARGET_BLOCK_ADD_COUNT
             )
         );
     }
@@ -6534,6 +6774,9 @@ run_tests! {
 
     reclaim_cache_memory
     bounded_interpreter_cache
+    lazy_branch_target_compilation_on_first_take
+    lazy_branch_target_cache_reset
+    lazy_branch_target_cache_limit
     lazy_branch_target_steps_and_charges_gas
 
     memset_basic

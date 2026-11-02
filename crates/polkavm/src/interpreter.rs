@@ -5832,269 +5832,85 @@ impl<'a, const DEBUG: bool> InstructionVisitor for Compiler<'a, DEBUG> {
 #[cfg(test)]
 mod tests {
     use super::InterpretedInstance;
-    use crate::{BackendKind, Config, Engine, GasMeteringKind, InterruptKind, Module, ModuleConfig, ProgramCounter, SetCacheSizeLimitArgs};
-    use alloc::vec::Vec;
+    use crate::tests::{interpreter_branch_test_blob, InterpreterBranchTestBlob, InterpreterBranchTestSide};
+    use crate::{BackendKind, Config, Engine, InterruptKind, Module, ModuleConfig, ProgramCounter};
     use polkavm_common::cast::cast;
-    use polkavm_common::program::{asm, InstructionSetKind, ProgramBlob, Reg, INTERPRETER_CACHE_ENTRY_SIZE};
-    use polkavm_common::writer::ProgramBlobBuilder;
+    use polkavm_common::program::{InstructionSetKind, Reg};
 
     const ISAS: [InstructionSetKind; 2] = [InstructionSetKind::Latest64, InstructionSetKind::ReviveV1];
 
-    fn new_module(blob: ProgramBlob, module_config: &ModuleConfig) -> Module {
+    fn new_instance(test_blob: &InterpreterBranchTestBlob) -> InterpretedInstance {
         let mut config = Config::default();
         config.set_backend(Some(BackendKind::Interpreter));
         let engine = Engine::new(&config).unwrap();
-        Module::from_blob(&engine, module_config, blob).unwrap()
+        let module = Module::from_blob(&engine, &ModuleConfig::new(), test_blob.blob.clone()).unwrap();
+        InterpretedInstance::new_from_module(module, false, false)
     }
 
-    fn new_instance(module: &Module) -> InterpretedInstance {
-        InterpretedInstance::new_from_module(module.clone(), false, false)
+    fn run(instance: &mut InterpretedInstance, program_counter: ProgramCounter) -> u64 {
+        let cycles = instance.cycle_counter;
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_next_program_counter(program_counter);
+        assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+        instance.cycle_counter - cycles
     }
 
-    // The branch in `branch_to_big_block_test_blob` targets basic block 2, the big block, which starts at instruction 3.
-    const BIG_BLOCK_START: usize = 3;
-    const BIG_BLOCK_ADDS: u32 = 32;
-    // The adds followed by a `ret`.
-    const BIG_BLOCK_LENGTH: usize = cast(BIG_BLOCK_ADDS).to_usize() + 1;
+    fn take_branch(instance: &mut InterpretedInstance, test_blob: &InterpreterBranchTestBlob, side: InterpreterBranchTestSide) -> u64 {
+        instance.set_reg(Reg::A0, side.a0());
+        run(instance, test_blob.branch)
+    }
 
-    fn branch_to_big_block_test_blob(isa: InstructionSetKind) -> ProgramBlob {
-        let mut code = alloc::vec![asm::branch_eq_imm(Reg::A0, 0, 2), asm::add_imm_32(Reg::A1, Reg::A1, 1), asm::ret()];
-        assert_eq!(code.len(), BIG_BLOCK_START);
-        code.extend((0..BIG_BLOCK_ADDS).map(|_| asm::add_imm_32(Reg::A2, Reg::A2, 1)));
-        code.push(asm::ret());
-        assert_eq!(code.len(), BIG_BLOCK_START + BIG_BLOCK_LENGTH);
-
-        let mut builder = ProgramBlobBuilder::new(isa);
-        builder.add_export_by_basic_block(0, b"main");
-        builder.set_code(&code, &[]);
-        ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap()
+    fn assert_branch_fully_resolved(instance: &InterpretedInstance, test_blob: &InterpreterBranchTestBlob) {
+        // In debug mode the branch's block is a `trace_pc` handler followed by the branch itself.
+        let branch = cast(instance.resolve_compiled_jump(test_blob.branch).unwrap()).to_usize() + 1;
+        let args = instance.compiled_args[branch];
+        assert_eq!(
+            (Some(args.a2), Some(args.a3)),
+            (
+                instance.resolve_compiled_jump(test_blob.target_block[0]),
+                instance.resolve_compiled_jump(test_blob.fallthrough_block[0])
+            ),
+            "expected the branch to hold both compiled targets"
+        );
     }
 
     #[test]
-    fn lazy_branch_target_is_compiled_when_first_taken() {
+    fn lazy_branch_dispatch_count() {
         let _ = env_logger::try_init();
         for isa in ISAS {
-            let module = new_module(branch_to_big_block_test_blob(isa), &ModuleConfig::new());
-            for (first, second) in [(1, 0), (0, 1)] {
-                let mut instance = new_instance(&module);
-                let mut run = |a0: u64| {
-                    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
-                    instance.set_reg(Reg::A0, a0);
-                    instance.set_reg(Reg::A1, 0);
-                    instance.set_reg(Reg::A2, 0);
-                    instance.set_next_program_counter(ProgramCounter(0));
-                    let cycles = instance.cycle_counter;
-                    assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
-
-                    let expected = if a0 == 0 { (0, u64::from(BIG_BLOCK_ADDS)) } else { (1, 0) };
-                    assert_eq!((instance.reg(Reg::A1), instance.reg(Reg::A2)), expected);
-                    (instance.compiled_handlers.len(), instance.cycle_counter - cycles)
-                };
-
-                let (count_1, _) = run(first);
-                let (count_2, cycles_2) = run(second);
-                let (count_3, cycles_3) = run(second);
-                let (count_4, _) = run(first);
-
-                if second == 0 {
-                    assert!(count_1 < BIG_BLOCK_LENGTH, "expected the untaken big block to not be compiled");
-                    assert!(
-                        count_2 - count_1 >= BIG_BLOCK_LENGTH,
-                        "expected the big block to be compiled when taken"
-                    );
-                }
-
-                assert!(count_2 > count_1, "expected the deferred target to be compiled when taken");
-                assert_eq!(count_3, count_2, "expected nothing to be compiled on the second take");
-                assert_eq!(count_4, count_3, "expected nothing to be compiled on the second take");
+            let test_blob = interpreter_branch_test_blob(isa);
+            for (first, second) in InterpreterBranchTestBlob::BRANCH_SIDE_ORDERS {
+                let mut instance = new_instance(&test_blob);
+                take_branch(&mut instance, &test_blob, first);
+                let cycles_2 = take_branch(&mut instance, &test_blob, second);
+                let cycles_3 = take_branch(&mut instance, &test_blob, second);
 
                 // `cycle_counter` counts dispatched handlers only in debug mode, which tests always use.
                 assert_eq!(cycles_3, cycles_2, "expected the first take to dispatch no extra handlers");
-
-                // In debug mode the branch's block is a `trace_pc` handler followed by the branch itself.
-                let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
-                let branch = cast(instance.resolve_compiled_jump(offsets[0]).unwrap()).to_usize() + 1;
-                let args = instance.compiled_args[branch];
-                assert_eq!(
-                    (Some(args.a2), Some(args.a3)),
-                    (
-                        instance.resolve_compiled_jump(offsets[BIG_BLOCK_START]),
-                        instance.resolve_compiled_jump(offsets[1])
-                    ),
-                    "expected the branch to hold both compiled targets"
-                );
             }
         }
     }
 
     #[test]
-    fn lazy_branch_with_the_other_side_compiled_is_fully_resolved() {
+    fn lazy_branch_full_resolution() {
         let _ = env_logger::try_init();
         for isa in ISAS {
-            let module = new_module(branch_to_big_block_test_blob(isa), &ModuleConfig::new());
-            let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
-            let run = |instance: &mut InterpretedInstance, a0: u64| {
-                instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
-                instance.set_reg(Reg::A0, a0);
-                instance.set_reg(Reg::A1, 0);
-                instance.set_reg(Reg::A2, 0);
-                instance.set_next_program_counter(offsets[0]);
-                assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
-
-                let expected = if a0 == 0 { (0, u64::from(BIG_BLOCK_ADDS)) } else { (1, 0) };
-                assert_eq!((instance.reg(Reg::A1), instance.reg(Reg::A2)), expected);
-                instance.compiled_handlers.len()
-            };
-
-            for (precompiled, first) in [(offsets[1], 0), (offsets[BIG_BLOCK_START], 1)] {
-                let mut instance = new_instance(&module);
-                instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
-                instance.set_next_program_counter(precompiled);
-                assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
-
-                let count = run(&mut instance, first);
-
-                // In debug mode the branch's block is a `trace_pc` handler followed by the branch itself.
-                let branch = cast(instance.resolve_compiled_jump(offsets[0]).unwrap()).to_usize() + 1;
-                let args = instance.compiled_args[branch];
-                assert_eq!(
-                    (Some(args.a2), Some(args.a3)),
-                    (
-                        instance.resolve_compiled_jump(offsets[BIG_BLOCK_START]),
-                        instance.resolve_compiled_jump(offsets[1])
-                    ),
-                    "expected the branch to hold both compiled targets after its first execution"
-                );
-
-                for a0 in [first, 1 - first] {
-                    assert_eq!(
-                        run(&mut instance, a0),
-                        count,
-                        "expected nothing to be compiled once both sides are resolved"
-                    );
-                }
+            let test_blob = interpreter_branch_test_blob(isa);
+            for (first, second) in InterpreterBranchTestBlob::BRANCH_SIDE_ORDERS {
+                let mut instance = new_instance(&test_blob);
+                take_branch(&mut instance, &test_blob, first);
+                take_branch(&mut instance, &test_blob, second);
+                assert_branch_fully_resolved(&instance, &test_blob);
             }
-        }
-    }
 
-    #[test]
-    fn lazy_branch_target_compile_can_reset_the_cache() {
-        let _ = env_logger::try_init();
-        for isa in ISAS {
-            let module = new_module(branch_to_big_block_test_blob(isa), &ModuleConfig::new());
-            let big_block = module.blob().instructions().nth(BIG_BLOCK_START).unwrap().offset;
-
-            let mut instance = new_instance(&module);
-            instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
-            instance.set_next_program_counter(big_block);
-            assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
-            let big_block_handlers = instance.compiled_handlers.len();
-
-            // Every instruction here compiles to the same number of handlers.
-            assert_eq!(big_block_handlers % BIG_BLOCK_LENGTH, 0);
-            let handlers_per_instruction = big_block_handlers / BIG_BLOCK_LENGTH;
-            let not_taken_handlers = BIG_BLOCK_START * handlers_per_instruction;
-
-            // The soft limit is the hard limit minus `max_block_size + 1`, so the cache fits just the big block
-            // and compiling it after anything else resets the cache.
-            let mut instance = new_instance(&module);
-            instance
-                .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
-                    max_block_size: 0,
-                    max_cache_size_bytes: (big_block_handlers + 1) * cast(INTERPRETER_CACHE_ENTRY_SIZE).to_usize(),
-                }))
-                .unwrap();
-
-            for a0 in [1, 0, 1, 0] {
-                instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
-                instance.set_reg(Reg::A0, a0);
-                instance.set_reg(Reg::A1, 0);
-                instance.set_reg(Reg::A2, 0);
-                instance.set_next_program_counter(ProgramCounter(0));
-                assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
-
-                if a0 == 0 {
-                    assert_eq!((instance.reg(Reg::A1), instance.reg(Reg::A2)), (0, u64::from(BIG_BLOCK_ADDS)));
-                    assert_eq!(
-                        instance.compiled_handlers.len(),
-                        big_block_handlers,
-                        "expected the cache to be reset when the big block was compiled"
-                    );
-                } else {
-                    assert_eq!((instance.reg(Reg::A1), instance.reg(Reg::A2)), (1, 0));
-                    assert_eq!(
-                        instance.compiled_handlers.len(),
-                        not_taken_handlers,
-                        "expected only the first two blocks to be compiled"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn lazy_branch_targets_stay_within_the_cache_limit() {
-        const BRANCH_COUNT: u32 = 8;
-
-        let _ = env_logger::try_init();
-        for isa in ISAS {
-            // Every branch jumps to the same final block; the fallthrough side is never taken.
-            let mut code = Vec::new();
-            for _ in 0..BRANCH_COUNT {
-                code.push(asm::add_imm_32(Reg::A1, Reg::A1, 1));
-                code.push(asm::branch_eq_imm(Reg::A0, 0, 2 * BRANCH_COUNT));
-                code.push(asm::trap());
-            }
-            code.push(asm::ret());
-
-            let mut builder = ProgramBlobBuilder::new(isa);
-            builder.set_code(&code, &[]);
-            let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
-            let mut module_config = ModuleConfig::new();
-            module_config.set_gas_metering(Some(GasMeteringKind::Sync));
-            let module = new_module(blob, &module_config);
-            let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
-            let (blocks, ret) = offsets.split_at(offsets.len() - 1);
-
-            // In debug mode every instruction takes two handlers (`trace_pc` and the instruction itself), so the
-            // branch blocks take four; the gas metering handler is accounted for on top of that.
-            let max_block_size: u32 = 4;
-            let minimum_cache_entries = 2 * (cast(max_block_size).to_usize() + 1);
-            for max_cache_entries in minimum_cache_entries..100 {
-                let mut instance = new_instance(&module);
-                instance
-                    .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
-                        max_block_size,
-                        max_cache_size_bytes: max_cache_entries * cast(INTERPRETER_CACHE_ENTRY_SIZE).to_usize(),
-                    }))
-                    .unwrap();
-
-                let mut run = |program_counter: ProgramCounter, gas: i64| {
-                    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
-                    instance.set_reg(Reg::A0, 0);
-                    instance.set_gas(gas);
-                    instance.set_next_program_counter(program_counter);
-                    let interrupt = instance.run().unwrap();
-                    assert!(
-                        instance.compiled_handlers.len() <= max_cache_entries,
-                        "expected the cache to stay within {max_cache_entries} entries"
-                    );
-                    interrupt
-                };
-
-                assert_eq!(run(ret[0], 10), InterruptKind::Finished);
-
-                // Entering a block in its middle without enough gas compiles it without entering it, so a block
-                // compiled past the soft limit stays in the cache until it's entered at its start.
-                for block in blocks.chunks(3) {
-                    assert_eq!(run(block[1], 0), InterruptKind::NotEnoughGas);
-                    assert_eq!(run(block[0], 0), InterruptKind::NotEnoughGas);
-                }
-
-                // Resolving a branch compiles at most its taken side.
-                for block in blocks.chunks(3) {
-                    assert_eq!(run(block[0], 10), InterruptKind::Finished);
-                }
+            for (precompiled_block, side) in [
+                (&test_blob.fallthrough_block, InterpreterBranchTestSide::Target),
+                (&test_blob.target_block, InterpreterBranchTestSide::Fallthrough),
+            ] {
+                let mut instance = new_instance(&test_blob);
+                run(&mut instance, precompiled_block[0]);
+                take_branch(&mut instance, &test_blob, side);
+                assert_branch_fully_resolved(&instance, &test_blob);
             }
         }
     }
