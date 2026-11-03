@@ -819,6 +819,12 @@ fn lazy_branch_target_cache_reset(config: Config, isa: InstructionSetKind) {
     let module = Module::from_blob(&engine, &ModuleConfig::new(), test_blob.blob.clone()).unwrap();
 
     let mut instance = module.instantiate().unwrap();
+    instance
+        .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+            max_block_size: 0,
+            max_cache_size_bytes: 1000000,
+        }))
+        .unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(test_blob.target_block[0]);
     assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
@@ -1387,7 +1393,7 @@ fn compilation_charge_out_of_gas_on_first_entry(config: Config, isa: Instruction
 
         assert_eq!(
             instance.interpreter_cache_size(),
-            Some(interpreter_calculate_cache_size(2 + 3)),
+            Some(interpreter_calculate_cache_size(3 + 5)),
             "expected the block after the branch to be compiled"
         );
 
@@ -1507,45 +1513,39 @@ fn compilation_thrown_away_on_entry_into_the_middle_of_a_block_is_charged(config
     let engine = Engine::new(&config).unwrap();
     let test_blob = interpreter_branch_test_blob(isa);
     let entry = test_blob.target_block[1];
-    for step_tracing in [false, true] {
-        let mut module_config = ModuleConfig::new();
-        module_config.set_gas_metering(Some(GasMeteringKind::Sync));
-        module_config.set_step_tracing(step_tracing);
-        module_config.set_interpreter_compilation_cost(Some(TEST_COMPILATION_COST));
-        let module = Module::from_blob(&engine, &module_config, test_blob.blob.clone()).unwrap();
-        let mut instance = module.instantiate().unwrap();
-        instance
-            .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
-                max_block_size: 0,
-                max_cache_size_bytes: interpreter_calculate_cache_size(35),
-            }))
-            .unwrap();
+    let mut instance =
+        instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, test_blob.blob.clone(), Some(TEST_COMPILATION_COST));
+    instance
+        .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+            max_block_size: 0,
+            max_cache_size_bytes: interpreter_calculate_cache_size(35),
+        }))
+        .unwrap();
 
-        assert_eq!(
-            run_and_get_gas_used(&mut instance, test_blob.branch, InterpreterBranchTestSide::Fallthrough.a0()),
-            1 + 11 + 2 + 11
-        );
+    assert_eq!(
+        run_and_get_gas_used(&mut instance, test_blob.branch, InterpreterBranchTestSide::Fallthrough.a0()),
+        1 + 11 + 2 + 11
+    );
 
-        // The big block doesn't fit next to the other two, so it's compiled twice before it's
-        // entered. It costs 33 to run and 27 to compile.
-        let gas = 33 + 27 + 27 - 1;
-        instance.set_gas(gas);
-        instance.set_next_program_counter(entry);
-        assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
-        assert_eq!(instance.gas(), gas);
-        assert_eq!(
-            instance.interpreter_cache_size(),
-            Some(interpreter_calculate_cache_size(34)),
-            "expected only the big block to be in the cache with step_tracing={step_tracing}"
-        );
+    // The big block doesn't fit next to the other two, so it's compiled twice before it's
+    // entered. It costs 33 to run and 27 to compile.
+    let gas = 33 + 27 + 27 - 1;
+    instance.set_gas(gas);
+    instance.set_next_program_counter(entry);
+    assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+    assert_eq!(instance.gas(), gas);
+    assert_eq!(
+        instance.interpreter_cache_size(),
+        Some(interpreter_calculate_cache_size(34)),
+        "expected only the big block to be in the cache"
+    );
 
-        assert_eq!(
-            run_and_get_gas_used(&mut instance, entry, 0),
-            33 + 27 + 27,
-            "expected both compilations to be charged once with step_tracing={step_tracing}"
-        );
-        assert_eq!(run_and_get_gas_used(&mut instance, entry, 0), 33);
-    }
+    assert_eq!(
+        run_and_get_gas_used(&mut instance, entry, 0),
+        33 + 27 + 27,
+        "expected both compilations to be charged once"
+    );
+    assert_eq!(run_and_get_gas_used(&mut instance, entry, 0), 33);
 }
 
 fn compilation_charge_on_entry_into_the_middle_of_a_block(config: Config, isa: InstructionSetKind) {
@@ -1712,52 +1712,45 @@ fn arbitrary_jump_inside_of_an_instruction_does_not_compile_again(config: Config
     );
 }
 
-fn cache_size_limit_does_not_depend_on_step_tracing(config: Config, isa: InstructionSetKind) {
+fn cache_size_limit_disables_debug_handlers(config: Config, isa: InstructionSetKind) {
     if config.backend() != Some(crate::BackendKind::Interpreter) {
         return;
     }
 
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
-    let run = |step_tracing: bool, max_cache_entries: usize| {
-        let mut module_config = ModuleConfig::new();
-        module_config.set_gas_metering(Some(GasMeteringKind::Sync));
-        module_config.set_step_tracing(step_tracing);
-        module_config.set_interpreter_compilation_cost(Some(TEST_COMPILATION_COST));
-        let module = Module::from_blob(&engine, &module_config, chain_of_blocks_test_blob(isa)).unwrap();
-        let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
-
-        let mut instance = module.instantiate().unwrap();
-        instance
-            .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
-                max_block_size: 5,
-                max_cache_size_bytes: interpreter_calculate_cache_size(max_cache_entries),
-            }))
-            .unwrap();
-
-        [offsets[0], offsets[0], offsets[1]].map(|program_counter| {
-            let gas = run_and_get_gas_used(&mut instance, program_counter, 0);
-            (
-                gas,
-                interpreter_calculate_cache_num_entries(instance.interpreter_cache_size().unwrap()),
-            )
-        })
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), chain_of_blocks_test_blob(isa)).unwrap();
+    let limit = SetCacheSizeLimitArgs {
+        max_block_size: 5,
+        max_cache_size_bytes: interpreter_calculate_cache_size(27),
     };
 
-    // Each block costs 4 to run and 12 to compile, and takes 5 entries; 6 are reserved for the
-    // next block. With 14 entries every block that doesn't fit is compiled twice: 7 compilations
-    // in the first run, 8 in the others, which start without the first block.
-    let fits_one_block = [(16 + 7 * 12, 5), (16 + 8 * 12, 5), (16 + 8 * 12, 5)];
-    let fits_all_blocks = [(16 + 4 * 12, 20), (16, 20), (16, 20)];
-    for (max_cache_entries, expected) in [(14, fits_one_block), (27, fits_all_blocks)] {
-        for step_tracing in [false, true] {
-            assert_eq!(
-                run(step_tracing, max_cache_entries),
-                expected,
-                "expected the same cache contents with max_cache_entries={max_cache_entries}, step_tracing={step_tracing}"
-            );
-        }
-    }
+    let mut instance = module.instantiate().unwrap();
+    let run = |instance: &mut RawInstance| {
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(Reg::A0, 0);
+        instance.set_next_program_counter(ProgramCounter(0));
+        assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+        assert_eq!(instance.reg(Reg::A0), 12);
+        interpreter_calculate_cache_num_entries(instance.interpreter_cache_size().unwrap())
+    };
+
+    // Unit tests always run the interpreter in debug mode, which adds a `trace_pc` handler to each of the 16 instructions.
+    assert_eq!(run(&mut instance), 32);
+
+    instance.set_interpreter_cache_size_limit(Some(limit)).unwrap();
+    assert_eq!(instance.interpreter_cache_size(), Some(0));
+    assert_eq!(run(&mut instance), 16);
+
+    instance.set_interpreter_cache_size_limit(None).unwrap();
+    assert_eq!(instance.interpreter_cache_size(), Some(0));
+    assert_eq!(run(&mut instance), 32);
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_step_tracing(true);
+    let module = Module::from_blob(&engine, &module_config, chain_of_blocks_test_blob(isa)).unwrap();
+    let mut instance = module.instantiate().unwrap();
+    assert!(instance.set_interpreter_cache_size_limit(Some(limit)).is_err());
 }
 
 fn lowering_the_cache_size_limit_clears_the_cache(config: Config, isa: InstructionSetKind) {
@@ -1791,7 +1784,7 @@ fn lowering_the_cache_size_limit_clears_the_cache(config: Config, isa: Instructi
     // This limit fits two blocks, so running resets the cache.
     let (cache_size_before_running, cache_size) = run_with_limit(15);
     assert_eq!(cache_size_before_running, Some(0));
-    assert!(cache_size.unwrap() <= interpreter_calculate_cache_size(15));
+    assert_eq!(cache_size, Some(interpreter_calculate_cache_size(8)));
 }
 
 fn step_tracing_invalid_store(engine_config: Config, isa: InstructionSetKind) {
@@ -7577,7 +7570,7 @@ run_tests! {
     compilation_charge_on_entry_into_the_middle_of_a_block
     cache_reset_while_suspended_resumes_at_the_next_program_counter
     arbitrary_jump_inside_of_an_instruction_does_not_compile_again
-    cache_size_limit_does_not_depend_on_step_tracing
+    cache_size_limit_disables_debug_handlers
     lowering_the_cache_size_limit_clears_the_cache
 
     memset_basic

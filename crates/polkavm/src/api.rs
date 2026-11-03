@@ -2051,10 +2051,9 @@ impl RawInstance {
 
     /// Set an upper limit on the interpreter cache size (in bytes).
     ///
-    /// Step tracing and debug logging handlers aren't counted. A limit without room for one more
-    /// block clears the cache. On the interpreter, setting a limit fails with gas metering other
-    /// than per instruction unless the module has a compilation cost (see
-    /// [`ModuleConfig::set_interpreter_compilation_cost`]).
+    /// A limit without room for one more block clears the cache. On the interpreter, setting a
+    /// limit fails with step tracing, and with gas metering other than per instruction unless the
+    /// module has a compilation cost (see [`ModuleConfig::set_interpreter_compilation_cost`]).
     pub fn set_interpreter_cache_size_limit(&mut self, cache_info: Option<SetCacheSizeLimitArgs>) -> Result<(), Error> {
         #[allow(irrefutable_let_patterns)]
         if let InstanceBackend::Interpreted(ref mut backend) = self.backend {
@@ -2064,8 +2063,6 @@ impl RawInstance {
     }
 
     /// Gets the current interpreter cache size.
-    ///
-    /// Step tracing and debug logging handlers aren't included, as for the cache size limit.
     ///
     /// Will return `None` when not running under an interpreter.
     pub fn interpreter_cache_size(&self) -> Option<usize> {

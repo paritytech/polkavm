@@ -1512,14 +1512,13 @@ pub(crate) struct InterpretedInstance {
     valid_jump_targets_for_block: Vec<Option<CodeBlockBitmapBox>>,
     compiled_handlers: Vec<Handler>,
     compiled_args: Vec<Args>,
-    tracing_handlers: usize,
     next_compiled_offset: Target,
     interrupt: InterruptKind,
     step_tracing: bool,
     unresolved_program_counter: Option<ProgramCounter>,
     max_compiled_handlers: Option<usize>,
     max_cache_entries: Option<usize>,
-    debug_mode: bool,
+    debug_logging: bool,
     handlers_debug: Handlers,
     handlers_non_debug: Handlers,
 }
@@ -1533,7 +1532,6 @@ impl InterpretedInstance {
             valid_jump_targets_for_block: Default::default(),
             compiled_handlers: Default::default(),
             compiled_args: Default::default(),
-            tracing_handlers: 0,
             module,
             standard_memory: StandardMemory::new(),
             dynamic_memory: DynamicMemory::new(),
@@ -1552,7 +1550,7 @@ impl InterpretedInstance {
             unresolved_program_counter: None,
             max_compiled_handlers: None,
             max_cache_entries: None,
-            debug_mode: cfg!(test)
+            debug_logging: cfg!(test)
                 || (!imperfect_logger_filtering_workaround
                     && (log::log_enabled!(target: "polkavm", log::Level::Debug)
                         || log::log_enabled!(target: "polkavm::interpreter", log::Level::Debug))),
@@ -1626,10 +1624,19 @@ impl InterpretedInstance {
             max_cache_size_bytes,
         }) = cache_info
         else {
+            if self.max_cache_entries.is_some() {
+                self.clear_cache();
+                self.resume_at_next_program_counter();
+            }
+
             self.max_compiled_handlers = None;
             self.max_cache_entries = None;
             return Ok(());
         };
+
+        if self.step_tracing {
+            return Err(Error::from_static_str("limiting the cache size is not supported with step tracing"));
+        }
 
         if self.module.interpreter_compilation_cost().is_none() && self.has_block_gas_metering() {
             return Err(Error::from_static_str(
@@ -1657,11 +1664,14 @@ impl InterpretedInstance {
         }
 
         let compiled_handlers_soft_limit = compiled_handlers_hard_limit - (cast(max_block_size).to_usize() + 1);
+        let was_unlimited = self.max_cache_entries.is_none();
         self.max_compiled_handlers = Some(compiled_handlers_soft_limit);
         self.max_cache_entries = Some(compiled_handlers_hard_limit);
 
-        // With more than this in the cache the next compilation could go past the new limit.
-        if self.compiled_handlers.len() - self.tracing_handlers > compiled_handlers_soft_limit {
+        // Compiled handlers depend on the debug mode. Clearing whether or not it changed keeps the
+        // cache resets the same with any log level. With more than the soft limit in the cache the
+        // next compilation could go past the new limit.
+        if was_unlimited || self.compiled_handlers.len() > compiled_handlers_soft_limit {
             self.clear_cache();
             self.resume_at_next_program_counter();
         }
@@ -1675,7 +1685,7 @@ impl InterpretedInstance {
     }
 
     pub fn interpreter_cache_size(&self) -> usize {
-        interpreter_calculate_cache_size(self.compiled_handlers.len() - self.tracing_handlers)
+        interpreter_calculate_cache_size(self.compiled_handlers.len())
     }
 
     pub fn set_interpreter_max_allocation_size(&mut self, value: Option<usize>) {
@@ -1767,7 +1777,7 @@ impl InterpretedInstance {
 
     pub fn run(&mut self) -> Result<InterruptKind, Error> {
         #[allow(clippy::collapsible_else_if)]
-        if self.debug_mode {
+        if self.debug_logging && self.max_cache_entries.is_none() {
             Ok(self.run_impl::<true>())
         } else {
             Ok(self.run_impl::<false>())
@@ -1897,7 +1907,6 @@ impl InterpretedInstance {
     fn clear_cache(&mut self) {
         self.compiled_handlers.clear();
         self.compiled_args.clear();
-        self.tracing_handlers = 0;
 
         for range in self.compiled_code_ranges.drain(..) {
             self.compiled_offset_for_block.remove_range(range);
@@ -2280,15 +2289,10 @@ impl InterpretedInstance {
             };
         }
 
-        // Not counted against the limit, so cache resets don't depend on step tracing or logging.
-        let tracing_handlers_added = cast(instruction_count).to_usize() * (usize::from(self.step_tracing) + usize::from(DEBUG));
-        self.tracing_handlers += tracing_handlers_added;
-
         // A block marked with `reset_cache` is thrown away on entry; the block compiled in its place pays for it.
         let marker = Args::reset_cache(program_counter, charged_compilation_cost);
         if let Some(max_compiled_handlers) = self.max_compiled_handlers {
-            let handlers_added = self.compiled_handlers.len() - cast(origin).to_usize() - tracing_handlers_added;
-            let cache_entries = self.compiled_handlers.len() - self.tracing_handlers;
+            let handlers_added = self.compiled_handlers.len() - cast(origin).to_usize();
             if handlers_added > max_compiled_handlers {
                 let compiled_handlers_new_limit = handlers_added;
 
@@ -2302,11 +2306,11 @@ impl InterpretedInstance {
                 self.max_compiled_handlers = Some(compiled_handlers_new_limit);
                 self.compiled_handlers[cast(origin).to_usize()] = self.handlers::<DEBUG>().reset_cache;
                 self.compiled_args[cast(origin).to_usize()] = marker;
-            } else if cache_entries > max_compiled_handlers {
+            } else if self.compiled_handlers.len() > max_compiled_handlers {
                 log::debug!(
                     "interpreter: compiled handlers cache size exceeded at {}: {} > {}; will reset the cache",
                     origin,
-                    cache_entries,
+                    self.compiled_handlers.len(),
                     max_compiled_handlers
                 );
 
