@@ -2038,9 +2038,7 @@ impl RawInstance {
 
     /// Reset cache and therefore reclaim cache backed memory.
     ///
-    /// On the interpreter, fails with gas metering other than per instruction unless the module has a
-    /// compilation cost (see [`ModuleConfig::set_interpreter_compilation_cost`]). A suspended
-    /// instance can still be resumed, and pays for compiling its current block again.
+    /// Fails on the interpreter with block gas metering and no compilation cost.
     pub fn reset_interpreter_cache(&mut self) -> Result<(), Error> {
         #[allow(irrefutable_let_patterns)]
         if let InstanceBackend::Interpreted(ref mut backend) = self.backend {
@@ -2049,11 +2047,9 @@ impl RawInstance {
         Ok(())
     }
 
-    /// Set an upper limit on the interpreter cache size (in bytes).
+    /// Set a tight upper limit on the interpreter cache size (in bytes).
     ///
-    /// A limit without room for one more block clears the cache. On the interpreter, setting a
-    /// limit fails with step tracing, and with gas metering other than per instruction unless the
-    /// module has a compilation cost (see [`ModuleConfig::set_interpreter_compilation_cost`]).
+    /// Fails on the interpreter with step tracing, or with block gas metering and no compilation cost.
     pub fn set_interpreter_cache_size_limit(&mut self, cache_info: Option<SetCacheSizeLimitArgs>) -> Result<(), Error> {
         #[allow(irrefutable_let_patterns)]
         if let InstanceBackend::Interpreted(ref mut backend) = self.backend {

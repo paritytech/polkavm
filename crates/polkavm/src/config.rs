@@ -497,9 +497,7 @@ pub enum GasMeteringKind {
     Async,
 }
 
-/// Gas the interpreter charges for compiling a block.
-///
-/// Charged when a block is compiled, which can leave the gas negative.
+/// Gas the interpreter charges when it compiles code; it can leave the gas negative.
 #[allow(clippy::exhaustive_structs)]
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct InterpreterCompilationCost {
@@ -507,10 +505,7 @@ pub struct InterpreterCompilationCost {
     pub per_block: u32,
     /// Thousandths of gas per instruction in a compiled block, rounded up per block.
     pub per_instruction_millis: u32,
-    /// Thousandths of gas per byte of code.
-    ///
-    /// Charged on the first compilation after instantiation or
-    /// [`RawInstance::reset_interpreter_cache`](crate::RawInstance::reset_interpreter_cache).
+    /// Thousandths of gas per byte of code, rounded up, on the first compilation after instantiation or `reset_interpreter_cache`.
     pub per_code_byte_millis: u32,
 }
 
@@ -678,8 +673,8 @@ impl ModuleConfig {
 
     /// Sets the gas the interpreter charges for compiling code.
     ///
-    /// Ignored by the recompiler and without gas metering. Creating a module fails if combined with
-    /// per instruction gas metering or crosschecking.
+    /// Ignored by the recompiler. Creating a module fails with per instruction gas metering or when crosschecking a
+    /// non-interpreter backend.
     ///
     /// Default: `None`
     pub fn set_interpreter_compilation_cost(&mut self, cost: Option<InterpreterCompilationCost>) -> &mut Self {

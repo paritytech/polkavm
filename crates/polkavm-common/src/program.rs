@@ -639,14 +639,11 @@ impl LookupTable {
     }
 }
 
-/// The size in bytes of an interpreter cache entry for the cache size limit.
-///
-/// The limit uses 24 bytes per entry on every target, so the cache resets at the same points everywhere.
+/// The size in bytes of an interpreter cache entry for the cache size limit, the same on every target.
 pub const INTERPRETER_CACHE_ENTRY_SIZE: u32 = 24;
 
 pub const INTERPRETER_FLATMAP_ENTRY_SIZE: u32 = 4;
 
-/// The size in bytes of the interpreter's record of a compiled basic block.
 pub const INTERPRETER_COMPILED_BLOCK_RECORD_SIZE: u32 = 8;
 
 pub fn interpreter_calculate_cache_size(count: usize) -> usize {

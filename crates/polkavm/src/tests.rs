@@ -1252,7 +1252,7 @@ fn compilation_cost_errors(config: Config, isa: InstructionSetKind) {
         max_cache_size_bytes: 1000,
     });
 
-    // Crosschecking the interpreter itself doesn't reject a cost; the branch and the block after it cost 1 + 11 and 2 + 11.
+    // The branch and the block after it cost 1 + 11 and 2 + 11.
     let mut crosscheck_config = config;
     crosscheck_config.set_allow_experimental(true);
     crosscheck_config.set_crosscheck(true);
@@ -1264,7 +1264,6 @@ fn compilation_cost_errors(config: Config, isa: InstructionSetKind) {
         1 + 11 + 2 + 11
     );
 
-    // Per instruction gas metering and no gas metering don't need a cost.
     let mut module_config = ModuleConfig::new();
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
     module_config.set_per_instruction_metering(true);
@@ -1357,8 +1356,7 @@ fn code_length_dependent_state_is_charged(config: Config, isa: InstructionSetKin
     instance.reset_interpreter_cache().unwrap();
     assert_eq!(run_and_get_gas_used(&mut instance, ProgramCounter(0), 0), 6 + code_length);
 
-    // The blocks take 5 and 3 entries and the limit fits one, so running resets the cache; these
-    // resets don't charge for the code again.
+    // The blocks take 5 and 3 entries and the limit fits one, so running resets the cache.
     instance.reset_interpreter_cache().unwrap();
     instance
         .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
@@ -1455,7 +1453,6 @@ fn compilation_thrown_away_by_a_cache_reset_is_charged(config: Config, isa: Inst
         instance
     };
 
-    // Both compilations are charged before the big block's own gas check.
     let gas_left = 27 + 27 + 33 - 1;
     let mut instance = run_out_of_gas_entering_big_block(GasMeteringKind::Sync, gas_left);
     assert_eq!(instance.gas(), gas_left - 27 - 27);
@@ -1581,7 +1578,6 @@ fn compilation_charge_on_entry_into_the_middle_of_a_block(config: Config, isa: I
         assert_eq!(run_until_interrupt(&mut instance), InterruptKind::Ecalli(0));
         assert_eq!(instance.gas(), 1000 - 4);
 
-        // Resuming in the middle of the block after a reset only pays for compiling it.
         instance.reset_interpreter_cache().unwrap();
         assert_eq!(run_until_interrupt(&mut instance), InterruptKind::Finished);
         assert_eq!(
@@ -1596,7 +1592,6 @@ fn compilation_charge_on_entry_into_the_middle_of_a_block(config: Config, isa: I
         instance.set_next_program_counter(offsets[0]);
         assert_eq!(run_until_interrupt(&mut instance), InterruptKind::Ecalli(0));
 
-        // The entry check stops a resume with negative gas before the rest of the block runs.
         instance.reset_interpreter_cache().unwrap();
         instance.set_gas(11);
         assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
@@ -1673,7 +1668,6 @@ fn cache_reset_while_suspended_resumes_at_the_next_program_counter(config: Confi
         }
     }
 
-    // Resuming in the middle of the recompiled block steps again and only pays for compiling it.
     let mut expected_steps = test_blob.path(InterpreterBranchTestSide::Fallthrough);
     expected_steps.push(reset_at);
     assert_eq!(steps, expected_steps);
@@ -1738,7 +1732,6 @@ fn step_interrupt_right_after_a_compilation(config: Config, isa: InstructionSetK
         }
     }
 
-    // The step into the second block comes after its compilation, which leaves the gas negative.
     assert_eq!(
         interrupts,
         [

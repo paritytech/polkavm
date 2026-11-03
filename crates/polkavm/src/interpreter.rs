@@ -1663,9 +1663,7 @@ impl InterpretedInstance {
         self.max_compiled_handlers = Some(compiled_handlers_soft_limit);
         self.max_cache_entries = Some(compiled_handlers_hard_limit);
 
-        // Compiled handlers depend on the debug mode. Clearing whether or not it changed keeps the
-        // cache resets the same with any log level. With more than the soft limit in the cache the
-        // next compilation could go past the new limit.
+        // Handlers depend on the debug mode; clearing on every switch keeps cache resets independent of the log level.
         if was_unlimited || self.compiled_handlers.len() > compiled_handlers_soft_limit {
             self.clear_cache();
             self.resume_at_next_program_counter();
@@ -1886,14 +1884,12 @@ impl InterpretedInstance {
         self.module.gas_metering().is_some() && !self.module.is_per_instruction_metering()
     }
 
-    /// Makes a suspended instance resolve its next program counter again after its compiled code is cleared.
     fn resume_at_next_program_counter(&mut self) {
         if self.next_program_counter.is_some() {
             self.next_program_counter_changed = true;
         }
     }
 
-    /// Takes time proportional to how much code is compiled.
     fn clear_cache(&mut self) {
         self.compiled_handlers.clear();
         self.compiled_args.clear();
@@ -2132,7 +2128,6 @@ impl InterpretedInstance {
 
         let cost = self.module.interpreter_compilation_cost();
 
-        // The first compilation after instantiation or `reset_interpreter_cache` pays for the state sized by the code length.
         let allocates_code_map = !self.compiled_offset_for_block.is_allocated();
 
         let instructions = if is_jump_target_valid {
@@ -2153,8 +2148,7 @@ impl InterpretedInstance {
             last_instruction_offset = instruction.offset.0;
 
             if let Some(max_cache_entries) = self.max_cache_entries {
-                // Powers of two match an allocator which rounds up to them and can't grow in place; the cap bounds
-                // the memory used with any other. An instruction takes at most four handlers.
+                // An instruction takes at most four handlers.
                 let needed = self.compiled_handlers.len() + 4;
                 if self.compiled_handlers.capacity() < needed {
                     let capacity = needed.next_power_of_two().min(max_cache_entries);
