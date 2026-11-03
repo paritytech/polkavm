@@ -2151,7 +2151,7 @@ impl InterpretedInstance {
                 // An instruction takes at most four handlers.
                 let needed = self.compiled_handlers.len() + 4;
                 if self.compiled_handlers.capacity() < needed {
-                    let capacity = needed.next_power_of_two().min(max_cache_entries);
+                    let capacity = needed.next_power_of_two().min(max_cache_entries.max(needed));
                     let additional = capacity.saturating_sub(self.compiled_handlers.len());
                     self.compiled_handlers.reserve_exact(additional);
                     self.compiled_args.reserve_exact(additional);
@@ -2229,6 +2229,9 @@ impl InterpretedInstance {
                 );
 
                 self.max_compiled_handlers = Some(compiled_handlers_new_limit);
+                self.max_cache_entries = self
+                    .max_cache_entries
+                    .map(|max_cache_entries| max_cache_entries + compiled_handlers_new_limit - max_compiled_handlers);
                 self.compiled_handlers[cast(origin).to_usize()] = self.handlers::<DEBUG>().reset_cache;
                 self.compiled_args[cast(origin).to_usize()] = Args::reset_cache(program_counter);
             } else if self.compiled_handlers.len() > max_compiled_handlers {
