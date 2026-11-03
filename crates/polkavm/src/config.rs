@@ -679,7 +679,7 @@ impl ModuleConfig {
     /// Sets the gas the interpreter charges for compiling code.
     ///
     /// Ignored by the recompiler and without gas metering. Creating a module fails if combined with
-    /// per instruction gas metering.
+    /// per instruction gas metering or crosschecking.
     ///
     /// Default: `None`
     pub fn set_interpreter_compilation_cost(&mut self, cost: Option<InterpreterCompilationCost>) -> &mut Self {

@@ -911,7 +911,9 @@ fn lazy_branch_target_cache_limit(config: Config, isa: InstructionSetKind) {
     let engine = Engine::new(&config).unwrap();
     let mut module_config = ModuleConfig::new();
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
-    module_config.set_interpreter_compilation_cost(Some(ZERO_COMPILATION_COST));
+    if !config.crosscheck() {
+        module_config.set_interpreter_compilation_cost(Some(ZERO_COMPILATION_COST));
+    }
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
     let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
     let (blocks, ret) = offsets.split_at(offsets.len() - 1);
@@ -965,7 +967,9 @@ fn interpreter_cache_limit_test_module(config: &Config, isa: InstructionSetKind)
     let engine = Engine::new(config).unwrap();
     let mut module_config = ModuleConfig::new();
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
-    module_config.set_interpreter_compilation_cost(Some(ZERO_COMPILATION_COST));
+    if !config.crosscheck() {
+        module_config.set_interpreter_compilation_cost(Some(ZERO_COMPILATION_COST));
+    }
     Module::from_blob(&engine, &module_config, blob).unwrap()
 }
 
@@ -1198,6 +1202,13 @@ fn compilation_cost_does_nothing_on_other_backends(config: Config, isa: Instruct
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
     let test_blob = interpreter_branch_test_blob(isa);
+    if config.crosscheck() {
+        let mut module_config = ModuleConfig::new();
+        module_config.set_interpreter_compilation_cost(Some(TEST_COMPILATION_COST));
+        assert!(Module::from_blob(&engine, &module_config, test_blob.blob).is_err());
+        return;
+    }
+
     let gas_used = |cost| {
         let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, test_blob.blob.clone(), cost);
         assert!(instance.reset_interpreter_cache().is_ok());
@@ -1234,6 +1245,18 @@ fn compilation_cost_errors(config: Config, isa: InstructionSetKind) {
         max_block_size: 0,
         max_cache_size_bytes: 1000,
     });
+
+    // Crosschecking the interpreter itself doesn't reject a cost; the branch and the block after it cost 1 + 11 and 2 + 11.
+    let mut crosscheck_config = config;
+    crosscheck_config.set_allow_experimental(true);
+    crosscheck_config.set_crosscheck(true);
+    let crosscheck_engine = Engine::new(&crosscheck_config).unwrap();
+    let mut instance =
+        instantiate_with_compilation_cost(&crosscheck_engine, GasMeteringKind::Sync, blob.clone(), Some(TEST_COMPILATION_COST));
+    assert_eq!(
+        run_and_get_gas_used(&mut instance, ProgramCounter(0), InterpreterBranchTestSide::Fallthrough.a0()),
+        1 + 11 + 2 + 11
+    );
 
     // Per instruction gas metering and no gas metering don't need a cost.
     let mut module_config = ModuleConfig::new();

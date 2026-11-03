@@ -428,7 +428,11 @@ impl Module {
         }
 
         if config.is_per_instruction_metering && config.interpreter_compilation_cost.is_some() {
-            return Err(Error::from_static_str("compilation cost is not supported with per instruction gas metering").into());
+            return Err(Error::from_static_str("compilation cost is not supported with per instruction metering").into());
+        }
+
+        if engine.crosscheck && engine.selected_backend != BackendKind::Interpreter && config.interpreter_compilation_cost.is_some() {
+            return Err(Error::from_static_str("compilation cost is not supported when crosschecking").into());
         }
 
         log::trace!(
@@ -685,13 +689,6 @@ impl Module {
         let page_shift = memory_map.page_size().ilog2();
         let page_size_mask = (1 << page_shift) - 1;
 
-        // Only the interpreter charges for compilation, and not when it's crosschecking the recompiler.
-        let interpreter_compilation_cost = if compiled_module.is_some() {
-            None
-        } else {
-            config.interpreter_compilation_cost
-        };
-
         let module = Arc::new(ModulePrivate {
             engine_state: Some(Arc::clone(&engine.state)),
 
@@ -707,7 +704,7 @@ impl Module {
             page_shift,
             cost_model,
             is_per_instruction_metering: config.is_per_instruction_metering,
-            interpreter_compilation_cost,
+            interpreter_compilation_cost: config.interpreter_compilation_cost,
 
             #[cfg(feature = "module-cache")]
             module_key,
