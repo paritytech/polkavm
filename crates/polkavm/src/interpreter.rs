@@ -1405,7 +1405,6 @@ polkavm_common::static_assert!(core::mem::size_of::<Range<u32>>() == cast(INTERP
 
 struct Handlers {
     charge_gas: Handler,
-    charge_gas_and_compilation: Handler,
     reset_cache: Handler,
     step: Handler,
     trace_pc: Handler,
@@ -1502,7 +1501,6 @@ pub(crate) struct InterpretedInstance {
     program_counter: ProgramCounter,
     program_counter_valid: bool,
     charge_gas_on_entry: bool,
-    charge_compilation_on_entry: bool,
     next_program_counter: Option<ProgramCounter>,
     next_program_counter_changed: bool,
     cycle_counter: u64,
@@ -1539,7 +1537,6 @@ impl InterpretedInstance {
             program_counter: ProgramCounter(!0),
             program_counter_valid: false,
             charge_gas_on_entry: true,
-            charge_compilation_on_entry: false,
             next_program_counter: None,
             next_program_counter_changed: true,
             cycle_counter: 0,
@@ -1564,14 +1561,12 @@ impl InterpretedInstance {
             // the same for a given interpreter instance.
             handlers_debug: Handlers {
                 charge_gas: cast_handler!(raw_handlers::charge_gas::<true>),
-                charge_gas_and_compilation: cast_handler!(raw_handlers::charge_gas_and_compilation::<true>),
                 reset_cache: cast_handler!(raw_handlers::reset_cache::<true>),
                 step: cast_handler!(raw_handlers::step::<true>),
                 trace_pc: cast_handler!(raw_handlers::trace_pc::<true>),
             },
             handlers_non_debug: Handlers {
                 charge_gas: cast_handler!(raw_handlers::charge_gas::<false>),
-                charge_gas_and_compilation: cast_handler!(raw_handlers::charge_gas_and_compilation::<false>),
                 reset_cache: cast_handler!(raw_handlers::reset_cache::<false>),
                 step: cast_handler!(raw_handlers::step::<false>),
                 trace_pc: cast_handler!(raw_handlers::trace_pc::<false>),
@@ -1795,7 +1790,7 @@ impl InterpretedInstance {
                 panic!("failed to run: next program counter is not set");
             };
 
-            if let Some((offset, gas_cost, compilation_charged_at)) = self.resolve_arbitrary_jump::<DEBUG>(program_counter) {
+            if let Some((offset, gas_cost)) = self.resolve_arbitrary_jump::<DEBUG>(program_counter) {
                 if gas_cost > self.gas {
                     if DEBUG {
                         log::debug!(
@@ -1817,10 +1812,6 @@ impl InterpretedInstance {
                 }
 
                 self.gas -= gas_cost;
-                if let Some(offset) = compilation_charged_at {
-                    self.mark_compilation_as_charged::<DEBUG>(offset);
-                }
-
                 self.next_compiled_offset = offset;
             } else {
                 self.program_counter_valid = true;
@@ -1832,7 +1823,6 @@ impl InterpretedInstance {
             self.next_program_counter = None;
             self.next_program_counter_changed = false;
             self.charge_gas_on_entry = false;
-            self.charge_compilation_on_entry = false;
 
             if DEBUG {
                 log::debug!("Starting execution at: {} [{}]", program_counter, self.next_compiled_offset);
@@ -1957,7 +1947,7 @@ impl InterpretedInstance {
             return None;
         }
 
-        self.compile_block::<DEBUG>(program_counter, !self.module.blob().isa().is_legacy(), 0)
+        self.compile_block::<DEBUG>(program_counter, !self.module.blob().isa().is_legacy())
     }
 
     /// Resolve a jump from *within* the program only if its target is already compiled.
@@ -1975,53 +1965,44 @@ impl InterpretedInstance {
         }
     }
 
-    /// The third value is the `charge_gas_and_compilation` handler to mark as charged once the entry is paid.
     #[allow(unpredictable_function_pointer_comparisons)]
-    fn extract_target_and_gas<const DEBUG: bool>(&self, compiled_offset: NonZeroU32) -> (Target, i64, Option<usize>) {
+    fn extract_target_and_gas<const DEBUG: bool>(&self, compiled_offset: NonZeroU32) -> (Target, i64) {
         let (is_jump_target_valid, target) = Self::unpack_target(compiled_offset);
-        if is_jump_target_valid || !self.has_block_gas_metering() || !(self.charge_gas_on_entry || self.charge_compilation_on_entry) {
-            return (target, 0, None);
+        if is_jump_target_valid
+            || self.module.gas_metering().is_none()
+            || self.module.is_per_instruction_metering()
+            || !self.charge_gas_on_entry
+        {
+            return (target, 0);
         }
 
-        let handlers = self.handlers::<DEBUG>();
-        let is_charge_gas = |handler: Handler| handler == handlers.charge_gas || handler == handlers.charge_gas_and_compilation;
-
         let mut start = cast(target).to_usize();
-        if self.compiled_handlers[start] == handlers.step && is_charge_gas(self.compiled_handlers[start + 1]) {
+        if self.compiled_handlers[start] == self.handlers::<DEBUG>().step
+            && self.compiled_handlers[start + 1] == self.handlers::<DEBUG>().charge_gas
+        {
             start += 1;
         } else {
-            while start > 0 && !is_charge_gas(self.compiled_handlers[start]) {
+            while start > 0 && self.compiled_handlers[start] != self.handlers::<DEBUG>().charge_gas {
                 start -= 1;
             }
         }
 
-        assert!(
-            is_charge_gas(self.compiled_handlers[start]),
+        assert_eq!(
+            self.compiled_handlers[start],
+            self.handlers::<DEBUG>().charge_gas,
             "internal error: failed to find the 'charge_gas' handler when jumping into the middle of a basic block"
         );
 
         let args = self.compiled_args[start];
-        if self.compiled_handlers[start] == handlers.charge_gas_and_compilation {
-            let gas_cost = if self.charge_gas_on_entry { args.a1 } else { args.a1 - args.a2 };
-            (target, cast(gas_cost).to_i64(), Some(start))
-        } else if self.charge_gas_on_entry {
-            (target, cast(args.a1).to_i64(), None)
-        } else {
-            (target, 0, None)
-        }
-    }
-
-    fn mark_compilation_as_charged<const DEBUG: bool>(&mut self, offset: usize) {
-        let args = self.compiled_args[offset];
-        self.compiled_handlers[offset] = self.handlers::<DEBUG>().charge_gas;
-        self.compiled_args[offset] = Args::charge_gas(ProgramCounter(args.a0), args.a2);
+        let gas_cost = cast(args.a1).to_i64();
+        (target, gas_cost)
     }
 
     /// Resolve a jump from *outside* of the program.
     ///
     /// Unlike jumps from within the program these can start execution anywhere to support suspend/resume of the VM.
     #[allow(unpredictable_function_pointer_comparisons)]
-    fn resolve_arbitrary_jump<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<(Target, i64, Option<usize>)> {
+    fn resolve_arbitrary_jump<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<(Target, i64)> {
         if let Some(compiled_offset) = self.compiled_offset_for_block.get(program_counter.0) {
             return Some(self.extract_target_and_gas::<DEBUG>(compiled_offset));
         }
@@ -2046,12 +2027,11 @@ impl InterpretedInstance {
 
         // The block can be compiled already when the program counter points inside of an instruction.
         if self.compiled_offset_for_block.get(basic_block_offset.0).is_none() {
-            let origin = self.compile_block::<DEBUG>(basic_block_offset, false, 0)?;
+            let origin = self.compile_block::<DEBUG>(basic_block_offset, false)?;
             if self.compiled_handlers[cast(origin).to_usize()] == self.handlers::<DEBUG>().reset_cache {
                 // There's a cache reset already queue for this block; trigger it now.
-                let discarded_compilation_cost = self.compiled_args[cast(origin).to_usize()].a1;
                 self.clear_cache();
-                self.compile_block::<DEBUG>(basic_block_offset, false, discarded_compilation_cost)?;
+                self.compile_block::<DEBUG>(basic_block_offset, false)?;
             }
         }
 
@@ -2062,9 +2042,8 @@ impl InterpretedInstance {
         };
 
         if basic_block_offset == program_counter {
-            Some((Self::unpack_target(compiled_offset).1, 0, None))
+            Some((Self::unpack_target(compiled_offset).1, 0))
         } else {
-            self.charge_compilation_on_entry = true;
             Some(self.extract_target_and_gas::<DEBUG>(compiled_offset))
         }
     }
@@ -2080,17 +2059,11 @@ impl InterpretedInstance {
             return Some(target);
         }
 
-        self.compile_block::<DEBUG>(program_counter, !self.module.blob().isa().is_legacy(), 0)
+        self.compile_block::<DEBUG>(program_counter, !self.module.blob().isa().is_legacy())
     }
 
-    /// `discarded_compilation_cost` is for a thrown away compilation of this block, and is charged with this one.
     #[inline(never)]
-    fn compile_block<const DEBUG: bool>(
-        &mut self,
-        program_counter: ProgramCounter,
-        known_valid_jump_target: bool,
-        discarded_compilation_cost: u32,
-    ) -> Option<Target> {
+    fn compile_block<const DEBUG: bool>(&mut self, program_counter: ProgramCounter, known_valid_jump_target: bool) -> Option<Target> {
         if program_counter.0 >= self.module.code_len() {
             return None;
         }
@@ -2103,17 +2076,11 @@ impl InterpretedInstance {
             CostModelKind::Simple(cost_model) => {
                 if self.module.is_per_instruction_metering() {
                     // TODO: Remove this.
-                    self.compile_block_impl::<_, DEBUG, true>(
-                        program_counter,
-                        known_valid_jump_target,
-                        discarded_compilation_cost,
-                        GasVisitor::new(cost_model.clone()),
-                    )
+                    self.compile_block_impl::<_, DEBUG, true>(program_counter, known_valid_jump_target, GasVisitor::new(cost_model.clone()))
                 } else {
                     self.compile_block_impl::<_, DEBUG, false>(
                         program_counter,
                         known_valid_jump_target,
-                        discarded_compilation_cost,
                         GasVisitor::new(cost_model.clone()),
                     )
                 }
@@ -2127,20 +2094,10 @@ impl InterpretedInstance {
 
                 if self.module.blob().is_64_bit() {
                     let gas_visitor = Simulator::<B64, ()>::new(code, blob.isa(), *cost_model, ());
-                    self.compile_block_impl::<_, DEBUG, false>(
-                        program_counter,
-                        known_valid_jump_target,
-                        discarded_compilation_cost,
-                        gas_visitor,
-                    )
+                    self.compile_block_impl::<_, DEBUG, false>(program_counter, known_valid_jump_target, gas_visitor)
                 } else {
                     let gas_visitor = Simulator::<B32, ()>::new(code, blob.isa(), *cost_model, ());
-                    self.compile_block_impl::<_, DEBUG, false>(
-                        program_counter,
-                        known_valid_jump_target,
-                        discarded_compilation_cost,
-                        gas_visitor,
-                    )
+                    self.compile_block_impl::<_, DEBUG, false>(program_counter, known_valid_jump_target, gas_visitor)
                 }
             }
         }
@@ -2150,7 +2107,6 @@ impl InterpretedInstance {
         &mut self,
         program_counter: ProgramCounter,
         known_valid_jump_target: bool,
-        discarded_compilation_cost: u32,
         mut gas_visitor: G,
     ) -> Option<Target>
     where
@@ -2223,11 +2179,7 @@ impl InterpretedInstance {
                         }
 
                         charge_gas_index = Some((instruction.offset, self.compiled_handlers.len()));
-                        if cost.is_some() {
-                            emit_consistent_address!(self, charge_gas_and_compilation(instruction.offset, 0, 0));
-                        } else {
-                            emit_consistent_address!(self, charge_gas(instruction.offset, 0));
-                        }
+                        emit_consistent_address!(self, charge_gas(instruction.offset, 0));
                     }
                     instruction.visit_parsing(&mut gas_visitor);
                 } else {
@@ -2270,27 +2222,6 @@ impl InterpretedInstance {
 
         self.compiled_code_ranges.push(program_counter.0..last_instruction_offset + 1);
 
-        let mut charged_compilation_cost = 0;
-        if let Some((program_counter, index)) = charge_gas_index {
-            let gas_cost = gas_visitor.take_block_cost().unwrap();
-            self.compiled_args[index] = if let Some(cost) = cost {
-                let mut compilation_cost = u64::from(cost.per_block)
-                    + (u64::from(instruction_count) * u64::from(cost.per_instruction_millis)).div_ceil(1000)
-                    + u64::from(discarded_compilation_cost);
-
-                if allocates_code_map {
-                    compilation_cost += (u64::from(self.module.code_len()) * u64::from(cost.per_code_byte_millis)).div_ceil(1000);
-                }
-
-                charged_compilation_cost = u32::try_from(compilation_cost).unwrap_or(u32::MAX);
-                Args::charge_gas_and_compilation(program_counter, gas_cost.saturating_add(charged_compilation_cost), gas_cost)
-            } else {
-                Args::charge_gas(program_counter, gas_cost)
-            };
-        }
-
-        // A block marked with `reset_cache` is thrown away on entry; the block compiled in its place pays for it.
-        let marker = Args::reset_cache(program_counter, charged_compilation_cost);
         if let Some(max_compiled_handlers) = self.max_compiled_handlers {
             let handlers_added = self.compiled_handlers.len() - cast(origin).to_usize();
             if handlers_added > max_compiled_handlers {
@@ -2305,7 +2236,7 @@ impl InterpretedInstance {
 
                 self.max_compiled_handlers = Some(compiled_handlers_new_limit);
                 self.compiled_handlers[cast(origin).to_usize()] = self.handlers::<DEBUG>().reset_cache;
-                self.compiled_args[cast(origin).to_usize()] = marker;
+                self.compiled_args[cast(origin).to_usize()] = Args::reset_cache(program_counter);
             } else if self.compiled_handlers.len() > max_compiled_handlers {
                 log::debug!(
                     "interpreter: compiled handlers cache size exceeded at {}: {} > {}; will reset the cache",
@@ -2315,7 +2246,24 @@ impl InterpretedInstance {
                 );
 
                 self.compiled_handlers[cast(origin).to_usize()] = self.handlers::<DEBUG>().reset_cache;
-                self.compiled_args[cast(origin).to_usize()] = marker;
+                self.compiled_args[cast(origin).to_usize()] = Args::reset_cache(program_counter);
+            }
+        }
+
+        if let Some((program_counter, index)) = charge_gas_index {
+            let gas_cost = gas_visitor.take_block_cost().unwrap();
+            self.compiled_args[index] = Args::charge_gas(program_counter, gas_cost);
+
+            // Can make the gas negative; the next gas check stops execution before the block runs.
+            if let Some(cost) = cost {
+                let mut compilation_cost =
+                    u64::from(cost.per_block) + (u64::from(instruction_count) * u64::from(cost.per_instruction_millis)).div_ceil(1000);
+
+                if allocates_code_map {
+                    compilation_cost += (u64::from(self.module.code_len()) * u64::from(cost.per_code_byte_millis)).div_ceil(1000);
+                }
+
+                self.gas = self.gas.saturating_sub_unsigned(compilation_cost);
             }
         }
 
@@ -2924,25 +2872,6 @@ macro_rules! define_interpreter {
         let args = $self.compiled_args[cast($compiled_offset).to_usize()];
         let $a0 = ProgramCounter(args.a0);
         let $a1 = args.a1;
-        $body
-    }};
-
-    (@define $handler_name:ident $body:block $self:ident $compiled_offset:ident, $a0:ident: ProgramCounter, $a1:ident: u32, $a2:ident: u32) => {{
-        impl Args {
-            pub fn $handler_name(a0: ProgramCounter, a1: u32, a2: u32) -> Args {
-                Args {
-                    a0: a0.0,
-                    a1,
-                    a2,
-                    ..Args::default()
-                }
-            }
-        }
-
-        let args = $self.compiled_args[cast($compiled_offset).to_usize()];
-        let $a0 = ProgramCounter(args.a0);
-        let $a1 = args.a1;
-        let $a2 = args.a2;
         $body
     }};
 
@@ -3643,22 +3572,6 @@ define_interpreter! {
         }
     }
 
-    fn charge_gas_and_compilation<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, gas_cost: u32, _execution_cost: u32) -> Target {
-        let new_gas = visitor.gas - i64::from(gas_cost);
-
-        if DEBUG {
-            log::trace!("[{}]: charge_gas_and_compilation: {gas_cost} ({} -> {})", compiled_offset, visitor.gas, new_gas);
-        }
-
-        if new_gas < 0 {
-            not_enough_gas_impl::<DEBUG>(visitor, compiled_offset, program_counter, new_gas)
-        } else {
-            visitor.gas = new_gas;
-            visitor.mark_compilation_as_charged::<DEBUG>(cast(compiled_offset).to_usize());
-            visitor.go_to_next_instruction(compiled_offset)
-        }
-    }
-
     fn step<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter) -> Target {
         if DEBUG {
             log::trace!("[{}]: step", compiled_offset);
@@ -3713,13 +3626,13 @@ define_interpreter! {
         visitor.go_to_next_instruction(compiled_offset)
     }
 
-    fn reset_cache<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter, compilation_cost: u32) -> Target {
+    fn reset_cache<const DEBUG: bool>(visitor: &mut InterpretedInstance, compiled_offset: Target, program_counter: ProgramCounter) -> Target {
         if DEBUG {
             log::trace!("[{}]: reset_cache", compiled_offset);
         }
 
         visitor.clear_cache();
-        if let Some(target) = visitor.compile_block::<DEBUG>(program_counter, false, compilation_cost) {
+        if let Some(target) = visitor.compile_block::<DEBUG>(program_counter, false) {
             visitor.go_to_target(target)
         } else {
             visitor.trigger_interrupt(InterruptKind::Trap)

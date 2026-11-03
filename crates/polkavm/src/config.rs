@@ -499,7 +499,7 @@ pub enum GasMeteringKind {
 
 /// Gas the interpreter charges for compiling a block.
 ///
-/// Charged on the block's first entry on top of its execution cost, and again after it's recompiled.
+/// Charged when a block is compiled, which can leave the gas negative.
 #[allow(clippy::exhaustive_structs)]
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
 pub struct InterpreterCompilationCost {

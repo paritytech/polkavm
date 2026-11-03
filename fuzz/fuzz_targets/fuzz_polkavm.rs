@@ -23,7 +23,7 @@ struct CacheSizeConfig {
     max_block_size: u32,
     compilation_cost_per_block: u8,
     compilation_cost_per_instruction_millis: u16,
-    compilation_cost_per_code_byte_millis: u16,
+    compilation_cost_per_code_byte_millis: u8,
 }
 
 #[derive(Arbitrary, Debug)]

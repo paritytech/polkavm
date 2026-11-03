@@ -1163,7 +1163,7 @@ fn instantiate_with_compilation_cost(
     module.instantiate().unwrap()
 }
 
-fn compilation_is_charged_on_first_entry(config: Config, isa: InstructionSetKind) {
+fn compilation_is_charged_when_compiling(config: Config, isa: InstructionSetKind) {
     if config.backend() != Some(crate::BackendKind::Interpreter) {
         return;
     }
@@ -1291,37 +1291,41 @@ fn compilation_cost_errors(config: Config, isa: InstructionSetKind) {
     assert!(instance.reset_interpreter_cache().is_ok());
 }
 
-fn compilation_cost_is_clamped(config: Config, isa: InstructionSetKind) {
+fn large_compilation_cost_is_charged_in_full(config: Config, isa: InstructionSetKind) {
     if config.backend() != Some(crate::BackendKind::Interpreter) {
         return;
     }
 
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
+    let blob = two_blocks_test_blob(isa);
+    let code_length = i64::try_from(blob.code().len()).unwrap();
+    let max = i64::from(u32::MAX);
     let costs = [
-        InterpreterCompilationCost {
-            per_block: u32::MAX,
-            ..ZERO_COMPILATION_COST
-        },
-        InterpreterCompilationCost {
-            per_block: u32::MAX,
-            per_instruction_millis: u32::MAX,
-            per_code_byte_millis: u32::MAX,
-        },
+        (
+            InterpreterCompilationCost {
+                per_block: u32::MAX,
+                ..ZERO_COMPILATION_COST
+            },
+            max,
+        ),
+        (
+            InterpreterCompilationCost {
+                per_block: u32::MAX,
+                per_instruction_millis: u32::MAX,
+                per_code_byte_millis: u32::MAX,
+            },
+            max + (4 * max + 999) / 1000 + (code_length * max + 999) / 1000,
+        ),
     ];
 
-    for cost in costs {
-        let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, two_blocks_test_blob(isa), Some(cost));
-        let gas = i64::from(u32::MAX) + 100;
+    for (cost, expected_compilation_cost) in costs {
+        let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, blob.clone(), Some(cost));
         instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
-        instance.set_gas(gas);
+        instance.set_gas(100);
         instance.set_next_program_counter(ProgramCounter(0));
         assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
-        assert_eq!(
-            instance.gas(),
-            gas - i64::from(u32::MAX),
-            "expected the first block's charge to be clamped"
-        );
+        assert_eq!(instance.gas(), 100 - expected_compilation_cost);
     }
 }
 
@@ -1346,28 +1350,29 @@ fn code_length_dependent_state_is_charged(config: Config, isa: InstructionSetKin
     instance.set_gas(4 + code_length - 1);
     instance.set_next_program_counter(ProgramCounter(0));
     assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
-    assert_eq!(instance.gas(), 4 + code_length - 1);
+    assert_eq!(instance.gas(), 4 - 1);
 
-    assert_eq!(run_and_get_gas_used(&mut instance, ProgramCounter(0), 0), 6 + code_length);
     assert_eq!(run_and_get_gas_used(&mut instance, ProgramCounter(0), 0), 6);
 
     instance.reset_interpreter_cache().unwrap();
     assert_eq!(run_and_get_gas_used(&mut instance, ProgramCounter(0), 0), 6 + code_length);
 
-    // Resets triggered by the limit don't charge for the code again.
+    // The blocks take 5 and 3 entries and the limit fits one, so running resets the cache; these
+    // resets don't charge for the code again.
     instance.reset_interpreter_cache().unwrap();
     instance
         .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
-            max_block_size: 0,
-            max_cache_size_bytes: interpreter_calculate_cache_size(4),
+            max_block_size: 4,
+            max_cache_size_bytes: interpreter_calculate_cache_size(10),
         }))
         .unwrap();
 
     assert_eq!(run_and_get_gas_used(&mut instance, ProgramCounter(0), 0), 6 + code_length);
+    assert_eq!(instance.interpreter_cache_size(), Some(interpreter_calculate_cache_size(3)));
     assert_eq!(run_and_get_gas_used(&mut instance, ProgramCounter(0), 0), 6);
 }
 
-fn compilation_charge_out_of_gas_on_first_entry(config: Config, isa: InstructionSetKind) {
+fn out_of_gas_after_a_compilation(config: Config, isa: InstructionSetKind) {
     if config.backend() != Some(crate::BackendKind::Interpreter) {
         return;
     }
@@ -1379,10 +1384,9 @@ fn compilation_charge_out_of_gas_on_first_entry(config: Config, isa: Instruction
     for gas_metering in [GasMeteringKind::Sync, GasMeteringKind::Async] {
         let mut instance = instantiate_with_compilation_cost(&engine, gas_metering, test_blob.blob.clone(), Some(TEST_COMPILATION_COST));
 
-        // Enough to pay 1 + 11 for the branch, but not 2 + 11 for the block after it.
+        // Enough to pay 1 + 11 for the branch, but not 11 to compile the block after it, which costs 2 to run.
         let branch_cost = 1 + 11;
-        let second_block_cost = 2 + 11;
-        let gas_left = second_block_cost - 1;
+        let gas_left = 5;
         instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
         instance.set_reg(Reg::A0, fallthrough);
         instance.set_reg(Reg::A1, 0);
@@ -1398,26 +1402,18 @@ fn compilation_charge_out_of_gas_on_first_entry(config: Config, isa: Instruction
         );
 
         if gas_metering == GasMeteringKind::Async {
-            assert_eq!(instance.gas(), gas_left - second_block_cost);
-
-            // The failed entry was deducted, so the next one pays again.
-            assert_eq!(run_and_get_gas_used(&mut instance, test_blob.branch, fallthrough), 1 + 2 + 11);
+            assert_eq!(instance.gas(), gas_left - 11 - 2);
             assert_eq!(run_and_get_gas_used(&mut instance, test_blob.branch, fallthrough), 1 + 2);
             continue;
         }
 
-        assert_eq!(instance.gas(), gas_left);
+        assert_eq!(instance.gas(), gas_left - 11);
         assert_eq!(instance.program_counter(), Some(test_blob.fallthrough_block[0]));
 
-        let refuel = 100;
-        instance.set_gas(gas_left + refuel);
+        instance.set_gas(100);
         assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
         assert_eq!(instance.reg(Reg::A1), 1);
-        assert_eq!(
-            instance.gas(),
-            gas_left + refuel - second_block_cost,
-            "expected the block to be charged once"
-        );
+        assert_eq!(instance.gas(), 100 - 2, "expected the compilation to be charged once");
 
         assert_eq!(run_and_get_gas_used(&mut instance, test_blob.branch, fallthrough), 1 + 2);
     }
@@ -1459,10 +1455,10 @@ fn compilation_thrown_away_by_a_cache_reset_is_charged(config: Config, isa: Inst
         instance
     };
 
-    // Entering the big block pays for both compilations and its execution at once.
+    // Both compilations are charged before the big block's own gas check.
     let gas_left = 27 + 27 + 33 - 1;
     let mut instance = run_out_of_gas_entering_big_block(GasMeteringKind::Sync, gas_left);
-    assert_eq!(instance.gas(), gas_left);
+    assert_eq!(instance.gas(), gas_left - 27 - 27);
     assert_eq!(instance.program_counter(), Some(test_blob.target_block[0]));
     assert_eq!(
         instance.interpreter_cache_size(),
@@ -1470,21 +1466,16 @@ fn compilation_thrown_away_by_a_cache_reset_is_charged(config: Config, isa: Inst
         "expected only the big block to be in the cache"
     );
 
-    let refuel = 100;
-    instance.set_gas(gas_left + refuel);
+    instance.set_gas(100);
     assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A2), target_block_add_count);
-    assert_eq!(
-        instance.gas(),
-        gas_left + refuel - 27 - 27 - 33,
-        "expected both compilations to be charged once"
-    );
+    assert_eq!(instance.gas(), 100 - 33, "expected both compilations to be charged once");
 
     let instance = run_out_of_gas_entering_big_block(GasMeteringKind::Async, gas_left);
     assert_eq!(instance.gas(), gas_left - (27 + 27 + 33));
 
     let mut instance = run_out_of_gas_entering_big_block(GasMeteringKind::Sync, gas_left);
-    assert_eq!(run_and_get_gas_used(&mut instance, test_blob.target_block[1], 0), 27 + 27 + 33);
+    assert_eq!(run_and_get_gas_used(&mut instance, test_blob.target_block[1], 0), 33);
     assert_eq!(instance.reg(Reg::A2), target_block_add_count - 1);
     assert_eq!(
         instance.interpreter_cache_size(),
@@ -1497,11 +1488,11 @@ fn compilation_thrown_away_by_a_cache_reset_is_charged(config: Config, isa: Inst
     instance.set_gas(1 + 11);
     instance.set_next_program_counter(test_blob.branch);
     assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
-    assert_eq!(instance.gas(), 1 + 11);
+    assert_eq!(instance.gas(), 1 + 11 - 2 * 11);
 
     instance.set_gas(100);
     assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
-    assert_eq!(instance.gas(), 100 - 2 * 11 - 1 - (2 + 11));
+    assert_eq!(instance.gas(), 100 - 1 - (2 + 11));
 }
 
 fn compilation_thrown_away_on_entry_into_the_middle_of_a_block_is_charged(config: Config, isa: InstructionSetKind) {
@@ -1533,7 +1524,7 @@ fn compilation_thrown_away_on_entry_into_the_middle_of_a_block_is_charged(config
     instance.set_gas(gas);
     instance.set_next_program_counter(entry);
     assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
-    assert_eq!(instance.gas(), gas);
+    assert_eq!(instance.gas(), gas - 27 - 27);
     assert_eq!(
         instance.interpreter_cache_size(),
         Some(interpreter_calculate_cache_size(34)),
@@ -1542,10 +1533,9 @@ fn compilation_thrown_away_on_entry_into_the_middle_of_a_block_is_charged(config
 
     assert_eq!(
         run_and_get_gas_used(&mut instance, entry, 0),
-        33 + 27 + 27,
+        33,
         "expected both compilations to be charged once"
     );
-    assert_eq!(run_and_get_gas_used(&mut instance, entry, 0), 33);
 }
 
 fn compilation_charge_on_entry_into_the_middle_of_a_block(config: Config, isa: InstructionSetKind) {
@@ -1606,15 +1596,16 @@ fn compilation_charge_on_entry_into_the_middle_of_a_block(config: Config, isa: I
         instance.set_next_program_counter(offsets[0]);
         assert_eq!(run_until_interrupt(&mut instance), InterruptKind::Ecalli(0));
 
+        // The entry check stops a resume with negative gas before the rest of the block runs.
         instance.reset_interpreter_cache().unwrap();
         instance.set_gas(11);
-        assert_eq!(run_until_interrupt(&mut instance), InterruptKind::NotEnoughGas);
-        assert_eq!(instance.gas(), 11);
+        assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+        assert_eq!(instance.gas(), 11 - 12);
         assert_eq!(instance.reg(Reg::A1), 0);
 
         instance.set_gas(100);
         assert_eq!(run_until_interrupt(&mut instance), InterruptKind::Finished);
-        assert_eq!(instance.gas(), 100 - 12, "expected the compilation to be charged once");
+        assert_eq!(instance.gas(), 100, "expected the compilation to be charged once");
         assert_eq!(instance.reg(Reg::A1), 1);
 
         assert_eq!(run_and_get_gas_used(&mut instance, offsets[0], 0), 4);
@@ -1690,26 +1681,100 @@ fn cache_reset_while_suspended_resumes_at_the_next_program_counter(config: Confi
     assert_eq!(instance.gas(), 1000 - (1 + 11 + 2 + 11) - 11);
 }
 
-fn arbitrary_jump_inside_of_an_instruction_does_not_compile_again(config: Config, isa: InstructionSetKind) {
+fn compilation_thrown_away_by_a_host_cache_reset_is_charged(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
-    let module = Module::from_blob(&engine, &ModuleConfig::new(), two_blocks_test_blob(isa)).unwrap();
+    let mut instance = instantiate_with_compilation_cost(
+        &engine,
+        GasMeteringKind::Sync,
+        two_blocks_test_blob(isa),
+        Some(TEST_COMPILATION_COST),
+    );
+
+    // The first block costs 4 to run and 12 to compile, the second 2 and 11.
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(12 + 3);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+    assert_eq!(instance.gas(), 3);
+
+    instance.reset_interpreter_cache().unwrap();
+    instance.set_gas(100);
+    assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.gas(), 100 - (12 + 4) - (11 + 2));
+}
+
+fn step_interrupt_right_after_a_compilation(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    module_config.set_step_tracing(true);
+    module_config.set_interpreter_compilation_cost(Some(TEST_COMPILATION_COST));
+    let module = Module::from_blob(&engine, &module_config, two_blocks_test_blob(isa)).unwrap();
     let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
     let mut instance = module.instantiate().unwrap();
+
+    // The first block costs 4 to run and 12 to compile, the second 2 and 11.
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(12 + 4 + 5);
     instance.set_next_program_counter(offsets[0]);
-    assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
-    let Some(cache_size) = instance.interpreter_cache_size() else {
+    let mut interrupts = Vec::new();
+    loop {
+        let interrupt = instance.run().unwrap();
+        interrupts.push((interrupt.clone(), instance.program_counter(), instance.gas()));
+        match interrupt {
+            InterruptKind::Step => {}
+            InterruptKind::NotEnoughGas => instance.set_gas(10),
+            _ => break,
+        }
+    }
+
+    // The step into the second block comes after its compilation, which leaves the gas negative.
+    assert_eq!(
+        interrupts,
+        [
+            (InterruptKind::Step, Some(offsets[0]), 5 + 4),
+            (InterruptKind::Step, Some(offsets[1]), 5),
+            (InterruptKind::Step, Some(offsets[2]), 5),
+            (InterruptKind::Step, Some(offsets[3]), 5),
+            (InterruptKind::NotEnoughGas, Some(offsets[4]), 5 - 11),
+            (InterruptKind::Step, Some(offsets[5]), 10 - 2),
+            (InterruptKind::Finished, None, 10 - 2),
+        ]
+    );
+}
+
+fn arbitrary_jump_inside_of_an_instruction_does_not_compile_again(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
         return;
-    };
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let blob = two_blocks_test_blob(isa);
+    let offsets: Vec<_> = blob.instructions().map(|inst| inst.offset).collect();
+    let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, blob, Some(TEST_COMPILATION_COST));
+    assert_eq!(run_and_get_gas_used(&mut instance, offsets[0], 0), (12 + 4) + (11 + 2));
+    let cache_size = instance.interpreter_cache_size();
+    let gas = instance.gas();
 
     instance.set_next_program_counter(ProgramCounter(offsets[1].0 + 1));
     assert_eq!(instance.run().unwrap(), InterruptKind::Trap);
     assert_eq!(
         instance.interpreter_cache_size(),
-        Some(cache_size),
+        cache_size,
         "expected the already compiled block to not be compiled again"
     );
+    assert_eq!(instance.gas(), gas);
 }
 
 fn cache_size_limit_disables_debug_handlers(config: Config, isa: InstructionSetKind) {
@@ -7559,16 +7624,18 @@ run_tests! {
     lazy_branch_target_steps_and_charges_gas
     cache_limit_with_middle_of_basic_block_entries
     undersized_max_block_size_with_middle_of_basic_block_entries
-    compilation_is_charged_on_first_entry
+    compilation_is_charged_when_compiling
     compilation_cost_does_nothing_on_other_backends
     compilation_cost_errors
-    compilation_cost_is_clamped
+    large_compilation_cost_is_charged_in_full
     code_length_dependent_state_is_charged
-    compilation_charge_out_of_gas_on_first_entry
+    out_of_gas_after_a_compilation
     compilation_thrown_away_by_a_cache_reset_is_charged
     compilation_thrown_away_on_entry_into_the_middle_of_a_block_is_charged
     compilation_charge_on_entry_into_the_middle_of_a_block
     cache_reset_while_suspended_resumes_at_the_next_program_counter
+    compilation_thrown_away_by_a_host_cache_reset_is_charged
+    step_interrupt_right_after_a_compilation
     arbitrary_jump_inside_of_an_instruction_does_not_compile_again
     cache_size_limit_disables_debug_handlers
     lowering_the_cache_size_limit_clears_the_cache
