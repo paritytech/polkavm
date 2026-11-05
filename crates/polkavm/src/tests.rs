@@ -1,7 +1,8 @@
 use crate::mutex::Mutex;
 use crate::{
-    BackendKind, CallError, Caller, CompileError, Config, Engine, GasMeteringKind, InterruptKind, Linker, MemoryAccessError,
-    MemoryProtection, Module, ModuleConfig, ProgramBlob, ProgramCounter, RawInstance, Reg, Segfault, SetCacheSizeLimitArgs,
+    BackendKind, CallError, Caller, CompileError, Config, Engine, GasMeteringKind, InterpreterCompilationCost, InterruptKind, Linker,
+    MemoryAccessError, MemoryProtection, Module, ModuleConfig, ProgramBlob, ProgramCounter, RawInstance, Reg, Segfault,
+    SetCacheSizeLimitArgs,
 };
 use alloc::collections::BTreeMap;
 use alloc::format;
@@ -535,12 +536,12 @@ fn reclaim_cache_memory(config: Config, isa: InstructionSetKind) {
 
     let mut instance = module.instantiate().unwrap();
 
-    instance.reset_interpreter_cache();
+    instance.reset_interpreter_cache().unwrap();
 
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_reg(Reg::A1, 0);
     instance.set_next_program_counter(list[0].offset);
-    instance.reset_interpreter_cache();
+    instance.reset_interpreter_cache().unwrap();
 
     // ecalli 0
 
@@ -552,7 +553,7 @@ fn reclaim_cache_memory(config: Config, isa: InstructionSetKind) {
 
     // ret
 
-    instance.reset_interpreter_cache();
+    instance.reset_interpreter_cache().unwrap();
     match_interrupt!(instance.run().unwrap(), InterruptKind::Finished);
     assert_eq!(instance.reg(Reg::A2), 0x4567);
 }
@@ -818,6 +819,12 @@ fn lazy_branch_target_cache_reset(config: Config, isa: InstructionSetKind) {
     let module = Module::from_blob(&engine, &ModuleConfig::new(), test_blob.blob.clone()).unwrap();
 
     let mut instance = module.instantiate().unwrap();
+    instance
+        .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+            max_block_size: 0,
+            max_cache_size_bytes: 1000000,
+        }))
+        .unwrap();
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_next_program_counter(test_blob.target_block[0]);
     assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
@@ -910,6 +917,9 @@ fn lazy_branch_target_cache_limit(config: Config, isa: InstructionSetKind) {
     let engine = Engine::new(&config).unwrap();
     let mut module_config = ModuleConfig::new();
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    if !config.crosscheck() {
+        module_config.set_interpreter_compilation_cost(Some(ZERO_COMPILATION_COST));
+    }
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
     let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
     let (blocks, ret) = offsets.split_at(offsets.len() - 1);
@@ -963,6 +973,9 @@ fn interpreter_cache_limit_test_module(config: &Config, isa: InstructionSetKind)
     let engine = Engine::new(config).unwrap();
     let mut module_config = ModuleConfig::new();
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    if !config.crosscheck() {
+        module_config.set_interpreter_compilation_cost(Some(ZERO_COMPILATION_COST));
+    }
     Module::from_blob(&engine, &module_config, blob).unwrap()
 }
 
@@ -1073,6 +1086,965 @@ fn lazy_branch_target_steps_and_charges_gas(config: Config, isa: InstructionSetK
             )
         );
     }
+}
+
+/// Charges 10 per block plus 1 for every two instructions, rounded up.
+const TEST_COMPILATION_COST: InterpreterCompilationCost = InterpreterCompilationCost {
+    per_block: 10,
+    per_instruction_millis: 500,
+    per_code_byte_millis: 0,
+};
+
+/// Lets a test limit the cache size with gas metering without charging for compilation.
+const ZERO_COMPILATION_COST: InterpreterCompilationCost = InterpreterCompilationCost {
+    per_block: 0,
+    per_instruction_millis: 0,
+    per_code_byte_millis: 0,
+};
+
+fn two_blocks_test_blob(isa: InstructionSetKind) -> ProgramBlob {
+    padded_two_blocks_test_blob(isa, 0)
+}
+
+fn chain_of_blocks_test_blob(isa: InstructionSetKind) -> ProgramBlob {
+    let mut code = Vec::new();
+    for block in 0..4 {
+        code.extend([asm::add_imm_32(A0, A0, 1), asm::add_imm_32(A0, A0, 1), asm::add_imm_32(A0, A0, 1)]);
+        code.push(if block < 3 { asm::jump(block + 1) } else { asm::ret() });
+    }
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&code, &[]);
+    ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap()
+}
+
+/// Runs to completion with 1000 gas, past steps and host calls, and returns the gas used.
+fn run_and_get_gas_used(instance: &mut RawInstance, program_counter: ProgramCounter, a0: u64) -> i64 {
+    instance.set_gas(1000);
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_reg(Reg::A0, a0);
+    instance.set_next_program_counter(program_counter);
+    loop {
+        match instance.run().unwrap() {
+            InterruptKind::Step | InterruptKind::Ecalli(..) => {}
+            interrupt => {
+                match_interrupt!(interrupt, InterruptKind::Finished);
+                return 1000 - instance.gas();
+            }
+        }
+    }
+}
+
+fn instantiate_with_compilation_cost(
+    engine: &Engine,
+    gas_metering: GasMeteringKind,
+    blob: ProgramBlob,
+    cost: Option<InterpreterCompilationCost>,
+) -> RawInstance {
+    let mut module_config = ModuleConfig::new();
+    module_config.set_gas_metering(Some(gas_metering));
+    module_config.set_interpreter_compilation_cost(cost);
+    let module = Module::from_blob(engine, &module_config, blob).unwrap();
+    module.instantiate().unwrap()
+}
+
+fn compilation_is_charged_when_compiling(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let test_blob = interpreter_branch_test_blob(isa);
+    let run = |instance: &mut RawInstance, side: InterpreterBranchTestSide| run_and_get_gas_used(instance, test_blob.branch, side.a0());
+    for gas_metering in [GasMeteringKind::Sync, GasMeteringKind::Async] {
+        let mut instance = instantiate_with_compilation_cost(&engine, gas_metering, test_blob.blob.clone(), Some(TEST_COMPILATION_COST));
+
+        // The branch costs 1 and the block after it 2; compiling either costs 11.
+        assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 11 + 2 + 11);
+        assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 2);
+
+        // The branch target is compiled on its first take; it costs 33 to run and 27 to compile.
+        assert_eq!(run(&mut instance, InterpreterBranchTestSide::Target), 1 + 33 + 27);
+        assert_eq!(run(&mut instance, InterpreterBranchTestSide::Target), 1 + 33);
+        assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 2);
+
+        instance.reset_interpreter_cache().unwrap();
+        assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 11 + 2 + 11);
+        assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 2);
+
+        let mut instance = instantiate_with_compilation_cost(&engine, gas_metering, test_blob.blob.clone(), None);
+        assert!(instance.reset_interpreter_cache().is_err());
+    }
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    module_config.set_per_instruction_metering(true);
+    assert!(Module::from_blob(&engine, &module_config, test_blob.blob.clone()).is_ok());
+    module_config.set_interpreter_compilation_cost(Some(TEST_COMPILATION_COST));
+    assert!(Module::from_blob(&engine, &module_config, test_blob.blob.clone()).is_err());
+}
+
+fn compilation_cost_does_nothing_on_other_backends(config: Config, isa: InstructionSetKind) {
+    if config.backend() == Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let test_blob = interpreter_branch_test_blob(isa);
+    if config.crosscheck() {
+        let mut module_config = ModuleConfig::new();
+        module_config.set_interpreter_compilation_cost(Some(TEST_COMPILATION_COST));
+        assert!(Module::from_blob(&engine, &module_config, test_blob.blob).is_err());
+        return;
+    }
+
+    let gas_used = |cost| {
+        let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, test_blob.blob.clone(), cost);
+        assert!(instance.reset_interpreter_cache().is_ok());
+        assert!(instance
+            .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+                max_block_size: 0,
+                max_cache_size_bytes: interpreter_calculate_cache_size(4),
+            }))
+            .is_ok());
+
+        let gas = [
+            InterpreterBranchTestSide::Fallthrough,
+            InterpreterBranchTestSide::Fallthrough,
+            InterpreterBranchTestSide::Target,
+            InterpreterBranchTestSide::Target,
+        ]
+        .map(|side| run_and_get_gas_used(&mut instance, test_blob.branch, side.a0()));
+        assert!(instance.reset_interpreter_cache().is_ok());
+        gas
+    };
+
+    assert_eq!(gas_used(Some(TEST_COMPILATION_COST)), gas_used(None));
+}
+
+fn compilation_cost_errors(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let blob = interpreter_branch_test_blob(isa).blob;
+    let limit = Some(SetCacheSizeLimitArgs {
+        max_block_size: 0,
+        max_cache_size_bytes: 1000,
+    });
+
+    // The branch and the block after it cost 1 + 11 and 2 + 11.
+    let mut crosscheck_config = config;
+    crosscheck_config.set_allow_experimental(true);
+    crosscheck_config.set_crosscheck(true);
+    let crosscheck_engine = Engine::new(&crosscheck_config).unwrap();
+    let mut instance =
+        instantiate_with_compilation_cost(&crosscheck_engine, GasMeteringKind::Sync, blob.clone(), Some(TEST_COMPILATION_COST));
+    assert_eq!(
+        run_and_get_gas_used(&mut instance, ProgramCounter(0), InterpreterBranchTestSide::Fallthrough.a0()),
+        1 + 11 + 2 + 11
+    );
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    module_config.set_per_instruction_metering(true);
+    let mut instance = Module::from_blob(&engine, &module_config, blob.clone())
+        .unwrap()
+        .instantiate()
+        .unwrap();
+    assert!(instance.set_interpreter_cache_size_limit(limit).is_ok());
+    assert!(instance.reset_interpreter_cache().is_ok());
+
+    let mut instance = Module::from_blob(&engine, &ModuleConfig::new(), blob.clone())
+        .unwrap()
+        .instantiate()
+        .unwrap();
+    assert!(instance.set_interpreter_cache_size_limit(limit).is_ok());
+    assert!(instance.reset_interpreter_cache().is_ok());
+
+    let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, blob.clone(), None);
+    assert!(instance.set_interpreter_cache_size_limit(limit).is_err());
+    assert!(instance.set_interpreter_cache_size_limit(None).is_ok());
+
+    let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, blob, Some(TEST_COMPILATION_COST));
+    assert!(instance.set_interpreter_cache_size_limit(limit).is_ok());
+    assert!(instance.reset_interpreter_cache().is_ok());
+}
+
+fn large_compilation_cost_is_charged_in_full(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let blob = two_blocks_test_blob(isa);
+    let code_length = i64::try_from(blob.code().len()).unwrap();
+    let max = i64::from(u32::MAX);
+    let costs = [
+        (
+            InterpreterCompilationCost {
+                per_block: u32::MAX,
+                ..ZERO_COMPILATION_COST
+            },
+            max,
+        ),
+        (
+            InterpreterCompilationCost {
+                per_block: u32::MAX,
+                per_instruction_millis: u32::MAX,
+                per_code_byte_millis: u32::MAX,
+            },
+            max + (4 * max + 999) / 1000 + (code_length * max + 999) / 1000,
+        ),
+    ];
+
+    for (cost, expected_compilation_cost) in costs {
+        let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, blob.clone(), Some(cost));
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_gas(100);
+        instance.set_next_program_counter(ProgramCounter(0));
+        assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+        assert_eq!(instance.gas(), 100 - expected_compilation_cost);
+    }
+}
+
+fn code_length_dependent_state_is_charged(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let cost = InterpreterCompilationCost {
+        per_code_byte_millis: 1000,
+        ..ZERO_COMPILATION_COST
+    };
+
+    let blob = two_blocks_test_blob(isa);
+    let code_length = i64::try_from(blob.code().len()).unwrap();
+
+    // The blocks cost 4 and 2, plus one per byte of code for the first compilation.
+    let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, blob, Some(cost));
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(4 + code_length - 1);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+    assert_eq!(instance.gas(), 4 - 1);
+
+    assert_eq!(run_and_get_gas_used(&mut instance, ProgramCounter(0), 0), 6);
+
+    instance.reset_interpreter_cache().unwrap();
+    assert_eq!(run_and_get_gas_used(&mut instance, ProgramCounter(0), 0), 6 + code_length);
+
+    // The blocks take 5 and 3 entries and the limit fits one, so running resets the cache.
+    instance.reset_interpreter_cache().unwrap();
+    instance
+        .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+            max_block_size: 4,
+            max_cache_size_bytes: interpreter_calculate_cache_size(10),
+        }))
+        .unwrap();
+
+    assert_eq!(run_and_get_gas_used(&mut instance, ProgramCounter(0), 0), 6 + code_length);
+    assert_eq!(instance.interpreter_cache_size(), Some(interpreter_calculate_cache_size(3)));
+    assert_eq!(run_and_get_gas_used(&mut instance, ProgramCounter(0), 0), 6);
+}
+
+fn out_of_gas_after_a_compilation(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let test_blob = interpreter_branch_test_blob(isa);
+    let fallthrough = InterpreterBranchTestSide::Fallthrough.a0();
+    for gas_metering in [GasMeteringKind::Sync, GasMeteringKind::Async] {
+        let mut instance = instantiate_with_compilation_cost(&engine, gas_metering, test_blob.blob.clone(), Some(TEST_COMPILATION_COST));
+
+        // Enough to pay 1 + 11 for the branch, but not 11 to compile the block after it, which costs 2 to run.
+        let branch_cost = 1 + 11;
+        let gas_left = 5;
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(Reg::A0, fallthrough);
+        instance.set_reg(Reg::A1, 0);
+        instance.set_gas(branch_cost + gas_left);
+        instance.set_next_program_counter(test_blob.branch);
+        assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+        assert_eq!(instance.reg(Reg::A1), 0);
+
+        assert_eq!(
+            instance.interpreter_cache_size(),
+            Some(interpreter_calculate_cache_size(3 + 5)),
+            "expected the block after the branch to be compiled"
+        );
+
+        if gas_metering == GasMeteringKind::Async {
+            assert_eq!(instance.gas(), gas_left - 11 - 2);
+            assert_eq!(run_and_get_gas_used(&mut instance, test_blob.branch, fallthrough), 1 + 2);
+            continue;
+        }
+
+        assert_eq!(instance.gas(), gas_left - 11);
+        assert_eq!(instance.program_counter(), Some(test_blob.fallthrough_block[0]));
+
+        instance.set_gas(100);
+        assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+        assert_eq!(instance.reg(Reg::A1), 1);
+        assert_eq!(instance.gas(), 100 - 2, "expected the compilation to be charged once");
+
+        assert_eq!(run_and_get_gas_used(&mut instance, test_blob.branch, fallthrough), 1 + 2);
+    }
+}
+
+fn compilation_thrown_away_by_a_cache_reset_is_charged(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let test_blob = interpreter_branch_test_blob(isa);
+    let target_block_add_count = InterpreterBranchTestBlob::TARGET_BLOCK_ADD_COUNT;
+
+    // The limit fits only the 34 entry big block, so compiling it after the branch throws it away
+    // and compiles it again. The big block costs 33 to run and 27 to compile.
+    let run_out_of_gas_entering_big_block = |gas_metering, gas_left_after_branch| {
+        let mut instance = instantiate_with_compilation_cost(&engine, gas_metering, test_blob.blob.clone(), Some(TEST_COMPILATION_COST));
+        instance
+            .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+                max_block_size: 0,
+                max_cache_size_bytes: interpreter_calculate_cache_size(35),
+            }))
+            .unwrap();
+
+        assert_eq!(
+            run_and_get_gas_used(&mut instance, test_blob.branch, InterpreterBranchTestSide::Fallthrough.a0()),
+            1 + 11 + 2 + 11
+        );
+
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(Reg::A0, InterpreterBranchTestSide::Target.a0());
+        instance.set_reg(Reg::A2, 0);
+        instance.set_gas(1 + gas_left_after_branch);
+        instance.set_next_program_counter(test_blob.branch);
+        assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+        assert_eq!(instance.reg(Reg::A2), 0);
+        instance
+    };
+
+    let gas_left = 27 + 27 + 33 - 1;
+    let mut instance = run_out_of_gas_entering_big_block(GasMeteringKind::Sync, gas_left);
+    assert_eq!(instance.gas(), gas_left - 27 - 27);
+    assert_eq!(instance.program_counter(), Some(test_blob.target_block[0]));
+    assert_eq!(
+        instance.interpreter_cache_size(),
+        Some(interpreter_calculate_cache_size(34)),
+        "expected only the big block to be in the cache"
+    );
+
+    instance.set_gas(100);
+    assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A2), target_block_add_count);
+    assert_eq!(instance.gas(), 100 - 33, "expected both compilations to be charged once");
+
+    let instance = run_out_of_gas_entering_big_block(GasMeteringKind::Async, gas_left);
+    assert_eq!(instance.gas(), gas_left - (27 + 27 + 33));
+
+    let mut instance = run_out_of_gas_entering_big_block(GasMeteringKind::Sync, gas_left);
+    assert_eq!(run_and_get_gas_used(&mut instance, test_blob.target_block[1], 0), 33);
+    assert_eq!(instance.reg(Reg::A2), target_block_add_count - 1);
+    assert_eq!(
+        instance.interpreter_cache_size(),
+        Some(interpreter_calculate_cache_size(34)),
+        "expected only the big block to be in the cache"
+    );
+
+    // The branch doesn't fit next to the big block either, so it's also compiled twice.
+    instance.set_reg(Reg::A0, InterpreterBranchTestSide::Fallthrough.a0());
+    instance.set_gas(1 + 11);
+    instance.set_next_program_counter(test_blob.branch);
+    assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+    assert_eq!(instance.gas(), 1 + 11 - 2 * 11);
+
+    instance.set_gas(100);
+    assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.gas(), 100 - 1 - (2 + 11));
+}
+
+fn compilation_thrown_away_on_entry_into_the_middle_of_a_block_is_charged(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let test_blob = interpreter_branch_test_blob(isa);
+    let entry = test_blob.target_block[1];
+    let mut instance =
+        instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, test_blob.blob.clone(), Some(TEST_COMPILATION_COST));
+    instance
+        .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+            max_block_size: 0,
+            max_cache_size_bytes: interpreter_calculate_cache_size(35),
+        }))
+        .unwrap();
+
+    assert_eq!(
+        run_and_get_gas_used(&mut instance, test_blob.branch, InterpreterBranchTestSide::Fallthrough.a0()),
+        1 + 11 + 2 + 11
+    );
+
+    // The big block doesn't fit next to the other two, so it's compiled twice before it's
+    // entered. It costs 33 to run and 27 to compile.
+    let gas = 33 + 27 + 27 - 1;
+    instance.set_gas(gas);
+    instance.set_next_program_counter(entry);
+    assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+    assert_eq!(instance.gas(), gas - 27 - 27);
+    assert_eq!(
+        instance.interpreter_cache_size(),
+        Some(interpreter_calculate_cache_size(34)),
+        "expected only the big block to be in the cache"
+    );
+
+    assert_eq!(
+        run_and_get_gas_used(&mut instance, entry, 0),
+        33,
+        "expected both compilations to be charged once"
+    );
+}
+
+fn compilation_charge_on_entry_into_the_middle_of_a_block(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(
+        &[asm::add_imm_32(A0, A0, 1), asm::ecalli(0), asm::add_imm_32(A1, A1, 1), asm::ret()],
+        &[],
+    );
+
+    let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
+    let offsets: Vec<_> = blob.instructions().map(|inst| inst.offset).collect();
+    let run_until_interrupt = |instance: &mut RawInstance| loop {
+        match instance.run().unwrap() {
+            InterruptKind::Step => {}
+            interrupt => return interrupt,
+        }
+    };
+
+    for step_tracing in [false, true] {
+        let mut module_config = ModuleConfig::new();
+        module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+        module_config.set_step_tracing(step_tracing);
+        module_config.set_interpreter_compilation_cost(Some(TEST_COMPILATION_COST));
+        let mut instance = Module::from_blob(&engine, &module_config, blob.clone())
+            .unwrap()
+            .instantiate()
+            .unwrap();
+
+        // The block costs 4 and compiling it 12.
+        assert_eq!(run_and_get_gas_used(&mut instance, offsets[2], 0), 4 + 12);
+        assert_eq!(run_and_get_gas_used(&mut instance, offsets[2], 0), 4);
+
+        instance.set_reg(Reg::A1, 0);
+        instance.set_gas(1000);
+        instance.set_next_program_counter(offsets[0]);
+        assert_eq!(run_until_interrupt(&mut instance), InterruptKind::Ecalli(0));
+        assert_eq!(instance.gas(), 1000 - 4);
+
+        instance.reset_interpreter_cache().unwrap();
+        assert_eq!(run_until_interrupt(&mut instance), InterruptKind::Finished);
+        assert_eq!(
+            instance.gas(),
+            1000 - 4 - 12,
+            "expected only the compilation to be charged with step_tracing={step_tracing}"
+        );
+        assert_eq!(instance.reg(Reg::A1), 1);
+
+        instance.set_reg(Reg::A1, 0);
+        instance.set_gas(1000);
+        instance.set_next_program_counter(offsets[0]);
+        assert_eq!(run_until_interrupt(&mut instance), InterruptKind::Ecalli(0));
+
+        instance.reset_interpreter_cache().unwrap();
+        instance.set_gas(11);
+        assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+        assert_eq!(instance.gas(), 11 - 12);
+        assert_eq!(instance.reg(Reg::A1), 0);
+
+        instance.set_gas(100);
+        assert_eq!(run_until_interrupt(&mut instance), InterruptKind::Finished);
+        assert_eq!(instance.gas(), 100, "expected the compilation to be charged once");
+        assert_eq!(instance.reg(Reg::A1), 1);
+
+        assert_eq!(run_and_get_gas_used(&mut instance, offsets[0], 0), 4);
+    }
+}
+
+fn cache_reset_while_suspended_resumes_at_the_next_program_counter(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let test_blob = interpreter_branch_test_blob(isa);
+    let fallthrough = InterpreterBranchTestSide::Fallthrough.a0();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    module_config.set_interpreter_compilation_cost(Some(TEST_COMPILATION_COST));
+
+    // The branch costs 1 and the block after it 2; compiling either costs 11.
+    let mut instance = Module::from_blob(&engine, &module_config, test_blob.blob.clone())
+        .unwrap()
+        .instantiate()
+        .unwrap();
+    assert_eq!(run_and_get_gas_used(&mut instance, test_blob.branch, fallthrough), 1 + 11 + 2 + 11);
+
+    instance.set_reg(Reg::A1, 0);
+    instance.set_gas(1 + 1);
+    instance.set_next_program_counter(test_blob.branch);
+    assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+    assert_eq!(instance.gas(), 1);
+
+    instance.reset_interpreter_cache().unwrap();
+    instance.set_gas(100);
+    assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A1), 1);
+    assert_eq!(instance.gas(), 100 - 2 - 11);
+
+    module_config.set_step_tracing(true);
+    let mut instance = Module::from_blob(&engine, &module_config, test_blob.blob.clone())
+        .unwrap()
+        .instantiate()
+        .unwrap();
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_reg(Reg::A0, fallthrough);
+    instance.set_gas(1000);
+    instance.set_next_program_counter(test_blob.branch);
+
+    let reset_at = test_blob.fallthrough_block[1];
+    let mut steps = Vec::new();
+    loop {
+        match instance.run().unwrap() {
+            InterruptKind::Step => {
+                let program_counter = instance.program_counter().unwrap();
+                if program_counter == reset_at && !steps.contains(&program_counter) {
+                    instance.reset_interpreter_cache().unwrap();
+                }
+
+                steps.push(program_counter);
+            }
+            interrupt => {
+                assert_eq!(interrupt, InterruptKind::Finished);
+                break;
+            }
+        }
+    }
+
+    let mut expected_steps = test_blob.path(InterpreterBranchTestSide::Fallthrough);
+    expected_steps.push(reset_at);
+    assert_eq!(steps, expected_steps);
+    assert_eq!(instance.reg(Reg::A1), 1);
+    assert_eq!(instance.gas(), 1000 - (1 + 11 + 2 + 11) - 11);
+}
+
+fn compilation_thrown_away_by_a_host_cache_reset_is_charged(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let mut instance = instantiate_with_compilation_cost(
+        &engine,
+        GasMeteringKind::Sync,
+        two_blocks_test_blob(isa),
+        Some(TEST_COMPILATION_COST),
+    );
+
+    // The first block costs 4 to run and 12 to compile, the second 2 and 11.
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(12 + 3);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+    assert_eq!(instance.gas(), 3);
+
+    instance.reset_interpreter_cache().unwrap();
+    instance.set_gas(100);
+    assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.gas(), 100 - (12 + 4) - (11 + 2));
+}
+
+fn step_interrupt_right_after_a_compilation(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let mut module_config = ModuleConfig::new();
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
+    module_config.set_step_tracing(true);
+    module_config.set_interpreter_compilation_cost(Some(TEST_COMPILATION_COST));
+    let module = Module::from_blob(&engine, &module_config, two_blocks_test_blob(isa)).unwrap();
+    let offsets: Vec<_> = module.blob().instructions().map(|inst| inst.offset).collect();
+    let mut instance = module.instantiate().unwrap();
+
+    // The first block costs 4 to run and 12 to compile, the second 2 and 11.
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_gas(12 + 4 + 5);
+    instance.set_next_program_counter(offsets[0]);
+    let mut interrupts = Vec::new();
+    loop {
+        let interrupt = instance.run().unwrap();
+        interrupts.push((interrupt.clone(), instance.program_counter(), instance.gas()));
+        match interrupt {
+            InterruptKind::Step => {}
+            InterruptKind::NotEnoughGas => instance.set_gas(10),
+            _ => break,
+        }
+    }
+
+    assert_eq!(
+        interrupts,
+        [
+            (InterruptKind::Step, Some(offsets[0]), 5 + 4),
+            (InterruptKind::Step, Some(offsets[1]), 5),
+            (InterruptKind::Step, Some(offsets[2]), 5),
+            (InterruptKind::Step, Some(offsets[3]), 5),
+            (InterruptKind::NotEnoughGas, Some(offsets[4]), 5 - 11),
+            (InterruptKind::Step, Some(offsets[5]), 10 - 2),
+            (InterruptKind::Finished, None, 10 - 2),
+        ]
+    );
+}
+
+fn arbitrary_jump_inside_of_an_instruction_does_not_compile_again(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let blob = two_blocks_test_blob(isa);
+    let offsets: Vec<_> = blob.instructions().map(|inst| inst.offset).collect();
+    let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, blob, Some(TEST_COMPILATION_COST));
+    assert_eq!(run_and_get_gas_used(&mut instance, offsets[0], 0), (12 + 4) + (11 + 2));
+    let cache_size = instance.interpreter_cache_size();
+    let gas = instance.gas();
+
+    instance.set_next_program_counter(ProgramCounter(offsets[1].0 + 1));
+    assert_eq!(instance.run().unwrap(), InterruptKind::Trap);
+    assert_eq!(
+        instance.interpreter_cache_size(),
+        cache_size,
+        "expected the already compiled block to not be compiled again"
+    );
+    assert_eq!(instance.gas(), gas);
+}
+
+fn cache_size_limit_disables_debug_handlers(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), chain_of_blocks_test_blob(isa)).unwrap();
+    let limit = SetCacheSizeLimitArgs {
+        max_block_size: 5,
+        max_cache_size_bytes: interpreter_calculate_cache_size(27),
+    };
+
+    let mut instance = module.instantiate().unwrap();
+    let run = |instance: &mut RawInstance| {
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(Reg::A0, 0);
+        instance.set_next_program_counter(ProgramCounter(0));
+        assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+        assert_eq!(instance.reg(Reg::A0), 12);
+        interpreter_calculate_cache_num_entries(instance.interpreter_cache_size().unwrap())
+    };
+
+    // Unit tests always run the interpreter in debug mode, which adds a `trace_pc` handler to each of the 16 instructions.
+    assert_eq!(run(&mut instance), 32);
+
+    instance.set_interpreter_cache_size_limit(Some(limit)).unwrap();
+    assert_eq!(instance.interpreter_cache_size(), Some(0));
+    assert_eq!(run(&mut instance), 16);
+
+    instance.set_interpreter_cache_size_limit(None).unwrap();
+    assert_eq!(instance.interpreter_cache_size(), Some(0));
+    assert_eq!(run(&mut instance), 32);
+
+    let mut module_config = ModuleConfig::new();
+    module_config.set_step_tracing(true);
+    let module = Module::from_blob(&engine, &module_config, chain_of_blocks_test_blob(isa)).unwrap();
+    let mut instance = module.instantiate().unwrap();
+    assert!(instance.set_interpreter_cache_size_limit(Some(limit)).is_err());
+}
+
+fn lowering_the_cache_size_limit_clears_the_cache(config: Config, isa: InstructionSetKind) {
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let module = Module::from_blob(&engine, &ModuleConfig::new(), chain_of_blocks_test_blob(isa)).unwrap();
+    let mut instance = module.instantiate().unwrap();
+    let mut run_with_limit = |max_cache_entries: usize| {
+        instance
+            .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+                max_block_size: 5,
+                max_cache_size_bytes: interpreter_calculate_cache_size(max_cache_entries),
+            }))
+            .unwrap();
+
+        let cache_size_before_running = instance.interpreter_cache_size();
+        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+        instance.set_reg(Reg::A0, 0);
+        instance.set_next_program_counter(ProgramCounter(0));
+        assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+        assert_eq!(instance.reg(Reg::A0), 12);
+        (cache_size_before_running, instance.interpreter_cache_size())
+    };
+
+    // Without gas metering every block takes four entries; this limit fits all four.
+    let (_, Some(cache_size)) = run_with_limit(27) else {
+        return;
+    };
+    assert_eq!(cache_size, interpreter_calculate_cache_size(16));
+
+    // This limit fits two blocks, so running resets the cache.
+    let (cache_size_before_running, cache_size) = run_with_limit(15);
+    assert_eq!(cache_size_before_running, Some(0));
+    assert_eq!(cache_size, Some(interpreter_calculate_cache_size(8)));
+}
+
+const PER_CODE_BYTE_COMPILATION_COST: InterpreterCompilationCost = InterpreterCompilationCost {
+    per_code_byte_millis: 1,
+    ..TEST_COMPILATION_COST
+};
+
+// With 256 KiB of padding the code map is rewritten after every 1023 cache clears.
+const PADDING: usize = 1 << 18;
+const CLEARS_PER_REWRITE: usize = 1023;
+
+fn padded_two_blocks_test_blob(isa: InstructionSetKind, padding: usize) -> ProgramBlob {
+    let mut code = vec![
+        asm::add_imm_32(A0, A0, 1),
+        asm::add_imm_32(A0, A0, 1),
+        asm::add_imm_32(A0, A0, 1),
+        asm::jump(1),
+        asm::add_imm_32(A1, A1, 1),
+        asm::ret(),
+    ];
+    code.resize(code.len() + padding, asm::trap());
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&code, &[]);
+    ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap()
+}
+
+fn instantiate_padded_two_blocks(engine: &Engine, isa: InstructionSetKind, padding: usize) -> (RawInstance, i64) {
+    let blob = padded_two_blocks_test_blob(isa, padding);
+    let code_map_cost = i64::try_from(blob.code().len().div_ceil(1000)).unwrap();
+    let instance = instantiate_with_compilation_cost(engine, GasMeteringKind::Sync, blob, Some(PER_CODE_BYTE_COMPILATION_COST));
+    (instance, code_map_cost)
+}
+
+// The first block costs 4 to run and 12 to compile, the second 2 and 11.
+const RUN_COST: i64 = 4 + 2;
+const COMPILATION_COST: i64 = 12 + 11;
+
+fn run_padded_two_blocks(instance: &mut RawInstance) -> i64 {
+    let gas_used = run_and_get_gas_used(instance, ProgramCounter(0), 0);
+    assert_eq!(instance.reg(Reg::A0), 3);
+    gas_used
+}
+
+fn run_padded_two_blocks_from_scratch(instance: &mut RawInstance, code_map_cost: i64) {
+    assert_eq!(run_padded_two_blocks(instance), code_map_cost + COMPILATION_COST + RUN_COST);
+}
+
+fn cache_resets_past_the_epoch_range(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let (mut instance, code_map_cost) = instantiate_padded_two_blocks(&engine, isa, PADDING);
+    instance
+        .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+            max_block_size: 4,
+            max_cache_size_bytes: interpreter_calculate_cache_size(10),
+        }))
+        .unwrap();
+
+    // The limit fits one block: the first run resets the cache once and compiles the second block
+    // twice, every later run resets it twice and compiles both blocks twice.
+    assert_eq!(
+        run_padded_two_blocks(&mut instance),
+        code_map_cost + COMPILATION_COST + 11 + RUN_COST
+    );
+
+    let runs = 2..=CLEARS_PER_REWRITE + 2;
+    let code_map_costs: Vec<i64> = runs
+        .clone()
+        .map(|_| run_padded_two_blocks(&mut instance) - (2 * COMPILATION_COST + RUN_COST))
+        .collect();
+
+    let expected: Vec<i64> = runs
+        .map(|run| {
+            if (2 * run - 2) % CLEARS_PER_REWRITE == 0 || (2 * run - 1) % CLEARS_PER_REWRITE == 0 {
+                code_map_cost
+            } else {
+                0
+            }
+        })
+        .collect();
+    assert_eq!(expected.iter().filter(|&&cost| cost != 0).count(), 2);
+    assert_eq!(code_map_costs, expected);
+}
+
+fn clear_cache_by_switching_the_limit(instance: &mut RawInstance, limited: &mut bool, clears: usize) -> Vec<i64> {
+    let limit = SetCacheSizeLimitArgs {
+        max_block_size: 4,
+        max_cache_size_bytes: interpreter_calculate_cache_size(100),
+    };
+
+    (0..clears)
+        .map(|_| {
+            *limited = !*limited;
+            let gas = instance.gas();
+            instance.set_interpreter_cache_size_limit(limited.then_some(limit)).unwrap();
+            gas - instance.gas()
+        })
+        .collect()
+}
+
+fn charged_on_the_last_clear(clears: usize, code_map_cost: i64) -> Vec<i64> {
+    let mut charges = vec![0; clears];
+    charges[clears - 1] = code_map_cost;
+    charges
+}
+
+fn cache_clears_past_the_epoch_range_overwrite_the_code_map(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    for (padding, clears_per_rewrite) in [(PADDING, CLEARS_PER_REWRITE), (2 * PADDING, 511)] {
+        let (mut instance, code_map_cost) = instantiate_padded_two_blocks(&engine, isa, padding);
+        let mut limited = false;
+
+        run_padded_two_blocks_from_scratch(&mut instance, code_map_cost);
+        assert_eq!(run_padded_two_blocks(&mut instance), RUN_COST);
+
+        assert_eq!(
+            clear_cache_by_switching_the_limit(&mut instance, &mut limited, clears_per_rewrite),
+            charged_on_the_last_clear(clears_per_rewrite, code_map_cost)
+        );
+        assert_eq!(run_padded_two_blocks(&mut instance), COMPILATION_COST + RUN_COST);
+        assert_eq!(run_padded_two_blocks(&mut instance), RUN_COST);
+    }
+}
+
+fn reset_interpreter_cache_restarts_the_epoch_count(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let (mut instance, code_map_cost) = instantiate_padded_two_blocks(&engine, isa, PADDING);
+    let mut limited = false;
+
+    run_padded_two_blocks_from_scratch(&mut instance, code_map_cost);
+    assert_eq!(clear_cache_by_switching_the_limit(&mut instance, &mut limited, 4), [0; 4]);
+
+    instance.reset_interpreter_cache().unwrap();
+    run_padded_two_blocks_from_scratch(&mut instance, code_map_cost);
+    assert_eq!(
+        clear_cache_by_switching_the_limit(&mut instance, &mut limited, CLEARS_PER_REWRITE),
+        charged_on_the_last_clear(CLEARS_PER_REWRITE, code_map_cost)
+    );
+}
+
+fn epoch_wrap_without_block_gas_metering_charges_nothing(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let blob = padded_two_blocks_test_blob(isa, PADDING);
+    for (gas_metering, is_per_instruction_metering, cost) in [
+        (None, false, Some(PER_CODE_BYTE_COMPILATION_COST)),
+        (Some(GasMeteringKind::Sync), true, None),
+    ] {
+        let mut module_config = ModuleConfig::new();
+        module_config.set_gas_metering(gas_metering);
+        module_config.set_per_instruction_metering(is_per_instruction_metering);
+        module_config.set_interpreter_compilation_cost(cost);
+        let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+        let mut instance = module.instantiate().unwrap();
+        let mut limited = false;
+
+        run_padded_two_blocks(&mut instance);
+        assert_eq!(
+            clear_cache_by_switching_the_limit(&mut instance, &mut limited, CLEARS_PER_REWRITE),
+            [0; CLEARS_PER_REWRITE]
+        );
+        run_padded_two_blocks(&mut instance);
+    }
+}
+
+fn host_cache_clear_leaving_negative_gas_stops_the_next_run(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let (mut instance, code_map_cost) = instantiate_padded_two_blocks(&engine, isa, PADDING);
+    let mut limited = false;
+
+    run_padded_two_blocks_from_scratch(&mut instance, code_map_cost);
+    assert_eq!(
+        clear_cache_by_switching_the_limit(&mut instance, &mut limited, CLEARS_PER_REWRITE - 1),
+        [0; CLEARS_PER_REWRITE - 1]
+    );
+
+    instance.set_gas(code_map_cost - 1);
+    assert_eq!(clear_cache_by_switching_the_limit(&mut instance, &mut limited, 1), [code_map_cost]);
+    assert_eq!(instance.gas(), -1);
+
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_reg(Reg::A0, 0);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+    assert_eq!(instance.reg(Reg::A0), 0);
+    assert_eq!(instance.gas(), -1);
+
+    instance.set_gas(100);
+    assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 3);
+    assert_eq!(instance.gas(), 100 - COMPILATION_COST - RUN_COST);
 }
 
 fn step_tracing_invalid_store(engine_config: Config, isa: InstructionSetKind) {
@@ -6587,6 +7559,10 @@ fn module_cache(mut config: Config, isa: InstructionSetKind) {
     let module_with_cache_2 = Module::from_blob(&engine_with_cache, &Default::default(), blob.clone()).unwrap();
     assert!(Module::from_cache(&engine_with_cache, &Default::default(), &blob).is_some());
 
+    let mut module_config_with_cost = ModuleConfig::new();
+    module_config_with_cost.set_interpreter_compilation_cost(Some(TEST_COMPILATION_COST));
+    assert!(Module::from_cache(&engine_with_cache, &module_config_with_cost, &blob).is_none());
+
     assert!(Module::from_cache(&engine_without_cache, &Default::default(), &blob).is_none());
     let module_without_cache_1 = Module::from_blob(&engine_without_cache, &Default::default(), blob.clone()).unwrap();
     assert!(Module::from_cache(&engine_without_cache, &Default::default(), &blob).is_none());
@@ -6843,6 +7819,26 @@ run_tests! {
     lazy_branch_target_steps_and_charges_gas
     cache_limit_with_middle_of_basic_block_entries
     undersized_max_block_size_with_middle_of_basic_block_entries
+    compilation_is_charged_when_compiling
+    compilation_cost_does_nothing_on_other_backends
+    compilation_cost_errors
+    large_compilation_cost_is_charged_in_full
+    code_length_dependent_state_is_charged
+    out_of_gas_after_a_compilation
+    compilation_thrown_away_by_a_cache_reset_is_charged
+    compilation_thrown_away_on_entry_into_the_middle_of_a_block_is_charged
+    compilation_charge_on_entry_into_the_middle_of_a_block
+    cache_reset_while_suspended_resumes_at_the_next_program_counter
+    compilation_thrown_away_by_a_host_cache_reset_is_charged
+    step_interrupt_right_after_a_compilation
+    arbitrary_jump_inside_of_an_instruction_does_not_compile_again
+    cache_size_limit_disables_debug_handlers
+    lowering_the_cache_size_limit_clears_the_cache
+    cache_resets_past_the_epoch_range
+    cache_clears_past_the_epoch_range_overwrite_the_code_map
+    reset_interpreter_cache_restarts_the_epoch_count
+    epoch_wrap_without_block_gas_metering_charges_nothing
+    host_cache_clear_leaving_negative_gas_stops_the_next_run
 
     memset_basic
     memset_with_dynamic_paging

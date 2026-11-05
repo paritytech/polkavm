@@ -639,15 +639,8 @@ impl LookupTable {
     }
 }
 
-pub const INTERPRETER_CACHE_ENTRY_SIZE: u32 = {
-    if cfg!(target_pointer_width = "32") {
-        20
-    } else if cfg!(target_pointer_width = "64") {
-        24
-    } else {
-        panic!("unsupported target pointer width")
-    }
-};
+/// The size in bytes of an interpreter cache entry for the cache size limit, the same on every target.
+pub const INTERPRETER_CACHE_ENTRY_SIZE: u32 = 24;
 
 pub const INTERPRETER_FLATMAP_ENTRY_SIZE: u32 = 4;
 
@@ -7669,7 +7662,9 @@ impl ProgramBlob {
             } => (page_size, instruction_count, basic_block_count),
         };
 
-        let cache_entry_count_upper_bound = cast(instruction_count).to_usize() + cast(basic_block_count).to_usize();
+        // The cache grows in powers of two, with room for four more entries before each instruction.
+        let cache_entry_count_upper_bound =
+            (cast(instruction_count).to_usize() + cast(basic_block_count).to_usize() + 4).next_power_of_two();
         let cache_size_upper_bound = interpreter_calculate_cache_size(cache_entry_count_upper_bound);
 
         let mut purgeable_ram_consumption = match args {
@@ -7694,8 +7689,10 @@ impl ProgramBlob {
         purgeable_ram_consumption = purgeable_ram_consumption.saturating_add((code_length + 1) * INTERPRETER_FLATMAP_ENTRY_SIZE as usize);
 
         if !self.isa.is_legacy() {
+            let code_block_count = code_length.div_ceil(CODE_BLOCK_SIZE);
             purgeable_ram_consumption = purgeable_ram_consumption.saturating_add(
-                code_length.div_ceil(CODE_BLOCK_SIZE) * (core::mem::size_of::<CodeBlockBitmap>() + core::mem::size_of::<usize>()),
+                code_block_count * core::mem::size_of::<CodeBlockBitmap>()
+                    + core::cmp::max(4, code_block_count) * core::mem::size_of::<usize>(),
             );
         }
 
@@ -7746,7 +7743,7 @@ fn test_estimate_interpreter_memory_usage_accounts_for_the_jump_target_bitmaps()
             })
             .unwrap();
 
-        let cache = interpreter_calculate_cache_size(code.len() + 1);
+        let cache = interpreter_calculate_cache_size((code.len() + 1 + 4).next_power_of_two());
         let flat_map = (blob.code().len() + 1) * INTERPRETER_FLATMAP_ENTRY_SIZE as usize;
         (
             blob.code().len(),
@@ -7758,9 +7755,10 @@ fn test_estimate_interpreter_memory_usage_accounts_for_the_jump_target_bitmaps()
 
     let (code_length, extra) = estimate(InstructionSetKind::Latest64);
     assert!(code_length > CODE_BLOCK_SIZE);
+    let code_block_count = code_length.div_ceil(CODE_BLOCK_SIZE);
     assert_eq!(
         extra,
-        code_length.div_ceil(CODE_BLOCK_SIZE) * (core::mem::size_of::<CodeBlockBitmap>() + 8)
+        code_block_count * core::mem::size_of::<CodeBlockBitmap>() + core::cmp::max(4, code_block_count) * 8
     );
 }
 

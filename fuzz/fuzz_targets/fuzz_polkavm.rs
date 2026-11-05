@@ -6,6 +6,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use polkavm::Engine;
+use polkavm::InterpreterCompilationCost;
 use polkavm::InterruptKind;
 use polkavm::ModuleConfig;
 use polkavm::ProgramCounter;
@@ -20,6 +21,9 @@ use polkavm::RETURN_TO_HOST;
 struct CacheSizeConfig {
     max_cache_size_bytes: usize,
     max_block_size: u32,
+    compilation_cost_per_block: u8,
+    compilation_cost_per_instruction_millis: u16,
+    compilation_cost_per_code_byte_millis: u8,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -554,6 +558,13 @@ fn interpreter_fuzzer_harness(data: Vec<OperationKind>, cache_config: Option<Cac
     let mut module_config = ModuleConfig::default();
     module_config.set_strict(true);
     module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
+    if let Some(config) = &cache_config {
+        module_config.set_interpreter_compilation_cost(Some(InterpreterCompilationCost {
+            per_block: u32::from(config.compilation_cost_per_block),
+            per_instruction_millis: u32::from(config.compilation_cost_per_instruction_millis),
+            per_code_byte_millis: u32::from(config.compilation_cost_per_code_byte_millis),
+        }));
+    }
 
     let module = polkavm::Module::from_blob(engine(polkavm::BackendKind::Interpreter), &module_config, blob).unwrap();
     let mut instance = module.instantiate().unwrap();

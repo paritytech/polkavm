@@ -6,16 +6,15 @@
 use crate::api::{MemoryAccessError, MemoryProtection, Module, RegValue, SetCacheSizeLimitArgs};
 use crate::error::Error;
 use crate::gas::{CostModelKind, GasVisitor};
-use crate::utils::{FlatMap, InterruptKind, Segfault};
+use crate::utils::{InterruptKind, Segfault};
 use crate::{Gas, GasMeteringKind, ProgramCounter};
 use alloc::boxed::Box;
 use alloc::collections::btree_map::Entry;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::mem::MaybeUninit;
-use core::num::NonZeroU32;
 use core::ops::Range;
-use polkavm_common::abi::VM_ADDR_RETURN_TO_HOST;
+use polkavm_common::abi::{VM_ADDR_RETURN_TO_HOST, VM_MAXIMUM_CODE_SIZE};
 use polkavm_common::cast::cast;
 use polkavm_common::operation::*;
 use polkavm_common::program::{
@@ -1388,13 +1387,94 @@ fn test_each_page() {
     ]);
 }
 
-use NonZeroU32 as CompiledOffset;
+const MAX_HANDLERS_PER_INSTRUCTION: usize = 4;
 
+struct CompiledOffsets {
+    entries: Vec<u32>,
+    epoch: u32,
+    epoch_shift: u32,
+    is_jump_target_valid_bit: u32,
+    index_mask: u32,
+}
+
+impl CompiledOffsets {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            epoch: 1,
+            epoch_shift: 0,
+            is_jump_target_valid_bit: 0,
+            index_mask: 0,
+        }
+    }
+
+    const fn epoch_shift_for(len: u32) -> u32 {
+        (cast(len).to_usize() * MAX_HANDLERS_PER_INSTRUCTION)
+            .next_power_of_two()
+            .trailing_zeros()
+            + 1
+    }
+
+    fn is_allocated(&self) -> bool {
+        !self.entries.is_empty()
+    }
+
+    #[cold]
+    fn allocate(&mut self, len: u32) {
+        self.entries = alloc::vec![0; cast(len).to_usize()];
+        self.epoch = 1;
+        self.epoch_shift = Self::epoch_shift_for(len);
+        self.is_jump_target_valid_bit = 1 << (self.epoch_shift - 1);
+        self.index_mask = self.is_jump_target_valid_bit - 1;
+    }
+
+    fn reset(&mut self) {
+        self.entries = Vec::new();
+    }
+
+    fn clear_and_report_rewrite(&mut self) -> bool {
+        if self.epoch < u32::MAX >> self.epoch_shift {
+            self.epoch += 1;
+            return false;
+        }
+
+        self.entries.fill(0);
+        self.epoch = 1;
+        self.is_allocated()
+    }
+
+    #[inline(always)]
+    fn get(&self, program_counter: u32) -> Option<(bool, Target)> {
+        let entry = *self.entries.get(cast(program_counter).to_usize())?;
+        (entry >> self.epoch_shift == self.epoch).then_some((entry & self.is_jump_target_valid_bit != 0, entry & self.index_mask))
+    }
+
+    #[inline(always)]
+    fn insert(&mut self, program_counter: u32, index: usize, is_jump_target_valid: bool) {
+        let index = cast(index).to_u32_or_debug_panic();
+        debug_assert!(index <= self.index_mask);
+
+        let mut entry = (self.epoch << self.epoch_shift) | index;
+        if is_jump_target_valid {
+            entry |= self.is_jump_target_valid_bit;
+        }
+
+        self.entries[cast(program_counter).to_usize()] = entry;
+    }
+}
+
+polkavm_common::static_assert!(CompiledOffsets::epoch_shift_for(VM_MAXIMUM_CODE_SIZE + 1) + 3 <= u32::BITS);
+
+polkavm_common::static_assert!(
+    core::mem::size_of::<Handler>() + core::mem::size_of::<Args>() <= cast(INTERPRETER_CACHE_ENTRY_SIZE).to_usize()
+);
+
+#[cfg(target_pointer_width = "64")]
 polkavm_common::static_assert!(
     core::mem::size_of::<Handler>() + core::mem::size_of::<Args>() == cast(INTERPRETER_CACHE_ENTRY_SIZE).to_usize()
 );
 
-polkavm_common::static_assert!(core::mem::size_of::<CompiledOffset>() == cast(INTERPRETER_FLATMAP_ENTRY_SIZE).to_usize());
+polkavm_common::static_assert!(core::mem::size_of::<u32>() == cast(INTERPRETER_FLATMAP_ENTRY_SIZE).to_usize());
 
 struct Handlers {
     charge_gas: Handler,
@@ -1498,7 +1578,7 @@ pub(crate) struct InterpretedInstance {
     next_program_counter_changed: bool,
     cycle_counter: u64,
     gas: i64,
-    compiled_offset_for_block: FlatMap<CompiledOffset, true>,
+    compiled_offset_for_block: CompiledOffsets,
     valid_jump_targets_for_block: Vec<Option<CodeBlockBitmapBox>>,
     compiled_handlers: Vec<Handler>,
     compiled_args: Vec<Args>,
@@ -1507,7 +1587,8 @@ pub(crate) struct InterpretedInstance {
     step_tracing: bool,
     unresolved_program_counter: Option<ProgramCounter>,
     max_compiled_handlers: Option<usize>,
-    debug_mode: bool,
+    max_cache_entries: Option<usize>,
+    debug_logging: bool,
     handlers_debug: Handlers,
     handlers_non_debug: Handlers,
 }
@@ -1516,7 +1597,7 @@ impl InterpretedInstance {
     pub fn new_from_module(module: Module, force_step_tracing: bool, imperfect_logger_filtering_workaround: bool) -> Self {
         let step_tracing = module.is_step_tracing() || force_step_tracing;
         let mut instance = Self {
-            compiled_offset_for_block: FlatMap::new(module.code_len() + 1), // + 1 for one implicit out-of-bounds trap.
+            compiled_offset_for_block: CompiledOffsets::new(),
             valid_jump_targets_for_block: Default::default(),
             compiled_handlers: Default::default(),
             compiled_args: Default::default(),
@@ -1536,7 +1617,8 @@ impl InterpretedInstance {
             step_tracing,
             unresolved_program_counter: None,
             max_compiled_handlers: None,
-            debug_mode: cfg!(test)
+            max_cache_entries: None,
+            debug_logging: cfg!(test)
                 || (!imperfect_logger_filtering_workaround
                     && (log::log_enabled!(target: "polkavm", log::Level::Debug)
                         || log::log_enabled!(target: "polkavm::interpreter", log::Level::Debug))),
@@ -1608,9 +1690,25 @@ impl InterpretedInstance {
             max_cache_size_bytes,
         }) = cache_info
         else {
+            if self.max_cache_entries.is_some() {
+                self.clear_cache();
+                self.resume_at_next_program_counter();
+            }
+
             self.max_compiled_handlers = None;
+            self.max_cache_entries = None;
             return Ok(());
         };
+
+        if self.step_tracing {
+            return Err(Error::from_static_str("limiting the cache size is not supported with step tracing"));
+        }
+
+        if self.module.interpreter_compilation_cost().is_none() && self.has_block_gas_metering() {
+            return Err(Error::from_static_str(
+                "limiting the cache size requires a compilation cost to be set",
+            ));
+        }
 
         let compiled_handlers_hard_limit = interpreter_calculate_cache_num_entries(max_cache_size_bytes);
 
@@ -1632,7 +1730,21 @@ impl InterpretedInstance {
         }
 
         let compiled_handlers_soft_limit = compiled_handlers_hard_limit - (cast(max_block_size).to_usize() + 1);
+        let was_unlimited = self.max_cache_entries.is_none();
         self.max_compiled_handlers = Some(compiled_handlers_soft_limit);
+        self.max_cache_entries = Some(compiled_handlers_hard_limit);
+
+        // Handlers depend on the debug mode; clearing on every switch keeps cache resets independent of the log level.
+        if was_unlimited || self.compiled_handlers.len() > compiled_handlers_soft_limit {
+            self.clear_cache();
+            self.resume_at_next_program_counter();
+        }
+
+        if self.compiled_handlers.capacity() > compiled_handlers_hard_limit {
+            self.compiled_handlers.shrink_to(compiled_handlers_hard_limit);
+            self.compiled_args.shrink_to(compiled_handlers_hard_limit);
+        }
+
         Ok(())
     }
 
@@ -1729,7 +1841,7 @@ impl InterpretedInstance {
 
     pub fn run(&mut self) -> Result<InterruptKind, Error> {
         #[allow(clippy::collapsible_else_if)]
-        if self.debug_mode {
+        if self.debug_logging && self.max_cache_entries.is_none() {
             Ok(self.run_impl::<true>())
         } else {
             Ok(self.run_impl::<false>())
@@ -1822,16 +1934,46 @@ impl InterpretedInstance {
         });
     }
 
-    pub fn reset_interpreter_cache(&mut self) {
-        self.compiled_handlers.clear();
-        self.compiled_args.clear();
-        self.valid_jump_targets_for_block.clear();
-
-        self.compiled_handlers.shrink_to_fit();
-        self.compiled_args.shrink_to_fit();
-        self.valid_jump_targets_for_block.shrink_to_fit();
+    pub fn reset_interpreter_cache(&mut self) -> Result<(), Error> {
+        if self.module.interpreter_compilation_cost().is_none() && self.has_block_gas_metering() {
+            return Err(Error::from_static_str("resetting the cache requires a compilation cost to be set"));
+        }
 
         self.compiled_offset_for_block.reset();
+        self.valid_jump_targets_for_block.clear();
+        self.valid_jump_targets_for_block.shrink_to_fit();
+        self.clear_cache();
+        self.compiled_handlers.shrink_to_fit();
+        self.compiled_args.shrink_to_fit();
+        self.resume_at_next_program_counter();
+        Ok(())
+    }
+
+    fn has_block_gas_metering(&self) -> bool {
+        self.module.gas_metering().is_some() && !self.module.is_per_instruction_metering()
+    }
+
+    fn charge_code_map(&mut self) {
+        if let Some(compilation_cost) = self.module.interpreter_compilation_cost().filter(|_| self.has_block_gas_metering()) {
+            self.gas = self.gas.saturating_sub_unsigned(
+                (u64::from(self.module.code_len()) * u64::from(compilation_cost.per_code_byte_millis)).div_ceil(1000),
+            );
+        }
+    }
+
+    fn resume_at_next_program_counter(&mut self) {
+        if self.next_program_counter.is_some() {
+            self.next_program_counter_changed = true;
+        }
+    }
+
+    fn clear_cache(&mut self) {
+        self.compiled_handlers.clear();
+        self.compiled_args.clear();
+        if self.compiled_offset_for_block.clear_and_report_rewrite() {
+            self.charge_code_map();
+        }
+
         self.next_compiled_offset = 0;
     }
 
@@ -1846,26 +1988,9 @@ impl InterpretedInstance {
         });
     }
 
-    #[inline(always)]
-    fn pack_target(index: usize, is_jump_target_valid: bool) -> NonZeroU32 {
-        let mut index = cast(index).to_u32_or_debug_panic();
-        if is_jump_target_valid {
-            index |= 1 << 31;
-        }
-
-        NonZeroU32::new(index + 1).unwrap()
-    }
-
-    #[inline(always)]
-    fn unpack_target(value: NonZeroU32) -> (bool, Target) {
-        let value = value.get() - 1;
-        ((value >> 31) == 1, (value << 1) >> 1)
-    }
-
     /// Resolve a jump from *within* the program.
     fn resolve_jump<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<Target> {
-        if let Some(compiled_offset) = self.compiled_offset_for_block.get(program_counter.0) {
-            let (is_jump_target_valid, target) = Self::unpack_target(compiled_offset);
+        if let Some((is_jump_target_valid, target)) = self.compiled_offset_for_block.get(program_counter.0) {
             if !is_jump_target_valid {
                 return None;
             }
@@ -1882,7 +2007,7 @@ impl InterpretedInstance {
 
     /// Resolve a jump from *within* the program only if its target is already compiled.
     fn resolve_compiled_jump(&self, program_counter: ProgramCounter) -> Option<Target> {
-        let (is_jump_target_valid, target) = Self::unpack_target(self.compiled_offset_for_block.get(program_counter.0)?);
+        let (is_jump_target_valid, target) = self.compiled_offset_for_block.get(program_counter.0)?;
         is_jump_target_valid.then_some(target)
     }
 
@@ -1896,8 +2021,7 @@ impl InterpretedInstance {
     }
 
     #[allow(unpredictable_function_pointer_comparisons)]
-    fn extract_target_and_gas<const DEBUG: bool>(&self, compiled_offset: NonZeroU32) -> (Target, i64) {
-        let (is_jump_target_valid, target) = Self::unpack_target(compiled_offset);
+    fn extract_target_and_gas<const DEBUG: bool>(&self, (is_jump_target_valid, target): (bool, Target)) -> (Target, i64) {
         if is_jump_target_valid
             || self.module.gas_metering().is_none()
             || self.module.is_per_instruction_metering()
@@ -1955,11 +2079,14 @@ impl InterpretedInstance {
             log::trace!("  -> Found start of a basic block at: {basic_block_offset}");
         }
 
-        let origin = self.compile_block::<DEBUG>(basic_block_offset, false)?;
-        if self.compiled_handlers[cast(origin).to_usize()] == self.handlers::<DEBUG>().reset_cache {
-            // There's a cache reset already queue for this block; trigger it now.
-            self.reset_interpreter_cache();
-            self.compile_block::<DEBUG>(basic_block_offset, false)?;
+        // The block can be compiled already when the program counter points inside of an instruction.
+        if self.compiled_offset_for_block.get(basic_block_offset.0).is_none() {
+            let origin = self.compile_block::<DEBUG>(basic_block_offset, false)?;
+            if self.compiled_handlers[cast(origin).to_usize()] == self.handlers::<DEBUG>().reset_cache {
+                // There's a cache reset already queue for this block; trigger it now.
+                self.clear_cache();
+                self.compile_block::<DEBUG>(basic_block_offset, false)?;
+            }
         }
 
         // Reject a program counter pointing into the middle of an instruction.
@@ -1969,7 +2096,7 @@ impl InterpretedInstance {
         };
 
         if basic_block_offset == program_counter {
-            Some((Self::unpack_target(compiled_offset).1, 0))
+            Some((compiled_offset.1, 0))
         } else {
             Some(self.extract_target_and_gas::<DEBUG>(compiled_offset))
         }
@@ -1977,8 +2104,7 @@ impl InterpretedInstance {
 
     /// Resolve a fallthrough.
     fn resolve_fallthrough<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<Target> {
-        if let Some(compiled_offset) = self.compiled_offset_for_block.get(program_counter.0) {
-            let (is_jump_target_valid, target) = Self::unpack_target(compiled_offset);
+        if let Some((is_jump_target_valid, target)) = self.compiled_offset_for_block.get(program_counter.0) {
             if !is_jump_target_valid {
                 return None;
             }
@@ -2043,6 +2169,11 @@ impl InterpretedInstance {
             panic!("internal compiled program counter overflow: the program is too big!");
         };
 
+        if !self.compiled_offset_for_block.is_allocated() {
+            self.compiled_offset_for_block.allocate(self.module.code_len() + 1); // + 1 for one implicit out-of-bounds trap.
+            self.charge_code_map();
+        }
+
         if cfg!(debug_assertions) && known_valid_jump_target {
             assert!(is_jump_target_valid_cached(
                 &self.module,
@@ -2052,6 +2183,7 @@ impl InterpretedInstance {
         }
 
         let mut charge_gas_index = None;
+        let mut instruction_count: u32 = 0;
         let mut is_jump_target_valid =
             known_valid_jump_target || is_jump_target_valid_cached(&self.module, &mut self.valid_jump_targets_for_block, program_counter);
 
@@ -2063,12 +2195,22 @@ impl InterpretedInstance {
         };
 
         for instruction in instructions {
-            self.compiled_offset_for_block.insert(
-                instruction.offset.0,
-                Self::pack_target(self.compiled_handlers.len(), is_jump_target_valid),
-            );
+            let first_handler = self.compiled_handlers.len();
+            self.compiled_offset_for_block
+                .insert(instruction.offset.0, first_handler, is_jump_target_valid);
 
             is_jump_target_valid = false;
+            instruction_count += 1;
+
+            if let Some(max_cache_entries) = self.max_cache_entries {
+                let needed = self.compiled_handlers.len() + MAX_HANDLERS_PER_INSTRUCTION;
+                if self.compiled_handlers.capacity() < needed {
+                    let capacity = needed.next_power_of_two().min(max_cache_entries.max(needed));
+                    let additional = capacity.saturating_sub(self.compiled_handlers.len());
+                    self.compiled_handlers.reserve_exact(additional);
+                    self.compiled_args.reserve_exact(additional);
+                }
+            }
 
             if self.step_tracing {
                 if DEBUG {
@@ -2120,6 +2262,7 @@ impl InterpretedInstance {
             debug_assert!(
                 instruction.opcode() == polkavm_common::program::Opcode::unlikely || self.compiled_handlers.len() > original_length
             );
+            debug_assert!(self.compiled_handlers.len() - first_handler <= MAX_HANDLERS_PER_INSTRUCTION);
 
             if instruction.opcode().starts_new_basic_block() {
                 break;
@@ -2139,6 +2282,9 @@ impl InterpretedInstance {
                 );
 
                 self.max_compiled_handlers = Some(compiled_handlers_new_limit);
+                self.max_cache_entries = self
+                    .max_cache_entries
+                    .map(|max_cache_entries| max_cache_entries + compiled_handlers_new_limit - max_compiled_handlers);
                 self.compiled_handlers[cast(origin).to_usize()] = self.handlers::<DEBUG>().reset_cache;
                 self.compiled_args[cast(origin).to_usize()] = Args::reset_cache(program_counter);
             } else if self.compiled_handlers.len() > max_compiled_handlers {
@@ -2151,15 +2297,20 @@ impl InterpretedInstance {
 
                 self.compiled_handlers[cast(origin).to_usize()] = self.handlers::<DEBUG>().reset_cache;
                 self.compiled_args[cast(origin).to_usize()] = Args::reset_cache(program_counter);
-            } else if self.compiled_handlers.capacity() > max_compiled_handlers {
-                self.compiled_handlers.shrink_to(max_compiled_handlers);
-                self.compiled_args.shrink_to(max_compiled_handlers);
             }
         }
 
         if let Some((program_counter, index)) = charge_gas_index {
             let gas_cost = gas_visitor.take_block_cost().unwrap();
             self.compiled_args[index] = Args::charge_gas(program_counter, gas_cost);
+
+            // Can make the gas negative; the next gas check stops execution before the block runs.
+            if let Some(compilation_cost) = self.module.interpreter_compilation_cost() {
+                self.gas = self.gas.saturating_sub_unsigned(
+                    u64::from(compilation_cost.per_block)
+                        + (u64::from(instruction_count) * u64::from(compilation_cost.per_instruction_millis)).div_ceil(1000),
+                );
+            }
         }
 
         if self.compiled_handlers.len() == cast(origin).to_usize() {
@@ -3526,7 +3677,7 @@ define_interpreter! {
             log::trace!("[{}]: reset_cache", compiled_offset);
         }
 
-        visitor.reset_interpreter_cache();
+        visitor.clear_cache();
         if let Some(target) = visitor.compile_block::<DEBUG>(program_counter, false) {
             visitor.go_to_target(target)
         } else {

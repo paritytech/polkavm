@@ -497,6 +497,21 @@ pub enum GasMeteringKind {
     Async,
 }
 
+/// Gas the interpreter charges when it compiles code; it can leave the gas negative.
+#[allow(clippy::exhaustive_structs)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct InterpreterCompilationCost {
+    /// Gas per compiled block.
+    pub per_block: u32,
+    /// Thousandths of gas per instruction in a compiled block, rounded up per block.
+    pub per_instruction_millis: u32,
+    /// Thousandths of gas per byte of code, rounded up.
+    ///
+    /// Charged when the code map is allocated, on the first compilation after instantiation or `reset_interpreter_cache`,
+    /// and again each time the code map is rewritten after many cache clears.
+    pub per_code_byte_millis: u32,
+}
+
 pub trait CustomCodegen: Send + Sync + 'static {
     fn should_emit_ecalli(&self, number: u32, asm: &mut Assembler) -> bool;
 }
@@ -514,6 +529,7 @@ pub struct ModuleConfig {
     pub(crate) custom_codegen: Option<Arc<dyn CustomCodegen>>,
     pub(crate) cost_model: Option<CostModelKind>,
     pub(crate) is_per_instruction_metering: bool,
+    pub(crate) interpreter_compilation_cost: Option<InterpreterCompilationCost>,
 }
 
 impl Default for ModuleConfig {
@@ -536,6 +552,7 @@ impl ModuleConfig {
             custom_codegen: None,
             cost_model: None,
             is_per_instruction_metering: false,
+            interpreter_compilation_cost: None,
         }
     }
 
@@ -657,6 +674,17 @@ impl ModuleConfig {
         self
     }
 
+    /// Sets the gas the interpreter charges for compiling code.
+    ///
+    /// Ignored by the recompiler. Creating a module fails with per instruction gas metering or when crosschecking a
+    /// non-interpreter backend.
+    ///
+    /// Default: `None`
+    pub fn set_interpreter_compilation_cost(&mut self, cost: Option<InterpreterCompilationCost>) -> &mut Self {
+        self.interpreter_compilation_cost = cost;
+        self
+    }
+
     #[cfg(feature = "module-cache")]
     pub(crate) fn hash(&self, cost_model: &CostModelKind) -> Option<polkavm_common::hasher::Hash> {
         if self.custom_codegen.is_some() {
@@ -671,6 +699,7 @@ impl ModuleConfig {
             step_tracing,
             dynamic_paging,
             is_per_instruction_metering,
+            interpreter_compilation_cost,
             // Deliberately ignored.
             cost_model: _,
             cache_by_hash: _,
@@ -693,6 +722,7 @@ impl ModuleConfig {
         ]);
 
         use core::hash::Hash;
+        interpreter_compilation_cost.hash(&mut hasher);
         match cost_model {
             CostModelKind::Simple(cost_model) => {
                 hasher.update_u32_array([0]);

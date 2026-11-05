@@ -9,7 +9,7 @@ use polkavm_common::cast::cast;
 use polkavm_common::program::{FrameKind, Imports, InstructionSetKind, Instructions, JumpTable, ProgramBlob, Reg};
 use polkavm_common::utils::{ArcBytes, AsUninitSliceMut, B32, B64};
 
-use crate::config::{BackendKind, Config, GasMeteringKind, ModuleConfig, SandboxKind};
+use crate::config::{BackendKind, Config, GasMeteringKind, InterpreterCompilationCost, ModuleConfig, SandboxKind};
 use crate::error::{bail, Error};
 use crate::gas::{CostModel, CostModelKind, GasVisitor};
 use crate::interpreter::InterpretedInstance;
@@ -278,6 +278,7 @@ pub(crate) struct ModulePrivate {
     pub(crate) module_key: Option<ModuleKey>,
 
     is_per_instruction_metering: bool,
+    interpreter_compilation_cost: Option<InterpreterCompilationCost>,
 }
 
 /// A compiled PolkaVM program module.
@@ -312,6 +313,10 @@ impl Module {
 
     pub(crate) fn is_per_instruction_metering(&self) -> bool {
         self.state().is_per_instruction_metering
+    }
+
+    pub(crate) fn interpreter_compilation_cost(&self) -> Option<InterpreterCompilationCost> {
+        self.state().interpreter_compilation_cost
     }
 
     pub(crate) fn is_strict(&self) -> bool {
@@ -420,6 +425,14 @@ impl Module {
 
         if config.is_per_instruction_metering && engine.selected_backend == BackendKind::Compiler {
             return Err(Error::from_static_str("per instruction metering is not supported with the recompiler").into());
+        }
+
+        if config.is_per_instruction_metering && config.interpreter_compilation_cost.is_some() {
+            return Err(Error::from_static_str("compilation cost is not supported with per instruction metering").into());
+        }
+
+        if engine.crosscheck && engine.selected_backend != BackendKind::Interpreter && config.interpreter_compilation_cost.is_some() {
+            return Err(Error::from_static_str("compilation cost is not supported when crosschecking").into());
         }
 
         log::trace!(
@@ -691,6 +704,7 @@ impl Module {
             page_shift,
             cost_model,
             is_per_instruction_metering: config.is_per_instruction_metering,
+            interpreter_compilation_cost: config.interpreter_compilation_cost,
 
             #[cfg(feature = "module-cache")]
             module_key,
@@ -2023,14 +2037,19 @@ impl RawInstance {
     }
 
     /// Reset cache and therefore reclaim cache backed memory.
-    pub fn reset_interpreter_cache(&mut self) {
+    ///
+    /// Fails on the interpreter with block gas metering and no compilation cost.
+    pub fn reset_interpreter_cache(&mut self) -> Result<(), Error> {
         #[allow(irrefutable_let_patterns)]
         if let InstanceBackend::Interpreted(ref mut backend) = self.backend {
-            backend.reset_interpreter_cache();
+            backend.reset_interpreter_cache()?
         }
+        Ok(())
     }
 
     /// Set a tight upper limit on the interpreter cache size (in bytes).
+    ///
+    /// Fails on the interpreter with step tracing, or with block gas metering and no compilation cost.
     pub fn set_interpreter_cache_size_limit(&mut self, cache_info: Option<SetCacheSizeLimitArgs>) -> Result<(), Error> {
         #[allow(irrefutable_let_patterns)]
         if let InstanceBackend::Interpreted(ref mut backend) = self.backend {

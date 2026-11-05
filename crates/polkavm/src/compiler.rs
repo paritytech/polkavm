@@ -15,7 +15,7 @@ use crate::api::CompileError;
 use crate::config::{CustomCodegen, GasMeteringKind, ModuleConfig, SandboxKind};
 use crate::mutex::Mutex;
 use crate::sandbox::{Sandbox, SandboxInit, SandboxProgram};
-use crate::utils::{FlatMap, GuestInit};
+use crate::utils::GuestInit;
 
 #[cfg(target_arch = "x86_64")]
 mod amd64;
@@ -31,9 +31,53 @@ const END_BASIC_BLOCK_UNCONDITIONAL: usize = 1;
 const END_BASIC_BLOCK_CONDITIONAL: usize = 2;
 const END_BASIC_BLOCK_INVALID: usize = 3;
 
+struct FlatMap<T> {
+    inner: Vec<Option<T>>,
+}
+
+impl<T> FlatMap<T>
+where
+    T: Copy,
+{
+    #[inline]
+    fn new(capacity: u32) -> Self {
+        let mut inner = Vec::new();
+        inner.reserve_exact(capacity as usize);
+        inner.resize_with(capacity as usize, || None);
+        Self { inner }
+    }
+
+    #[inline]
+    fn new_reusing_memory(mut memory: Self, capacity: u32) -> Self {
+        memory.inner.clear();
+        memory.inner.resize_with(capacity as usize, || None);
+        memory
+    }
+
+    #[inline]
+    fn get(&self, key: u32) -> Option<T> {
+        self.inner.get(key as usize).and_then(|value| *value)
+    }
+
+    #[inline]
+    fn len(&self) -> u32 {
+        self.inner.len() as u32
+    }
+
+    #[inline]
+    fn insert(&mut self, key: u32, value: T) {
+        self.inner[key as usize] = Some(value);
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.inner.clear();
+    }
+}
+
 struct CachePerCompilation {
     assembler: Assembler,
-    program_counter_to_label: FlatMap<Label, false>,
+    program_counter_to_label: FlatMap<Label>,
     gas_cost_for_basic_block: Vec<u32>,
     export_to_label: HashMap<u32, Label>,
 }
@@ -64,7 +108,7 @@ where
     code: &'a [u8],
     bitmask: &'a [u8],
     asm: Assembler,
-    program_counter_to_label: FlatMap<Label, false>,
+    program_counter_to_label: FlatMap<Label>,
     step_tracing: bool,
     ecall_label: Label,
     export_to_label: HashMap<u32, Label>,
