@@ -2126,8 +2126,6 @@ impl InterpretedInstance {
         let mut is_jump_target_valid =
             known_valid_jump_target || is_jump_target_valid_cached(&self.module, &mut self.valid_jump_targets_for_block, program_counter);
 
-        let cost = self.module.interpreter_compilation_cost();
-
         let allocates_code_map = !self.compiled_offset_for_block.is_allocated();
 
         let instructions = if is_jump_target_valid {
@@ -2252,15 +2250,15 @@ impl InterpretedInstance {
             self.compiled_args[index] = Args::charge_gas(program_counter, gas_cost);
 
             // Can make the gas negative; the next gas check stops execution before the block runs.
-            if let Some(cost) = cost {
-                let mut compilation_cost =
-                    u64::from(cost.per_block) + (u64::from(instruction_count) * u64::from(cost.per_instruction_millis)).div_ceil(1000);
+            if let Some(compilation_cost) = self.module.interpreter_compilation_cost() {
+                let mut charge = u64::from(compilation_cost.per_block)
+                    + (u64::from(instruction_count) * u64::from(compilation_cost.per_instruction_millis)).div_ceil(1000);
 
                 if allocates_code_map {
-                    compilation_cost += (u64::from(self.module.code_len()) * u64::from(cost.per_code_byte_millis)).div_ceil(1000);
+                    charge += (u64::from(self.module.code_len()) * u64::from(compilation_cost.per_code_byte_millis)).div_ceil(1000);
                 }
 
-                self.gas = self.gas.saturating_sub_unsigned(compilation_cost);
+                self.gas = self.gas.saturating_sub_unsigned(charge);
             }
         }
 
