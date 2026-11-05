@@ -8,7 +8,14 @@ mod elf;
 mod fast_range_map;
 mod program_from_elf;
 mod reader_wrapper;
+#[cfg(not(any(test, feature = "export-internals-for-testing")))]
 mod riscv;
+#[cfg(any(test, feature = "export-internals-for-testing"))]
+#[doc(hidden)]
+pub mod riscv;
+#[cfg(any(test, feature = "export-internals-for-testing"))]
+#[doc(hidden)]
+pub mod riscv_interpreter;
 mod utils;
 
 #[cfg(test)]

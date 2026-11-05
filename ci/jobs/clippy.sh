@@ -16,6 +16,7 @@ cargo clippy -p polkavm-derive-impl
 cargo clippy -p polkavm-derive-impl-macro
 cargo clippy -p polkavm-disassembler
 cargo clippy -p polkavm-linker
+cargo clippy -p polkavm-linker --all-features
 cargo clippy -p polkavm-linux-raw
 
 echo ">> cargo clippy (examples)"
