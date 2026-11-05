@@ -1103,21 +1103,7 @@ const ZERO_COMPILATION_COST: InterpreterCompilationCost = InterpreterCompilation
 };
 
 fn two_blocks_test_blob(isa: InstructionSetKind) -> ProgramBlob {
-    let mut builder = ProgramBlobBuilder::new(isa);
-    builder.add_export_by_basic_block(0, b"main");
-    builder.set_code(
-        &[
-            asm::add_imm_32(A0, A0, 1),
-            asm::add_imm_32(A0, A0, 1),
-            asm::add_imm_32(A0, A0, 1),
-            asm::jump(1),
-            asm::add_imm_32(A1, A1, 1),
-            asm::ret(),
-        ],
-        &[],
-    );
-
-    ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap()
+    padded_two_blocks_test_blob(isa, 0)
 }
 
 fn chain_of_blocks_test_blob(isa: InstructionSetKind) -> ProgramBlob {
@@ -1843,6 +1829,222 @@ fn lowering_the_cache_size_limit_clears_the_cache(config: Config, isa: Instructi
     let (cache_size_before_running, cache_size) = run_with_limit(15);
     assert_eq!(cache_size_before_running, Some(0));
     assert_eq!(cache_size, Some(interpreter_calculate_cache_size(8)));
+}
+
+const PER_CODE_BYTE_COMPILATION_COST: InterpreterCompilationCost = InterpreterCompilationCost {
+    per_code_byte_millis: 1,
+    ..TEST_COMPILATION_COST
+};
+
+// With 256 KiB of padding the code map is rewritten after every 1023 cache clears.
+const PADDING: usize = 1 << 18;
+const CLEARS_PER_REWRITE: usize = 1023;
+
+fn padded_two_blocks_test_blob(isa: InstructionSetKind, padding: usize) -> ProgramBlob {
+    let mut code = vec![
+        asm::add_imm_32(A0, A0, 1),
+        asm::add_imm_32(A0, A0, 1),
+        asm::add_imm_32(A0, A0, 1),
+        asm::jump(1),
+        asm::add_imm_32(A1, A1, 1),
+        asm::ret(),
+    ];
+    code.resize(code.len() + padding, asm::trap());
+
+    let mut builder = ProgramBlobBuilder::new(isa);
+    builder.add_export_by_basic_block(0, b"main");
+    builder.set_code(&code, &[]);
+    ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap()
+}
+
+fn instantiate_padded_two_blocks(engine: &Engine, isa: InstructionSetKind, padding: usize) -> (RawInstance, i64) {
+    let blob = padded_two_blocks_test_blob(isa, padding);
+    let code_map_cost = i64::try_from(blob.code().len().div_ceil(1000)).unwrap();
+    let instance = instantiate_with_compilation_cost(engine, GasMeteringKind::Sync, blob, Some(PER_CODE_BYTE_COMPILATION_COST));
+    (instance, code_map_cost)
+}
+
+// The first block costs 4 to run and 12 to compile, the second 2 and 11.
+const RUN_COST: i64 = 4 + 2;
+const COMPILATION_COST: i64 = 12 + 11;
+
+fn run_padded_two_blocks(instance: &mut RawInstance) -> i64 {
+    let gas_used = run_and_get_gas_used(instance, ProgramCounter(0), 0);
+    assert_eq!(instance.reg(Reg::A0), 3);
+    gas_used
+}
+
+fn run_padded_two_blocks_from_scratch(instance: &mut RawInstance, code_map_cost: i64) {
+    assert_eq!(run_padded_two_blocks(instance), code_map_cost + COMPILATION_COST + RUN_COST);
+}
+
+fn cache_resets_past_the_epoch_range(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let (mut instance, code_map_cost) = instantiate_padded_two_blocks(&engine, isa, PADDING);
+    instance
+        .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
+            max_block_size: 4,
+            max_cache_size_bytes: interpreter_calculate_cache_size(10),
+        }))
+        .unwrap();
+
+    // The limit fits one block: the first run resets the cache once and compiles the second block
+    // twice, every later run resets it twice and compiles both blocks twice.
+    assert_eq!(
+        run_padded_two_blocks(&mut instance),
+        code_map_cost + COMPILATION_COST + 11 + RUN_COST
+    );
+
+    let runs = 2..=CLEARS_PER_REWRITE + 2;
+    let code_map_costs: Vec<i64> = runs
+        .clone()
+        .map(|_| run_padded_two_blocks(&mut instance) - (2 * COMPILATION_COST + RUN_COST))
+        .collect();
+
+    let expected: Vec<i64> = runs
+        .map(|run| {
+            if (2 * run - 2) % CLEARS_PER_REWRITE == 0 || (2 * run - 1) % CLEARS_PER_REWRITE == 0 {
+                code_map_cost
+            } else {
+                0
+            }
+        })
+        .collect();
+    assert_eq!(expected.iter().filter(|&&cost| cost != 0).count(), 2);
+    assert_eq!(code_map_costs, expected);
+}
+
+fn clear_cache_by_switching_the_limit(instance: &mut RawInstance, limited: &mut bool, clears: usize) -> Vec<i64> {
+    let limit = SetCacheSizeLimitArgs {
+        max_block_size: 4,
+        max_cache_size_bytes: interpreter_calculate_cache_size(100),
+    };
+
+    (0..clears)
+        .map(|_| {
+            *limited = !*limited;
+            let gas = instance.gas();
+            instance.set_interpreter_cache_size_limit(limited.then_some(limit)).unwrap();
+            gas - instance.gas()
+        })
+        .collect()
+}
+
+fn charged_on_the_last_clear(clears: usize, code_map_cost: i64) -> Vec<i64> {
+    let mut charges = vec![0; clears];
+    charges[clears - 1] = code_map_cost;
+    charges
+}
+
+fn cache_clears_past_the_epoch_range_overwrite_the_code_map(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    for (padding, clears_per_rewrite) in [(PADDING, CLEARS_PER_REWRITE), (2 * PADDING, 511)] {
+        let (mut instance, code_map_cost) = instantiate_padded_two_blocks(&engine, isa, padding);
+        let mut limited = false;
+
+        run_padded_two_blocks_from_scratch(&mut instance, code_map_cost);
+        assert_eq!(run_padded_two_blocks(&mut instance), RUN_COST);
+
+        assert_eq!(
+            clear_cache_by_switching_the_limit(&mut instance, &mut limited, clears_per_rewrite),
+            charged_on_the_last_clear(clears_per_rewrite, code_map_cost)
+        );
+        assert_eq!(run_padded_two_blocks(&mut instance), COMPILATION_COST + RUN_COST);
+        assert_eq!(run_padded_two_blocks(&mut instance), RUN_COST);
+    }
+}
+
+fn reset_interpreter_cache_restarts_the_epoch_count(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let (mut instance, code_map_cost) = instantiate_padded_two_blocks(&engine, isa, PADDING);
+    let mut limited = false;
+
+    run_padded_two_blocks_from_scratch(&mut instance, code_map_cost);
+    assert_eq!(clear_cache_by_switching_the_limit(&mut instance, &mut limited, 4), [0; 4]);
+
+    instance.reset_interpreter_cache().unwrap();
+    run_padded_two_blocks_from_scratch(&mut instance, code_map_cost);
+    assert_eq!(
+        clear_cache_by_switching_the_limit(&mut instance, &mut limited, CLEARS_PER_REWRITE),
+        charged_on_the_last_clear(CLEARS_PER_REWRITE, code_map_cost)
+    );
+}
+
+fn epoch_wrap_without_block_gas_metering_charges_nothing(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let blob = padded_two_blocks_test_blob(isa, PADDING);
+    for (gas_metering, is_per_instruction_metering, cost) in [
+        (None, false, Some(PER_CODE_BYTE_COMPILATION_COST)),
+        (Some(GasMeteringKind::Sync), true, None),
+    ] {
+        let mut module_config = ModuleConfig::new();
+        module_config.set_gas_metering(gas_metering);
+        module_config.set_per_instruction_metering(is_per_instruction_metering);
+        module_config.set_interpreter_compilation_cost(cost);
+        let module = Module::from_blob(&engine, &module_config, blob.clone()).unwrap();
+        let mut instance = module.instantiate().unwrap();
+        let mut limited = false;
+
+        run_padded_two_blocks(&mut instance);
+        assert_eq!(
+            clear_cache_by_switching_the_limit(&mut instance, &mut limited, CLEARS_PER_REWRITE),
+            [0; CLEARS_PER_REWRITE]
+        );
+        run_padded_two_blocks(&mut instance);
+    }
+}
+
+fn host_cache_clear_leaving_negative_gas_stops_the_next_run(config: Config, isa: InstructionSetKind) {
+    if config.backend() != Some(crate::BackendKind::Interpreter) {
+        return;
+    }
+
+    let _ = env_logger::try_init();
+    let engine = Engine::new(&config).unwrap();
+    let (mut instance, code_map_cost) = instantiate_padded_two_blocks(&engine, isa, PADDING);
+    let mut limited = false;
+
+    run_padded_two_blocks_from_scratch(&mut instance, code_map_cost);
+    assert_eq!(
+        clear_cache_by_switching_the_limit(&mut instance, &mut limited, CLEARS_PER_REWRITE - 1),
+        [0; CLEARS_PER_REWRITE - 1]
+    );
+
+    instance.set_gas(code_map_cost - 1);
+    assert_eq!(clear_cache_by_switching_the_limit(&mut instance, &mut limited, 1), [code_map_cost]);
+    assert_eq!(instance.gas(), -1);
+
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_reg(Reg::A0, 0);
+    instance.set_next_program_counter(ProgramCounter(0));
+    assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+    assert_eq!(instance.reg(Reg::A0), 0);
+    assert_eq!(instance.gas(), -1);
+
+    instance.set_gas(100);
+    assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A0), 3);
+    assert_eq!(instance.gas(), 100 - COMPILATION_COST - RUN_COST);
 }
 
 fn step_tracing_invalid_store(engine_config: Config, isa: InstructionSetKind) {
@@ -7632,6 +7834,11 @@ run_tests! {
     arbitrary_jump_inside_of_an_instruction_does_not_compile_again
     cache_size_limit_disables_debug_handlers
     lowering_the_cache_size_limit_clears_the_cache
+    cache_resets_past_the_epoch_range
+    cache_clears_past_the_epoch_range_overwrite_the_code_map
+    reset_interpreter_cache_restarts_the_epoch_count
+    epoch_wrap_without_block_gas_metering_charges_nothing
+    host_cache_clear_leaving_negative_gas_stops_the_next_run
 
     memset_basic
     memset_with_dynamic_paging

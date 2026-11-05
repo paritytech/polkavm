@@ -6,22 +6,20 @@
 use crate::api::{MemoryAccessError, MemoryProtection, Module, RegValue, SetCacheSizeLimitArgs};
 use crate::error::Error;
 use crate::gas::{CostModelKind, GasVisitor};
-use crate::utils::{FlatMap, InterruptKind, Segfault};
+use crate::utils::{InterruptKind, Segfault};
 use crate::{Gas, GasMeteringKind, ProgramCounter};
 use alloc::boxed::Box;
 use alloc::collections::btree_map::Entry;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::mem::MaybeUninit;
-use core::num::NonZeroU32;
 use core::ops::Range;
-use polkavm_common::abi::VM_ADDR_RETURN_TO_HOST;
+use polkavm_common::abi::{VM_ADDR_RETURN_TO_HOST, VM_MAXIMUM_CODE_SIZE};
 use polkavm_common::cast::cast;
 use polkavm_common::operation::*;
 use polkavm_common::program::{
     asm, interpreter_calculate_cache_num_entries, interpreter_calculate_cache_size, CodeBlockBitmap, CodeBlockBitmapBox, InstructionSet,
-    InstructionVisitor, RawReg, Reg, CODE_BLOCK_SIZE, INTERPRETER_CACHE_ENTRY_SIZE, INTERPRETER_COMPILED_BLOCK_RECORD_SIZE,
-    INTERPRETER_FLATMAP_ENTRY_SIZE,
+    InstructionVisitor, RawReg, Reg, CODE_BLOCK_SIZE, INTERPRETER_CACHE_ENTRY_SIZE, INTERPRETER_FLATMAP_ENTRY_SIZE,
 };
 use polkavm_common::utils::{align_to_next_page_usize, slice_assume_init_mut, ArcBytes, GasVisitorT};
 
@@ -1389,7 +1387,83 @@ fn test_each_page() {
     ]);
 }
 
-use NonZeroU32 as CompiledOffset;
+const MAX_HANDLERS_PER_INSTRUCTION: usize = 4;
+
+struct CompiledOffsets {
+    entries: Vec<u32>,
+    epoch: u32,
+    epoch_shift: u32,
+    is_jump_target_valid_bit: u32,
+    index_mask: u32,
+}
+
+impl CompiledOffsets {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            epoch: 1,
+            epoch_shift: 0,
+            is_jump_target_valid_bit: 0,
+            index_mask: 0,
+        }
+    }
+
+    const fn epoch_shift_for(len: u32) -> u32 {
+        (cast(len).to_usize() * MAX_HANDLERS_PER_INSTRUCTION)
+            .next_power_of_two()
+            .trailing_zeros()
+            + 1
+    }
+
+    fn is_allocated(&self) -> bool {
+        !self.entries.is_empty()
+    }
+
+    #[cold]
+    fn allocate(&mut self, len: u32) {
+        self.entries = alloc::vec![0; cast(len).to_usize()];
+        self.epoch = 1;
+        self.epoch_shift = Self::epoch_shift_for(len);
+        self.is_jump_target_valid_bit = 1 << (self.epoch_shift - 1);
+        self.index_mask = self.is_jump_target_valid_bit - 1;
+    }
+
+    fn reset(&mut self) {
+        self.entries = Vec::new();
+    }
+
+    fn clear_and_report_rewrite(&mut self) -> bool {
+        if self.epoch < u32::MAX >> self.epoch_shift {
+            self.epoch += 1;
+            return false;
+        }
+
+        self.entries.fill(0);
+        self.epoch = 1;
+        self.is_allocated()
+    }
+
+    #[inline(always)]
+    fn get(&self, program_counter: u32) -> Option<(bool, Target)> {
+        let entry = *self.entries.get(cast(program_counter).to_usize())?;
+        (entry >> self.epoch_shift == self.epoch).then_some((entry & self.is_jump_target_valid_bit != 0, entry & self.index_mask))
+    }
+
+    #[inline(always)]
+    fn insert(&mut self, program_counter: u32, index: usize, is_jump_target_valid: bool) {
+        let index = cast(index).to_u32_or_debug_panic();
+        debug_assert!(index <= self.index_mask);
+
+        let mut entry = (self.epoch << self.epoch_shift) | index;
+        if is_jump_target_valid {
+            entry |= self.is_jump_target_valid_bit;
+        }
+
+        self.entries[cast(program_counter).to_usize()] = entry;
+    }
+}
+
+polkavm_common::static_assert!(CompiledOffsets::epoch_shift_for(VM_MAXIMUM_CODE_SIZE + 1) + 3 <= u32::BITS);
 
 polkavm_common::static_assert!(
     core::mem::size_of::<Handler>() + core::mem::size_of::<Args>() <= cast(INTERPRETER_CACHE_ENTRY_SIZE).to_usize()
@@ -1400,8 +1474,7 @@ polkavm_common::static_assert!(
     core::mem::size_of::<Handler>() + core::mem::size_of::<Args>() == cast(INTERPRETER_CACHE_ENTRY_SIZE).to_usize()
 );
 
-polkavm_common::static_assert!(core::mem::size_of::<CompiledOffset>() == cast(INTERPRETER_FLATMAP_ENTRY_SIZE).to_usize());
-polkavm_common::static_assert!(core::mem::size_of::<Range<u32>>() == cast(INTERPRETER_COMPILED_BLOCK_RECORD_SIZE).to_usize());
+polkavm_common::static_assert!(core::mem::size_of::<u32>() == cast(INTERPRETER_FLATMAP_ENTRY_SIZE).to_usize());
 
 struct Handlers {
     charge_gas: Handler,
@@ -1505,8 +1578,7 @@ pub(crate) struct InterpretedInstance {
     next_program_counter_changed: bool,
     cycle_counter: u64,
     gas: i64,
-    compiled_offset_for_block: FlatMap<CompiledOffset, true>,
-    compiled_code_ranges: Vec<Range<u32>>,
+    compiled_offset_for_block: CompiledOffsets,
     valid_jump_targets_for_block: Vec<Option<CodeBlockBitmapBox>>,
     compiled_handlers: Vec<Handler>,
     compiled_args: Vec<Args>,
@@ -1525,8 +1597,7 @@ impl InterpretedInstance {
     pub fn new_from_module(module: Module, force_step_tracing: bool, imperfect_logger_filtering_workaround: bool) -> Self {
         let step_tracing = module.is_step_tracing() || force_step_tracing;
         let mut instance = Self {
-            compiled_offset_for_block: FlatMap::new(module.code_len() + 1), // + 1 for one implicit out-of-bounds trap.
-            compiled_code_ranges: Default::default(),
+            compiled_offset_for_block: CompiledOffsets::new(),
             valid_jump_targets_for_block: Default::default(),
             compiled_handlers: Default::default(),
             compiled_args: Default::default(),
@@ -1869,8 +1940,6 @@ impl InterpretedInstance {
         }
 
         self.compiled_offset_for_block.reset();
-        self.compiled_code_ranges.clear();
-        self.compiled_code_ranges.shrink_to_fit();
         self.valid_jump_targets_for_block.clear();
         self.valid_jump_targets_for_block.shrink_to_fit();
         self.clear_cache();
@@ -1884,6 +1953,14 @@ impl InterpretedInstance {
         self.module.gas_metering().is_some() && !self.module.is_per_instruction_metering()
     }
 
+    fn charge_code_map(&mut self) {
+        if let Some(compilation_cost) = self.module.interpreter_compilation_cost().filter(|_| self.has_block_gas_metering()) {
+            self.gas = self.gas.saturating_sub_unsigned(
+                (u64::from(self.module.code_len()) * u64::from(compilation_cost.per_code_byte_millis)).div_ceil(1000),
+            );
+        }
+    }
+
     fn resume_at_next_program_counter(&mut self) {
         if self.next_program_counter.is_some() {
             self.next_program_counter_changed = true;
@@ -1893,9 +1970,8 @@ impl InterpretedInstance {
     fn clear_cache(&mut self) {
         self.compiled_handlers.clear();
         self.compiled_args.clear();
-
-        for range in self.compiled_code_ranges.drain(..) {
-            self.compiled_offset_for_block.remove_range(range);
+        if self.compiled_offset_for_block.clear_and_report_rewrite() {
+            self.charge_code_map();
         }
 
         self.next_compiled_offset = 0;
@@ -1912,26 +1988,9 @@ impl InterpretedInstance {
         });
     }
 
-    #[inline(always)]
-    fn pack_target(index: usize, is_jump_target_valid: bool) -> NonZeroU32 {
-        let mut index = cast(index).to_u32_or_debug_panic();
-        if is_jump_target_valid {
-            index |= 1 << 31;
-        }
-
-        NonZeroU32::new(index + 1).unwrap()
-    }
-
-    #[inline(always)]
-    fn unpack_target(value: NonZeroU32) -> (bool, Target) {
-        let value = value.get() - 1;
-        ((value >> 31) == 1, (value << 1) >> 1)
-    }
-
     /// Resolve a jump from *within* the program.
     fn resolve_jump<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<Target> {
-        if let Some(compiled_offset) = self.compiled_offset_for_block.get(program_counter.0) {
-            let (is_jump_target_valid, target) = Self::unpack_target(compiled_offset);
+        if let Some((is_jump_target_valid, target)) = self.compiled_offset_for_block.get(program_counter.0) {
             if !is_jump_target_valid {
                 return None;
             }
@@ -1948,7 +2007,7 @@ impl InterpretedInstance {
 
     /// Resolve a jump from *within* the program only if its target is already compiled.
     fn resolve_compiled_jump(&self, program_counter: ProgramCounter) -> Option<Target> {
-        let (is_jump_target_valid, target) = Self::unpack_target(self.compiled_offset_for_block.get(program_counter.0)?);
+        let (is_jump_target_valid, target) = self.compiled_offset_for_block.get(program_counter.0)?;
         is_jump_target_valid.then_some(target)
     }
 
@@ -1962,8 +2021,7 @@ impl InterpretedInstance {
     }
 
     #[allow(unpredictable_function_pointer_comparisons)]
-    fn extract_target_and_gas<const DEBUG: bool>(&self, compiled_offset: NonZeroU32) -> (Target, i64) {
-        let (is_jump_target_valid, target) = Self::unpack_target(compiled_offset);
+    fn extract_target_and_gas<const DEBUG: bool>(&self, (is_jump_target_valid, target): (bool, Target)) -> (Target, i64) {
         if is_jump_target_valid
             || self.module.gas_metering().is_none()
             || self.module.is_per_instruction_metering()
@@ -2038,7 +2096,7 @@ impl InterpretedInstance {
         };
 
         if basic_block_offset == program_counter {
-            Some((Self::unpack_target(compiled_offset).1, 0))
+            Some((compiled_offset.1, 0))
         } else {
             Some(self.extract_target_and_gas::<DEBUG>(compiled_offset))
         }
@@ -2046,8 +2104,7 @@ impl InterpretedInstance {
 
     /// Resolve a fallthrough.
     fn resolve_fallthrough<const DEBUG: bool>(&mut self, program_counter: ProgramCounter) -> Option<Target> {
-        if let Some(compiled_offset) = self.compiled_offset_for_block.get(program_counter.0) {
-            let (is_jump_target_valid, target) = Self::unpack_target(compiled_offset);
+        if let Some((is_jump_target_valid, target)) = self.compiled_offset_for_block.get(program_counter.0) {
             if !is_jump_target_valid {
                 return None;
             }
@@ -2112,6 +2169,11 @@ impl InterpretedInstance {
             panic!("internal compiled program counter overflow: the program is too big!");
         };
 
+        if !self.compiled_offset_for_block.is_allocated() {
+            self.compiled_offset_for_block.allocate(self.module.code_len() + 1); // + 1 for one implicit out-of-bounds trap.
+            self.charge_code_map();
+        }
+
         if cfg!(debug_assertions) && known_valid_jump_target {
             assert!(is_jump_target_valid_cached(
                 &self.module,
@@ -2122,11 +2184,8 @@ impl InterpretedInstance {
 
         let mut charge_gas_index = None;
         let mut instruction_count: u32 = 0;
-        let mut last_instruction_offset = program_counter.0;
         let mut is_jump_target_valid =
             known_valid_jump_target || is_jump_target_valid_cached(&self.module, &mut self.valid_jump_targets_for_block, program_counter);
-
-        let allocates_code_map = !self.compiled_offset_for_block.is_allocated();
 
         let instructions = if is_jump_target_valid {
             // A valid jump target always lies on an instruction boundary.
@@ -2136,18 +2195,15 @@ impl InterpretedInstance {
         };
 
         for instruction in instructions {
-            self.compiled_offset_for_block.insert(
-                instruction.offset.0,
-                Self::pack_target(self.compiled_handlers.len(), is_jump_target_valid),
-            );
+            let first_handler = self.compiled_handlers.len();
+            self.compiled_offset_for_block
+                .insert(instruction.offset.0, first_handler, is_jump_target_valid);
 
             is_jump_target_valid = false;
             instruction_count += 1;
-            last_instruction_offset = instruction.offset.0;
 
             if let Some(max_cache_entries) = self.max_cache_entries {
-                // An instruction takes at most four handlers.
-                let needed = self.compiled_handlers.len() + 4;
+                let needed = self.compiled_handlers.len() + MAX_HANDLERS_PER_INSTRUCTION;
                 if self.compiled_handlers.capacity() < needed {
                     let capacity = needed.next_power_of_two().min(max_cache_entries.max(needed));
                     let additional = capacity.saturating_sub(self.compiled_handlers.len());
@@ -2206,13 +2262,12 @@ impl InterpretedInstance {
             debug_assert!(
                 instruction.opcode() == polkavm_common::program::Opcode::unlikely || self.compiled_handlers.len() > original_length
             );
+            debug_assert!(self.compiled_handlers.len() - first_handler <= MAX_HANDLERS_PER_INSTRUCTION);
 
             if instruction.opcode().starts_new_basic_block() {
                 break;
             }
         }
-
-        self.compiled_code_ranges.push(program_counter.0..last_instruction_offset + 1);
 
         if let Some(max_compiled_handlers) = self.max_compiled_handlers {
             let handlers_added = self.compiled_handlers.len() - cast(origin).to_usize();
@@ -2251,14 +2306,10 @@ impl InterpretedInstance {
 
             // Can make the gas negative; the next gas check stops execution before the block runs.
             if let Some(compilation_cost) = self.module.interpreter_compilation_cost() {
-                let mut charge = u64::from(compilation_cost.per_block)
-                    + (u64::from(instruction_count) * u64::from(compilation_cost.per_instruction_millis)).div_ceil(1000);
-
-                if allocates_code_map {
-                    charge += (u64::from(self.module.code_len()) * u64::from(compilation_cost.per_code_byte_millis)).div_ceil(1000);
-                }
-
-                self.gas = self.gas.saturating_sub_unsigned(charge);
+                self.gas = self.gas.saturating_sub_unsigned(
+                    u64::from(compilation_cost.per_block)
+                        + (u64::from(instruction_count) * u64::from(compilation_cost.per_instruction_millis)).div_ceil(1000),
+                );
             }
         }
 

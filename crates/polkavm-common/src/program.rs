@@ -644,8 +644,6 @@ pub const INTERPRETER_CACHE_ENTRY_SIZE: u32 = 24;
 
 pub const INTERPRETER_FLATMAP_ENTRY_SIZE: u32 = 4;
 
-pub const INTERPRETER_COMPILED_BLOCK_RECORD_SIZE: u32 = 8;
-
 pub fn interpreter_calculate_cache_size(count: usize) -> usize {
     count * INTERPRETER_CACHE_ENTRY_SIZE as usize
 }
@@ -7690,11 +7688,6 @@ impl ProgramBlob {
         let code_length = self.code.len();
         purgeable_ram_consumption = purgeable_ram_consumption.saturating_add((code_length + 1) * INTERPRETER_FLATMAP_ENTRY_SIZE as usize);
 
-        // At most one record per basic block between cache resets, in a vector which doubles from four.
-        let block_record_count = core::cmp::max(4, 2 * cast(basic_block_count).to_usize());
-        purgeable_ram_consumption =
-            purgeable_ram_consumption.saturating_add(block_record_count * INTERPRETER_COMPILED_BLOCK_RECORD_SIZE as usize);
-
         if !self.isa.is_legacy() {
             let code_block_count = code_length.div_ceil(CODE_BLOCK_SIZE);
             purgeable_ram_consumption = purgeable_ram_consumption.saturating_add(
@@ -7752,10 +7745,9 @@ fn test_estimate_interpreter_memory_usage_accounts_for_the_jump_target_bitmaps()
 
         let cache = interpreter_calculate_cache_size((code.len() + 1 + 4).next_power_of_two());
         let flat_map = (blob.code().len() + 1) * INTERPRETER_FLATMAP_ENTRY_SIZE as usize;
-        let block_records = 4 * INTERPRETER_COMPILED_BLOCK_RECORD_SIZE as usize;
         (
             blob.code().len(),
-            cast(info.purgeable_ram_consumption).to_usize() - cache - flat_map - block_records,
+            cast(info.purgeable_ram_consumption).to_usize() - cache - flat_map,
         )
     }
 

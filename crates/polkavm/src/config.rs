@@ -505,7 +505,10 @@ pub struct InterpreterCompilationCost {
     pub per_block: u32,
     /// Thousandths of gas per instruction in a compiled block, rounded up per block.
     pub per_instruction_millis: u32,
-    /// Thousandths of gas per byte of code, rounded up, on the first compilation after instantiation or `reset_interpreter_cache`.
+    /// Thousandths of gas per byte of code, rounded up.
+    ///
+    /// Charged when the code map is allocated, on the first compilation after instantiation or `reset_interpreter_cache`,
+    /// and again each time the code map is rewritten after many cache clears.
     pub per_code_byte_millis: u32,
 }
 
