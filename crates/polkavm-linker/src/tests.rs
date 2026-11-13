@@ -210,3 +210,27 @@ fn metadata_hash_is_absent_by_default() {
     let blob = polkavm_common::program::ProgramBlob::parse(program.as_slice().into()).unwrap();
     assert!(blob.metadata_hash().is_empty());
 }
+
+#[test]
+fn branch_into_constant_condition_loop_is_linked() {
+    let _ = env_logger::try_init();
+
+    let bytes = create_elf(&[
+        0x00050463, 0x00008067, 0x00000593, 0x00059863, 0x0040006f, 0x0040006f, 0xff1ff06f, 0x00008067,
+    ]);
+    let program = program_from_elf(Config::default(), TargetInstructionSet::Latest, &bytes).unwrap();
+    let disassembly = disassemble(&program);
+
+    assert_eq!(
+        disassembly.trim(),
+        "<_start>:
+        @0 [export #0: '_start']
+        jump @2 if a0 == 0
+        @1
+        ret
+        @2
+        jump @2"
+            .trim()
+            .replace("        ", "")
+    );
+}
