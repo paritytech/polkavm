@@ -4069,7 +4069,7 @@ fn perform_inlining(
             target_false,
         } => {
             if let ControlInst::Jump { target } = all_blocks[target_true.index()].next.instruction {
-                if target != target_true && all_blocks[target_true.index()].ops.is_empty() {
+                if target != target_true && all_blocks[target_true.index()].ops.is_empty() && inline_history.insert((current, target)) {
                     // We're branching to another block which immediately jumps somewhere else.
                     // So skip the middle-man and just jump where we want to go directly.
                     assert!(reachability_graph
