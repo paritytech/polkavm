@@ -202,9 +202,9 @@ fn read_list(path: &Path) -> Result<Vec<usize>, String> {
     Ok(parse_cpu_list(&s))
 }
 
-fn fetch_cpu_topology() -> Result<Vec<TopologyInfo>, String> {
+fn fetch_cpu_topology(cpu_root: &Path) -> Result<Vec<TopologyInfo>, String> {
     let mut map = BTreeMap::new();
-    let cpu_root = Path::new("/sys/devices/system/cpu");
+    let mut cpus_without_l3 = Vec::new();
 
     let mut max_cpu_id = 0;
     for entry in std::fs::read_dir(cpu_root).map_err(|error| format!("failed to read directory {}: {}", cpu_root.display(), error))? {
@@ -220,9 +220,22 @@ fn fetch_cpu_topology() -> Result<Vec<TopologyInfo>, String> {
             Err(_) => continue,
         };
 
+        max_cpu_id = max_cpu_id.max(cpu_id);
+
         let base = cpu_root.join(name);
+        if !base.join("topology").exists() {
+            // Skip offline CPUs.
+            continue;
+        }
+
         let hyperthreads = read_list(&base.join("topology/thread_siblings_list"))?;
-        let ccx_siblings = read_list(&base.join("cache/index3/shared_cpu_list"))?;
+        let l3_path = base.join("cache/index3/shared_cpu_list");
+        let ccx_siblings = if l3_path.exists() {
+            read_list(&l3_path)?
+        } else {
+            cpus_without_l3.push(cpu_id);
+            Vec::new()
+        };
 
         map.insert(
             cpu_id,
@@ -231,8 +244,13 @@ fn fetch_cpu_topology() -> Result<Vec<TopologyInfo>, String> {
                 ccx_siblings,
             },
         );
+    }
 
-        max_cpu_id = max_cpu_id.max(cpu_id);
+    cpus_without_l3.sort_unstable();
+    for (cpu_id, topology) in &mut map {
+        if cpus_without_l3.contains(cpu_id) {
+            topology.ccx_siblings = cpus_without_l3.clone();
+        }
     }
 
     let mut output = Vec::new();
@@ -244,6 +262,43 @@ fn fetch_cpu_topology() -> Result<Vec<TopologyInfo>, String> {
     }
 
     Ok(output)
+}
+
+#[cfg(not(miri))]
+#[test]
+fn test_fetch_cpu_topology_for_cpus_without_l3_and_offline_cpus() {
+    let cpu_root = std::env::temp_dir().join(format!("polkavm-cpu-topology-{}", std::process::id()));
+    let write = |path: String, contents: &str| {
+        let path = cpu_root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    };
+
+    for (cpu, core_cpus, l2_cpus, l3_cpus) in [
+        (0, "0-1", "0-1", Some("0-2")),
+        (1, "0-1", "0-1", Some("0-2")),
+        (2, "2", "2", Some("0-2")),
+        (3, "3", "3", None),
+        (4, "4", "4", None),
+    ] {
+        write(format!("cpu{cpu}/topology/thread_siblings_list"), core_cpus);
+        write(format!("cpu{cpu}/cache/index0/shared_cpu_list"), core_cpus);
+        write(format!("cpu{cpu}/cache/index1/shared_cpu_list"), core_cpus);
+        write(format!("cpu{cpu}/cache/index2/shared_cpu_list"), l2_cpus);
+        if let Some(l3_cpus) = l3_cpus {
+            write(format!("cpu{cpu}/cache/index3/shared_cpu_list"), l3_cpus);
+        }
+    }
+    write("cpu5/online".to_owned(), "0");
+
+    let topology = fetch_cpu_topology(&cpu_root);
+    std::fs::remove_dir_all(&cpu_root).unwrap();
+
+    let ccx_siblings: Vec<_> = topology.unwrap().into_iter().map(|info| info.ccx_siblings).collect();
+    assert_eq!(
+        ccx_siblings,
+        [vec![0, 1, 2], vec![0, 1, 2], vec![0, 1, 2], vec![3, 4], vec![3, 4], vec![]]
+    );
 }
 
 struct CcxState {
@@ -447,7 +502,8 @@ impl GlobalState {
             },
         }
 
-        let mut topology = fetch_cpu_topology().map_err(|error| Error::from(format!("failed to fetch CPU topology: {error}")))?;
+        let mut topology = fetch_cpu_topology(Path::new("/sys/devices/system/cpu"))
+            .map_err(|error| Error::from(format!("failed to fetch CPU topology: {error}")))?;
         let affinity = CpuMask::get_affinity(0).map_err(|error| Error::from(format!("failed to fetch CPU affinity: {error}")))?;
         for (core, topology) in topology.iter().enumerate() {
             log::trace!(
