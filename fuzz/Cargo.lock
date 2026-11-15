@@ -228,7 +228,7 @@ checksum = "7823ffd00d2b55ebe51750a19f47f2a33cb1f1d135f5cba893379b81c4d44856"
 
 [[package]]
 name = "polkavm"
-version = "0.38.0"
+version = "0.38.1"
 dependencies = [
  "libc",
  "log",
