@@ -117,7 +117,6 @@ fn generate_tuple_splits() -> proc_macro2::TokenStream {
 const ABI_SUPPORT_COMMON_PUBLIC_RS: &str = include_str!("abi_support_impl/common_public.rs");
 const ABI_SUPPORT_COMMON_PRIVATE_RS: &str = include_str!("abi_support_impl/common_private.rs");
 const ABI_SUPPORT_COMMON_PRIVATE_EXTERA_REGISTERS_RS: &str = include_str!("abi_support_impl/common_private_extra_registers.rs");
-const ABI_SUPPORT_RISCV32_RS: &str = include_str!("abi_support_impl/riscv32.rs");
 const ABI_SUPPORT_RISCV64_RS: &str = include_str!("abi_support_impl/riscv64.rs");
 
 mod kw {
@@ -180,7 +179,6 @@ pub fn polkavm_impl_abi_support(attributes: AbiSupportAttributes) -> proc_macro2
     let common_public_code: proc_macro2::TokenStream = ABI_SUPPORT_COMMON_PUBLIC_RS.parse().unwrap();
     let common_private_code: proc_macro2::TokenStream = ABI_SUPPORT_COMMON_PRIVATE_RS.parse().unwrap();
     let common_private_extra_registers_code: proc_macro2::TokenStream = ABI_SUPPORT_COMMON_PRIVATE_EXTERA_REGISTERS_RS.parse().unwrap();
-    let riscv32_code: proc_macro2::TokenStream = ABI_SUPPORT_RISCV32_RS.parse().unwrap();
     let riscv64_code: proc_macro2::TokenStream = ABI_SUPPORT_RISCV64_RS.parse().unwrap();
     let tuple_joins = generate_tuple_joins();
     let tuple_splits = generate_tuple_splits();
@@ -203,7 +201,6 @@ pub fn polkavm_impl_abi_support(attributes: AbiSupportAttributes) -> proc_macro2
             #extra_registers_code
         }
 
-        #riscv32_code
         #riscv64_code
         #tuple_joins
         #tuple_splits

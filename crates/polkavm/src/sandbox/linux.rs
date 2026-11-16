@@ -6,7 +6,7 @@ extern crate polkavm_linux_raw as linux_raw;
 use polkavm_common::{
     cast::cast,
     program::Reg,
-    utils::{align_to_next_page_usize, slice_assume_init_mut, Bitness},
+    utils::{align_to_next_page_usize, slice_assume_init_mut},
     zygote::{
         AddressTable, AddressTablePacked, ExtTable, ExtTablePacked, VmCtx, VmFd, VmMap, VMCTX_FUTEX_BUSY, VMCTX_FUTEX_GUEST_ECALLI,
         VMCTX_FUTEX_GUEST_NOT_ENOUGH_GAS, VMCTX_FUTEX_GUEST_PAGEFAULT, VMCTX_FUTEX_GUEST_SIGNAL, VMCTX_FUTEX_GUEST_STEP,
@@ -2210,21 +2210,10 @@ impl super::Sandbox for Sandbox {
     }
 
     fn reg(&self, reg: Reg) -> RegValue {
-        let mut value = self.vmctx().regs[reg as usize].load(Ordering::Relaxed);
-        let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
-        if compiled_module.bitness == Bitness::B32 {
-            value &= 0xffffffff;
-        }
-
-        value
+        self.vmctx().regs[reg as usize].load(Ordering::Relaxed)
     }
 
-    fn set_reg(&mut self, reg: Reg, mut value: RegValue) {
-        let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
-        if compiled_module.bitness == Bitness::B32 {
-            value &= 0xffffffff;
-        }
-
+    fn set_reg(&mut self, reg: Reg, value: RegValue) {
         self.vmctx().regs[reg as usize].store(value, Ordering::Relaxed)
     }
 
@@ -2788,13 +2777,6 @@ impl Sandbox {
             if state == VMCTX_FUTEX_GUEST_SIGNAL {
                 core::sync::atomic::fence(Ordering::Acquire);
 
-                let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
-                if compiled_module.bitness == Bitness::B32 {
-                    for reg_value in &self.vmctx().regs {
-                        reg_value.fetch_and(0xffffffff, Ordering::Relaxed);
-                    }
-                }
-
                 let machine_code_address = self.vmctx().rip.load(Ordering::Relaxed);
                 return self.handle_guest_signal(machine_code_address);
             }
@@ -2825,12 +2807,6 @@ impl Sandbox {
                 core::sync::atomic::fence(Ordering::Acquire);
 
                 let compiled_module = Self::downcast_module(self.module.as_ref().unwrap());
-                if compiled_module.bitness == Bitness::B32 {
-                    for reg_value in &self.vmctx().regs {
-                        reg_value.fetch_and(0xffffffff, Ordering::Relaxed);
-                    }
-                }
-
                 let machine_code_address = self.vmctx().rip.load(Ordering::Relaxed);
                 let address = self.vmctx().arg.load(Ordering::Relaxed);
                 let is_write_protected = self.vmctx().arg2.load(Ordering::Relaxed);

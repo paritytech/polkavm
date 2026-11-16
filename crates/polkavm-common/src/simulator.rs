@@ -3,7 +3,7 @@
 
 use crate::cast::cast;
 use crate::program::{InstructionFormat, InstructionSet, InstructionSetKind, Opcode, ParsingVisitor, RawReg};
-use crate::utils::{Bitness, BitnessT, GasVisitorT, B64};
+use crate::utils::GasVisitorT;
 use alloc::string::String;
 use alloc::vec;
 
@@ -373,7 +373,7 @@ impl RobIndex {
     }
 }
 
-pub struct Simulator<'a, B, T: Tracer = ()> {
+pub struct Simulator<'a, T: Tracer = ()> {
     // The bytecode of the whole program.
     code: &'a [u8],
     /// The current cycle on which we're on.
@@ -419,7 +419,6 @@ pub struct Simulator<'a, B, T: Tracer = ()> {
     opcode_unlikely_or_trap: u8,
 
     tracer: T,
-    _phantom: core::marker::PhantomData<B>,
 }
 
 static SLOT_MASKS: [i8x32; 32] = {
@@ -478,10 +477,9 @@ impl DispatchReg for () {
     }
 }
 
-impl<'a, B, T> Simulator<'a, B, T>
+impl<'a, T> Simulator<'a, T>
 where
     T: Tracer,
-    B: BitnessT,
 {
     pub fn new(code: &'a [u8], isa: InstructionSetKind, cache_model: CacheModel, tracer: T) -> Self {
         let opcode_trap = isa
@@ -513,7 +511,6 @@ where
                 reorder_buffer_head: RobIndex::new(0),
                 opcode_trap,
                 opcode_unlikely_or_trap: isa.opcode_to_raw(Opcode::unlikely, 0).and_then(|(opcode, _)| opcode.try_into().ok()).unwrap_or(opcode_trap),
-                _phantom: core::marker::PhantomData,
             };
 
             simulator.clear();
@@ -1262,8 +1259,8 @@ where
             d,
             s,
             InstCost {
-                latency: 1 + i8::from(B::BITNESS == Bitness::B64),
-                decode_slots: 1 + u32::from(d.get() != s.get()) + u32::from(B::BITNESS == Bitness::B64),
+                latency: 2,
+                decode_slots: 2 + u32::from(d.get() != s.get()),
                 alu_slots: 1,
                 ..EMPTY_COST
             },
@@ -1291,8 +1288,8 @@ where
             s1,
             s2,
             InstCost {
-                latency: 1 + i8::from(B::BITNESS == Bitness::B64),
-                decode_slots: 1 + u32::from((d.get() != s1.get()) & (d.get() != s2.get())) + u32::from(B::BITNESS == Bitness::B64),
+                latency: 2,
+                decode_slots: 2 + u32::from((d.get() != s1.get()) & (d.get() != s2.get())),
                 alu_slots: 1,
                 ..EMPTY_COST
             },
@@ -1319,8 +1316,8 @@ where
             s1,
             s2,
             InstCost {
-                latency: 1 + i8::from(B::BITNESS == Bitness::B64),
-                decode_slots: 2 + u32::from(d.get() != s1.get()) + u32::from(B::BITNESS == Bitness::B64),
+                latency: 2,
+                decode_slots: 3 + u32::from(d.get() != s1.get()),
                 alu_slots: 1,
                 ..EMPTY_COST
             },
@@ -1439,9 +1436,8 @@ where
     }
 }
 
-impl<'a, B, T> GasVisitorT for Simulator<'a, B, T>
+impl<'a, T> GasVisitorT for Simulator<'a, T>
 where
-    B: BitnessT,
     T: Tracer,
 {
     #[inline]
@@ -1462,9 +1458,8 @@ where
     }
 }
 
-impl<'a, B, T> ParsingVisitor for Simulator<'a, B, T>
+impl<'a, T> ParsingVisitor for Simulator<'a, T>
 where
-    B: BitnessT,
     T: Tracer,
 {
     type ReturnTy = ();
@@ -2446,23 +2441,11 @@ where
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct TimelineConfig<'a> {
     pub should_enable_fast_forward: bool,
     pub instruction_format: InstructionFormat<'a>,
-}
-
-impl<'a> Default for TimelineConfig<'a> {
-    fn default() -> Self {
-        TimelineConfig {
-            should_enable_fast_forward: false,
-            instruction_format: InstructionFormat {
-                is_64_bit: true,
-                ..InstructionFormat::default()
-            },
-        }
-    }
 }
 
 fn run_simulator_for_first_block<T: Tracer>(
@@ -2491,7 +2474,7 @@ fn run_simulator_for_first_block<T: Tracer>(
         });
     }
 
-    let mut sim = Simulator::<B64, _>::new(code, isa, cache_model, tracer);
+    let mut sim = Simulator::new(code, isa, cache_model, tracer);
     for &instruction in &instructions {
         assert!(sim.take_block_cost().is_none());
         instruction.visit_parsing(&mut sim);
@@ -2605,7 +2588,7 @@ pub fn timeline_for_instructions(
 }
 
 pub fn trap_cost(isa: InstructionSetKind, cache_model: CacheModel) -> u32 {
-    let mut sim = Simulator::<B64, _>::new(&[], isa, cache_model, ());
+    let mut sim = Simulator::new(&[], isa, cache_model, ());
     crate::program::ParsedInstruction {
         kind: crate::program::Instruction::trap,
         offset: crate::program::ProgramCounter(0),

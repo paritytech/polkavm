@@ -1,4 +1,4 @@
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl CallImport for (Reg, Reg, Reg, Reg, Reg, Reg, Reg) {
     #[inline(always)]
     fn call_import<F>(mut self) -> (Reg, Reg) where F: ImportSymbol {
@@ -23,7 +23,7 @@ impl CallImport for (Reg, Reg, Reg, Reg, Reg, Reg, Reg) {
     }
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl CallImport for (Reg, Reg, Reg, Reg, Reg, Reg, Reg, Reg) {
     #[inline(always)]
     fn call_import<F>(mut self) -> (Reg, Reg) where F: ImportSymbol {
@@ -48,7 +48,7 @@ impl CallImport for (Reg, Reg, Reg, Reg, Reg, Reg, Reg, Reg) {
     }
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl CallImport for (Reg, Reg, Reg, Reg, Reg, Reg, Reg, Reg, Reg) {
     #[inline(always)]
     fn call_import<F>(mut self) -> (Reg, Reg) where F: ImportSymbol {

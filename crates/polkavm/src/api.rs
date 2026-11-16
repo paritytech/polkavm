@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use polkavm_common::abi::{MemoryMap, MemoryMapBuilder, VM_ADDR_RETURN_TO_HOST};
 use polkavm_common::cast::cast;
 use polkavm_common::program::{FrameKind, Imports, InstructionSetKind, Instructions, JumpTable, ProgramBlob, Reg};
-use polkavm_common::utils::{ArcBytes, AsUninitSliceMut, B32, B64};
+use polkavm_common::utils::{ArcBytes, AsUninitSliceMut};
 
 use crate::config::{BackendKind, Config, GasMeteringKind, InterpreterCompilationCost, ModuleConfig, SandboxKind};
 use crate::error::{bail, Error};
@@ -435,11 +435,6 @@ impl Module {
             return Err(Error::from_static_str("compilation cost is not supported when crosschecking").into());
         }
 
-        log::trace!(
-            "Creating new module from a {}-bit program blob",
-            if blob.is_64_bit() { 64 } else { 32 }
-        );
-
         let cost_model = config.cost_model.clone().unwrap_or_else(|| engine.default_cost_model.clone());
         if config.is_per_instruction_metering && !cost_model.is_naive() {
             return Err(Error::from_static_str("per instruction metering is not supported with a non-naive gas cost model").into());
@@ -539,12 +534,11 @@ impl Module {
 
         #[allow(unused_macros)]
         macro_rules! compile_module {
-            ($sandbox_kind:ident, $bitness_kind:ident, $build_static_dispatch_table:ident, $visitor_name:ident, $module_kind:ident) => {
+            ($sandbox_kind:ident, $build_static_dispatch_table:ident, $visitor_name:ident, $module_kind:ident) => {
                 match cost_model {
                     CostModelKind::Simple(ref cost_model) => {
                         compile_module!(
                             $sandbox_kind,
-                            $bitness_kind,
                             $build_static_dispatch_table,
                             $visitor_name,
                             $module_kind,
@@ -555,24 +549,23 @@ impl Module {
                     }
                     CostModelKind::Full(cost_model) => {
                         use polkavm_common::simulator::Simulator;
-                        let gas_visitor = Simulator::<$bitness_kind, ()>::new(blob.code(), blob.isa(), cost_model, ());
+                        let gas_visitor = Simulator::<()>::new(blob.code(), blob.isa(), cost_model, ());
                         compile_module!(
                             $sandbox_kind,
-                            $bitness_kind,
                             $build_static_dispatch_table,
                             $visitor_name,
                             $module_kind,
-                            Simulator::<'a, $bitness_kind, ()>,
-                            Simulator::<$bitness_kind, ()>,
+                            Simulator::<'a, ()>,
+                            Simulator::<()>,
                             gas_visitor
                         )
                     }
                 }
             };
 
-            ($sandbox_kind:ident, $bitness_kind:ident, $build_static_dispatch_table:ident, $visitor_name:ident, $module_kind:ident, $gas_kind:ty, $gas_kind_no_lifetime:ty, $gas_visitor:expr) => {{
-                type VisitorTy<'a> = crate::compiler::CompilerVisitor<'a, $sandbox_kind, $bitness_kind, $gas_kind>;
-                let (mut visitor, aux) = crate::compiler::CompilerVisitor::<$sandbox_kind, $bitness_kind, $gas_kind_no_lifetime>::new(
+            ($sandbox_kind:ident, $build_static_dispatch_table:ident, $visitor_name:ident, $module_kind:ident, $gas_kind:ty, $gas_kind_no_lifetime:ty, $gas_visitor:expr) => {{
+                type VisitorTy<'a> = crate::compiler::CompilerVisitor<'a, $sandbox_kind, $gas_kind>;
+                let (mut visitor, aux) = crate::compiler::CompilerVisitor::<$sandbox_kind, $gas_kind_no_lifetime>::new(
                     &engine.state.compiler_cache,
                     config,
                     blob.isa(),
@@ -605,10 +598,9 @@ impl Module {
                             SandboxKind::Linux => {
                                 #[cfg(target_os = "linux")]
                                 match blob.isa() {
-                                    InstructionSetKind::ReviveV1 => compile_module!(SandboxLinux, B64, build_static_dispatch_table_revive_v1, COMPILER_VISITOR_LINUX, Linux),
-                                    InstructionSetKind::JamV1 => compile_module!(SandboxLinux, B64, build_static_dispatch_table_jam_v1, COMPILER_VISITOR_LINUX, Linux),
-                                    InstructionSetKind::Latest32 => compile_module!(SandboxLinux, B32, build_static_dispatch_table_latest32, COMPILER_VISITOR_LINUX, Linux),
-                                    InstructionSetKind::Latest64 => compile_module!(SandboxLinux, B64, build_static_dispatch_table_latest64, COMPILER_VISITOR_LINUX, Linux),
+                                    InstructionSetKind::ReviveV1 => compile_module!(SandboxLinux, build_static_dispatch_table_revive_v1, COMPILER_VISITOR_LINUX, Linux),
+                                    InstructionSetKind::JamV1 => compile_module!(SandboxLinux, build_static_dispatch_table_jam_v1, COMPILER_VISITOR_LINUX, Linux),
+                                    InstructionSetKind::Latest64 => compile_module!(SandboxLinux, build_static_dispatch_table_latest64, COMPILER_VISITOR_LINUX, Linux),
                                 }
 
                                 #[cfg(not(target_os = "linux"))]
@@ -620,10 +612,9 @@ impl Module {
                             SandboxKind::Generic => {
                                 #[cfg(feature = "generic-sandbox")]
                                 match blob.isa() {
-                                    InstructionSetKind::ReviveV1 => compile_module!(SandboxGeneric, B64, build_static_dispatch_table_revive_v1, COMPILER_VISITOR_GENERIC, Generic),
-                                    InstructionSetKind::JamV1 => compile_module!(SandboxGeneric, B64, build_static_dispatch_table_jam_v1, COMPILER_VISITOR_GENERIC, Generic),
-                                    InstructionSetKind::Latest32 => compile_module!(SandboxGeneric, B32, build_static_dispatch_table_latest32, COMPILER_VISITOR_GENERIC, Generic),
-                                    InstructionSetKind::Latest64 => compile_module!(SandboxGeneric, B64, build_static_dispatch_table_latest64, COMPILER_VISITOR_GENERIC, Generic),
+                                    InstructionSetKind::ReviveV1 => compile_module!(SandboxGeneric, build_static_dispatch_table_revive_v1, COMPILER_VISITOR_GENERIC, Generic),
+                                    InstructionSetKind::JamV1 => compile_module!(SandboxGeneric, build_static_dispatch_table_jam_v1, COMPILER_VISITOR_GENERIC, Generic),
+                                    InstructionSetKind::Latest64 => compile_module!(SandboxGeneric, build_static_dispatch_table_latest64, COMPILER_VISITOR_GENERIC, Generic),
                                 }
 
                                 #[cfg(not(feature = "generic-sandbox"))]
@@ -716,11 +707,6 @@ impl Module {
         }
 
         Ok(Module(Some(module)))
-    }
-
-    /// Returns whether the module is 64-bit.
-    pub fn is_64_bit(&self) -> bool {
-        self.state().blob.is_64_bit()
     }
 
     /// Fetches a cached module for the given `blob`.
@@ -955,13 +941,8 @@ impl Module {
             CostModelKind::Full(cost_model) => {
                 use polkavm_common::simulator::Simulator;
                 let instructions = self.instructions_bounded_at(code_offset);
-                if self.is_64_bit() {
-                    let gas_visitor = Simulator::<B64, ()>::new(self.blob().code(), self.blob().isa(), cost_model, ());
-                    crate::gas::calculate_for_block(gas_visitor, instructions)
-                } else {
-                    let gas_visitor = Simulator::<B32, ()>::new(self.blob().code(), self.blob().isa(), cost_model, ());
-                    crate::gas::calculate_for_block(gas_visitor, instructions)
-                }
+                let gas_visitor = Simulator::<()>::new(self.blob().code(), self.blob().isa(), cost_model, ());
+                crate::gas::calculate_for_block(gas_visitor, instructions)
             }
         };
 
@@ -971,13 +952,7 @@ impl Module {
     #[cold]
     fn display_instruction_at(&self, program_counter: ProgramCounter) -> impl core::fmt::Display {
         let state = self.state();
-        Self::display_instruction_at_impl(
-            state.blob.isa(),
-            state.blob.code(),
-            state.blob.bitmask(),
-            state.blob.is_64_bit(),
-            program_counter,
-        )
+        Self::display_instruction_at_impl(state.blob.isa(), state.blob.code(), state.blob.bitmask(), program_counter)
     }
 
     #[cold]
@@ -985,15 +960,13 @@ impl Module {
         instruction_set: InstructionSetKind,
         code: &[u8],
         bitmask: &[u8],
-        is_64_bit: bool,
         program_counter: ProgramCounter,
     ) -> impl core::fmt::Display {
-        struct MaybeInstruction(Option<polkavm_common::program::ParsedInstruction>, bool);
+        struct MaybeInstruction(Option<polkavm_common::program::ParsedInstruction>);
         impl core::fmt::Display for MaybeInstruction {
             fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
                 if let Some(instruction) = self.0 {
-                    let mut format = polkavm_common::program::InstructionFormat::default();
-                    format.is_64_bit = self.1;
+                    let format = polkavm_common::program::InstructionFormat::default();
                     instruction.display(&format).fmt(fmt)?;
                     Ok(())
                 } else {
@@ -1002,10 +975,7 @@ impl Module {
             }
         }
 
-        MaybeInstruction(
-            Instructions::new_bounded(instruction_set, code, bitmask, program_counter.0).next(),
-            is_64_bit,
-        )
+        MaybeInstruction(Instructions::new_bounded(instruction_set, code, bitmask, program_counter.0).next())
     }
 
     pub(crate) fn debug_print_location(&self, log_level: log::Level, pc: ProgramCounter) {
@@ -1202,11 +1172,6 @@ impl RawInstance {
     /// Returns the module from which this instance was created.
     pub fn module(&self) -> &Module {
         &self.module
-    }
-
-    /// Returns whether we're running a 64-bit program.
-    pub fn is_64_bit(&self) -> bool {
-        self.module.is_64_bit()
     }
 
     #[cold]
@@ -1996,7 +1961,7 @@ impl RawInstance {
     {
         let mut regs = [0; Reg::ARG_REGS.len()];
         let mut input_count = 0;
-        args._set(self.module().blob().is_64_bit(), |value| {
+        args._set(|value| {
             assert!(input_count <= Reg::ARG_REGS.len(), "too many arguments");
             regs[input_count] = value;
             input_count += 1;
@@ -2013,7 +1978,7 @@ impl RawInstance {
         FnResult: crate::linker::FuncResult,
     {
         let mut output_count = 0;
-        FnResult::_get(self.module().blob().is_64_bit(), || {
+        FnResult::_get(|| {
             let value = access_backend!(self.backend, |backend| backend.reg(Reg::ARG_REGS[output_count]));
             output_count += 1;
             value

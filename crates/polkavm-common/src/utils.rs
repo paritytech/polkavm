@@ -385,27 +385,6 @@ pub trait GasVisitorT: ParsingVisitor {
     fn is_at_start_of_basic_block(&self) -> bool;
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum Bitness {
-    B32,
-    B64,
-}
-
-pub trait BitnessT {
-    const BITNESS: Bitness;
-}
-
-pub struct B64;
-pub struct B32;
-
-impl BitnessT for B32 {
-    const BITNESS: Bitness = Bitness::B32;
-}
-
-impl BitnessT for B64 {
-    const BITNESS: Bitness = Bitness::B64;
-}
-
 #[test]
 fn test_parse_immediate() {
     // "special cases"
