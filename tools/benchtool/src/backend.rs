@@ -232,23 +232,15 @@ macro_rules! define_backends {
 
 define_backends! {
     #[cfg(not(dummy))] // A dummy cfg since the macro requires it.
-    PolkaVM_Compiler32_NoGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, None, false, backend_polkavm::CostModel::Simple),
+    PolkaVM_Compiler64_NoGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, None, backend_polkavm::CostModel::Simple),
     #[cfg(not(dummy))]
-    PolkaVM_Compiler32_SimpleModel_AsyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async), false, backend_polkavm::CostModel::Simple),
+    PolkaVM_Compiler64_SimpleModel_AsyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async), backend_polkavm::CostModel::Simple),
     #[cfg(not(dummy))]
-    PolkaVM_Compiler32_SimpleModel_SyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), false, backend_polkavm::CostModel::Simple),
+    PolkaVM_Compiler64_SimpleModel_SyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), backend_polkavm::CostModel::Simple),
     #[cfg(not(dummy))]
-    PolkaVM_Compiler64_NoGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, None, true, backend_polkavm::CostModel::Simple),
+    PolkaVM_Compiler64_FullModel_SyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), backend_polkavm::CostModel::Full),
     #[cfg(not(dummy))]
-    PolkaVM_Compiler64_SimpleModel_AsyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async), true, backend_polkavm::CostModel::Simple),
-    #[cfg(not(dummy))]
-    PolkaVM_Compiler64_SimpleModel_SyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), true, backend_polkavm::CostModel::Simple),
-    #[cfg(not(dummy))]
-    PolkaVM_Compiler64_FullModel_SyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), true, backend_polkavm::CostModel::Full),
-    #[cfg(not(dummy))]
-    PolkaVM_Interpreter32 => backend_polkavm::PolkaVM(polkavm::BackendKind::Interpreter, None, false, backend_polkavm::CostModel::Simple),
-    #[cfg(not(dummy))]
-    PolkaVM_Interpreter64 => backend_polkavm::PolkaVM(polkavm::BackendKind::Interpreter, None, true, backend_polkavm::CostModel::Simple),
+    PolkaVM_Interpreter64 => backend_polkavm::PolkaVM(polkavm::BackendKind::Interpreter, None, backend_polkavm::CostModel::Simple),
 
     #[cfg(all(feature = "wasmtime", any(target_arch = "x86_64", target_arch = "aarch64")))]
     Wasmtime_Cranelift =>
@@ -304,18 +296,7 @@ impl BenchmarkKind {
     pub fn matching_backends(self) -> Vec<BackendKind> {
         let mut output = Vec::new();
         match self {
-            BenchmarkKind::PolkaVM32 => {
-                if polkavm::BackendKind::Compiler.is_supported() {
-                    output.extend([
-                        BackendKind::PolkaVM_Compiler32_NoGas,
-                        BackendKind::PolkaVM_Compiler32_SimpleModel_AsyncGas,
-                        BackendKind::PolkaVM_Compiler32_SimpleModel_SyncGas,
-                    ]);
-                }
-
-                output.push(BackendKind::PolkaVM_Interpreter32);
-            }
-            BenchmarkKind::PolkaVM64 => {
+            BenchmarkKind::PolkaVM => {
                 if polkavm::BackendKind::Compiler.is_supported() {
                     output.extend([
                         BackendKind::PolkaVM_Compiler64_NoGas,

@@ -32,10 +32,10 @@ enum TestProgram {
 }
 
 #[cfg(feature = "std")]
-fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
-    static ELF_MAP: Mutex<BTreeMap<(TestProgram, bool), &'static [u8]>> = Mutex::new(BTreeMap::new());
+fn get_test_program(kind: TestProgram) -> &'static [u8] {
+    static ELF_MAP: Mutex<BTreeMap<TestProgram, &'static [u8]>> = Mutex::new(BTreeMap::new());
     let mut elf_map = ELF_MAP.lock();
-    if let Some(blob) = elf_map.get(&(kind, is_64_bit)) {
+    if let Some(blob) = elf_map.get(&kind) {
         return blob;
     }
 
@@ -55,14 +55,10 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
     };
 
     let mut args = polkavm_linker::TargetJsonArgs::default();
-    args.is_64_bit = is_64_bit;
     args.rustc_version = polkavm_linker::RustcVersion::Legacy;
 
-    let (target, target_path) = if is_64_bit {
-        ("riscv64emac-unknown-none-polkavm", polkavm_linker::target_json_path(args).unwrap())
-    } else {
-        ("riscv32emac-unknown-none-polkavm", polkavm_linker::target_json_path(args).unwrap())
-    };
+    let target = "riscv64emac-unknown-none-polkavm";
+    let target_path = polkavm_linker::target_json_path(args).unwrap();
 
     let (project, filename, profile, is_bin) = match kind {
         TestProgram::Pinky => ("bench-pinky", "bench-pinky", "release", true),
@@ -98,25 +94,16 @@ fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
 
     let blob = std::fs::read(target_dir.join(target).join(profile).join(filename)).unwrap().leak();
 
-    elf_map.insert((kind, is_64_bit), blob);
+    elf_map.insert(kind, blob);
     blob
 }
 
 #[cfg(not(feature = "std"))]
-fn get_test_program(kind: TestProgram, is_64_bit: bool) -> &'static [u8] {
-    match (kind, is_64_bit) {
-        (TestProgram::Pinky, true) => include_bytes!("../../../guest-programs/target/riscv64emac-unknown-none-polkavm/release/bench-pinky"),
-        (TestProgram::Pinky, false) => unreachable!(),
-        (TestProgram::TestBlob, true) => include_bytes!("../../../guest-programs/target/riscv64emac-unknown-none-polkavm/no-lto/test-blob"),
-        (TestProgram::TestBlob, false) => {
-            include_bytes!("../../../guest-programs/target/riscv32emac-unknown-none-polkavm/no-lto/test-blob")
-        }
-        (TestProgram::TestBlobSo, true) => {
-            include_bytes!("../../../guest-programs/target/riscv64emac-unknown-none-polkavm/no-lto/test_blob.elf")
-        }
-        (TestProgram::TestBlobSo, false) => {
-            include_bytes!("../../../guest-programs/target/riscv32emac-unknown-none-polkavm/no-lto/test_blob.elf")
-        }
+fn get_test_program(kind: TestProgram) -> &'static [u8] {
+    match kind {
+        TestProgram::Pinky => include_bytes!("../../../guest-programs/target/riscv64emac-unknown-none-polkavm/release/bench-pinky"),
+        TestProgram::TestBlob => include_bytes!("../../../guest-programs/target/riscv64emac-unknown-none-polkavm/no-lto/test-blob"),
+        TestProgram::TestBlobSo => include_bytes!("../../../guest-programs/target/riscv64emac-unknown-none-polkavm/no-lto/test_blob.elf"),
     }
 }
 
@@ -211,98 +198,48 @@ macro_rules! run_tests {
 macro_rules! run_test_blob_tests {
     ($($test_name:ident)+) => {
         paste! {
-            run_tests_on_isa! { latest32, InstructionSetKind::Latest32,
-                $([<unoptimized_bin_32_ $test_name>])+
-                $([<unoptimized_cdylib_32_ $test_name>])+
-                $([<optimized_bin_32_ $test_name>])+
-                $([<optimized_cdylib_32_ $test_name>])+
-            }
             run_tests! {
-                $([<unoptimized_bin_64_ $test_name>])+
-                $([<unoptimized_cdylib_64_ $test_name>])+
-                $([<optimized_bin_64_ $test_name>])+
-                $([<optimized_cdylib_64_ $test_name>])+
+                $([<unoptimized_bin_ $test_name>])+
+                $([<unoptimized_cdylib_ $test_name>])+
+                $([<optimized_bin_ $test_name>])+
+                $([<optimized_cdylib_ $test_name>])+
             }
         }
 
         $(
             paste! {
-                fn [<unoptimized_bin_32_ $test_name>](config: Config, isa: InstructionSetKind) {
+                fn [<unoptimized_bin_ $test_name>](config: Config, isa: InstructionSetKind) {
                     $test_name(TestBlobArgs {
                         config,
                         isa,
                         optimize: false,
-                        is_64_bit: false,
                         is_cdylib: false
                     })
                 }
 
-                fn [<unoptimized_bin_64_ $test_name>](config: Config, isa: InstructionSetKind) {
+                fn [<unoptimized_cdylib_ $test_name>](config: Config, isa: InstructionSetKind) {
                     $test_name(TestBlobArgs {
                         config,
                         isa,
                         optimize: false,
-                        is_64_bit: true,
-                        is_cdylib: false
-                    })
-                }
-
-                fn [<unoptimized_cdylib_32_ $test_name>](config: Config, isa: InstructionSetKind) {
-                    $test_name(TestBlobArgs {
-                        config,
-                        isa,
-                        optimize: false,
-                        is_64_bit: false,
                         is_cdylib: true
                     })
                 }
 
-                fn [<unoptimized_cdylib_64_ $test_name>](config: Config, isa: InstructionSetKind) {
-                    $test_name(TestBlobArgs {
-                        config,
-                        isa,
-                        optimize: false,
-                        is_64_bit: true,
-                        is_cdylib: true
-                    })
-                }
-
-                fn [<optimized_bin_32_ $test_name>](config: Config, isa: InstructionSetKind) {
+                fn [<optimized_bin_ $test_name>](config: Config, isa: InstructionSetKind) {
                     $test_name(TestBlobArgs {
                         config,
                         isa,
                         optimize: true,
-                        is_64_bit: false,
                         is_cdylib: false
                     })
                 }
 
-                fn [<optimized_bin_64_ $test_name>](config: Config, isa: InstructionSetKind) {
+                fn [<optimized_cdylib_ $test_name>](config: Config, isa: InstructionSetKind) {
                     $test_name(TestBlobArgs {
                         config,
                         isa,
                         optimize: true,
-                        is_64_bit: true,
-                        is_cdylib: false
-                    })
-                }
-
-                fn [<optimized_cdylib_32_ $test_name>](config: Config, isa: InstructionSetKind) {
-                    $test_name(TestBlobArgs {
-                        config,
-                        isa,
-                        optimize: true,
-                        is_64_bit: false,
-                        is_cdylib: true
-                    })
-                }
-
-                fn [<optimized_cdylib_64_ $test_name>](config: Config, isa: InstructionSetKind) {
-                    $test_name(TestBlobArgs {
-                        config,
-                        isa,
-                        optimize: true,
-                        is_64_bit: true,
                         is_cdylib: true
                     })
                 }
@@ -315,18 +252,18 @@ macro_rules! run_asm_tests {
     ($($test_name:ident)+) => {
         paste! {
             run_tests! {
-                $([<unoptimized_64_ $test_name>])+
-                $([<optimized_64_ $test_name>])+
+                $([<unoptimized_ $test_name>])+
+                $([<optimized_ $test_name>])+
             }
         }
 
         $(
             paste! {
-                fn [<unoptimized_64_ $test_name>](config: Config, isa: InstructionSetKind) {
+                fn [<unoptimized_ $test_name>](config: Config, isa: InstructionSetKind) {
                     $test_name(config, isa, false)
                 }
 
-                fn [<optimized_64_ $test_name>](config: Config, isa: InstructionSetKind) {
+                fn [<optimized_ $test_name>](config: Config, isa: InstructionSetKind) {
                     $test_name(config, isa, true)
                 }
             }
@@ -4322,35 +4259,7 @@ fn doom_impl(config: Config, isa: InstructionSetKind, elf: &'static [u8]) {
     // }
 }
 
-fn doom_o3_dwarf5(config: Config, isa: InstructionSetKind) {
-    if isa.is_64_bit() {
-        return;
-    }
-
-    doom_impl(config, isa, include_bytes!("../../../test-data/doom_O3_dwarf5.elf.zst"));
-}
-
-fn doom_o1_dwarf5(config: Config, isa: InstructionSetKind) {
-    if isa.is_64_bit() {
-        return;
-    }
-
-    doom_impl(config, isa, include_bytes!("../../../test-data/doom_O1_dwarf5.elf.zst"));
-}
-
-fn doom_o3_dwarf2(config: Config, isa: InstructionSetKind) {
-    if isa.is_64_bit() {
-        return;
-    }
-
-    doom_impl(config, isa, include_bytes!("../../../test-data/doom_O3_dwarf2.elf.zst"));
-}
-
 fn doom(config: Config, isa: InstructionSetKind) {
-    if !isa.is_64_bit() {
-        return;
-    }
-
     doom_impl(config, isa, include_bytes!("../../../test-data/doom_64.elf.zst"));
 }
 
@@ -4369,7 +4278,7 @@ fn pinky_impl(config: Config, isa: InstructionSetKind) {
     }
 
     let _ = env_logger::try_init();
-    let blob = get_blob(get_test_program(TestProgram::Pinky, isa.is_64_bit()), isa);
+    let blob = get_blob(get_test_program(TestProgram::Pinky), isa);
 
     let engine = Engine::new(&config).unwrap();
     let mut module_config = ModuleConfig::default();
@@ -5772,13 +5681,8 @@ impl TestInstance {
 
         linker
             .define_untyped("return_tuple_usize", move |caller: Caller<()>| {
-                if caller.instance.is_64_bit() {
-                    caller.instance.set_reg(Reg::A0, 0x123456789abcdefe);
-                    caller.instance.set_reg(Reg::A1, 0x1122334455667788);
-                } else {
-                    caller.instance.set_reg(Reg::A0, 0x12345678);
-                    caller.instance.set_reg(Reg::A1, 0x9abcdefe);
-                }
+                caller.instance.set_reg(Reg::A0, 0x123456789abcdefe);
+                caller.instance.set_reg(Reg::A1, 0x1122334455667788);
 
                 Ok(())
             })
@@ -5803,20 +5707,16 @@ struct TestBlobArgs {
     config: Config,
     isa: InstructionSetKind,
     optimize: bool,
-    is_64_bit: bool,
     is_cdylib: bool,
 }
 
 impl TestBlobArgs {
     fn get_test_program(&self) -> &'static [u8] {
-        get_test_program(
-            if self.is_cdylib {
-                TestProgram::TestBlobSo
-            } else {
-                TestProgram::TestBlob
-            },
-            self.is_64_bit,
-        )
+        get_test_program(if self.is_cdylib {
+            TestProgram::TestBlobSo
+        } else {
+            TestProgram::TestBlob
+        })
     }
 }
 
@@ -6028,10 +5928,8 @@ fn test_blob_add_u32(args: TestBlobArgs) {
     assert_eq!(i.call::<(u32, u32), u32>("add_u32", (0xffffffff, 2,)).unwrap(), 1);
     assert_eq!(i.instance.reg(Reg::A0), 1);
 
-    if args.is_64_bit {
-        assert_eq!(i.call::<(u32, u32), u32>("add_u32_asm", (0xfffffffa, 2,)).unwrap(), 0xfffffffc);
-        assert_eq!(i.instance.reg(Reg::A0), 0xfffffffffffffffc);
-    }
+    assert_eq!(i.call::<(u32, u32), u32>("add_u32_asm", (0xfffffffa, 2,)).unwrap(), 0xfffffffc);
+    assert_eq!(i.instance.reg(Reg::A0), 0xfffffffffffffffc);
 }
 
 fn test_blob_add_u64(args: TestBlobArgs) {
@@ -6090,11 +5988,7 @@ fn test_blob_min_stack_size(args: TestBlobArgs) {
 fn test_blob_negate_and_add(args: TestBlobArgs) {
     let elf = args.get_test_program();
     let mut i = TestInstance::new(&args, elf);
-    if !args.is_64_bit {
-        assert_eq!(i.call::<(u32, u32), u32>("negate_and_add", (123, 1,)).unwrap(), 15);
-    } else {
-        assert_eq!(i.call::<(u64, u64), u64>("negate_and_add", (123, 1,)).unwrap(), 15);
-    }
+    assert_eq!(i.call::<(u64, u64), u64>("negate_and_add", (123, 1,)).unwrap(), 15);
 }
 
 fn test_blob_return_tuple_from_import(args: TestBlobArgs) {
@@ -6106,31 +6000,17 @@ fn test_blob_return_tuple_from_import(args: TestBlobArgs) {
 fn test_blob_return_tuple_from_export(args: TestBlobArgs) {
     let elf = args.get_test_program();
     let mut i = TestInstance::new(&args, elf);
-    if args.is_64_bit {
-        let a0 = 0x123456789abcdefe_u64;
-        let a1 = 0x1122334455667788_u64;
-        i.call::<(), ()>("export_return_tuple_u64", ()).unwrap();
-        assert_eq!(i.instance.reg(Reg::A0), a0);
-        assert_eq!(i.instance.reg(Reg::A1), a1);
+    let a0 = 0x123456789abcdefe_u64;
+    let a1 = 0x1122334455667788_u64;
+    i.call::<(), ()>("export_return_tuple_u64", ()).unwrap();
+    assert_eq!(i.instance.reg(Reg::A0), a0);
+    assert_eq!(i.instance.reg(Reg::A1), a1);
 
-        i.instance.set_reg(Reg::A0, 0);
-        i.instance.set_reg(Reg::A1, 0);
-        i.call::<(), ()>("export_return_tuple_usize", ()).unwrap();
-        assert_eq!(i.instance.reg(Reg::A0), a0);
-        assert_eq!(i.instance.reg(Reg::A1), a1);
-    } else {
-        let a0 = 0x12345678_u64;
-        let a1 = 0x9abcdefe_u64;
-        i.call::<(), ()>("export_return_tuple_u32", ()).unwrap();
-        assert_eq!(i.instance.reg(Reg::A0), a0);
-        assert_eq!(i.instance.reg(Reg::A1), a1);
-
-        i.instance.set_reg(Reg::A0, 0);
-        i.instance.set_reg(Reg::A1, 0);
-        i.call::<(), ()>("export_return_tuple_usize", ()).unwrap();
-        assert_eq!(i.instance.reg(Reg::A0), a0);
-        assert_eq!(i.instance.reg(Reg::A1), a1);
-    }
+    i.instance.set_reg(Reg::A0, 0);
+    i.instance.set_reg(Reg::A1, 0);
+    i.call::<(), ()>("export_return_tuple_usize", ()).unwrap();
+    assert_eq!(i.instance.reg(Reg::A0), a0);
+    assert_eq!(i.instance.reg(Reg::A1), a1);
 }
 
 fn test_blob_get_heap_base(args: TestBlobArgs) {
@@ -6155,54 +6035,36 @@ fn test_blob_get_self_address_naked(args: TestBlobArgs) {
 }
 
 fn test_blob_sub_i32_min_64(args: TestBlobArgs) {
-    if !args.is_64_bit {
-        return;
-    }
     let elf = args.get_test_program();
     let mut i = TestInstance::new(&args, elf);
     assert_eq!(i.call::<(u64,), u64>("sub_i32_min_64", (0,)).unwrap(), 0x80000000);
 }
 
 fn test_blob_sub_i32_min_32(args: TestBlobArgs) {
-    if !args.is_64_bit {
-        return;
-    }
     let elf = args.get_test_program();
     let mut i = TestInstance::new(&args, elf);
     assert_eq!(i.call::<(u64,), u64>("sub_i32_min_32", (0,)).unwrap(), 0xffffffff80000000);
 }
 
 fn test_blob_orn_zero_const_64(args: TestBlobArgs) {
-    if !args.is_64_bit {
-        return;
-    }
     let elf = args.get_test_program();
     let mut i = TestInstance::new(&args, elf);
     assert_eq!(i.call::<(), u64>("orn_zero_const_64", ()).unwrap(), 0x80000001);
 }
 
 fn test_blob_xnor_zero_const_64(args: TestBlobArgs) {
-    if !args.is_64_bit {
-        return;
-    }
     let elf = args.get_test_program();
     let mut i = TestInstance::new(&args, elf);
     assert_eq!(i.call::<(), u64>("xnor_zero_const_64", ()).unwrap(), 0x80000001);
 }
 
 fn test_blob_min_zero_const_64(args: TestBlobArgs) {
-    if !args.is_64_bit {
-        return;
-    }
     let elf = args.get_test_program();
     let mut i = TestInstance::new(&args, elf);
     assert_eq!(i.call::<(), u64>("min_zero_const_64", ()).unwrap(), 0xffffffff7ffffffe);
 }
 
 fn test_blob_max_zero_const_64(args: TestBlobArgs) {
-    if !args.is_64_bit {
-        return;
-    }
     let elf = args.get_test_program();
     let mut i = TestInstance::new(&args, elf);
     assert_eq!(i.call::<(), u64>("max_zero_const_64", ()).unwrap(), 0);
@@ -6219,7 +6081,6 @@ fn test_asm_reloc_add_sub(config: Config, isa: InstructionSetKind, optimize: boo
         config,
         isa,
         optimize,
-        is_64_bit: true,
         is_cdylib: false,
     };
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_add_sub_64.elf");
@@ -6242,7 +6103,6 @@ fn test_asm_reloc_hi_lo(config: Config, isa: InstructionSetKind, optimize: bool)
         config,
         isa,
         optimize,
-        is_64_bit: true,
         is_cdylib: false,
     };
     const BLOB_64: &[u8] = include_bytes!("../../../guest-programs/asm-tests/output/reloc_hi_lo_64.elf");
@@ -7403,14 +7263,8 @@ fn test_basic_debug_info(raw_blob: &'static [u8], isa: InstructionSetKind) {
 
 #[ignore]
 #[test]
-fn test_basic_debug_info_32() {
-    test_basic_debug_info(get_test_program(TestProgram::TestBlob, false), InstructionSetKind::Latest32);
-}
-
-#[ignore]
-#[test]
-fn test_basic_debug_info_64() {
-    test_basic_debug_info(get_test_program(TestProgram::TestBlob, true), InstructionSetKind::Latest64);
+fn test_basic_debug_info_test_blob() {
+    test_basic_debug_info(get_test_program(TestProgram::TestBlob), InstructionSetKind::Latest64);
 }
 
 #[test]
@@ -7535,7 +7389,7 @@ fn module_cache(mut config: Config, isa: InstructionSetKind) {
         optimize: true,
         strip: false,
         isa,
-        elf: get_test_program(TestProgram::TestBlob, true),
+        elf: get_test_program(TestProgram::TestBlob),
         is_permissive: true,
     });
 
@@ -7590,11 +7444,6 @@ fn module_cache(mut config: Config, isa: InstructionSetKind) {
 }
 
 fn run_riscv_test(engine_config: Config, isa: InstructionSetKind, elf: &[u8], testnum_reg: Reg, optimize: bool) {
-    let is_64_bit = elf[4] == 2;
-    if is_64_bit != isa.is_64_bit() {
-        return;
-    }
-
     let _ = env_logger::try_init();
     let mut linker_config = polkavm_linker::Config::default();
     linker_config.set_optimize(optimize);
@@ -7775,9 +7624,6 @@ run_tests! {
     dynamic_paging_parallel_page_fault_stress_test
     memory_access_with_upper_address_bits_set
     zero_memory
-    doom_o3_dwarf5
-    doom_o1_dwarf5
-    doom_o3_dwarf2
     doom
     pinky_standard
     pinky_dynamic_paging

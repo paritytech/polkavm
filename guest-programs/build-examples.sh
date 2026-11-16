@@ -6,7 +6,7 @@ cd "${0%/*}/"
 source build-common.sh
 
 pushd ..
-TARGET_JSON_PATH="$(cargo run -p polkatool get-target-json-path --bitness 32)"
+TARGET_JSON_PATH="$(cargo run -p polkatool get-target-json-path)"
 popd
 
 function build_example () {
@@ -23,7 +23,7 @@ function build_example () {
     pushd ..
 
     cargo run -q -p polkatool link \
-        --run-only-if-newer -s guest-programs/target/riscv32emac-unknown-none-polkavm/release/$1 \
+        --run-only-if-newer -s guest-programs/target/riscv64emac-unknown-none-polkavm/release/$1 \
         -o guest-programs/$output_path
 
     popd

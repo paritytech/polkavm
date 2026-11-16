@@ -197,7 +197,6 @@ pub struct Elf<'data> {
     sections: Vec<Section<'data>>,
     section_index_by_name: HashMap<String, Vec<SectionIndex>>,
     symbols: Vec<Symbol>,
-    is_64_bit: bool,
 }
 
 impl<'data> Elf<'data> {
@@ -227,8 +226,6 @@ impl<'data> Elf<'data> {
         if elf.elf_header().e_machine(LittleEndian) != object::elf::EM_RISCV {
             return Err(ProgramFromElfError::other("file is not a RISC-V file (EM_RISCV)"));
         }
-
-        let is_64_bit = elf.is_64();
 
         let mut relocation_sections_for_section = HashMap::new();
         let mut relocations_in_section = HashMap::new();
@@ -282,11 +279,7 @@ impl<'data> Elf<'data> {
                 let section_data = section.data()?;
                 let mut struct_offset = 0;
                 while struct_offset < section_data.len() {
-                    let struct_size = if is_64_bit {
-                        core::mem::size_of::<object::elf::Rela64<LittleEndian>>()
-                    } else {
-                        core::mem::size_of::<object::elf::Rela32<LittleEndian>>()
-                    };
+                    let struct_size = core::mem::size_of::<object::elf::Rela64<LittleEndian>>();
                     let rela = section_data
                         .get(struct_offset..struct_offset + struct_size)
                         .ok_or_else(|| ProgramFromElfError::other("failed to parse relocations"))?;
@@ -296,21 +289,12 @@ impl<'data> Elf<'data> {
                     let symbol;
                     let addend;
                     let offset;
-                    if is_64_bit {
-                        // SAFETY: The pointer is always within bounds since we used '.get'.
-                        let rela = unsafe { rela.as_ptr().cast::<object::elf::Rela64<LittleEndian>>().read_unaligned() };
-                        r_type = rela.r_type(LittleEndian, false);
-                        symbol = rela.symbol(LittleEndian, false);
-                        addend = rela.r_addend(LittleEndian);
-                        offset = rela.r_offset(LittleEndian);
-                    } else {
-                        // SAFETY: The pointer is always within bounds since we used '.get'.
-                        let rela = unsafe { rela.as_ptr().cast::<object::elf::Rela32<LittleEndian>>().read_unaligned() };
-                        r_type = rela.r_type(LittleEndian);
-                        symbol = rela.symbol(LittleEndian, false);
-                        addend = i64::from(rela.r_addend(LittleEndian));
-                        offset = u64::from(rela.r_offset(LittleEndian));
-                    }
+                    // SAFETY: The pointer is always within bounds since we used '.get'.
+                    let rela = unsafe { rela.as_ptr().cast::<object::elf::Rela64<LittleEndian>>().read_unaligned() };
+                    r_type = rela.r_type(LittleEndian, false);
+                    symbol = rela.symbol(LittleEndian, false);
+                    addend = rela.r_addend(LittleEndian);
+                    offset = rela.r_offset(LittleEndian);
                     let (kind, encoding, size) = match r_type {
                         object::elf::R_RISCV_32 => (object::RelocationKind::Absolute, object::RelocationEncoding::Generic, 32),
                         object::elf::R_RISCV_64 => (object::RelocationKind::Absolute, object::RelocationEncoding::Generic, 64),
@@ -471,7 +455,6 @@ impl<'data> Elf<'data> {
             sections,
             section_index_by_name,
             symbols,
-            is_64_bit,
         })
     }
 
@@ -535,10 +518,6 @@ impl<'data> Elf<'data> {
     pub fn section_data_mut(&mut self, index: SectionIndex) -> &mut [u8] {
         let section = &mut self.sections[index.0];
         section.data.to_mut()
-    }
-
-    pub fn is_64(&self) -> bool {
-        self.is_64_bit
     }
 
     pub fn section_to_function_name(&self) -> BTreeMap<SectionTarget, String> {

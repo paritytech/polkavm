@@ -14,14 +14,6 @@ use std::path::{Path, PathBuf};
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[derive(Copy, Clone, Debug, clap::ValueEnum)]
-enum Bitness {
-    #[clap(name = "32")]
-    B32,
-    #[clap(name = "64")]
-    B64,
-}
-
-#[derive(Copy, Clone, Debug, clap::ValueEnum)]
 enum OptLevel {
     #[clap(name = "0")]
     O0,
@@ -39,8 +31,6 @@ enum Isa {
     ReviveV1,
     #[clap(name = "jam_v1")]
     JamV1,
-    #[clap(name = "latest32")]
-    Latest32,
     #[clap(name = "latest64")]
     Latest64,
 }
@@ -50,7 +40,6 @@ impl Isa {
         match self {
             Isa::ReviveV1 => InstructionSetKind::ReviveV1,
             Isa::JamV1 => InstructionSetKind::JamV1,
-            Isa::Latest32 => InstructionSetKind::Latest32,
             Isa::Latest64 => InstructionSetKind::Latest64,
         }
     }
@@ -147,10 +136,7 @@ enum Args {
     },
 
     /// Writes a path to a JSON target file for rustc to stdout.
-    GetTargetJsonPath {
-        #[clap(short = 'b', long, value_enum, default_value_t = Bitness::B64)]
-        bitness: Bitness,
-    },
+    GetTargetJsonPath,
 }
 
 macro_rules! bail {
@@ -208,16 +194,7 @@ fn main() {
             instruction_set,
         } => main_assemble(input, output, instruction_set),
         Args::Stats { inputs } => main_stats(inputs),
-        Args::GetTargetJsonPath { bitness } => {
-            let mut args = polkavm_linker::TargetJsonArgs::default();
-            args.is_64_bit = match bitness {
-                Bitness::B32 => false,
-                Bitness::B64 => true,
-            };
-
-            let result = polkavm_linker::target_json_path(args);
-            result.map(|path| print!("{}", path.to_str().unwrap()))
-        }
+        Args::GetTargetJsonPath => polkavm_linker::target_json_path(Default::default()).map(|path| print!("{}", path.to_str().unwrap())),
     };
 
     if let Err(error) = result {

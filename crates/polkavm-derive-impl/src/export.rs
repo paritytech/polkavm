@@ -161,7 +161,7 @@ pub fn polkavm_export(attributes: ExportBlockAttributes, input: syn::ItemFn) -> 
         #(#cfg_attributes)*
         #(#fn_attributes)*
         #vis #unsafety fn #ident(#args) #output {
-            #[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+            #[cfg(all(target_arch = "riscv64", target_feature = "e"))]
             #[doc(hidden)]
             mod __polkavm_export {
                 use #abi_path::private::Reg;
@@ -199,17 +199,6 @@ pub fn polkavm_export(attributes: ExportBlockAttributes, input: syn::ItemFn) -> 
                     input_regs: <#args_joined_regs_ty as #abi_path::private::CountTuple>::COUNT,
                     output_regs: <<#return_ty as #abi_path::IntoHost>::Regs as #abi_path::private::CountTuple>::COUNT,
                 };
-
-                #[cfg(target_arch = "riscv32")]
-                ::core::arch::global_asm!(
-                    ".pushsection .polkavm_exports,\"Ra\",@note\n",
-                    ".byte 1\n", // Version.
-                    "auipc zero, %pcrel_hi({metadata})\n",
-                    "auipc zero, %pcrel_hi({function})\n",
-                    ".popsection\n",
-                    metadata = sym METADATA,
-                    function = sym trampoline,
-                );
 
                 #[cfg(target_arch = "riscv64")]
                 ::core::arch::global_asm!(

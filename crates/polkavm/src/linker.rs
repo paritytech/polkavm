@@ -36,10 +36,7 @@ impl<UserData, UserError> Clone for CallFnArc<UserData, UserError> {
 
 pub trait IntoCallFn<UserData, UserError, Params, Result>: Send + Sync + 'static {
     #[doc(hidden)]
-    const _REGS_REQUIRED_32: usize;
-
-    #[doc(hidden)]
-    const _REGS_REQUIRED_64: usize;
+    const _REGS_REQUIRED: usize;
 
     #[doc(hidden)]
     fn _into_extern_fn(self) -> CallFnArc<UserData, UserError>;
@@ -48,110 +45,60 @@ pub trait IntoCallFn<UserData, UserError, Params, Result>: Send + Sync + 'static
 /// A type which can be marshalled through the VM's FFI boundary.
 pub trait AbiTy: Sized + Send + 'static {
     #[doc(hidden)]
-    const _REGS_REQUIRED_32: usize;
+    const _REGS_REQUIRED: usize;
 
     #[doc(hidden)]
-    const _REGS_REQUIRED_64: usize;
+    fn _get(get_reg: impl FnMut() -> RegValue) -> Self;
 
     #[doc(hidden)]
-    fn _get32(get_reg: impl FnMut() -> RegValue) -> Self;
-
-    #[doc(hidden)]
-    fn _get64(get_reg: impl FnMut() -> RegValue) -> Self;
-
-    #[doc(hidden)]
-    fn _set32(self, set_reg: impl FnMut(RegValue));
-
-    #[doc(hidden)]
-    fn _set64(self, set_reg: impl FnMut(RegValue));
+    fn _set(self, set_reg: impl FnMut(RegValue));
 }
 
 impl AbiTy for u32 {
-    const _REGS_REQUIRED_32: usize = 1;
-    const _REGS_REQUIRED_64: usize = 1;
+    const _REGS_REQUIRED: usize = 1;
 
-    fn _get32(mut get_reg: impl FnMut() -> RegValue) -> Self {
+    fn _get(mut get_reg: impl FnMut() -> RegValue) -> Self {
         get_reg() as u32
     }
 
-    fn _get64(mut get_reg: impl FnMut() -> RegValue) -> Self {
-        get_reg() as u32
-    }
-
-    fn _set32(self, mut set_reg: impl FnMut(RegValue)) {
-        set_reg(u64::from(self))
-    }
-
-    fn _set64(self, mut set_reg: impl FnMut(RegValue)) {
+    fn _set(self, mut set_reg: impl FnMut(RegValue)) {
         set_reg(u64::from(self))
     }
 }
 
 impl AbiTy for i32 {
-    const _REGS_REQUIRED_32: usize = <u32 as AbiTy>::_REGS_REQUIRED_32;
-    const _REGS_REQUIRED_64: usize = <u32 as AbiTy>::_REGS_REQUIRED_64;
+    const _REGS_REQUIRED: usize = <u32 as AbiTy>::_REGS_REQUIRED;
 
-    fn _get32(get_reg: impl FnMut() -> RegValue) -> Self {
-        <u32 as AbiTy>::_get32(get_reg) as i32
+    fn _get(get_reg: impl FnMut() -> RegValue) -> Self {
+        <u32 as AbiTy>::_get(get_reg) as i32
     }
 
-    fn _get64(get_reg: impl FnMut() -> RegValue) -> Self {
-        <u32 as AbiTy>::_get64(get_reg) as i32
-    }
-
-    fn _set32(self, set_reg: impl FnMut(RegValue)) {
-        (self as u32)._set32(set_reg)
-    }
-
-    fn _set64(self, set_reg: impl FnMut(RegValue)) {
-        i64::from(self)._set64(set_reg)
+    fn _set(self, set_reg: impl FnMut(RegValue)) {
+        i64::from(self)._set(set_reg)
     }
 }
 
 impl AbiTy for u64 {
-    const _REGS_REQUIRED_32: usize = 2;
-    const _REGS_REQUIRED_64: usize = 1;
+    const _REGS_REQUIRED: usize = 1;
 
-    fn _get32(mut get_reg: impl FnMut() -> RegValue) -> Self {
-        let value_lo = get_reg();
-        let value_hi = get_reg();
-        debug_assert!(value_lo <= u64::from(u32::MAX));
-        debug_assert!(value_hi <= u64::from(u32::MAX));
-        value_lo | (value_hi << 32)
-    }
-
-    fn _get64(mut get_reg: impl FnMut() -> RegValue) -> Self {
+    fn _get(mut get_reg: impl FnMut() -> RegValue) -> Self {
         get_reg()
     }
 
-    fn _set32(self, mut set_reg: impl FnMut(RegValue)) {
-        set_reg(self);
-        set_reg(self >> 32);
-    }
-
-    fn _set64(self, mut set_reg: impl FnMut(RegValue)) {
+    fn _set(self, mut set_reg: impl FnMut(RegValue)) {
         set_reg(self);
     }
 }
 
 impl AbiTy for i64 {
-    const _REGS_REQUIRED_32: usize = <u64 as AbiTy>::_REGS_REQUIRED_32;
-    const _REGS_REQUIRED_64: usize = <u64 as AbiTy>::_REGS_REQUIRED_64;
+    const _REGS_REQUIRED: usize = <u64 as AbiTy>::_REGS_REQUIRED;
 
-    fn _get32(get_reg: impl FnMut() -> RegValue) -> Self {
-        <u64 as AbiTy>::_get32(get_reg) as i64
+    fn _get(get_reg: impl FnMut() -> RegValue) -> Self {
+        <u64 as AbiTy>::_get(get_reg) as i64
     }
 
-    fn _get64(get_reg: impl FnMut() -> RegValue) -> Self {
-        <u64 as AbiTy>::_get64(get_reg) as i64
-    }
-
-    fn _set32(self, set_reg: impl FnMut(RegValue)) {
-        (self as u64)._set32(set_reg)
-    }
-
-    fn _set64(self, set_reg: impl FnMut(RegValue)) {
-        (self as u64)._set64(set_reg)
+    fn _set(self, set_reg: impl FnMut(RegValue)) {
+        (self as u64)._set(set_reg)
     }
 }
 
@@ -160,45 +107,28 @@ impl AbiTy for i64 {
 /// A type which can be returned from a host function.
 pub trait ReturnTy<UserError>: Sized + 'static {
     #[doc(hidden)]
-    const _REGS_REQUIRED_32: usize;
+    const _REGS_REQUIRED: usize;
 
     #[doc(hidden)]
-    const _REGS_REQUIRED_64: usize;
-
-    #[doc(hidden)]
-    fn _handle_return32(self, set_reg: impl FnMut(RegValue)) -> Result<(), UserError>;
-
-    #[doc(hidden)]
-    fn _handle_return64(self, set_reg: impl FnMut(RegValue)) -> Result<(), UserError>;
+    fn _handle_return(self, set_reg: impl FnMut(RegValue)) -> Result<(), UserError>;
 }
 
 impl<UserError, T> ReturnTy<UserError> for T
 where
     T: AbiTy,
 {
-    const _REGS_REQUIRED_32: usize = <T as AbiTy>::_REGS_REQUIRED_32;
-    const _REGS_REQUIRED_64: usize = <T as AbiTy>::_REGS_REQUIRED_64;
+    const _REGS_REQUIRED: usize = <T as AbiTy>::_REGS_REQUIRED;
 
-    fn _handle_return32(self, set_reg: impl FnMut(RegValue)) -> Result<(), UserError> {
-        self._set32(set_reg);
-        Ok(())
-    }
-
-    fn _handle_return64(self, set_reg: impl FnMut(RegValue)) -> Result<(), UserError> {
-        self._set64(set_reg);
+    fn _handle_return(self, set_reg: impl FnMut(RegValue)) -> Result<(), UserError> {
+        self._set(set_reg);
         Ok(())
     }
 }
 
 impl<UserError> ReturnTy<UserError> for () {
-    const _REGS_REQUIRED_32: usize = 0;
-    const _REGS_REQUIRED_64: usize = 0;
+    const _REGS_REQUIRED: usize = 0;
 
-    fn _handle_return32(self, _set_reg: impl FnMut(RegValue)) -> Result<(), UserError> {
-        Ok(())
-    }
-
-    fn _handle_return64(self, _set_reg: impl FnMut(RegValue)) -> Result<(), UserError> {
+    fn _handle_return(self, _set_reg: impl FnMut(RegValue)) -> Result<(), UserError> {
         Ok(())
     }
 }
@@ -208,14 +138,9 @@ where
     UserError: From<E>,
     E: 'static,
 {
-    const _REGS_REQUIRED_32: usize = 0;
-    const _REGS_REQUIRED_64: usize = 0;
+    const _REGS_REQUIRED: usize = 0;
 
-    fn _handle_return32(self, _set_reg: impl FnMut(RegValue)) -> Result<(), UserError> {
-        Ok(self?)
-    }
-
-    fn _handle_return64(self, _set_reg: impl FnMut(RegValue)) -> Result<(), UserError> {
+    fn _handle_return(self, _set_reg: impl FnMut(RegValue)) -> Result<(), UserError> {
         Ok(self?)
     }
 }
@@ -226,88 +151,44 @@ where
     E: 'static,
     T: AbiTy,
 {
-    const _REGS_REQUIRED_32: usize = <T as AbiTy>::_REGS_REQUIRED_32;
-    const _REGS_REQUIRED_64: usize = <T as AbiTy>::_REGS_REQUIRED_64;
+    const _REGS_REQUIRED: usize = <T as AbiTy>::_REGS_REQUIRED;
 
-    fn _handle_return32(self, set_reg: impl FnMut(RegValue)) -> Result<(), UserError> {
-        self?._set32(set_reg);
-        Ok(())
-    }
-
-    fn _handle_return64(self, set_reg: impl FnMut(RegValue)) -> Result<(), UserError> {
-        self?._set64(set_reg);
+    fn _handle_return(self, set_reg: impl FnMut(RegValue)) -> Result<(), UserError> {
+        self?._set(set_reg);
         Ok(())
     }
 }
 
 pub trait FuncArgs: Send {
     #[doc(hidden)]
-    const _REGS_REQUIRED_32: usize;
-    #[doc(hidden)]
-    const _REGS_REQUIRED_64: usize;
+    const _REGS_REQUIRED: usize;
 
     #[doc(hidden)]
-    fn _set(self, is_64_bit: bool, set_reg: impl FnMut(RegValue))
-    where
-        Self: Sized,
-    {
-        if is_64_bit {
-            self._set64(set_reg);
-        } else {
-            self._set32(set_reg);
-        }
-    }
-
-    #[doc(hidden)]
-    fn _set32(self, set_reg: impl FnMut(RegValue));
-
-    #[doc(hidden)]
-    fn _set64(self, set_reg: impl FnMut(RegValue));
+    fn _set(self, set_reg: impl FnMut(RegValue));
 }
 
 pub trait FuncResult: Send + Sized {
     #[doc(hidden)]
-    const _REGS_REQUIRED_32: usize;
-    #[doc(hidden)]
-    const _REGS_REQUIRED_64: usize;
+    const _REGS_REQUIRED: usize;
 
     #[doc(hidden)]
-    fn _get(is_64_bit: bool, get_reg: impl FnMut() -> RegValue) -> Self {
-        if is_64_bit {
-            Self::_get64(get_reg)
-        } else {
-            Self::_get32(get_reg)
-        }
-    }
-
-    #[doc(hidden)]
-    fn _get32(get_reg: impl FnMut() -> RegValue) -> Self;
-
-    #[doc(hidden)]
-    fn _get64(get_reg: impl FnMut() -> RegValue) -> Self;
+    fn _get(get_reg: impl FnMut() -> RegValue) -> Self;
 }
 
 impl FuncResult for () {
-    const _REGS_REQUIRED_32: usize = 0;
-    const _REGS_REQUIRED_64: usize = 0;
+    const _REGS_REQUIRED: usize = 0;
 
-    fn _get32(_: impl FnMut() -> RegValue) -> Self {}
-    fn _get64(_: impl FnMut() -> RegValue) -> Self {}
+    fn _get(_: impl FnMut() -> RegValue) -> Self {}
 }
 
 impl<T> FuncResult for T
 where
     T: AbiTy,
 {
-    const _REGS_REQUIRED_32: usize = <T as AbiTy>::_REGS_REQUIRED_32;
-    const _REGS_REQUIRED_64: usize = <T as AbiTy>::_REGS_REQUIRED_64;
+    const _REGS_REQUIRED: usize = <T as AbiTy>::_REGS_REQUIRED;
 
-    fn _get32(get_reg: impl FnMut() -> RegValue) -> Self {
-        <T as AbiTy>::_get32(get_reg)
-    }
-
-    fn _get64(get_reg: impl FnMut() -> RegValue) -> Self {
-        <T as AbiTy>::_get64(get_reg)
+    fn _get(get_reg: impl FnMut() -> RegValue) -> Self {
+        <T as AbiTy>::_get(get_reg)
     }
 }
 
@@ -319,7 +200,7 @@ macro_rules! impl_into_extern_fn {
         }
     };
 
-    (@call $is_64_bit:expr, $caller:expr, $callback:expr, ) => {{
+    (@call $caller:expr, $callback:expr, ) => {{
         ($callback)($caller)
     }};
 
@@ -333,131 +214,65 @@ macro_rules! impl_into_extern_fn {
         }
     }};
 
-    (@call $is_64_bit:expr, $caller:expr, $callback:expr, $a0:ident) => {{
+    (@call $caller:expr, $callback:expr, $a0:ident) => {{
         let cb = impl_into_extern_fn!(@get_reg $caller);
-        let a0;
-        if $is_64_bit {
-            impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED_64);
-            a0 = $a0::_get64(cb);
-        } else {
-            impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED_32);
-            a0 = $a0::_get32(cb);
-        }
+        impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED);
+        let a0 = $a0::_get(cb);
 
         ($callback)($caller, a0)
     }};
 
-    (@call $is_64_bit:expr, $caller:expr, $callback:expr, $a0:ident, $a1:ident) => {{
+    (@call $caller:expr, $callback:expr, $a0:ident, $a1:ident) => {{
         let mut cb = impl_into_extern_fn!(@get_reg $caller);
-        let a0;
-        let a1;
-        if $is_64_bit {
-            impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED_64 + $a1::_REGS_REQUIRED_64);
-            a0 = $a0::_get64(&mut cb);
-            a1 = $a1::_get64(cb);
-        } else {
-            impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED_32 + $a1::_REGS_REQUIRED_32);
-            a0 = $a0::_get32(&mut cb);
-            a1 = $a1::_get32(cb);
-        }
+        impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED + $a1::_REGS_REQUIRED);
+        let a0 = $a0::_get(&mut cb);
+        let a1 = $a1::_get(cb);
 
         ($callback)($caller, a0, a1)
     }};
 
-    (@call $is_64_bit:expr, $caller:expr, $callback:expr, $a0:ident, $a1:ident, $a2:ident) => {{
+    (@call $caller:expr, $callback:expr, $a0:ident, $a1:ident, $a2:ident) => {{
         let mut cb = impl_into_extern_fn!(@get_reg $caller);
-        let a0;
-        let a1;
-        let a2;
-        if $is_64_bit {
-            impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED_64 + $a1::_REGS_REQUIRED_64 + $a2::_REGS_REQUIRED_64);
-            a0 = $a0::_get64(&mut cb);
-            a1 = $a1::_get64(&mut cb);
-            a2 = $a2::_get64(cb);
-        } else {
-            impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED_32 + $a1::_REGS_REQUIRED_32 + $a2::_REGS_REQUIRED_32);
-            a0 = $a0::_get32(&mut cb);
-            a1 = $a1::_get32(&mut cb);
-            a2 = $a2::_get32(cb);
-        }
+        impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED + $a1::_REGS_REQUIRED + $a2::_REGS_REQUIRED);
+        let a0 = $a0::_get(&mut cb);
+        let a1 = $a1::_get(&mut cb);
+        let a2 = $a2::_get(cb);
 
         ($callback)($caller, a0, a1, a2)
     }};
 
-    (@call $is_64_bit:expr, $caller:expr, $callback:expr, $a0:ident, $a1:ident, $a2:ident, $a3:ident) => {{
+    (@call $caller:expr, $callback:expr, $a0:ident, $a1:ident, $a2:ident, $a3:ident) => {{
         let mut cb = impl_into_extern_fn!(@get_reg $caller);
-        let a0;
-        let a1;
-        let a2;
-        let a3;
-        if $is_64_bit {
-            impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED_64 + $a1::_REGS_REQUIRED_64 + $a2::_REGS_REQUIRED_64 + $a3::_REGS_REQUIRED_64);
-            a0 = $a0::_get64(&mut cb);
-            a1 = $a1::_get64(&mut cb);
-            a2 = $a2::_get64(&mut cb);
-            a3 = $a3::_get64(cb);
-        } else {
-            impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED_32 + $a1::_REGS_REQUIRED_32 + $a2::_REGS_REQUIRED_32 + $a3::_REGS_REQUIRED_32);
-            a0 = $a0::_get32(&mut cb);
-            a1 = $a1::_get32(&mut cb);
-            a2 = $a2::_get32(&mut cb);
-            a3 = $a3::_get32(cb);
-        }
+        impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED + $a1::_REGS_REQUIRED + $a2::_REGS_REQUIRED + $a3::_REGS_REQUIRED);
+        let a0 = $a0::_get(&mut cb);
+        let a1 = $a1::_get(&mut cb);
+        let a2 = $a2::_get(&mut cb);
+        let a3 = $a3::_get(cb);
 
         ($callback)($caller, a0, a1, a2, a3)
     }};
 
-    (@call $is_64_bit:expr, $caller:expr, $callback:expr, $a0:ident, $a1:ident, $a2:ident, $a3:ident, $a4:ident) => {{
+    (@call $caller:expr, $callback:expr, $a0:ident, $a1:ident, $a2:ident, $a3:ident, $a4:ident) => {{
         let mut cb = impl_into_extern_fn!(@get_reg $caller);
-        let a0;
-        let a1;
-        let a2;
-        let a3;
-        let a4;
-        if $is_64_bit {
-            impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED_64 + $a1::_REGS_REQUIRED_64 + $a2::_REGS_REQUIRED_64 + $a3::_REGS_REQUIRED_64 + $a4::_REGS_REQUIRED_64);
-            a0 = $a0::_get64(&mut cb);
-            a1 = $a1::_get64(&mut cb);
-            a2 = $a2::_get64(&mut cb);
-            a3 = $a3::_get64(&mut cb);
-            a4 = $a4::_get64(cb);
-        } else {
-            impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED_32 + $a1::_REGS_REQUIRED_32 + $a2::_REGS_REQUIRED_32 + $a3::_REGS_REQUIRED_32 + $a4::_REGS_REQUIRED_32);
-            a0 = $a0::_get32(&mut cb);
-            a1 = $a1::_get32(&mut cb);
-            a2 = $a2::_get32(&mut cb);
-            a3 = $a3::_get32(&mut cb);
-            a4 = $a4::_get32(cb);
-        }
+        impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED + $a1::_REGS_REQUIRED + $a2::_REGS_REQUIRED + $a3::_REGS_REQUIRED + $a4::_REGS_REQUIRED);
+        let a0 = $a0::_get(&mut cb);
+        let a1 = $a1::_get(&mut cb);
+        let a2 = $a2::_get(&mut cb);
+        let a3 = $a3::_get(&mut cb);
+        let a4 = $a4::_get(cb);
 
         ($callback)($caller, a0, a1, a2, a3, a4)
     }};
 
-    (@call $is_64_bit:expr, $caller:expr, $callback:expr, $a0:ident, $a1:ident, $a2:ident, $a3:ident, $a4:ident, $a5:ident) => {{
+    (@call $caller:expr, $callback:expr, $a0:ident, $a1:ident, $a2:ident, $a3:ident, $a4:ident, $a5:ident) => {{
         let mut cb = impl_into_extern_fn!(@get_reg $caller);
-        let a0;
-        let a1;
-        let a2;
-        let a3;
-        let a4;
-        let a5;
-        if $is_64_bit {
-            impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED_64 + $a1::_REGS_REQUIRED_64 + $a2::_REGS_REQUIRED_64 + $a3::_REGS_REQUIRED_64 + $a4::_REGS_REQUIRED_64 + $a5::_REGS_REQUIRED_64);
-            a0 = $a0::_get64(&mut cb);
-            a1 = $a1::_get64(&mut cb);
-            a2 = $a2::_get64(&mut cb);
-            a3 = $a3::_get64(&mut cb);
-            a4 = $a4::_get64(&mut cb);
-            a5 = $a5::_get64(cb);
-        } else {
-            impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED_32 + $a1::_REGS_REQUIRED_32 + $a2::_REGS_REQUIRED_32 + $a3::_REGS_REQUIRED_32 + $a4::_REGS_REQUIRED_32 + $a5::_REGS_REQUIRED_32);
-            a0 = $a0::_get32(&mut cb);
-            a1 = $a1::_get32(&mut cb);
-            a2 = $a2::_get32(&mut cb);
-            a3 = $a3::_get32(&mut cb);
-            a4 = $a4::_get32(&mut cb);
-            a5 = $a5::_get32(cb);
-        }
+        impl_into_extern_fn!(@check_reg_count $a0::_REGS_REQUIRED + $a1::_REGS_REQUIRED + $a2::_REGS_REQUIRED + $a3::_REGS_REQUIRED + $a4::_REGS_REQUIRED + $a5::_REGS_REQUIRED);
+        let a0 = $a0::_get(&mut cb);
+        let a1 = $a1::_get(&mut cb);
+        let a2 = $a2::_get(&mut cb);
+        let a3 = $a3::_get(&mut cb);
+        let a4 = $a4::_get(&mut cb);
+        let a5 = $a5::_get(cb);
 
         ($callback)($caller, a0, a1, a2, a3, a4, a5)
     }};
@@ -470,7 +285,6 @@ macro_rules! impl_into_extern_fn {
             R: ReturnTy<UserError>,
         {
             fn call(&self, user_data: &mut UserData, instance: &mut RawInstance) -> Result<(), UserError> {
-                let is_64_bit = instance.module().blob().is_64_bit();
                 let result = {
                     #[allow(unused_mut)]
                     let mut caller = Caller {
@@ -478,7 +292,7 @@ macro_rules! impl_into_extern_fn {
                         instance
                     };
 
-                    impl_into_extern_fn!(@call is_64_bit, caller, self.0, $($args),*)
+                    impl_into_extern_fn!(@call caller, self.0, $($args),*)
                 };
 
                 let set_reg = {
@@ -490,11 +304,7 @@ macro_rules! impl_into_extern_fn {
                     }
                 };
 
-                if is_64_bit {
-                    result._handle_return64(set_reg)
-                } else {
-                    result._handle_return32(set_reg)
-                }
+                result._handle_return(set_reg)
             }
         }
 
@@ -504,8 +314,7 @@ macro_rules! impl_into_extern_fn {
             $($args: AbiTy,)*
             R: ReturnTy<UserError>,
         {
-            const _REGS_REQUIRED_32: usize = 0 $(+ $args::_REGS_REQUIRED_32)*;
-            const _REGS_REQUIRED_64: usize = 0 $(+ $args::_REGS_REQUIRED_64)*;
+            const _REGS_REQUIRED: usize = 0 $(+ $args::_REGS_REQUIRED)*;
 
             fn _into_extern_fn(self) -> CallFnArc<UserData, UserError> {
                 #[allow(non_snake_case)]
@@ -522,8 +331,7 @@ macro_rules! impl_into_extern_fn {
             $($args: AbiTy,)*
             R: ReturnTy<UserError>,
         {
-            const _REGS_REQUIRED_32: usize = 0 $(+ $args::_REGS_REQUIRED_32)*;
-            const _REGS_REQUIRED_64: usize = 0 $(+ $args::_REGS_REQUIRED_64)*;
+            const _REGS_REQUIRED: usize = 0 $(+ $args::_REGS_REQUIRED)*;
 
             fn _into_extern_fn(self) -> CallFnArc<UserData, UserError> {
                 CallFnArc(Arc::new((self, UnsafePhantomData(PhantomData::<(R, $($args),*)>))))
@@ -531,23 +339,14 @@ macro_rules! impl_into_extern_fn {
         }
 
         impl<$($args: Send + AbiTy,)*> FuncArgs for ($($args,)*) {
-            const _REGS_REQUIRED_32: usize = 0 $(+ $args::_REGS_REQUIRED_32)*;
-            const _REGS_REQUIRED_64: usize = 0 $(+ $args::_REGS_REQUIRED_64)*;
+            const _REGS_REQUIRED: usize = 0 $(+ $args::_REGS_REQUIRED)*;
 
             #[allow(unused_mut)]
             #[allow(unused_variables)]
             #[allow(non_snake_case)]
-            fn _set32(self, mut set_reg: impl FnMut(RegValue)) {
+            fn _set(self, mut set_reg: impl FnMut(RegValue)) {
                 let ($($args,)*) = self;
-                $($args._set32(&mut set_reg);)*
-            }
-
-            #[allow(unused_mut)]
-            #[allow(unused_variables)]
-            #[allow(non_snake_case)]
-            fn _set64(self, mut set_reg: impl FnMut(RegValue)) {
-                let ($($args,)*) = self;
-                $($args._set64(&mut set_reg);)*
+                $($args._set(&mut set_reg);)*
             }
         }
     };

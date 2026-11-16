@@ -81,28 +81,13 @@ pub const fn rem64(lhs: i64, rhs: i64) -> i64 {
 }
 
 #[inline]
-pub const fn mulh(lhs: i32, rhs: i32) -> i32 {
-    ((lhs as i64).wrapping_mul(rhs as i64) >> 32) as i32
-}
-
-#[inline]
 pub const fn mulh64(lhs: i64, rhs: i64) -> i64 {
     ((lhs as i128).wrapping_mul(rhs as i128) >> 64) as i64
 }
 
 #[inline]
-pub const fn mulhsu(lhs: i32, rhs: u32) -> i32 {
-    ((lhs as i64).wrapping_mul(rhs as i64) >> 32) as i32
-}
-
-#[inline]
 pub const fn mulhsu64(lhs: i64, rhs: u64) -> i64 {
     ((lhs as i128).wrapping_mul(rhs as i128) >> 64) as i64
-}
-
-#[inline]
-pub const fn mulhu(lhs: u32, rhs: u32) -> u32 {
-    ((lhs as i64).wrapping_mul(rhs as i64) >> 32) as u32
 }
 
 #[inline]

@@ -285,7 +285,7 @@ pub fn polkavm_import(attributes: ImportBlockAttributes, input: syn::ItemForeign
                 tokens.push(quote! {
                     #(#outer_cfg_attributes)*
                     #(#inner_cfg_attributes)*
-                    #[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+                    #[cfg(all(target_arch = "riscv64", target_feature = "e"))]
                     #[link_section = ".text.polkavm_import"]
                     #vis unsafe fn #ident(#args) #output {
                         const _: () = {
@@ -312,30 +312,6 @@ pub fn polkavm_import(attributes: ImportBlockAttributes, input: syn::ItemForeign
                         };
 
                         struct Sym;
-
-                        #[cfg(target_arch = "riscv32")]
-                        impl #abi_path::private::ImportSymbol for Sym {
-                            extern fn trampoline(a0: u32, a1: u32, a2: u32, a3: u32, a4: u32, a5: u32) -> #abi_path::private::PackedReturnTy {
-                                let mut out0: u32;
-                                let mut out1: u32;
-                                unsafe {
-                                    core::arch::asm!(
-                                        ".insn r 0xb, 0, 0, zero, zero, zero\n",
-                                        "auipc zero, %pcrel_hi({metadata})\n",
-                                        in("a0") a0,
-                                        in("a1") a1,
-                                        in("a2") a2,
-                                        in("a3") a3,
-                                        in("a4") a4,
-                                        in("a5") a5,
-                                        lateout("a0") out0,
-                                        lateout("a1") out1,
-                                        metadata = sym METADATA,
-                                    );
-                                }
-                                #abi_path::private::PackedReturnTy(out0, out1)
-                            }
-                        }
 
                         #[cfg(target_arch = "riscv64")]
                         impl #abi_path::private::ImportSymbol for Sym {
@@ -373,7 +349,7 @@ pub fn polkavm_import(attributes: ImportBlockAttributes, input: syn::ItemForeign
     }
 
     tokens.push(quote! {
-        #[cfg(not(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e")))]
+        #[cfg(not(all(target_arch = "riscv64", target_feature = "e")))]
         #(#outer_cfg_attributes)*
         extern "C" {
             #(#passthrough_tokens)*
