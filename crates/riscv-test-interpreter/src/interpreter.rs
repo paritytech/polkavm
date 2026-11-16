@@ -264,7 +264,7 @@ impl Interpreter {
     }
 
     #[allow(clippy::needless_pass_by_ref_mut)]
-    fn execute(&mut self, _instruction: Inst, _program_counter: u64) -> Result<(), Exception> {
+    fn execute(&mut self, _instruction: Inst, _instruction_address: u64) -> Result<(), Exception> {
         todo!()
     }
 }

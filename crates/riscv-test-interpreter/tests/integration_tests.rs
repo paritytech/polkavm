@@ -13,9 +13,9 @@ const STOP_ADDRESS: u64 = 0xffff0000;
 const REGION_ADDRESS: u64 = 0x1000;
 const REGION_SIZE: u64 = 0x100;
 const CORPUS_TEXT_ADDRESS: u64 = 0x10000;
-const NOP: u32 = 0x00000013;
 const INSTRUCTION_BYTE_LENGTH: u64 = 4;
 const COMPRESSED_INSTRUCTION_BYTE_LENGTH: u64 = 2;
+const NOP: u32 = 0x00000013;
 const EXECUTE: MemoryProtection = MemoryProtection {
     read: false,
     write: false,
@@ -45,7 +45,7 @@ fn memory_layout(interpreter: &Interpreter) -> Vec<(u64, u64, MemoryProtection)>
         .collect()
 }
 
-fn run_program(code: &[u8], max_steps: u64) -> (StopReason, Interpreter) {
+fn run(code: &[u8], max_steps: u64) -> (StopReason, Interpreter) {
     let mut interpreter = Interpreter::new();
     map_region_with_data(&mut interpreter, CODE_ADDRESS, code, EXECUTE);
     interpreter.set_stop_address(STOP_ADDRESS);
@@ -294,7 +294,7 @@ fn run_with_no_mapped_executable_region_faults() {
 
 #[test]
 fn run_truncated_32bit_instruction_faults() {
-    let (stop_reason, interpreter) = run_program(&NOP.to_le_bytes()[..COMPRESSED_INSTRUCTION_BYTE_LENGTH as usize], 1);
+    let (stop_reason, interpreter) = run(&NOP.to_le_bytes()[..COMPRESSED_INSTRUCTION_BYTE_LENGTH as usize], 1);
     assert_eq!(stop_reason, StopReason::Trap(Exception::InstructionAccessFault));
     assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
 }
@@ -302,7 +302,7 @@ fn run_truncated_32bit_instruction_faults() {
 #[test]
 fn run_undecodable_32bit_word_is_illegal_instruction() {
     const EBREAK: u32 = 0x00100073;
-    let (stop_reason, interpreter) = run_program(&EBREAK.to_le_bytes(), 1);
+    let (stop_reason, interpreter) = run(&EBREAK.to_le_bytes(), 1);
     assert_eq!(stop_reason, StopReason::Trap(Exception::IllegalInstruction(EBREAK)));
     assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
 }
@@ -310,7 +310,7 @@ fn run_undecodable_32bit_word_is_illegal_instruction() {
 #[test]
 fn run_undecodable_compressed_parcel_is_illegal_instruction() {
     const COMPRESSED_EBREAK: u16 = 0x9002;
-    let (stop_reason, interpreter) = run_program(&COMPRESSED_EBREAK.to_le_bytes(), 1);
+    let (stop_reason, interpreter) = run(&COMPRESSED_EBREAK.to_le_bytes(), 1);
     assert_eq!(
         stop_reason,
         StopReason::Trap(Exception::IllegalInstruction(u32::from(COMPRESSED_EBREAK)))
