@@ -1,4 +1,4 @@
-[build]
+[target.'cfg(not(all(target_arch = "aarch64", target_vendor = "apple")))']
 rustflags = [
     "-C", "target-cpu=native",
 ]
