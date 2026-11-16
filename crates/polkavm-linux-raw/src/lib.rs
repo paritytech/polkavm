@@ -2334,7 +2334,7 @@ pub fn sendfd(socket: FdRef, fd: FdRef) -> Result<(), Error> {
     let mut header = msghdr {
         msg_name: core::ptr::null_mut(),
         msg_namelen: 0,
-        msg_iov: &mut iov,
+        msg_iov: core::ptr::addr_of_mut!(iov),
         msg_iovlen: 1,
         msg_control: buffer.as_mut_ptr().cast::<c_void>(),
         msg_controllen: core::mem::size_of_val(&buffer),
@@ -2349,7 +2349,7 @@ pub fn sendfd(socket: FdRef, fd: FdRef) -> Result<(), Error> {
 
     #[allow(clippy::cast_ptr_alignment)]
     unsafe {
-        core::ptr::write_unaligned(CMSG_FIRSTHDR(&header), control_header);
+        core::ptr::write_unaligned(CMSG_FIRSTHDR(core::ptr::addr_of!(header)), control_header);
         core::ptr::write_unaligned(CMSG_DATA(buffer.as_mut_ptr().cast::<cmsghdr>()).cast::<c_int>(), fd.raw());
     }
 
@@ -2371,7 +2371,7 @@ pub fn recvfd(socket: FdRef) -> Result<Fd, Error> {
     let mut header = msghdr {
         msg_name: core::ptr::null_mut(),
         msg_namelen: 0,
-        msg_iov: &mut iov,
+        msg_iov: core::ptr::addr_of_mut!(iov),
         msg_iovlen: 1,
         msg_control: buffer.as_mut_ptr().cast::<c_void>(),
         msg_controllen: core::mem::size_of_val(&buffer),

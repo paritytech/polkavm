@@ -54,7 +54,6 @@ struct AttributeParser<R: gimli::Reader> {
     call_column: Option<u32>,
     is_declaration: bool,
     recursion_limit: usize,
-    is_64bit: bool,
 }
 
 fn parse_ranges<R>(
@@ -64,7 +63,6 @@ fn parse_ranges<R>(
     mut base: Option<SectionTarget>,
     ranges_offset: gimli::RangeListsOffset<<R as gimli::Reader>::Offset>,
     mut callback: impl FnMut(Source),
-    is_64bit: bool,
 ) -> Result<(), ProgramFromElfError>
 where
     R: gimli::Reader,
@@ -96,8 +94,8 @@ where
             offset: offset_end.into_u64(),
         };
 
-        if let Some((start_section, start_range)) = try_fetch_size_relocation(relocations, relocation_start, is_64bit)? {
-            let (end_section, end_range) = fetch_size_relocation(relocations, relocation_end, is_64bit)?;
+        if let Some((start_section, start_range)) = try_fetch_size_relocation(relocations, relocation_start)? {
+            let (end_section, end_range) = fetch_size_relocation(relocations, relocation_end)?;
 
             if start_section != end_section {
                 return Err(ProgramFromElfError::other(
@@ -147,7 +145,7 @@ where
                 gimli::constants::DW_RLE_startx_length => {
                     let begin = gimli::DebugAddrIndex(reader.read_uleb128().and_then(R::Offset::from_u64)?);
                     let length = reader.read_uleb128()?;
-                    if let Some(target) = resolve_debug_addr_index(sections.debug_addr, relocations, unit, begin, is_64bit)? {
+                    if let Some(target) = resolve_debug_addr_index(sections.debug_addr, relocations, unit, begin)? {
                         let source = Source {
                             section_index: target.section_index,
                             offset_range: (target.offset..target.offset + length).into(),
@@ -157,7 +155,7 @@ where
                 }
                 gimli::constants::DW_RLE_base_addressx => {
                     let begin = gimli::DebugAddrIndex(reader.read_uleb128().and_then(R::Offset::from_u64)?);
-                    base = resolve_debug_addr_index(sections.debug_addr, relocations, unit, begin, is_64bit)?;
+                    base = resolve_debug_addr_index(sections.debug_addr, relocations, unit, begin)?;
                 }
                 _ => {
                     return Err(ProgramFromElfError::other(format!(
@@ -172,7 +170,7 @@ where
 }
 
 impl<R: gimli::Reader> AttributeParser<R> {
-    fn new(depth: usize, is_64bit: bool) -> Self {
+    fn new(depth: usize) -> Self {
         AttributeParser {
             depth,
             low_pc: None,
@@ -189,7 +187,6 @@ impl<R: gimli::Reader> AttributeParser<R> {
             call_column: None,
             is_declaration: false,
             recursion_limit: 32,
-            is_64bit,
         }
     }
 
@@ -201,15 +198,7 @@ impl<R: gimli::Reader> AttributeParser<R> {
         mut callback: impl FnMut(Source),
     ) -> Result<(), ProgramFromElfError> {
         if let Some(ranges_offset) = self.ranges_offset {
-            parse_ranges::<R>(
-                sections,
-                relocations,
-                &unit.raw_unit,
-                unit.low_pc,
-                ranges_offset,
-                callback,
-                self.is_64bit,
-            )?;
+            parse_ranges::<R>(sections, relocations, &unit.raw_unit, unit.low_pc, ranges_offset, callback)?;
         } else if let (Some(low_pc), Some(high_pc)) = (self.low_pc, self.high_pc) {
             if low_pc.section_index != high_pc.section_index {
                 return Err(ProgramFromElfError::other(
@@ -297,7 +286,7 @@ impl<R: gimli::Reader> AttributeParser<R> {
                         offset: offset.into_u64(),
                     };
 
-                    if let Some(target) = try_fetch_relocation(relocations, relocation_target, self.is_64bit)? {
+                    if let Some(target) = try_fetch_relocation(relocations, relocation_target)? {
                         log::trace!("  = {target} (address)");
                         self.low_pc = Some(target);
                     }
@@ -308,7 +297,7 @@ impl<R: gimli::Reader> AttributeParser<R> {
                     value: gimli::AttributeValue::DebugAddrIndex(index),
                     ..
                 } => {
-                    self.low_pc = resolve_debug_addr_index(sections.debug_addr, relocations, &unit.raw_unit, index, self.is_64bit)?;
+                    self.low_pc = resolve_debug_addr_index(sections.debug_addr, relocations, &unit.raw_unit, index)?;
                     if let Some(value) = self.low_pc {
                         log::trace!("  = {value} ({index:?})");
                     } else {
@@ -332,7 +321,7 @@ impl<R: gimli::Reader> AttributeParser<R> {
                         offset: offset.into_u64(),
                     };
 
-                    if let Some(target) = try_fetch_relocation(relocations, relocation_target, self.is_64bit)? {
+                    if let Some(target) = try_fetch_relocation(relocations, relocation_target)? {
                         log::trace!("  = {target} (address)");
                         self.high_pc = Some(target);
                     }
@@ -343,7 +332,7 @@ impl<R: gimli::Reader> AttributeParser<R> {
                     value: gimli::AttributeValue::DebugAddrIndex(index),
                     ..
                 } => {
-                    self.high_pc = resolve_debug_addr_index(sections.debug_addr, relocations, &unit.raw_unit, index, self.is_64bit)?;
+                    self.high_pc = resolve_debug_addr_index(sections.debug_addr, relocations, &unit.raw_unit, index)?;
                     if let Some(value) = self.high_pc {
                         log::trace!("  = {value} ({index:?})");
                     } else {
@@ -540,7 +529,7 @@ impl<R: gimli::Reader> AttributeParser<R> {
 
         let (target_unit, target_offset) = find_unit(units, value)?;
         if let Some(target_offset) = target_offset {
-            let mut parser = AttributeParser::new(self.depth + 1, self.is_64bit);
+            let mut parser = AttributeParser::new(self.depth + 1);
             parser.recursion_limit = self.recursion_limit - 1;
             parser.try_match(sections, relocations, dwarf, target_unit, target_offset)?;
             Ok(Some((target_unit, parser)))
@@ -585,7 +574,6 @@ struct Sections<'a> {
 fn try_fetch_relocation(
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     relocation_target: SectionTarget,
-    is_64bit: bool,
 ) -> Result<Option<SectionTarget>, ProgramFromElfError> {
     let Some(relocation) = relocations.get(&relocation_target) else {
         return Ok(None);
@@ -595,7 +583,7 @@ fn try_fetch_relocation(
         RelocationKind::Abs {
             target,
             size: RelocationSize::U64,
-        } if is_64bit => target,
+        } => target,
         RelocationKind::Abs {
             target,
             size: RelocationSize::U32,
@@ -630,7 +618,6 @@ fn try_fetch_size_from_offset_relocation(
 fn try_fetch_size_relocation(
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     relocation_target: SectionTarget,
-    is_64bit: bool,
 ) -> Result<Option<(SectionIndex, AddressRange)>, ProgramFromElfError> {
     let Some(relocation) = relocations.get(&relocation_target) else {
         return Ok(None);
@@ -652,7 +639,7 @@ fn try_fetch_size_relocation(
         RelocationKind::Abs {
             target,
             size: RelocationSize::U64,
-        } if is_64bit => Ok(Some((target.section_index, (target.offset..target.offset).into()))),
+        } => Ok(Some((target.section_index, (target.offset..target.offset).into()))),
         _ => Err(ProgramFromElfError::other(format!(
             "failed to process DWARF: unexpected relocation at {relocation_target}: {relocation:?}"
         ))),
@@ -662,9 +649,8 @@ fn try_fetch_size_relocation(
 fn fetch_size_relocation(
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     relocation_target: SectionTarget,
-    is_64bit: bool,
 ) -> Result<(SectionIndex, AddressRange), ProgramFromElfError> {
-    if let Some(target) = try_fetch_size_relocation(relocations, relocation_target, is_64bit)? {
+    if let Some(target) = try_fetch_size_relocation(relocations, relocation_target)? {
         Ok(target)
     } else {
         Err(ProgramFromElfError::other(format!(
@@ -678,7 +664,6 @@ fn resolve_debug_addr_index<R>(
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     unit: &gimli::Unit<R>,
     index: gimli::DebugAddrIndex<R::Offset>,
-    is_64bit: bool,
 ) -> Result<Option<SectionTarget>, ProgramFromElfError>
 where
     R: gimli::Reader,
@@ -691,7 +676,7 @@ where
             offset,
         };
 
-        try_fetch_relocation(relocations, relocation_target, is_64bit)
+        try_fetch_relocation(relocations, relocation_target)
     } else {
         Err(ProgramFromElfError::other("failed to process DWARF: missing '.debug_addr' section"))
     }
@@ -803,7 +788,6 @@ fn extract_lines<R>(
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     section_map: &RangeMap<SectionIndex>,
     unit: &Unit<ReaderWrapper<R>>,
-    is_64bit: bool,
 ) -> Result<Vec<LineEntry>, ProgramFromElfError>
 where
     R: gimli::Reader,
@@ -867,8 +851,7 @@ where
                         offset: *tracker.list().last().unwrap(),
                     };
 
-                    if let Some((target_section_index, target_range)) = try_fetch_size_relocation(relocations, relocation_target, is_64bit)?
-                    {
+                    if let Some((target_section_index, target_range)) = try_fetch_size_relocation(relocations, relocation_target)? {
                         target = Some(SectionTarget {
                             section_index: target_section_index,
                             offset: target_range.end,
@@ -886,7 +869,7 @@ where
                         offset: *tracker.list().last().unwrap(),
                     };
 
-                    target = try_fetch_relocation(relocations, relocation_target, is_64bit)?;
+                    target = try_fetch_relocation(relocations, relocation_target)?;
                 }
 
                 LineInstruction::FixedAddPc(..) => {
@@ -895,13 +878,12 @@ where
                         offset: *tracker.list().last().unwrap(),
                     };
 
-                    target =
-                        try_fetch_size_relocation(relocations, relocation_target, is_64bit)?.map(|(target_section_index, target_range)| {
-                            SectionTarget {
-                                section_index: target_section_index,
-                                offset: target_range.end,
-                            }
-                        });
+                    target = try_fetch_size_relocation(relocations, relocation_target)?.map(|(target_section_index, target_range)| {
+                        SectionTarget {
+                            section_index: target_section_index,
+                            offset: target_range.end,
+                        }
+                    });
                 }
             }
 
@@ -1079,7 +1061,6 @@ where
     namespace_buffer: Vec<String>,
     subprograms: Vec<SubProgram<R>>,
     strings: &'a mut StringCache,
-    is_64bit: bool,
 }
 
 impl<'a, R> DwarfWalker<'a, R>
@@ -1115,7 +1096,7 @@ where
             subprograms_for_unit.push(subprograms);
 
             let lines = if let Some(debug_line) = self.sections.debug_line {
-                extract_lines(debug_line.index(), self.relocations, self.section_map, unit, self.is_64bit)?
+                extract_lines(debug_line.index(), self.relocations, self.section_map, unit)?
             } else {
                 Default::default()
             };
@@ -1514,7 +1495,7 @@ where
                     ));
                 }
 
-                let mut parser = AttributeParser::new(self.depth + 1, self.is_64bit);
+                let mut parser = AttributeParser::new(self.depth + 1);
                 for pair in iter_attributes(self.dwarf, &unit.raw_unit, node_entry.offset())? {
                     let (name, value) = pair?;
                     parser.try_match_attribute(&self.sections, self.relocations, self.dwarf, unit, name, value)?;
@@ -1591,7 +1572,7 @@ where
                 current_subprogram = Some(subprogram);
             }
             gimli::DW_TAG_inlined_subroutine => {
-                let mut parser = AttributeParser::new(self.depth + 1, self.is_64bit);
+                let mut parser = AttributeParser::new(self.depth + 1);
                 for pair in iter_attributes(self.dwarf, &unit.raw_unit, node_entry.offset())? {
                     let (name, value) = pair?;
                     parser.try_match_attribute(&self.sections, self.relocations, self.dwarf, unit, name, value)?;
@@ -2286,7 +2267,6 @@ fn extract_symbolic_low_pc<R>(
     relocations: &BTreeMap<SectionTarget, RelocationKind>,
     section_map: &RangeMap<SectionIndex>,
     unit: &gimli::Unit<R>,
-    is_64bit: bool,
 ) -> Result<Option<SectionTarget>, ProgramFromElfError>
 where
     R: gimli::Reader,
@@ -2309,7 +2289,7 @@ where
                 ..
             } => {
                 let index = gimli::DebugAddrIndex(index);
-                return resolve_debug_addr_index(sections.debug_addr, relocations, unit, index, is_64bit);
+                return resolve_debug_addr_index(sections.debug_addr, relocations, unit, index);
             }
             AttributeValue {
                 value: gimli::AttributeValue::Addr(address),
@@ -2344,7 +2324,7 @@ where
                     RelocationKind::Abs {
                         target,
                         size: RelocationSize::U64,
-                    } if is_64bit => target,
+                    } => target,
                     RelocationKind::Abs {
                         target,
                         size: RelocationSize::U32,
@@ -2380,8 +2360,6 @@ pub(crate) fn load_dwarf(
     let Some(debug_info) = elf.section_by_name(".debug_info").next() else {
         return Ok(Default::default());
     };
-
-    let is_64bit = elf.is_64();
 
     let sections = Sections {
         debug_info,
@@ -2431,7 +2409,7 @@ pub(crate) fn load_dwarf(
             };
 
             log::trace!("Processing unit: {offset:?}");
-            let low_pc = extract_symbolic_low_pc(&dwarf, &sections, relocations, section_map, &unit, is_64bit)?;
+            let low_pc = extract_symbolic_low_pc(&dwarf, &sections, relocations, section_map, &unit)?;
             let paths = extract_paths(&dwarf, string_cache, &unit)?;
             units.push(Unit {
                 low_pc,
@@ -2455,7 +2433,6 @@ pub(crate) fn load_dwarf(
         units: &units[..],
         subprograms: Default::default(),
         strings: string_cache,
-        is_64bit,
     };
 
     let location_map = walker.run()?;

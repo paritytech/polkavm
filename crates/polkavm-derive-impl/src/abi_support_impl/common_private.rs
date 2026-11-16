@@ -106,45 +106,35 @@ pub trait SplitTuple<Target> {
     fn split_tuple(tuple: Self) -> (Target, Self::Remainder);
 }
 
-#[cfg(all(target_arch = "riscv32", target_feature = "e"))]
-pub type Reg = u32;
-
 #[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 pub type Reg = u64;
 
-#[cfg(all(target_arch = "riscv32", target_feature = "e"))]
-pub type ReturnTy = u64;
-
 #[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 pub type ReturnTy = u128;
-
-#[cfg(all(target_arch = "riscv32", target_feature = "e"))]
-#[repr(C, packed(1))]
-pub struct PackedReturnTy(pub u32, pub u32);
 
 #[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 #[repr(C, packed(1))]
 pub struct PackedReturnTy(pub u64, pub u64);
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 #[inline(always)]
 pub extern fn pack_return_ty(a0: Reg, a1: Reg) -> ReturnTy {
     const SHIFT: usize = core::mem::size_of::<Reg>() * 8;
     (a0 as ReturnTy) | ((a1 as ReturnTy) << SHIFT)
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 pub trait IntoTuple {
     fn into_tuple(a0: Reg, a1: Reg) -> Self;
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl IntoTuple for () {
     #[inline(always)]
     fn into_tuple(_: Reg, _: Reg) -> Self {}
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl IntoTuple for (Reg,) {
     #[inline(always)]
     fn into_tuple(a0: Reg, _: Reg) -> Self {
@@ -152,7 +142,7 @@ impl IntoTuple for (Reg,) {
     }
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl IntoTuple for (Reg, Reg) {
     #[inline(always)]
     fn into_tuple(a0: Reg, a1: Reg) -> Self {
@@ -160,17 +150,17 @@ impl IntoTuple for (Reg, Reg) {
     }
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 pub trait ImportSymbol {
     extern fn trampoline(a0: Reg, a1: Reg, a2: Reg, a3: Reg, a4: Reg, a5: Reg) -> PackedReturnTy;
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 pub trait CallImport {
     fn call_import<F>(self) -> (Reg, Reg) where F: ImportSymbol;
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl CallImport for () {
     #[inline(always)]
     fn call_import<F>(mut self) -> (Reg, Reg) where F: ImportSymbol {
@@ -198,7 +188,7 @@ impl CallImport for () {
     }
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl CallImport for (Reg,) {
     #[inline(always)]
     fn call_import<F>(mut self) -> (Reg, Reg) where F: ImportSymbol {
@@ -225,7 +215,7 @@ impl CallImport for (Reg,) {
     }
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl CallImport for (Reg, Reg) {
     #[inline(always)]
     fn call_import<F>(mut self) -> (Reg, Reg) where F: ImportSymbol {
@@ -250,7 +240,7 @@ impl CallImport for (Reg, Reg) {
     }
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl CallImport for (Reg, Reg, Reg) {
     #[inline(always)]
     fn call_import<F>(mut self) -> (Reg, Reg) where F: ImportSymbol {
@@ -275,7 +265,7 @@ impl CallImport for (Reg, Reg, Reg) {
     }
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl CallImport for (Reg, Reg, Reg, Reg) {
     #[inline(always)]
     fn call_import<F>(mut self) -> (Reg, Reg) where F: ImportSymbol {
@@ -300,7 +290,7 @@ impl CallImport for (Reg, Reg, Reg, Reg) {
     }
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl CallImport for (Reg, Reg, Reg, Reg, Reg) {
     #[inline(always)]
     fn call_import<F>(mut self) -> (Reg, Reg) where F: ImportSymbol {
@@ -325,7 +315,7 @@ impl CallImport for (Reg, Reg, Reg, Reg, Reg) {
     }
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl CallImport for (Reg, Reg, Reg, Reg, Reg, Reg) {
     #[inline(always)]
     fn call_import<F>(mut self) -> (Reg, Reg) where F: ImportSymbol {
@@ -350,12 +340,12 @@ impl CallImport for (Reg, Reg, Reg, Reg, Reg, Reg) {
     }
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 pub trait PackReturnTy {
     fn pack_return_ty(value: Self) -> ReturnTy;
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl PackReturnTy for () {
     #[inline(always)]
     fn pack_return_ty(_: Self) -> ReturnTy {
@@ -373,7 +363,7 @@ impl PackReturnTy for () {
     }
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl PackReturnTy for (Reg,) {
     #[inline(always)]
     fn pack_return_ty(value: Self) -> ReturnTy {
@@ -391,7 +381,7 @@ impl PackReturnTy for (Reg,) {
     }
 }
 
-#[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+#[cfg(all(target_arch = "riscv64", target_feature = "e"))]
 impl PackReturnTy for (Reg, Reg) {
     #[inline(always)]
     fn pack_return_ty(value: Self) -> ReturnTy {

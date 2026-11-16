@@ -6,7 +6,7 @@ use polkavm_assembler::{Assembler, Label};
 use polkavm_common::abi::VM_CODE_ADDRESS_ALIGNMENT;
 use polkavm_common::cast::cast;
 use polkavm_common::program::{scan_is_jump_target_valid, InstructionSetKind, JumpTable, ProgramCounter, ProgramExport, RawReg};
-use polkavm_common::utils::{Bitness, BitnessT, GasVisitorT};
+use polkavm_common::utils::GasVisitorT;
 use polkavm_common::zygote::{JUMP_TABLE_INVALID_ADDRESS, VM_COMPILER_MAXIMUM_INSTRUCTION_LENGTH};
 
 use crate::error::Error;
@@ -15,7 +15,7 @@ use crate::api::CompileError;
 use crate::config::{CustomCodegen, GasMeteringKind, ModuleConfig, SandboxKind};
 use crate::mutex::Mutex;
 use crate::sandbox::{Sandbox, SandboxInit, SandboxProgram};
-use crate::utils::{FlatMap, GuestInit};
+use crate::utils::GuestInit;
 
 #[cfg(target_arch = "x86_64")]
 mod amd64;
@@ -31,9 +31,53 @@ const END_BASIC_BLOCK_UNCONDITIONAL: usize = 1;
 const END_BASIC_BLOCK_CONDITIONAL: usize = 2;
 const END_BASIC_BLOCK_INVALID: usize = 3;
 
+struct FlatMap<T> {
+    inner: Vec<Option<T>>,
+}
+
+impl<T> FlatMap<T>
+where
+    T: Copy,
+{
+    #[inline]
+    fn new(capacity: u32) -> Self {
+        let mut inner = Vec::new();
+        inner.reserve_exact(capacity as usize);
+        inner.resize_with(capacity as usize, || None);
+        Self { inner }
+    }
+
+    #[inline]
+    fn new_reusing_memory(mut memory: Self, capacity: u32) -> Self {
+        memory.inner.clear();
+        memory.inner.resize_with(capacity as usize, || None);
+        memory
+    }
+
+    #[inline]
+    fn get(&self, key: u32) -> Option<T> {
+        self.inner.get(key as usize).and_then(|value| *value)
+    }
+
+    #[inline]
+    fn len(&self) -> u32 {
+        self.inner.len() as u32
+    }
+
+    #[inline]
+    fn insert(&mut self, key: u32, value: T) {
+        self.inner[key as usize] = Some(value);
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.inner.clear();
+    }
+}
+
 struct CachePerCompilation {
     assembler: Assembler,
-    program_counter_to_label: FlatMap<Label, false>,
+    program_counter_to_label: FlatMap<Label>,
     gas_cost_for_basic_block: Vec<u32>,
     export_to_label: HashMap<u32, Label>,
 }
@@ -53,10 +97,9 @@ struct Cache {
 #[derive(Clone, Default)]
 pub(crate) struct CompilerCache(Arc<Mutex<Cache>>);
 
-pub(crate) struct CompilerVisitor<'a, S, B, G>
+pub(crate) struct CompilerVisitor<'a, S, G>
 where
     S: Sandbox,
-    B: BitnessT,
     G: GasVisitorT,
 {
     init: GuestInit<'a>,
@@ -64,7 +107,7 @@ where
     code: &'a [u8],
     bitmask: &'a [u8],
     asm: Assembler,
-    program_counter_to_label: FlatMap<Label, false>,
+    program_counter_to_label: FlatMap<Label>,
     step_tracing: bool,
     ecall_label: Label,
     export_to_label: HashMap<u32, Label>,
@@ -96,32 +139,29 @@ where
     custom_codegen: Option<Arc<dyn CustomCodegen>>,
     first_invalid_offset: Option<ProgramCounter>,
 
-    _phantom: PhantomData<(S, B)>,
+    _phantom: PhantomData<S>,
 }
 
 #[repr(transparent)]
-pub(crate) struct ArchVisitor<'r, 'a, S, B, G>(pub &'r mut CompilerVisitor<'a, S, B, G>)
+pub(crate) struct ArchVisitor<'r, 'a, S, G>(pub &'r mut CompilerVisitor<'a, S, G>)
 where
     S: Sandbox,
-    B: BitnessT,
     G: GasVisitorT;
 
-impl<'r, 'a, S, B, G> core::ops::Deref for ArchVisitor<'r, 'a, S, B, G>
+impl<'r, 'a, S, G> core::ops::Deref for ArchVisitor<'r, 'a, S, G>
 where
     S: Sandbox,
-    B: BitnessT,
     G: GasVisitorT,
 {
-    type Target = CompilerVisitor<'a, S, B, G>;
+    type Target = CompilerVisitor<'a, S, G>;
     fn deref(&self) -> &Self::Target {
         self.0
     }
 }
 
-impl<'r, 'a, S, B, G> core::ops::DerefMut for ArchVisitor<'r, 'a, S, B, G>
+impl<'r, 'a, S, G> core::ops::DerefMut for ArchVisitor<'r, 'a, S, G>
 where
     S: Sandbox,
-    B: BitnessT,
     G: GasVisitorT,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
@@ -129,10 +169,9 @@ where
     }
 }
 
-impl<'a, S, B, G> CompilerVisitor<'a, S, B, G>
+impl<'a, S, G> CompilerVisitor<'a, S, G>
 where
     S: Sandbox,
-    B: BitnessT,
     G: GasVisitorT,
 {
     #[allow(clippy::too_many_arguments)]
@@ -405,7 +444,7 @@ where
             SandboxKind::Generic => {
                 let native_page_size = crate::sandbox::get_native_page_size();
                 let padded_length = polkavm_common::utils::align_to_next_page_usize(native_page_size, self.asm.len()).unwrap();
-                self.asm.resize(padded_length, ArchVisitor::<S, B, G>::PADDING_BYTE);
+                self.asm.resize(padded_length, ArchVisitor::<S, G>::PADDING_BYTE);
                 self.asm.define_label(self.jump_table_label);
             }
         }
@@ -427,7 +466,6 @@ where
                 program_counter_to_machine_code_offset_map: self.program_counter_to_machine_code_offset_map,
                 gas_metering_stub_offsets,
                 cache: cache.clone(),
-                bitness: B::BITNESS,
                 step_tracing: self.step_tracing,
                 memset_trampoline_start: polkavm_common::cast::cast(self.memset_trampoline_start).to_u64(),
                 memset_trampoline_end: polkavm_common::cast::cast(self.memset_trampoline_end).to_u64(),
@@ -473,9 +511,9 @@ where
             self.step(program_counter);
         }
 
-        if let Some(gas_metering) = self.gas_metering {
+        if self.gas_metering.is_some() {
             self.gas_metering_stub_offsets.push(cast(self.asm.len()).to_u32_or_debug_panic());
-            ArchVisitor(self).emit_gas_metering_stub(gas_metering);
+            ArchVisitor(self).emit_gas_metering_stub();
         }
     }
 
@@ -531,13 +569,7 @@ where
 
     #[cold]
     fn current_instruction(&self, program_counter: u32) -> impl core::fmt::Display {
-        crate::api::Module::display_instruction_at_impl(
-            self.instruction_set,
-            self.code,
-            self.bitmask,
-            matches!(B::BITNESS, Bitness::B64),
-            ProgramCounter(program_counter),
-        )
+        crate::api::Module::display_instruction_at_impl(self.instruction_set, self.code, self.bitmask, ProgramCounter(program_counter))
     }
 
     #[cold]
@@ -616,10 +648,9 @@ macro_rules! emit_branch {
     }};
 }
 
-impl<'a, S, B, G> polkavm_common::program::ParsingVisitor for CompilerVisitor<'a, S, B, G>
+impl<'a, S, G> polkavm_common::program::ParsingVisitor for CompilerVisitor<'a, S, G>
 where
     S: Sandbox,
-    B: BitnessT,
     G: GasVisitorT,
 {
     type ReturnTy = ();
@@ -731,7 +762,6 @@ where
 
     #[inline(always)]
     fn shift_logical_right_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, shift_logical_right_64(d, s1, s2));
     }
 
@@ -748,7 +778,6 @@ where
 
     #[inline(always)]
     fn shift_arithmetic_right_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
@@ -765,7 +794,6 @@ where
 
     #[inline(always)]
     fn shift_logical_left_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, shift_logical_left_64(d, s1, s2));
     }
 
@@ -791,7 +819,6 @@ where
 
     #[inline(always)]
     fn add_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, add_64(d, s1, s2));
     }
 
@@ -802,7 +829,6 @@ where
 
     #[inline(always)]
     fn sub_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, sub_64(d, s1, s2));
     }
 
@@ -813,7 +839,6 @@ where
 
     #[inline(always)]
     fn mul_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, mul_64(d, s1, s2));
     }
 
@@ -851,7 +876,6 @@ where
 
     #[inline(always)]
     fn div_unsigned_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, div_unsigned_64(d, s1, s2));
     }
 
@@ -862,7 +886,6 @@ where
 
     #[inline(always)]
     fn div_signed_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, div_signed_64(d, s1, s2));
     }
 
@@ -873,7 +896,6 @@ where
 
     #[inline(always)]
     fn rem_unsigned_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, rem_unsigned_64(d, s1, s2));
     }
 
@@ -884,7 +906,6 @@ where
 
     #[inline(always)]
     fn rem_signed_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, rem_signed_64(d, s1, s2));
     }
 
@@ -895,7 +916,6 @@ where
 
     #[inline(always)]
     fn mul_imm_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, mul_imm_64(d, s1, s2));
     }
 
@@ -950,7 +970,6 @@ where
 
     #[inline(always)]
     fn shift_logical_right_imm_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
@@ -973,7 +992,6 @@ where
 
     #[inline(always)]
     fn shift_arithmetic_right_imm_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
@@ -996,7 +1014,6 @@ where
 
     #[inline(always)]
     fn shift_logical_left_imm_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
@@ -1019,7 +1036,6 @@ where
 
     #[inline(always)]
     fn shift_logical_right_imm_alt_64(&mut self, code_offset: u32, length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
@@ -1042,7 +1058,6 @@ where
 
     #[inline(always)]
     fn shift_arithmetic_right_imm_alt_64(&mut self, code_offset: u32, length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
@@ -1065,7 +1080,6 @@ where
 
     #[inline(always)]
     fn shift_logical_left_imm_alt_64(&mut self, code_offset: u32, length: u32, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
@@ -1182,7 +1196,6 @@ where
 
     #[inline(always)]
     fn add_imm_64(&mut self, code_offset: u32, length: u32, d: RawReg, s: RawReg, imm: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, add_imm_64(d, s, imm));
     }
 
@@ -1193,7 +1206,6 @@ where
 
     #[inline(always)]
     fn negate_and_add_imm_64(&mut self, code_offset: u32, length: u32, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, negate_and_add_imm_64(d, s1, s2));
     }
 
@@ -1232,7 +1244,6 @@ where
 
     #[inline(always)]
     fn store_imm_indirect_u64(&mut self, code_offset: u32, length: u32, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
@@ -1277,7 +1288,6 @@ where
 
     #[inline(always)]
     fn store_indirect_u64(&mut self, code_offset: u32, length: u32, src: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
@@ -1304,7 +1314,6 @@ where
 
     #[inline(always)]
     fn store_imm_u64(&mut self, code_offset: u32, length: u32, value: i32, offset: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, store_imm_u64(value, offset));
     }
 
@@ -1325,7 +1334,6 @@ where
 
     #[inline(always)]
     fn store_u64(&mut self, code_offset: u32, length: u32, src: RawReg, offset: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, store_u64(src, offset));
     }
 
@@ -1363,7 +1371,6 @@ where
 
     #[inline(always)]
     fn load_indirect_u32(&mut self, code_offset: u32, length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
@@ -1386,7 +1393,6 @@ where
 
     #[inline(always)]
     fn load_indirect_u64(&mut self, code_offset: u32, length: u32, dst: RawReg, base: RawReg, offset: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(
             self,
             code_offset,
@@ -1418,7 +1424,6 @@ where
 
     #[inline(always)]
     fn load_u32(&mut self, code_offset: u32, length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, load_u32(dst, offset));
     }
 
@@ -1429,7 +1434,6 @@ where
 
     #[inline(always)]
     fn load_u64(&mut self, code_offset: u32, length: u32, dst: RawReg, offset: i32) -> Self::ReturnTy {
-        assert_eq!(B::BITNESS, Bitness::B64);
         emit_instruction!(self, code_offset, length, CONTINUE_BASIC_BLOCK, load_u64(dst, offset));
     }
 
@@ -1585,7 +1589,6 @@ where
     gas_metering_stub_offsets: Vec<u32>,
     cache: CompilerCache,
     step_tracing: bool,
-    pub(crate) bitness: Bitness,
 
     pub(crate) memset_trampoline_start: u64,
     pub(crate) memset_trampoline_end: u64,

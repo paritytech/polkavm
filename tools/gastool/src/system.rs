@@ -68,7 +68,7 @@ fn set_affinity(pid: libc::c_int, cpu: usize) -> Result<(), String> {
     unsafe {
         let mut cpu_set: libc::cpu_set_t = core::mem::zeroed();
         libc::CPU_SET(cpu, &mut cpu_set);
-        if libc::sched_setaffinity(pid, core::mem::size_of::<libc::cpu_set_t>(), &cpu_set) < 0 {
+        if libc::sched_setaffinity(pid, core::mem::size_of::<libc::cpu_set_t>(), core::ptr::addr_of!(cpu_set)) < 0 {
             Err(format!(
                 "failed to set cpu affinity for PID {pid}: {}",
                 std::io::Error::last_os_error()

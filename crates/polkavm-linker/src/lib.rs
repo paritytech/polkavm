@@ -25,10 +25,8 @@ pub use crate::program_from_elf::{program_from_elf, Config, OptLevel, ProgramFro
 pub use polkavm_common::assembler::assemble;
 pub use polkavm_common::program::{ProgramBlob, ProgramParseError, ProgramParts};
 
-pub static TARGET_JSON_32_BIT_OLD: &str = include_str!("../targets/legacy/riscv32emac-unknown-none-polkavm.json");
 pub static TARGET_JSON_64_BIT_OLD: &str = include_str!("../targets/legacy/riscv64emac-unknown-none-polkavm.json");
 
-pub static TARGET_JSON_32_BIT_NEW: &str = include_str!("../targets/1_91/riscv32emac-unknown-none-polkavm.json");
 pub static TARGET_JSON_64_BIT_NEW: &str = include_str!("../targets/1_91/riscv64emac-unknown-none-polkavm.json");
 
 struct VersionDetector {
@@ -158,36 +156,17 @@ pub enum RustcVersion {
     Rustc_1_91,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct TargetJsonArgs {
     pub rustc_version: RustcVersion,
-    pub is_64_bit: bool,
-}
-
-impl Default for TargetJsonArgs {
-    fn default() -> Self {
-        TargetJsonArgs {
-            rustc_version: Default::default(),
-            is_64_bit: true,
-        }
-    }
 }
 
 pub fn target_json_path(args: TargetJsonArgs) -> Result<PathBuf, String> {
-    if args.is_64_bit {
-        target_json_path_impl(
-            "riscv64emac-unknown-none-polkavm.json",
-            TARGET_JSON_64_BIT_OLD,
-            TARGET_JSON_64_BIT_NEW,
-            args.rustc_version,
-        )
-    } else {
-        target_json_path_impl(
-            "riscv32emac-unknown-none-polkavm.json",
-            TARGET_JSON_32_BIT_OLD,
-            TARGET_JSON_32_BIT_NEW,
-            args.rustc_version,
-        )
-    }
+    target_json_path_impl(
+        "riscv64emac-unknown-none-polkavm.json",
+        TARGET_JSON_64_BIT_OLD,
+        TARGET_JSON_64_BIT_NEW,
+        args.rustc_version,
+    )
 }

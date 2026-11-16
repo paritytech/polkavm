@@ -75,12 +75,8 @@ end
 
 NAME_MAP = {
     "native" => "(bare metal)",
-    "polkavm32_compiler_no_gas" => "PolkaVM (32-bit, recompiler)",
-    "polkavm32_compiler_sync_gas" => "PolkaVM (32-bit, recompiler, sync gas)",
-    "polkavm32_compiler_async_gas" => "PolkaVM (32-bit, recompiler, async gas)",
     "polkavm64_compiler_no_gas" => "**PolkaVM (64-bit, recompiler)**",
     "polkavm64_compiler_sync_gas" => "PolkaVM (64-bit, recompiler, sync gas)",
-    "polkavm64_compiler_async_gas" => "PolkaVM (64-bit, recompiler, async gas)",
     "wasmer" => "Wasmer (singlepass)",
     "wasmtime_cranelift_default" => "Wasmtime (cranelift)",
     "wasmtime_cranelift_with_epoch" => "Wasmtime (cranelift, epoch interruption)",
@@ -95,7 +91,6 @@ NAME_MAP = {
     "solana_rbpf" => "Solana RBPF",
     "ckbvm_asm" => "CKB VM (ASM)",
     "ckbvm_non_asm" => "CKB VM (non-ASM)",
-    "polkavm32_interpreter" => "PolkaVM (32-bit, interpreter)",
     "polkavm64_interpreter" => "PolkaVM (64-bit, interpreter)",
     "wasm3" => "Wasm3",
 

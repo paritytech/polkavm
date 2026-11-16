@@ -137,9 +137,9 @@ pub mod debug_info {
 /// Miscellaneous types related to program blobs.
 pub mod program {
     pub use polkavm_common::program::{
-        EstimateInterpreterMemoryUsageArgs, ISA_JamV1, ISA_Latest32, ISA_Latest64, ISA_ReviveV1, Imports, ImportsIter, Instruction,
-        InstructionSet, InstructionSetKind, Instructions, JumpTable, JumpTableIter, Opcode, ParsedInstruction, ProgramExport,
-        ProgramMemoryInfo, ProgramParseError, ProgramSymbol, RawReg,
+        EstimateInterpreterMemoryUsageArgs, ISA_JamV1, ISA_Latest64, ISA_ReviveV1, Imports, ImportsIter, Instruction, InstructionSet,
+        InstructionSetKind, Instructions, JumpTable, JumpTableIter, Opcode, ParsedInstruction, ProgramExport, ProgramMemoryInfo,
+        ProgramParseError, ProgramSymbol, RawReg,
     };
 
     // This is meant to be public *eventually*, but since it's still a work-in-progress
@@ -151,7 +151,9 @@ pub mod program {
 pub type Gas = i64;
 
 pub use crate::api::{CompileError, Engine, MemoryAccessError, MemoryProtection, Module, RawInstance, RegValue, SetCacheSizeLimitArgs};
-pub use crate::config::{BackendKind, Config, CorePinning, CustomCodegen, GasMeteringKind, ModuleConfig, SandboxKind};
+pub use crate::config::{
+    BackendKind, Config, CorePinning, CustomCodegen, GasMeteringKind, InterpreterCompilationCost, ModuleConfig, SandboxKind,
+};
 pub use crate::error::Error;
 pub use crate::gas::{Cost, CostModel, CostModelKind, CostModelRef};
 pub use crate::linker::{CallError, Caller, Instance, InstancePre, Linker};

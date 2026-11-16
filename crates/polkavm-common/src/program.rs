@@ -639,15 +639,8 @@ impl LookupTable {
     }
 }
 
-pub const INTERPRETER_CACHE_ENTRY_SIZE: u32 = {
-    if cfg!(target_pointer_width = "32") {
-        20
-    } else if cfg!(target_pointer_width = "64") {
-        24
-    } else {
-        panic!("unsupported target pointer width")
-    }
-};
+/// The size in bytes of an interpreter cache entry for the cache size limit, the same on every target.
+pub const INTERPRETER_CACHE_ENTRY_SIZE: u32 = 24;
 
 pub const INTERPRETER_FLATMAP_ENTRY_SIZE: u32 = 4;
 
@@ -2773,146 +2766,6 @@ define_legacy_instruction_set! {
     ]
 }
 
-define_legacy_instruction_set! {
-    ($)
-
-    ISA_Latest32,
-    build_static_dispatch_table_latest32,
-
-    [
-        trap                                     = 0,
-        fallthrough                              = 1,
-        memset                                   = 2,
-        unlikely                                 = 3,
-    ]
-    [
-        jump_indirect                            = 50,
-        load_imm                                 = 51,
-        load_u8                                  = 52,
-        load_i8                                  = 53,
-        load_u16                                 = 54,
-        load_i16                                 = 55,
-        load_i32                                 = 57,
-        store_u8                                 = 59,
-        store_u16                                = 60,
-        store_u32                                = 61,
-    ]
-    [
-        load_imm_and_jump                        = 80,
-        branch_eq_imm                            = 81,
-        branch_not_eq_imm                        = 82,
-        branch_less_unsigned_imm                 = 83,
-        branch_less_signed_imm                   = 87,
-        branch_greater_or_equal_unsigned_imm     = 85,
-        branch_greater_or_equal_signed_imm       = 89,
-        branch_less_or_equal_signed_imm          = 88,
-        branch_less_or_equal_unsigned_imm        = 84,
-        branch_greater_signed_imm                = 90,
-        branch_greater_unsigned_imm              = 86,
-    ]
-    [
-        store_imm_indirect_u8                    = 70,
-        store_imm_indirect_u16                   = 71,
-        store_imm_indirect_u32                   = 72,
-    ]
-    [
-        store_indirect_u8                        = 120,
-        store_indirect_u16                       = 121,
-        store_indirect_u32                       = 122,
-        load_indirect_u8                         = 124,
-        load_indirect_i8                         = 125,
-        load_indirect_u16                        = 126,
-        load_indirect_i16                        = 127,
-        load_indirect_i32                        = 129,
-        add_imm_32                               = 131,
-        and_imm                                  = 132,
-        xor_imm                                  = 133,
-        or_imm                                   = 134,
-        mul_imm_32                               = 135,
-        set_less_than_unsigned_imm               = 136,
-        set_less_than_signed_imm                 = 137,
-        shift_logical_left_imm_32                = 138,
-        shift_logical_right_imm_32               = 139,
-        shift_arithmetic_right_imm_32            = 140,
-        negate_and_add_imm_32                    = 141,
-        set_greater_than_unsigned_imm            = 142,
-        set_greater_than_signed_imm              = 143,
-        shift_logical_right_imm_alt_32           = 145,
-        shift_arithmetic_right_imm_alt_32        = 146,
-        shift_logical_left_imm_alt_32            = 144,
-        cmov_if_zero_imm                         = 147,
-        cmov_if_not_zero_imm                     = 148,
-        rotate_right_imm_32                      = 160,
-        rotate_right_imm_alt_32                  = 161,
-    ]
-    [
-        branch_eq                                = 170,
-        branch_not_eq                            = 171,
-        branch_less_unsigned                     = 172,
-        branch_less_signed                       = 173,
-        branch_greater_or_equal_unsigned         = 174,
-        branch_greater_or_equal_signed           = 175,
-    ]
-    [
-        add_32                                   = 190,
-        sub_32                                   = 191,
-        and                                      = 210,
-        xor                                      = 211,
-        or                                       = 212,
-        mul_32                                   = 192,
-        mul_upper_signed_signed                  = 213,
-        mul_upper_unsigned_unsigned              = 214,
-        mul_upper_signed_unsigned                = 215,
-        set_less_than_unsigned                   = 216,
-        set_less_than_signed                     = 217,
-        shift_logical_left_32                    = 197,
-        shift_logical_right_32                   = 198,
-        shift_arithmetic_right_32                = 199,
-        div_unsigned_32                          = 193,
-        div_signed_32                            = 194,
-        rem_unsigned_32                          = 195,
-        rem_signed_32                            = 196,
-        cmov_if_zero                             = 218,
-        cmov_if_not_zero                         = 219,
-        and_inverted                             = 224,
-        or_inverted                              = 225,
-        xnor                                     = 226,
-        maximum                                  = 227,
-        maximum_unsigned                         = 228,
-        minimum                                  = 229,
-        minimum_unsigned                         = 230,
-        rotate_left_32                           = 221,
-        rotate_right_32                          = 223,
-    ]
-    [
-        jump                                     = 40,
-    ]
-    [
-        ecalli                                   = 10,
-    ]
-    [
-        store_imm_u8                             = 30,
-        store_imm_u16                            = 31,
-        store_imm_u32                            = 32,
-    ]
-    [
-        move_reg                                 = 100,
-        sbrk                                     = 101,
-        count_leading_zero_bits_32               = 105,
-        count_trailing_zero_bits_32              = 107,
-        count_set_bits_32                        = 103,
-        sign_extend_8                            = 108,
-        sign_extend_16                           = 109,
-        zero_extend_16                           = 110,
-        reverse_byte                             = 111,
-    ]
-    [
-        load_imm_and_jump_indirect               = 180,
-    ]
-    [
-    ]
-}
-
 define_extended_instruction_set! {
     ($)
 
@@ -3291,7 +3144,6 @@ fn test_opcode_from_raw() {
 pub enum InstructionSetKind {
     ReviveV1,
     JamV1,
-    Latest32,
     Latest64,
 }
 
@@ -3300,7 +3152,6 @@ impl InstructionSetKind {
         match self {
             Self::ReviveV1 => "revive_v1",
             Self::JamV1 => "jam_v1",
-            Self::Latest32 => "latest32",
             Self::Latest64 => "latest64",
         }
     }
@@ -3309,7 +3160,6 @@ impl InstructionSetKind {
     pub(crate) fn blob_version(self) -> u8 {
         match self {
             Self::ReviveV1 => 0,
-            Self::Latest32 => 1,
             Self::Latest64 => 2,
             Self::JamV1 => 3,
         }
@@ -3318,18 +3168,9 @@ impl InstructionSetKind {
     pub(crate) fn from_blob_version(version: u8) -> Option<Self> {
         match version {
             0 => Some(Self::ReviveV1),
-            1 => Some(Self::Latest32),
             2 => Some(Self::Latest64),
             3 => Some(Self::JamV1),
             _ => None,
-        }
-    }
-
-    /// Returns whether the ISA is 64-bit.
-    pub fn is_64_bit(&self) -> bool {
-        match self {
-            InstructionSetKind::Latest32 => false,
-            InstructionSetKind::ReviveV1 | InstructionSetKind::JamV1 | InstructionSetKind::Latest64 => true,
         }
     }
 }
@@ -3339,10 +3180,6 @@ macro_rules! dispatch_isa {
         match $self {
             Self::ReviveV1 => {
                 let $isa = ISA_ReviveV1;
-                $e
-            }
-            Self::Latest32 => {
-                let $isa = ISA_Latest32;
                 $e
             }
             Self::Latest64 => {
@@ -3663,22 +3500,23 @@ impl Instruction {
 
 pub const MAX_INSTRUCTION_LENGTH: usize = 2 + MAX_VARINT_LENGTH * 2;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct InstructionFormat<'a> {
     pub prefer_non_abi_reg_names: bool,
     pub prefer_unaliased: bool,
     pub jump_target_formatter: Option<&'a dyn Fn(u32, &mut core::fmt::Formatter) -> core::fmt::Result>,
-    pub is_64_bit: bool,
 }
 
-impl<'a> Default for InstructionFormat<'a> {
-    fn default() -> Self {
-        InstructionFormat {
-            prefer_non_abi_reg_names: false,
-            prefer_unaliased: false,
-            jump_target_formatter: None,
-            is_64_bit: true,
+struct ImmediateDisplay(i32);
+
+impl core::fmt::Display for ImmediateDisplay {
+    fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
+        if self.0 == 0 {
+            write!(fmt, "0")
+        } else {
+            let imm: i64 = cast(self.0).to_i64_sign_extend();
+            write!(fmt, "0x{imm:x}")
         }
     }
 }
@@ -3710,31 +3548,6 @@ impl<'a, 'b, 'c> InstructionFormatter<'a, 'b, 'c> {
         }
 
         Formatter(self.format.jump_target_formatter, imm)
-    }
-
-    fn format_imm(&self, imm: i32) -> impl core::fmt::Display {
-        struct Formatter {
-            imm: i32,
-            is_64_bit: bool,
-        }
-
-        impl core::fmt::Display for Formatter {
-            fn fmt(&self, fmt: &mut core::fmt::Formatter) -> core::fmt::Result {
-                if self.imm == 0 {
-                    write!(fmt, "{}", self.imm)
-                } else if !self.is_64_bit {
-                    write!(fmt, "0x{:x}", self.imm)
-                } else {
-                    let imm: i64 = cast(self.imm).to_i64_sign_extend();
-                    write!(fmt, "0x{:x}", imm)
-                }
-            }
-        }
-
-        Formatter {
-            imm,
-            is_64_bit: self.format.is_64_bit,
-        }
     }
 
     fn format_offset(&self, offset: i32) -> impl core::fmt::Display {
@@ -3836,33 +3649,21 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} >> {s2}")
-        } else {
-            write!(self, "{d} = {s1} >> {s2}")
-        }
+        write!(self, "i32 {d} = {s1} >> {s2}")
     }
 
     fn shift_arithmetic_right_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} >>a {s2}")
-        } else {
-            write!(self, "{d} = {s1} >>a {s2}")
-        }
+        write!(self, "i32 {d} = {s1} >>a {s2}")
     }
 
     fn shift_logical_left_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} << {s2}")
-        } else {
-            write!(self, "{d} = {s1} << {s2}")
-        }
+        write!(self, "i32 {d} = {s1} << {s2}")
     }
 
     fn xor(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
@@ -3890,11 +3691,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} + {s2}")
-        } else {
-            write!(self, "{d} = {s1} + {s2}")
-        }
+        write!(self, "i32 {d} = {s1} + {s2}")
     }
 
     fn add_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
@@ -3908,11 +3705,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} - {s2}")
-        } else {
-            write!(self, "{d} = {s1} - {s2}")
-        }
+        write!(self, "i32 {d} = {s1} - {s2}")
     }
 
     fn sub_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
@@ -3926,11 +3719,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} * {s2}")
-        } else {
-            write!(self, "{d} = {s1} * {s2}")
-        }
+        write!(self, "i32 {d} = {s1} * {s2}")
     }
 
     fn mul_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
@@ -3943,18 +3732,14 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn mul_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} * {s2}")
-        } else {
-            write!(self, "{d} = {s1} * {s2}")
-        }
+        let s2 = ImmediateDisplay(s2);
+        write!(self, "i32 {d} = {s1} * {s2}")
     }
 
     fn mul_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
+        let s2 = ImmediateDisplay(s2);
         write!(self, "{d} = {s1} * {s2}")
     }
 
@@ -3983,44 +3768,28 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} /u {s2}")
-        } else {
-            write!(self, "{d} = {s1} /u {s2}")
-        }
+        write!(self, "i32 {d} = {s1} /u {s2}")
     }
 
     fn div_signed_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} /s {s2}")
-        } else {
-            write!(self, "{d} = {s1} /s {s2}")
-        }
+        write!(self, "i32 {d} = {s1} /s {s2}")
     }
 
     fn rem_unsigned_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} %u {s2}")
-        } else {
-            write!(self, "{d} = {s1} %u {s2}")
-        }
+        write!(self, "i32 {d} = {s1} %u {s2}")
     }
 
     fn rem_signed_32(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} %s {s2}")
-        } else {
-            write!(self, "{d} = {s1} %s {s2}")
-        }
+        write!(self, "i32 {d} = {s1} %s {s2}")
     }
 
     fn div_unsigned_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
@@ -4104,11 +3873,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} <<r {s2}")
-        } else {
-            write!(self, "{d} = {s1} <<r {s2}")
-        }
+        write!(self, "i32 {d} = {s1} <<r {s2}")
     }
 
     fn rotate_left_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
@@ -4122,11 +3887,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} >>r {s2}")
-        } else {
-            write!(self, "{d} = {s1} >>r {s2}")
-        }
+        write!(self, "i32 {d} = {s1} >>r {s2}")
     }
 
     fn rotate_right_64(&mut self, d: RawReg, s1: RawReg, s2: RawReg) -> Self::ReturnTy {
@@ -4139,74 +3900,62 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn set_less_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
+        let s2 = ImmediateDisplay(s2);
         write!(self, "{d} = {s1} <u {s2}")
     }
 
     fn set_greater_than_unsigned_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
+        let s2 = ImmediateDisplay(s2);
         write!(self, "{d} = {s1} >u {s2}")
     }
 
     fn set_less_than_signed_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
+        let s2 = ImmediateDisplay(s2);
         write!(self, "{d} = {s1} <s {s2}")
     }
 
     fn set_greater_than_signed_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
+        let s2 = ImmediateDisplay(s2);
         write!(self, "{d} = {s1} >s {s2}")
     }
 
     fn shift_logical_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} >> {s2}")
-        } else {
-            write!(self, "{d} = {s1} >> {s2}")
-        }
+        let s2 = ImmediateDisplay(s2);
+        write!(self, "i32 {d} = {s1} >> {s2}")
     }
 
     fn shift_logical_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
-        let s1 = self.format_imm(s1);
+        let s1 = ImmediateDisplay(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} >> {s2}")
-        } else {
-            write!(self, "{d} = {s1} >> {s2}")
-        }
+        write!(self, "i32 {d} = {s1} >> {s2}")
     }
 
     fn shift_arithmetic_right_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} >>a {s2}")
-        } else {
-            write!(self, "{d} = {s1} >>a {s2}")
-        }
+        let s2 = ImmediateDisplay(s2);
+        write!(self, "i32 {d} = {s1} >>a {s2}")
     }
 
     fn shift_logical_right_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
+        let s2 = ImmediateDisplay(s2);
         write!(self, "{d} = {s1} >> {s2}")
     }
 
     fn shift_logical_right_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
-        let s1 = self.format_imm(s1);
+        let s1 = ImmediateDisplay(s1);
         let s2 = self.format_reg(s2);
         write!(self, "{d} = {s1} >> {s2}")
     }
@@ -4214,46 +3963,34 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn shift_arithmetic_right_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
+        let s2 = ImmediateDisplay(s2);
         write!(self, "{d} = {s1} >>a {s2}")
     }
 
     fn shift_arithmetic_right_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
-        let s1 = self.format_imm(s1);
+        let s1 = ImmediateDisplay(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} >>a {s2}")
-        } else {
-            write!(self, "{d} = {s1} >>a {s2}")
-        }
+        write!(self, "i32 {d} = {s1} >>a {s2}")
     }
 
     fn shift_logical_left_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} << {s2}")
-        } else {
-            write!(self, "{d} = {s1} << {s2}")
-        }
+        let s2 = ImmediateDisplay(s2);
+        write!(self, "i32 {d} = {s1} << {s2}")
     }
 
     fn shift_logical_left_imm_alt_32(&mut self, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
-        let s1 = self.format_imm(s1);
+        let s1 = ImmediateDisplay(s1);
         let s2 = self.format_reg(s2);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s1} << {s2}")
-        } else {
-            write!(self, "{d} = {s1} << {s2}")
-        }
+        write!(self, "i32 {d} = {s1} << {s2}")
     }
 
     fn shift_arithmetic_right_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
-        let s1 = self.format_imm(s1);
+        let s1 = ImmediateDisplay(s1);
         let s2 = self.format_reg(s2);
         write!(self, "{d} = {s1} >>a {s2}")
     }
@@ -4261,13 +3998,13 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn shift_logical_left_imm_64(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
+        let s2 = ImmediateDisplay(s2);
         write!(self, "{d} = {s1} << {s2}")
     }
 
     fn shift_logical_left_imm_alt_64(&mut self, d: RawReg, s2: RawReg, s1: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
-        let s1 = self.format_imm(s1);
+        let s1 = ImmediateDisplay(s1);
         let s2 = self.format_reg(s2);
         write!(self, "{d} = {s1} << {s2}")
     }
@@ -4275,27 +4012,27 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn or_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
+        let s2 = ImmediateDisplay(s2);
         write!(self, "{d} = {s1} | {s2}")
     }
 
     fn and_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
+        let s2 = ImmediateDisplay(s2);
         write!(self, "{d} = {s1} & {s2}")
     }
 
     fn xor_imm(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let s2 = self.format_imm(s2);
+        let s2 = ImmediateDisplay(s2);
         write!(self, "{d} = {s1} ^ {s2}")
     }
 
     fn load_imm(&mut self, d: RawReg, a: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
-        let a = self.format_imm(a);
+        let a = ImmediateDisplay(a);
         write!(self, "{d} = {a}")
     }
 
@@ -4313,11 +4050,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn count_leading_zero_bits_32(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = clz {s}")
-        } else {
-            write!(self, "{d} = clz {s}")
-        }
+        write!(self, "i32 {d} = clz {s}")
     }
 
     fn count_leading_zero_bits_64(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
@@ -4329,11 +4062,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn count_trailing_zero_bits_32(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = ctz {s}")
-        } else {
-            write!(self, "{d} = ctz {s}")
-        }
+        write!(self, "i32 {d} = ctz {s}")
     }
 
     fn count_trailing_zero_bits_64(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
@@ -4345,11 +4074,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn count_set_bits_32(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = cpop {s}")
-        } else {
-            write!(self, "{d} = cpop {s}")
-        }
+        write!(self, "i32 {d} = cpop {s}")
     }
 
     fn count_set_bits_64(&mut self, d: RawReg, s: RawReg) -> Self::ReturnTy {
@@ -4399,50 +4124,42 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn cmov_if_zero_imm(&mut self, d: RawReg, c: RawReg, s: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let c = self.format_reg(c);
-        let s = self.format_imm(s);
+        let s = ImmediateDisplay(s);
         write!(self, "{d} = {s} if {c} == 0")
     }
 
     fn cmov_if_not_zero_imm(&mut self, d: RawReg, c: RawReg, s: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let c = self.format_reg(c);
-        let s = self.format_imm(s);
+        let s = ImmediateDisplay(s);
         write!(self, "{d} = {s} if {c} != 0")
     }
 
     fn rotate_right_imm_32(&mut self, d: RawReg, s: RawReg, c: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        let c = self.format_imm(c);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s} >>r {c}")
-        } else {
-            write!(self, "{d} = {s} >> {c}")
-        }
+        let c = ImmediateDisplay(c);
+        write!(self, "i32 {d} = {s} >>r {c}")
     }
 
     fn rotate_right_imm_alt_32(&mut self, d: RawReg, c: RawReg, s: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let c = self.format_reg(c);
-        let s = self.format_imm(s);
-        if self.format.is_64_bit {
-            write!(self, "i32 {d} = {s} >>r {c}")
-        } else {
-            write!(self, "{d} = {s} >> {c}")
-        }
+        let s = ImmediateDisplay(s);
+        write!(self, "i32 {d} = {s} >>r {c}")
     }
 
     fn rotate_right_imm_64(&mut self, d: RawReg, s: RawReg, c: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s = self.format_reg(s);
-        let c = self.format_imm(c);
+        let c = ImmediateDisplay(c);
         write!(self, "{d} = {s} >>r {c}")
     }
 
     fn rotate_right_imm_alt_64(&mut self, d: RawReg, c: RawReg, s: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let c = self.format_reg(c);
-        let s = self.format_imm(s);
+        let s = ImmediateDisplay(s);
         write!(self, "{d} = {s} >>r {c}")
     }
 
@@ -4452,7 +4169,7 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         if !self.format.prefer_unaliased && i64::from(s2) < 0 && i64::from(s2) > -4096 {
             write!(self, "{d} = {s1} - {s2}", s2 = -i64::from(s2))
         } else {
-            let s2 = self.format_imm(s2);
+            let s2 = ImmediateDisplay(s2);
             write!(self, "{d} = {s1} + {s2}")
         }
     }
@@ -4460,24 +4177,22 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     fn add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let prefix = if self.format.is_64_bit { "i32 " } else { "" };
         if !self.format.prefer_unaliased && i64::from(s2) < 0 && i64::from(s2) > -4096 {
-            write!(self, "{prefix}{d} = {s1} - {s2}", s2 = -i64::from(s2))
+            write!(self, "i32 {d} = {s1} - {s2}", s2 = -i64::from(s2))
         } else {
-            let s2 = self.format_imm(s2);
-            write!(self, "{prefix}{d} = {s1} + {s2}")
+            let s2 = ImmediateDisplay(s2);
+            write!(self, "i32 {d} = {s1} + {s2}")
         }
     }
 
     fn negate_and_add_imm_32(&mut self, d: RawReg, s1: RawReg, s2: i32) -> Self::ReturnTy {
         let d = self.format_reg(d);
         let s1 = self.format_reg(s1);
-        let prefix = if self.format.is_64_bit { "i32 " } else { "" };
         if !self.format.prefer_unaliased && s2 == 0 {
-            write!(self, "{prefix}{d} = -{s1}")
+            write!(self, "i32 {d} = -{s1}")
         } else {
-            let s2 = self.format_imm(s2);
-            write!(self, "{prefix}{d} = {s2} - {s1}")
+            let s2 = ImmediateDisplay(s2);
+            write!(self, "i32 {d} = {s2} - {s1}")
         }
     }
 
@@ -4487,35 +4202,35 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
         if !self.format.prefer_unaliased && s2 == 0 {
             write!(self, "{d} = -{s1}")
         } else {
-            let s2 = self.format_imm(s2);
+            let s2 = ImmediateDisplay(s2);
             write!(self, "{d} = {s2} - {s1}")
         }
     }
 
     fn store_imm_indirect_u8(&mut self, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         let base = self.format_reg(base);
-        let value = self.format_imm(value);
+        let value = ImmediateDisplay(value);
         let offset = self.format_offset(offset);
         write!(self, "u8 [{base}{offset}] = {value}")
     }
 
     fn store_imm_indirect_u16(&mut self, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         let base = self.format_reg(base);
-        let value = self.format_imm(value);
+        let value = ImmediateDisplay(value);
         let offset = self.format_offset(offset);
         write!(self, "u16 [{base}{offset}] = {value}")
     }
 
     fn store_imm_indirect_u32(&mut self, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         let base = self.format_reg(base);
-        let value = self.format_imm(value);
+        let value = ImmediateDisplay(value);
         let offset = self.format_offset(offset);
         write!(self, "u32 [{base}{offset}] = {value}")
     }
 
     fn store_imm_indirect_u64(&mut self, base: RawReg, offset: i32, value: i32) -> Self::ReturnTy {
         let base = self.format_reg(base);
-        let value = self.format_imm(value);
+        let value = ImmediateDisplay(value);
         let offset = self.format_offset(offset);
         write!(self, "u64 [{base}{offset}] = {value}")
     }
@@ -4548,50 +4263,50 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
     }
 
     fn store_imm_u8(&mut self, offset: i32, value: i32) -> Self::ReturnTy {
-        let offset = self.format_imm(offset);
-        let value = self.format_imm(value);
+        let offset = ImmediateDisplay(offset);
+        let value = ImmediateDisplay(value);
         write!(self, "u8 [{offset}] = {value}")
     }
 
     fn store_imm_u16(&mut self, offset: i32, value: i32) -> Self::ReturnTy {
-        let offset = self.format_imm(offset);
-        let value = self.format_imm(value);
+        let offset = ImmediateDisplay(offset);
+        let value = ImmediateDisplay(value);
         write!(self, "u16 [{offset}] = {value}")
     }
 
     fn store_imm_u32(&mut self, offset: i32, value: i32) -> Self::ReturnTy {
-        let offset = self.format_imm(offset);
-        let value = self.format_imm(value);
+        let offset = ImmediateDisplay(offset);
+        let value = ImmediateDisplay(value);
         write!(self, "u32 [{offset}] = {value}")
     }
 
     fn store_imm_u64(&mut self, offset: i32, value: i32) -> Self::ReturnTy {
-        let offset = self.format_imm(offset);
-        let value = self.format_imm(value);
+        let offset = ImmediateDisplay(offset);
+        let value = ImmediateDisplay(value);
         write!(self, "u64 [{offset}] = {value}")
     }
 
     fn store_u8(&mut self, src: RawReg, offset: i32) -> Self::ReturnTy {
         let src = self.format_reg(src);
-        let offset = self.format_imm(offset);
+        let offset = ImmediateDisplay(offset);
         write!(self, "u8 [{offset}] = {src}")
     }
 
     fn store_u16(&mut self, src: RawReg, offset: i32) -> Self::ReturnTy {
         let src = self.format_reg(src);
-        let offset = self.format_imm(offset);
+        let offset = ImmediateDisplay(offset);
         write!(self, "u16 [{offset}] = {src}")
     }
 
     fn store_u32(&mut self, src: RawReg, offset: i32) -> Self::ReturnTy {
         let src = self.format_reg(src);
-        let offset = self.format_imm(offset);
+        let offset = ImmediateDisplay(offset);
         write!(self, "u32 [{offset}] = {src}")
     }
 
     fn store_u64(&mut self, src: RawReg, offset: i32) -> Self::ReturnTy {
         let src = self.format_reg(src);
-        let offset = self.format_imm(offset);
+        let offset = ImmediateDisplay(offset);
         write!(self, "u64 [{offset}] = {src}")
     }
 
@@ -4646,43 +4361,43 @@ impl<'a, 'b, 'c> InstructionVisitor for InstructionFormatter<'a, 'b, 'c> {
 
     fn load_u8(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
-        let offset = self.format_imm(offset);
+        let offset = ImmediateDisplay(offset);
         write!(self, "{} = u8 [{}]", dst, offset)
     }
 
     fn load_i8(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
-        let offset = self.format_imm(offset);
+        let offset = ImmediateDisplay(offset);
         write!(self, "{} = i8 [{}]", dst, offset)
     }
 
     fn load_u16(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
-        let offset = self.format_imm(offset);
+        let offset = ImmediateDisplay(offset);
         write!(self, "{} = u16 [{}]", dst, offset)
     }
 
     fn load_i16(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
-        let offset = self.format_imm(offset);
+        let offset = ImmediateDisplay(offset);
         write!(self, "{} = i16 [{}]", dst, offset)
     }
 
     fn load_i32(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
-        let offset = self.format_imm(offset);
+        let offset = ImmediateDisplay(offset);
         write!(self, "{} = i32 [{}]", dst, offset)
     }
 
     fn load_u32(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
-        let offset = self.format_imm(offset);
+        let offset = ImmediateDisplay(offset);
         write!(self, "{} = u32 [{}]", dst, offset)
     }
 
     fn load_u64(&mut self, dst: RawReg, offset: i32) -> Self::ReturnTy {
         let dst = self.format_reg(dst);
-        let offset = self.format_imm(offset);
+        let offset = ImmediateDisplay(offset);
         write!(self, "{} = u64 [{}]", dst, offset)
     }
 
@@ -6119,16 +5834,14 @@ fn test_code_block_bitmap_only_answers_queries_about_its_own_block() {
 #[test]
 fn test_is_jump_target_valid() {
     fn assert_get_previous_instruction_skip_matches_instruction_parser(code: &[u8], bitmask: &[u8]) {
-        for instruction in Instructions::new(ISA_Latest32, code, bitmask, 0, false) {
+        for instruction in Instructions::new(ISA_JamV1, code, bitmask, 0, false) {
             match instruction.kind {
                 Instruction::trap => {
                     let skip = get_previous_instruction_skip(bitmask, instruction.offset.0);
                     if let Some(skip) = skip {
                         let previous_offset = instruction.offset.0 - skip - 1;
                         assert_eq!(
-                            Instructions::new(ISA_Latest32, code, bitmask, previous_offset, true)
-                                .next()
-                                .unwrap(),
+                            Instructions::new(ISA_JamV1, code, bitmask, previous_offset, true).next().unwrap(),
                             ParsedInstruction {
                                 kind: Instruction::trap,
                                 offset: ProgramCounter(previous_offset),
@@ -6141,7 +5854,7 @@ fn test_is_jump_target_valid() {
                                 continue;
                             };
                             assert_eq!(
-                                Instructions::new(ISA_Latest32, code, bitmask, previous_offset, true)
+                                Instructions::new(ISA_JamV1, code, bitmask, previous_offset, true)
                                     .next()
                                     .unwrap()
                                     .kind,
@@ -6187,14 +5900,14 @@ fn test_is_jump_target_valid() {
     macro_rules! assert_valid {
         ($code_length:expr, $bits:expr, $offset:expr) => {{
             let (code, bitmask) = g!($code_length, $bits);
-            assert!(is_jump_target_valid_legacy(ISA_Latest32, &code, &bitmask, $offset));
+            assert!(is_jump_target_valid_legacy(ISA_JamV1, &code, &bitmask, $offset));
         }};
     }
 
     macro_rules! assert_invalid {
         ($code_length:expr, $bits:expr, $offset:expr) => {{
             let (code, bitmask) = g!($code_length, $bits);
-            assert!(!is_jump_target_valid_legacy(ISA_Latest32, &code, &bitmask, $offset));
+            assert!(!is_jump_target_valid_legacy(ISA_JamV1, &code, &bitmask, $offset));
         }};
     }
 
@@ -6213,18 +5926,18 @@ fn test_is_jump_target_valid() {
     assert_valid!(27, [0], 25);
     assert_valid!(27, [0, 26], 26);
 
-    let opcode_load_imm = ISA_Latest32.opcode_to_raw(Opcode::load_imm, 1).unwrap().0 as u8;
-    assert!(is_jump_target_valid_legacy(ISA_Latest32, &[opcode_load_imm], &[0b00000001], 0));
+    let opcode_load_imm = ISA_JamV1.opcode_to_raw(Opcode::load_imm, 1).unwrap().0 as u8;
+    assert!(is_jump_target_valid_legacy(ISA_JamV1, &[opcode_load_imm], &[0b00000001], 0));
 
     assert!(!is_jump_target_valid_legacy(
-        ISA_Latest32,
+        ISA_JamV1,
         &[opcode_load_imm, opcode_load_imm],
         &[0b00000011],
         1
     ));
 
     assert!(is_jump_target_valid_legacy(
-        ISA_Latest32,
+        ISA_JamV1,
         &[opcode_trap, opcode_load_imm],
         &[0b00000011],
         1
@@ -6232,11 +5945,11 @@ fn test_is_jump_target_valid() {
 
     // An unassigned opcode is an invalid instruction, which is a trap, so it also ends a basic block.
     let opcode_unassigned = (0..=u8::MAX)
-        .find(|&raw_opcode| ISA_Latest32.opcode_from_raw(u32::from(raw_opcode)).is_none())
+        .find(|&raw_opcode| ISA_JamV1.opcode_from_raw(u32::from(raw_opcode)).is_none())
         .unwrap();
 
     assert!(is_jump_target_valid_legacy(
-        ISA_Latest32,
+        ISA_JamV1,
         &[opcode_unassigned, opcode_load_imm],
         &[0b00000011],
         1
@@ -6275,7 +5988,7 @@ fn test_legacy_runner_and_free_functions_match() {
         state as u8
     };
 
-    let instruction_set = ISA_Latest32;
+    let instruction_set = ISA_JamV1;
     let mut injected_instructions = 0;
     for iteration in 0..100 {
         let mut code = [0_u8; 256];
@@ -6628,10 +6341,10 @@ where
 
 #[test]
 fn test_instructions_iterator_with_implicit_trap() {
-    let opcode_fallthrough = ISA_Latest32.opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
+    let opcode_fallthrough = ISA_JamV1.opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
     let code = [opcode_fallthrough];
     for is_bounded in [false, true] {
-        let mut i = Instructions::new(ISA_Latest32, &code, &[0b00000001], 0, is_bounded);
+        let mut i = Instructions::new(ISA_JamV1, &code, &[0b00000001], 0, is_bounded);
         assert_eq!(
             i.next(),
             Some(ParsedInstruction {
@@ -6656,10 +6369,10 @@ fn test_instructions_iterator_with_implicit_trap() {
 
 #[test]
 fn test_instructions_iterator_without_implicit_trap() {
-    let opcode_trap = ISA_Latest32.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
+    let opcode_trap = ISA_JamV1.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap];
     for is_bounded in [false, true] {
-        let mut i = Instructions::new(ISA_Latest32, &code, &[0b00000001], 0, is_bounded);
+        let mut i = Instructions::new(ISA_JamV1, &code, &[0b00000001], 0, is_bounded);
         assert_eq!(
             i.next(),
             Some(ParsedInstruction {
@@ -6676,12 +6389,12 @@ fn test_instructions_iterator_without_implicit_trap() {
 #[test]
 fn test_instructions_iterator_very_long_bitmask_bounded() {
     let mut code = [0_u8; 64];
-    code[0] = ISA_Latest32.opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
+    code[0] = ISA_JamV1.opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
     let mut bitmask = [0_u8; 8];
     bitmask[0] = 0b00000001;
     bitmask[7] = 0b10000000;
 
-    let mut i = Instructions::new(ISA_Latest32, &code, &bitmask, 0, true);
+    let mut i = Instructions::new(ISA_JamV1, &code, &bitmask, 0, true);
     assert_eq!(
         i.next(),
         Some(ParsedInstruction {
@@ -6706,12 +6419,12 @@ fn test_instructions_iterator_very_long_bitmask_bounded() {
 #[test]
 fn test_instructions_iterator_very_long_bitmask_unbounded() {
     let mut code = [0_u8; 64];
-    code[0] = ISA_Latest32.opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
+    code[0] = ISA_JamV1.opcode_to_raw(Opcode::fallthrough, 0).unwrap().0 as u8;
     let mut bitmask = [0_u8; 8];
     bitmask[0] = 0b00000001;
     bitmask[7] = 0b10000000;
 
-    let mut i = Instructions::new(ISA_Latest32, &code, &bitmask, 0, false);
+    let mut i = Instructions::new(ISA_JamV1, &code, &bitmask, 0, false);
     assert_eq!(
         i.next(),
         Some(ParsedInstruction {
@@ -6744,9 +6457,9 @@ fn test_instructions_iterator_very_long_bitmask_unbounded() {
 
 #[test]
 fn test_instructions_iterator_start_at_invalid_offset_bounded() {
-    let opcode_trap = ISA_Latest32.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
+    let opcode_trap = ISA_JamV1.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap; 8];
-    let mut i = Instructions::new(ISA_Latest32, &code, &[0b10000001], 1, true);
+    let mut i = Instructions::new(ISA_JamV1, &code, &[0b10000001], 1, true);
     assert_eq!(
         i.next(),
         Some(ParsedInstruction {
@@ -6762,9 +6475,9 @@ fn test_instructions_iterator_start_at_invalid_offset_bounded() {
 
 #[test]
 fn test_instructions_iterator_start_at_invalid_offset_unbounded() {
-    let opcode_trap = ISA_Latest32.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
+    let opcode_trap = ISA_JamV1.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap; 8];
-    let mut i = Instructions::new(ISA_Latest32, &code, &[0b10000001], 1, false);
+    let mut i = Instructions::new(ISA_JamV1, &code, &[0b10000001], 1, false);
     assert_eq!(
         i.next(),
         Some(ParsedInstruction {
@@ -6788,10 +6501,10 @@ fn test_instructions_iterator_start_at_invalid_offset_unbounded() {
 
 #[test]
 fn test_instructions_iterator_emits_an_injected_invalid_instruction_if_bounded_and_ends_with_a_trap() {
-    let opcode_trap = ISA_Latest32.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
+    let opcode_trap = ISA_JamV1.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap; 32];
     let bitmask = [0b00000001, 0b00000000, 0b00000000, 0b00000100];
-    let mut i = Instructions::new(ISA_Latest32, &code, &bitmask, 0, true);
+    let mut i = Instructions::new(ISA_JamV1, &code, &bitmask, 0, true);
     assert_eq!(i.offset(), 0);
     assert_eq!(
         i.next(),
@@ -6815,10 +6528,10 @@ fn test_instructions_iterator_emits_an_injected_invalid_instruction_if_bounded_a
 
 #[test]
 fn test_instructions_iterator_emits_an_injected_invalid_instruction_if_unbounded_and_ends_with_a_trap() {
-    let opcode_trap = ISA_Latest32.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
+    let opcode_trap = ISA_JamV1.opcode_to_raw(Opcode::trap, 0).unwrap().0 as u8;
     let code = [opcode_trap; 32];
     let bitmask = [0b00000001, 0b00000000, 0b00000000, 0b00000100];
-    let mut i = Instructions::new(ISA_Latest32, &code, &bitmask, 0, false);
+    let mut i = Instructions::new(ISA_JamV1, &code, &bitmask, 0, false);
     assert_eq!(i.offset(), 0);
     assert_eq!(
         i.next(),
@@ -7161,11 +6874,6 @@ impl ProgramBlob {
     /// Returns the instruction set of this program blob.
     pub fn isa(&self) -> InstructionSetKind {
         self.isa
-    }
-
-    /// Returns whether the blob contains a 64-bit program.
-    pub fn is_64_bit(&self) -> bool {
-        self.isa.is_64_bit()
     }
 
     /// Returns the metadata hash embedded in the blob, or an empty slice if none is present.
@@ -7669,7 +7377,9 @@ impl ProgramBlob {
             } => (page_size, instruction_count, basic_block_count),
         };
 
-        let cache_entry_count_upper_bound = cast(instruction_count).to_usize() + cast(basic_block_count).to_usize();
+        // The cache grows in powers of two, with room for four more entries before each instruction.
+        let cache_entry_count_upper_bound =
+            (cast(instruction_count).to_usize() + cast(basic_block_count).to_usize() + 4).next_power_of_two();
         let cache_size_upper_bound = interpreter_calculate_cache_size(cache_entry_count_upper_bound);
 
         let mut purgeable_ram_consumption = match args {
@@ -7694,8 +7404,10 @@ impl ProgramBlob {
         purgeable_ram_consumption = purgeable_ram_consumption.saturating_add((code_length + 1) * INTERPRETER_FLATMAP_ENTRY_SIZE as usize);
 
         if !self.isa.is_legacy() {
+            let code_block_count = code_length.div_ceil(CODE_BLOCK_SIZE);
             purgeable_ram_consumption = purgeable_ram_consumption.saturating_add(
-                code_length.div_ceil(CODE_BLOCK_SIZE) * (core::mem::size_of::<CodeBlockBitmap>() + core::mem::size_of::<usize>()),
+                code_block_count * core::mem::size_of::<CodeBlockBitmap>()
+                    + core::cmp::max(4, code_block_count) * core::mem::size_of::<usize>(),
             );
         }
 
@@ -7746,7 +7458,7 @@ fn test_estimate_interpreter_memory_usage_accounts_for_the_jump_target_bitmaps()
             })
             .unwrap();
 
-        let cache = interpreter_calculate_cache_size(code.len() + 1);
+        let cache = interpreter_calculate_cache_size((code.len() + 1 + 4).next_power_of_two());
         let flat_map = (blob.code().len() + 1) * INTERPRETER_FLATMAP_ENTRY_SIZE as usize;
         (
             blob.code().len(),
@@ -7758,9 +7470,10 @@ fn test_estimate_interpreter_memory_usage_accounts_for_the_jump_target_bitmaps()
 
     let (code_length, extra) = estimate(InstructionSetKind::Latest64);
     assert!(code_length > CODE_BLOCK_SIZE);
+    let code_block_count = code_length.div_ceil(CODE_BLOCK_SIZE);
     assert_eq!(
         extra,
-        code_length.div_ceil(CODE_BLOCK_SIZE) * (core::mem::size_of::<CodeBlockBitmap>() + 8)
+        code_block_count * core::mem::size_of::<CodeBlockBitmap>() + core::cmp::max(4, code_block_count) * 8
     );
 }
 

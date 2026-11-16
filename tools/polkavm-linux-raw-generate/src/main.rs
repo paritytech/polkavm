@@ -134,5 +134,5 @@ fn main() {
     let output_path = root.join("../../crates/polkavm-linux-raw/src/arch_amd64_bindings.rs");
     std::fs::write(&output_path, bindings.to_string()).unwrap();
 
-    println!("Bindings written to {:?}!", output_path);
+    println!("Bindings written to {output_path:?}!");
 }

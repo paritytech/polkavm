@@ -3396,8 +3396,7 @@ fn main_test_cost_model(
     log::info!("Overhead: {:.02}x", gas_time_consumed as f64 / wall_time_consumed);
 
     if analyze {
-        let mut format = InstructionFormat::default();
-        format.is_64_bit = true;
+        let format = InstructionFormat::default();
 
         if let CostModelKind::Simple(cost_model) = cost_model {
             let mut instruction_counts: Vec<_> = instruction_counts

@@ -153,8 +153,7 @@ pub struct Benchmark {
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BenchmarkKind {
-    PolkaVM32,
-    PolkaVM64,
+    PolkaVM,
     WebAssembly,
     Ckbvm,
     Solana,
@@ -187,9 +186,7 @@ fn find_benchmarks_in(root_path: &Path) -> Result<Vec<Benchmark>, std::io::Error
             } else if extension == "polkavm" {
                 let Some(target) = target else { continue };
                 if target == "riscv64emac-unknown-none-polkavm" {
-                    BenchmarkKind::PolkaVM64
-                } else if target == "riscv32emac-unknown-none-polkavm" {
-                    BenchmarkKind::PolkaVM32
+                    BenchmarkKind::PolkaVM
                 } else {
                     eprintln!("WARNING: found unrecognized .polkavm artifact: {path:?} (target = {target:?})");
                     continue;
@@ -232,7 +229,6 @@ fn find_benchmarks() -> Result<Vec<Benchmark>, std::io::Error> {
     let mut paths = vec![PathBuf::from(".")];
     for root in roots {
         paths.extend([
-            root.join("riscv32emac-unknown-none-polkavm/release"),
             root.join("riscv64emac-unknown-none-polkavm/release"),
             root.join("riscv64imac-unknown-none-elf/release"),
             root.join("wasm32-unknown-unknown/release"),

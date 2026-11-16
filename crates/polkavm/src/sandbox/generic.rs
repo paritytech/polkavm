@@ -3,7 +3,7 @@
 use polkavm_common::{
     cast::cast,
     program::Reg,
-    utils::{align_to_next_page_usize, byte_slice_init, Bitness},
+    utils::{align_to_next_page_usize, byte_slice_init},
     zygote::{
         AddressTable, AddressTableRaw, CacheAligned, JUMP_TABLE_INVALID_ADDRESS, VM_ADDR_JUMP_TABLE, VM_ADDR_JUMP_TABLE_RETURN_TO_HOST,
         VM_SANDBOX_MAXIMUM_JUMP_TABLE_VIRTUAL_SIZE, VM_SANDBOX_MAXIMUM_NATIVE_CODE_SIZE,
@@ -1727,12 +1727,6 @@ impl super::Sandbox for Sandbox {
         self.set_aux_data_permission_for_host().map_err(Error::from)?;
         self.poison = Poison::None;
 
-        if self.module.as_ref().unwrap().gas_metering() == Some(GasMeteringKind::Async) && self.gas() < 0 {
-            self.is_program_counter_valid = false;
-            self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
-            return Ok(InterruptKind::NotEnoughGas);
-        }
-
         Ok(match self.vmctx().exit_reason {
             ExitReason::None => {
                 self.is_program_counter_valid = false;
@@ -1754,18 +1748,11 @@ impl super::Sandbox for Sandbox {
 
     fn reg(&self, reg: Reg) -> RegValue {
         assert!(!matches!(self.poison, Poison::Poisoned), "sandbox has been poisoned");
-        let mut value = self.vmctx().regs[reg as usize];
-        if Self::downcast_module(self.module.as_ref().unwrap()).bitness == Bitness::B32 {
-            value &= 0xffffffff;
-        }
-        value
+        self.vmctx().regs[reg as usize]
     }
 
-    fn set_reg(&mut self, reg: Reg, mut value: RegValue) {
+    fn set_reg(&mut self, reg: Reg, value: RegValue) {
         assert!(!matches!(self.poison, Poison::Poisoned), "sandbox has been poisoned");
-        if Self::downcast_module(self.module.as_ref().unwrap()).bitness == Bitness::B32 {
-            value &= 0xffffffff;
-        }
         self.vmctx_mut().regs[reg as usize] = value;
     }
 

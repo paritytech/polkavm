@@ -16,7 +16,7 @@ pub mod default_abi {
 #[allow(clippy::missing_safety_doc)]
 #[allow(clippy::undocumented_unsafe_blocks)]
 pub unsafe fn memset(mut dst: *mut u8, value: usize, mut count: usize) {
-    #[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+    #[cfg(all(target_arch = "riscv64", target_feature = "e"))]
     unsafe {
         core::arch::asm!(
             ".insn r 0xb, 2, 0, zero, zero, zero",
@@ -26,7 +26,7 @@ pub unsafe fn memset(mut dst: *mut u8, value: usize, mut count: usize) {
         );
     }
 
-    #[cfg(not(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e")))]
+    #[cfg(not(all(target_arch = "riscv64", target_feature = "e")))]
     unsafe {
         core::ptr::write_bytes(dst, value as u8, count);
     }
@@ -34,7 +34,7 @@ pub unsafe fn memset(mut dst: *mut u8, value: usize, mut count: usize) {
 
 #[inline]
 pub fn heap_base() -> *mut core::ffi::c_void {
-    #[cfg(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"))]
+    #[cfg(all(target_arch = "riscv64", target_feature = "e"))]
     unsafe {
         let mut output;
         core::arch::asm!(
@@ -44,14 +44,14 @@ pub fn heap_base() -> *mut core::ffi::c_void {
         output
     }
 
-    #[cfg(not(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e")))]
+    #[cfg(not(all(target_arch = "riscv64", target_feature = "e")))]
     {
         core::ptr::null_mut()
     }
 }
 
 /// Sets the minimum stack size.
-#[cfg(any(all(any(target_arch = "riscv32", target_arch = "riscv64"), target_feature = "e"), doc))]
+#[cfg(any(all(target_arch = "riscv64", target_feature = "e"), doc))]
 #[macro_export]
 macro_rules! min_stack_size {
     ($size:expr) => {
@@ -61,16 +61,5 @@ macro_rules! min_stack_size {
             ".popsection\n",
             size = const $size,
         );
-    }
-}
-
-#[cfg(target_pointer_width = "32")]
-#[cfg(any(all(target_arch = "riscv32", target_feature = "e"), doc))]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn __atomic_fetch_add_8(address: *mut u64, value: u64) -> u64 {
-    unsafe {
-        let old_value = *address;
-        *address += value;
-        old_value
     }
 }
