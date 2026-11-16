@@ -91,6 +91,7 @@ neg_multiply = "allow"
 needless_lifetimes = "allow"
 unnecessary_map_or = "allow"
 manual_range_patterns = "allow"
+uninlined_format_args = "allow"
 
 # These are are 'allow' by default.
 alloc_instead_of_core = "warn"

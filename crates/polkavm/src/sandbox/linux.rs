@@ -393,7 +393,7 @@ fn clone(flags: u64) -> Result<Fork, Error> {
     let mut pidfd: c_int = -1;
     let args = CloneArgs {
         flags: linux_raw::CLONE_CLEAR_SIGHAND | u64::from(linux_raw::CLONE_PIDFD) | flags,
-        pidfd: &mut pidfd,
+        pidfd: core::ptr::addr_of_mut!(pidfd),
         child_tid: 0,
         parent_tid: 0,
         exit_signal: 0,
@@ -2650,7 +2650,7 @@ impl super::Sandbox for Sandbox {
         OffsetTable {
             arg: get_field_offset!(VmCtx::new(), |base| base.arg.as_ptr()),
             gas: get_field_offset!(VmCtx::new(), |base| base.gas.as_ptr()),
-            heap_info: get_field_offset!(VmCtx::new(), |base| &base.heap_info),
+            heap_info: get_field_offset!(VmCtx::new(), |base| core::ptr::addr_of!(base.heap_info)),
             next_native_program_counter: get_field_offset!(VmCtx::new(), |base| base.next_native_program_counter.as_ptr()),
             memset_continuation: usize::MAX,
             next_program_counter: get_field_offset!(VmCtx::new(), |base| base.next_program_counter.as_ptr()),

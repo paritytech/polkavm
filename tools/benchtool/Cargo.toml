@@ -32,6 +32,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(dummy)'] }
 
 [lints.clippy]
 unnecessary_map_or = "allow"
+uninlined_format_args = "allow"
 
 [features]
 default = [

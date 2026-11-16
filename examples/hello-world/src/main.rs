@@ -27,7 +27,7 @@ fn main() {
     let result = instance
         .call_typed_and_get_result::<u32, (u32, u32)>(&mut (), "add_numbers", (1, 10))
         .unwrap();
-    println!("  1 + 10 + 100 = {}", result);
+    println!("  1 + 10 + 100 = {result}");
 
     // Low-level API.
     let entry_point = module.exports().find(|export| export == "add_numbers").unwrap().program_counter();
