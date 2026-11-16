@@ -1727,12 +1727,6 @@ impl super::Sandbox for Sandbox {
         self.set_aux_data_permission_for_host().map_err(Error::from)?;
         self.poison = Poison::None;
 
-        if self.module.as_ref().unwrap().gas_metering() == Some(GasMeteringKind::Async) && self.gas() < 0 {
-            self.is_program_counter_valid = false;
-            self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
-            return Ok(InterruptKind::NotEnoughGas);
-        }
-
         Ok(match self.vmctx().exit_reason {
             ExitReason::None => {
                 self.is_program_counter_valid = false;

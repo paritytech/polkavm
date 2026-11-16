@@ -44,7 +44,6 @@ BENCHMARK_VMS = [
     "ckbvm_non_asm",
     "native",
     "polkavm64_compiler_no_gas",
-    "polkavm64_compiler_async_gas",
     "polkavm64_compiler_sync_gas",
     "polkavm64_interpreter",
     "solana_rbpf",

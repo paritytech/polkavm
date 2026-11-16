@@ -484,17 +484,6 @@ impl Config {
 pub enum GasMeteringKind {
     /// Synchronous gas metering. This will immediately abort the execution if we run out of gas.
     Sync,
-    /// Asynchronous gas metering. Has a lower performance overhead compared to synchronous gas metering,
-    /// but will only periodically and asynchronously check whether we still have gas remaining while
-    /// the program is running.
-    ///
-    /// With asynchronous gas metering the program can run slightly longer than it would otherwise,
-    /// and the exact point *when* it is interrupted is not deterministic, but whether the computation
-    /// as a whole finishes under a given gas limit will still be strictly enforced and deterministic.
-    ///
-    /// This is only a hint, and the VM might still fall back to using synchronous gas metering
-    /// if asynchronous metering is not available.
-    Async,
 }
 
 /// Gas the interpreter charges when it compiles code; it can leave the gas negative.
@@ -713,7 +702,6 @@ impl ModuleConfig {
             match gas_metering {
                 None => 0,
                 Some(GasMeteringKind::Sync) => 1,
-                Some(GasMeteringKind::Async) => 2,
             },
             u32::from(is_strict),
             u32::from(step_tracing),

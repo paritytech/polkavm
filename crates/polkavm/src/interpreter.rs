@@ -7,7 +7,7 @@ use crate::api::{MemoryAccessError, MemoryProtection, Module, RegValue, SetCache
 use crate::error::Error;
 use crate::gas::{CostModelKind, GasVisitor};
 use crate::utils::{InterruptKind, Segfault};
-use crate::{Gas, GasMeteringKind, ProgramCounter};
+use crate::{Gas, ProgramCounter};
 use alloc::boxed::Box;
 use alloc::collections::btree_map::Entry;
 use alloc::collections::BTreeMap;
@@ -3464,22 +3464,11 @@ fn not_enough_gas_impl<const DEBUG: bool>(
     visitor: &mut InterpretedInstance,
     compiled_offset: Target,
     program_counter: ProgramCounter,
-    new_gas: i64,
 ) -> Target {
-    match visitor.module.gas_metering().unwrap() {
-        GasMeteringKind::Async => {
-            visitor.gas = new_gas;
-            visitor.program_counter_valid = false;
-            visitor.next_program_counter = None;
-            visitor.next_program_counter_changed = true;
-        }
-        GasMeteringKind::Sync => {
-            visitor.program_counter = program_counter;
-            visitor.program_counter_valid = true;
-            visitor.next_program_counter = Some(program_counter);
-            visitor.next_program_counter_changed = false;
-        }
-    }
+    visitor.program_counter = program_counter;
+    visitor.program_counter_valid = true;
+    visitor.next_program_counter = Some(program_counter);
+    visitor.next_program_counter_changed = false;
 
     visitor.next_compiled_offset = compiled_offset;
     visitor.trigger_interrupt(InterruptKind::NotEnoughGas)
@@ -3576,7 +3565,7 @@ define_interpreter! {
         }
 
         if new_gas < 0 {
-            not_enough_gas_impl::<DEBUG>(visitor, compiled_offset, program_counter, new_gas)
+            not_enough_gas_impl::<DEBUG>(visitor, compiled_offset, program_counter)
         } else {
             visitor.gas = new_gas;
             visitor.go_to_next_instruction(compiled_offset)
@@ -3701,7 +3690,7 @@ define_interpreter! {
         let mut count = u64::from(visitor.get_u32::<DEBUG>(Reg::A2));
         while count > 0 {
             if gas_metering_enabled && visitor.gas == 0 {
-                result = not_enough_gas_impl::<DEBUG>(visitor, compiled_offset, program_counter, 0);
+                result = not_enough_gas_impl::<DEBUG>(visitor, compiled_offset, program_counter);
                 break;
             }
 

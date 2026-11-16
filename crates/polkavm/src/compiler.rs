@@ -511,9 +511,9 @@ where
             self.step(program_counter);
         }
 
-        if let Some(gas_metering) = self.gas_metering {
+        if self.gas_metering.is_some() {
             self.gas_metering_stub_offsets.push(cast(self.asm.len()).to_u32_or_debug_panic());
-            ArchVisitor(self).emit_gas_metering_stub(gas_metering);
+            ArchVisitor(self).emit_gas_metering_stub();
         }
     }
 

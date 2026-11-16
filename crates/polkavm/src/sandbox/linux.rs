@@ -2794,10 +2794,6 @@ impl Sandbox {
             if state == VMCTX_FUTEX_GUEST_STEP {
                 core::sync::atomic::fence(Ordering::Acquire);
                 if self.vmctx().gas.load(Ordering::Relaxed) < 0 {
-                    if self.module.as_ref().unwrap().gas_metering() == Some(GasMeteringKind::Async) {
-                        self.is_program_counter_valid = false;
-                        self.vmctx().next_native_program_counter.store(0, Ordering::Relaxed);
-                    }
                     return Ok(InterruptKind::NotEnoughGas);
                 }
                 return Ok(InterruptKind::Step);

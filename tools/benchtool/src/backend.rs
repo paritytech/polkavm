@@ -234,8 +234,6 @@ define_backends! {
     #[cfg(not(dummy))] // A dummy cfg since the macro requires it.
     PolkaVM_Compiler64_NoGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, None, backend_polkavm::CostModel::Simple),
     #[cfg(not(dummy))]
-    PolkaVM_Compiler64_SimpleModel_AsyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async), backend_polkavm::CostModel::Simple),
-    #[cfg(not(dummy))]
     PolkaVM_Compiler64_SimpleModel_SyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), backend_polkavm::CostModel::Simple),
     #[cfg(not(dummy))]
     PolkaVM_Compiler64_FullModel_SyncGas => backend_polkavm::PolkaVM(polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), backend_polkavm::CostModel::Full),
@@ -300,7 +298,6 @@ impl BenchmarkKind {
                 if polkavm::BackendKind::Compiler.is_supported() {
                     output.extend([
                         BackendKind::PolkaVM_Compiler64_NoGas,
-                        BackendKind::PolkaVM_Compiler64_SimpleModel_AsyncGas,
                         BackendKind::PolkaVM_Compiler64_SimpleModel_SyncGas,
                         BackendKind::PolkaVM_Compiler64_FullModel_SyncGas,
                     ]);

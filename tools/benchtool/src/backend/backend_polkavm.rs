@@ -24,7 +24,6 @@ impl Backend for PolkaVM {
     fn name(&self) -> &'static str {
         match (self.0, self.1, self.2) {
             (polkavm::BackendKind::Compiler, None, CostModel::Simple) => "polkavm64_compiler_no_gas",
-            (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Async), CostModel::Simple) => "polkavm64_compiler_async_gas",
             (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), CostModel::Simple) => "polkavm64_compiler_sync_gas",
             (polkavm::BackendKind::Interpreter, _, CostModel::Simple) => "polkavm64_interpreter",
             (polkavm::BackendKind::Compiler, Some(polkavm::GasMeteringKind::Sync), CostModel::Full) => {

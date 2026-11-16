@@ -1073,14 +1073,9 @@ fn run_and_get_gas_used(instance: &mut RawInstance, program_counter: ProgramCoun
     }
 }
 
-fn instantiate_with_compilation_cost(
-    engine: &Engine,
-    gas_metering: GasMeteringKind,
-    blob: ProgramBlob,
-    cost: Option<InterpreterCompilationCost>,
-) -> RawInstance {
+fn instantiate_with_compilation_cost(engine: &Engine, blob: ProgramBlob, cost: Option<InterpreterCompilationCost>) -> RawInstance {
     let mut module_config = ModuleConfig::new();
-    module_config.set_gas_metering(Some(gas_metering));
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
     module_config.set_interpreter_compilation_cost(cost);
     let module = Module::from_blob(engine, &module_config, blob).unwrap();
     module.instantiate().unwrap()
@@ -1095,25 +1090,23 @@ fn compilation_is_charged_when_compiling(config: Config, isa: InstructionSetKind
     let engine = Engine::new(&config).unwrap();
     let test_blob = interpreter_branch_test_blob(isa);
     let run = |instance: &mut RawInstance, side: InterpreterBranchTestSide| run_and_get_gas_used(instance, test_blob.branch, side.a0());
-    for gas_metering in [GasMeteringKind::Sync, GasMeteringKind::Async] {
-        let mut instance = instantiate_with_compilation_cost(&engine, gas_metering, test_blob.blob.clone(), Some(TEST_COMPILATION_COST));
+    let mut instance = instantiate_with_compilation_cost(&engine, test_blob.blob.clone(), Some(TEST_COMPILATION_COST));
 
-        // The branch costs 1 and the block after it 2; compiling either costs 11.
-        assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 11 + 2 + 11);
-        assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 2);
+    // The branch costs 1 and the block after it 2; compiling either costs 11.
+    assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 11 + 2 + 11);
+    assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 2);
 
-        // The branch target is compiled on its first take; it costs 33 to run and 27 to compile.
-        assert_eq!(run(&mut instance, InterpreterBranchTestSide::Target), 1 + 33 + 27);
-        assert_eq!(run(&mut instance, InterpreterBranchTestSide::Target), 1 + 33);
-        assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 2);
+    // The branch target is compiled on its first take; it costs 33 to run and 27 to compile.
+    assert_eq!(run(&mut instance, InterpreterBranchTestSide::Target), 1 + 33 + 27);
+    assert_eq!(run(&mut instance, InterpreterBranchTestSide::Target), 1 + 33);
+    assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 2);
 
-        instance.reset_interpreter_cache().unwrap();
-        assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 11 + 2 + 11);
-        assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 2);
+    instance.reset_interpreter_cache().unwrap();
+    assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 11 + 2 + 11);
+    assert_eq!(run(&mut instance, InterpreterBranchTestSide::Fallthrough), 1 + 2);
 
-        let mut instance = instantiate_with_compilation_cost(&engine, gas_metering, test_blob.blob.clone(), None);
-        assert!(instance.reset_interpreter_cache().is_err());
-    }
+    let mut instance = instantiate_with_compilation_cost(&engine, test_blob.blob.clone(), None);
+    assert!(instance.reset_interpreter_cache().is_err());
 
     let mut module_config = ModuleConfig::new();
     module_config.set_gas_metering(Some(GasMeteringKind::Sync));
@@ -1139,7 +1132,7 @@ fn compilation_cost_does_nothing_on_other_backends(config: Config, isa: Instruct
     }
 
     let gas_used = |cost| {
-        let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, test_blob.blob.clone(), cost);
+        let mut instance = instantiate_with_compilation_cost(&engine, test_blob.blob.clone(), cost);
         assert!(instance.reset_interpreter_cache().is_ok());
         assert!(instance
             .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
@@ -1180,8 +1173,7 @@ fn compilation_cost_errors(config: Config, isa: InstructionSetKind) {
     crosscheck_config.set_allow_experimental(true);
     crosscheck_config.set_crosscheck(true);
     let crosscheck_engine = Engine::new(&crosscheck_config).unwrap();
-    let mut instance =
-        instantiate_with_compilation_cost(&crosscheck_engine, GasMeteringKind::Sync, blob.clone(), Some(TEST_COMPILATION_COST));
+    let mut instance = instantiate_with_compilation_cost(&crosscheck_engine, blob.clone(), Some(TEST_COMPILATION_COST));
     assert_eq!(
         run_and_get_gas_used(&mut instance, ProgramCounter(0), InterpreterBranchTestSide::Fallthrough.a0()),
         1 + 11 + 2 + 11
@@ -1204,11 +1196,11 @@ fn compilation_cost_errors(config: Config, isa: InstructionSetKind) {
     assert!(instance.set_interpreter_cache_size_limit(limit).is_ok());
     assert!(instance.reset_interpreter_cache().is_ok());
 
-    let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, blob.clone(), None);
+    let mut instance = instantiate_with_compilation_cost(&engine, blob.clone(), None);
     assert!(instance.set_interpreter_cache_size_limit(limit).is_err());
     assert!(instance.set_interpreter_cache_size_limit(None).is_ok());
 
-    let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, blob, Some(TEST_COMPILATION_COST));
+    let mut instance = instantiate_with_compilation_cost(&engine, blob, Some(TEST_COMPILATION_COST));
     assert!(instance.set_interpreter_cache_size_limit(limit).is_ok());
     assert!(instance.reset_interpreter_cache().is_ok());
 }
@@ -1242,7 +1234,7 @@ fn large_compilation_cost_is_charged_in_full(config: Config, isa: InstructionSet
     ];
 
     for (cost, expected_compilation_cost) in costs {
-        let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, blob.clone(), Some(cost));
+        let mut instance = instantiate_with_compilation_cost(&engine, blob.clone(), Some(cost));
         instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
         instance.set_gas(100);
         instance.set_next_program_counter(ProgramCounter(0));
@@ -1267,7 +1259,7 @@ fn code_length_dependent_state_is_charged(config: Config, isa: InstructionSetKin
     let code_length = i64::try_from(blob.code().len()).unwrap();
 
     // The blocks cost 4 and 2, plus one per byte of code for the first compilation.
-    let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, blob, Some(cost));
+    let mut instance = instantiate_with_compilation_cost(&engine, blob, Some(cost));
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
     instance.set_gas(4 + code_length - 1);
     instance.set_next_program_counter(ProgramCounter(0));
@@ -1302,42 +1294,34 @@ fn out_of_gas_after_a_compilation(config: Config, isa: InstructionSetKind) {
     let engine = Engine::new(&config).unwrap();
     let test_blob = interpreter_branch_test_blob(isa);
     let fallthrough = InterpreterBranchTestSide::Fallthrough.a0();
-    for gas_metering in [GasMeteringKind::Sync, GasMeteringKind::Async] {
-        let mut instance = instantiate_with_compilation_cost(&engine, gas_metering, test_blob.blob.clone(), Some(TEST_COMPILATION_COST));
+    let mut instance = instantiate_with_compilation_cost(&engine, test_blob.blob.clone(), Some(TEST_COMPILATION_COST));
 
-        // Enough to pay 1 + 11 for the branch, but not 11 to compile the block after it, which costs 2 to run.
-        let branch_cost = 1 + 11;
-        let gas_left = 5;
-        instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
-        instance.set_reg(Reg::A0, fallthrough);
-        instance.set_reg(Reg::A1, 0);
-        instance.set_gas(branch_cost + gas_left);
-        instance.set_next_program_counter(test_blob.branch);
-        assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
-        assert_eq!(instance.reg(Reg::A1), 0);
+    // Enough to pay 1 + 11 for the branch, but not 11 to compile the block after it, which costs 2 to run.
+    let branch_cost = 1 + 11;
+    let gas_left = 5;
+    instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
+    instance.set_reg(Reg::A0, fallthrough);
+    instance.set_reg(Reg::A1, 0);
+    instance.set_gas(branch_cost + gas_left);
+    instance.set_next_program_counter(test_blob.branch);
+    assert_eq!(instance.run().unwrap(), InterruptKind::NotEnoughGas);
+    assert_eq!(instance.reg(Reg::A1), 0);
 
-        assert_eq!(
-            instance.interpreter_cache_size(),
-            Some(interpreter_calculate_cache_size(3 + 5)),
-            "expected the block after the branch to be compiled"
-        );
+    assert_eq!(
+        instance.interpreter_cache_size(),
+        Some(interpreter_calculate_cache_size(3 + 5)),
+        "expected the block after the branch to be compiled"
+    );
 
-        if gas_metering == GasMeteringKind::Async {
-            assert_eq!(instance.gas(), gas_left - 11 - 2);
-            assert_eq!(run_and_get_gas_used(&mut instance, test_blob.branch, fallthrough), 1 + 2);
-            continue;
-        }
+    assert_eq!(instance.gas(), gas_left - 11);
+    assert_eq!(instance.program_counter(), Some(test_blob.fallthrough_block[0]));
 
-        assert_eq!(instance.gas(), gas_left - 11);
-        assert_eq!(instance.program_counter(), Some(test_blob.fallthrough_block[0]));
+    instance.set_gas(100);
+    assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
+    assert_eq!(instance.reg(Reg::A1), 1);
+    assert_eq!(instance.gas(), 100 - 2, "expected the compilation to be charged once");
 
-        instance.set_gas(100);
-        assert_eq!(instance.run().unwrap(), InterruptKind::Finished);
-        assert_eq!(instance.reg(Reg::A1), 1);
-        assert_eq!(instance.gas(), 100 - 2, "expected the compilation to be charged once");
-
-        assert_eq!(run_and_get_gas_used(&mut instance, test_blob.branch, fallthrough), 1 + 2);
-    }
+    assert_eq!(run_and_get_gas_used(&mut instance, test_blob.branch, fallthrough), 1 + 2);
 }
 
 fn compilation_thrown_away_by_a_cache_reset_is_charged(config: Config, isa: InstructionSetKind) {
@@ -1352,8 +1336,8 @@ fn compilation_thrown_away_by_a_cache_reset_is_charged(config: Config, isa: Inst
 
     // The limit fits only the 34 entry big block, so compiling it after the branch throws it away
     // and compiles it again. The big block costs 33 to run and 27 to compile.
-    let run_out_of_gas_entering_big_block = |gas_metering, gas_left_after_branch| {
-        let mut instance = instantiate_with_compilation_cost(&engine, gas_metering, test_blob.blob.clone(), Some(TEST_COMPILATION_COST));
+    let run_out_of_gas_entering_big_block = |gas_left_after_branch| {
+        let mut instance = instantiate_with_compilation_cost(&engine, test_blob.blob.clone(), Some(TEST_COMPILATION_COST));
         instance
             .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
                 max_block_size: 0,
@@ -1377,7 +1361,7 @@ fn compilation_thrown_away_by_a_cache_reset_is_charged(config: Config, isa: Inst
     };
 
     let gas_left = 27 + 27 + 33 - 1;
-    let mut instance = run_out_of_gas_entering_big_block(GasMeteringKind::Sync, gas_left);
+    let mut instance = run_out_of_gas_entering_big_block(gas_left);
     assert_eq!(instance.gas(), gas_left - 27 - 27);
     assert_eq!(instance.program_counter(), Some(test_blob.target_block[0]));
     assert_eq!(
@@ -1391,10 +1375,7 @@ fn compilation_thrown_away_by_a_cache_reset_is_charged(config: Config, isa: Inst
     assert_eq!(instance.reg(Reg::A2), target_block_add_count);
     assert_eq!(instance.gas(), 100 - 33, "expected both compilations to be charged once");
 
-    let instance = run_out_of_gas_entering_big_block(GasMeteringKind::Async, gas_left);
-    assert_eq!(instance.gas(), gas_left - (27 + 27 + 33));
-
-    let mut instance = run_out_of_gas_entering_big_block(GasMeteringKind::Sync, gas_left);
+    let mut instance = run_out_of_gas_entering_big_block(gas_left);
     assert_eq!(run_and_get_gas_used(&mut instance, test_blob.target_block[1], 0), 33);
     assert_eq!(instance.reg(Reg::A2), target_block_add_count - 1);
     assert_eq!(
@@ -1424,8 +1405,7 @@ fn compilation_thrown_away_on_entry_into_the_middle_of_a_block_is_charged(config
     let engine = Engine::new(&config).unwrap();
     let test_blob = interpreter_branch_test_blob(isa);
     let entry = test_blob.target_block[1];
-    let mut instance =
-        instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, test_blob.blob.clone(), Some(TEST_COMPILATION_COST));
+    let mut instance = instantiate_with_compilation_cost(&engine, test_blob.blob.clone(), Some(TEST_COMPILATION_COST));
     instance
         .set_interpreter_cache_size_limit(Some(SetCacheSizeLimitArgs {
             max_block_size: 0,
@@ -1605,12 +1585,7 @@ fn compilation_thrown_away_by_a_host_cache_reset_is_charged(config: Config, isa:
 
     let _ = env_logger::try_init();
     let engine = Engine::new(&config).unwrap();
-    let mut instance = instantiate_with_compilation_cost(
-        &engine,
-        GasMeteringKind::Sync,
-        two_blocks_test_blob(isa),
-        Some(TEST_COMPILATION_COST),
-    );
+    let mut instance = instantiate_with_compilation_cost(&engine, two_blocks_test_blob(isa), Some(TEST_COMPILATION_COST));
 
     // The first block costs 4 to run and 12 to compile, the second 2 and 11.
     instance.set_reg(Reg::RA, crate::RETURN_TO_HOST);
@@ -1678,7 +1653,7 @@ fn arbitrary_jump_inside_of_an_instruction_does_not_compile_again(config: Config
     let engine = Engine::new(&config).unwrap();
     let blob = two_blocks_test_blob(isa);
     let offsets: Vec<_> = blob.instructions().map(|inst| inst.offset).collect();
-    let mut instance = instantiate_with_compilation_cost(&engine, GasMeteringKind::Sync, blob, Some(TEST_COMPILATION_COST));
+    let mut instance = instantiate_with_compilation_cost(&engine, blob, Some(TEST_COMPILATION_COST));
     assert_eq!(run_and_get_gas_used(&mut instance, offsets[0], 0), (12 + 4) + (11 + 2));
     let cache_size = instance.interpreter_cache_size();
     let gas = instance.gas();
@@ -1797,7 +1772,7 @@ fn padded_two_blocks_test_blob(isa: InstructionSetKind, padding: usize) -> Progr
 fn instantiate_padded_two_blocks(engine: &Engine, isa: InstructionSetKind, padding: usize) -> (RawInstance, i64) {
     let blob = padded_two_blocks_test_blob(isa, padding);
     let code_map_cost = i64::try_from(blob.code().len().div_ceil(1000)).unwrap();
-    let instance = instantiate_with_compilation_cost(engine, GasMeteringKind::Sync, blob, Some(PER_CODE_BYTE_COMPILATION_COST));
+    let instance = instantiate_with_compilation_cost(engine, blob, Some(PER_CODE_BYTE_COMPILATION_COST));
     (instance, code_map_cost)
 }
 
@@ -6120,7 +6095,7 @@ fn test_asm_reloc_hi_lo(config: Config, isa: InstructionSetKind, optimize: bool)
     assert_eq!(i.instance.read_u32(address).unwrap(), 0xC3030303);
 }
 
-fn basic_gas_metering(config: Config, isa: InstructionSetKind, gas_metering_kind: GasMeteringKind) {
+fn basic_gas_metering(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
 
     let mut builder = ProgramBlobBuilder::new(isa);
@@ -6130,7 +6105,7 @@ fn basic_gas_metering(config: Config, isa: InstructionSetKind, gas_metering_kind
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let engine = Engine::new(&config).unwrap();
     let mut module_config = ModuleConfig::default();
-    module_config.set_gas_metering(Some(gas_metering_kind));
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
 
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
     let linker: Linker = Linker::new();
@@ -6150,33 +6125,24 @@ fn basic_gas_metering(config: Config, isa: InstructionSetKind, gas_metering_kind
         instance.set_gas(2);
         let result = instance.call_typed(&mut (), "main", ());
         assert!(matches!(result, Err(CallError::NotEnoughGas)), "unexpected result: {result:?}");
-        match gas_metering_kind {
-            GasMeteringKind::Sync => {
-                assert_eq!(instance.gas(), 1);
-                assert_eq!(instance.get_result_typed::<i32>(), 0);
-                assert_eq!(instance.program_counter(), Some(ProgramCounter(1)));
-                assert_eq!(instance.next_program_counter(), Some(ProgramCounter(1)));
+        assert_eq!(instance.gas(), 1);
+        assert_eq!(instance.get_result_typed::<i32>(), 0);
+        assert_eq!(instance.program_counter(), Some(ProgramCounter(1)));
+        assert_eq!(instance.next_program_counter(), Some(ProgramCounter(1)));
 
-                let result = instance.run().unwrap();
-                assert!(matches!(result, InterruptKind::NotEnoughGas), "unexpected result: {result:?}");
-                assert_eq!(instance.gas(), 1);
-                assert_eq!(instance.program_counter(), Some(ProgramCounter(1)));
-                assert_eq!(instance.next_program_counter(), Some(ProgramCounter(1)));
+        let result = instance.run().unwrap();
+        assert!(matches!(result, InterruptKind::NotEnoughGas), "unexpected result: {result:?}");
+        assert_eq!(instance.gas(), 1);
+        assert_eq!(instance.program_counter(), Some(ProgramCounter(1)));
+        assert_eq!(instance.next_program_counter(), Some(ProgramCounter(1)));
 
-                instance.set_gas(2);
-                let result = instance.run().unwrap();
-                assert!(matches!(result, InterruptKind::Finished), "unexpected result: {result:?}");
-                assert_eq!(instance.get_result_typed::<i32>(), 666);
-                assert_eq!(instance.gas(), 0);
-                assert_eq!(instance.program_counter(), None);
-                assert_eq!(instance.next_program_counter(), None);
-            }
-            GasMeteringKind::Async => {
-                assert!(instance.gas() < 0);
-                assert_eq!(instance.program_counter(), None);
-                assert_eq!(instance.next_program_counter(), None);
-            }
-        }
+        instance.set_gas(2);
+        let result = instance.run().unwrap();
+        assert!(matches!(result, InterruptKind::Finished), "unexpected result: {result:?}");
+        assert_eq!(instance.get_result_typed::<i32>(), 666);
+        assert_eq!(instance.gas(), 0);
+        assert_eq!(instance.program_counter(), None);
+        assert_eq!(instance.next_program_counter(), None);
     }
 
     {
@@ -6195,14 +6161,7 @@ fn basic_gas_metering(config: Config, isa: InstructionSetKind, gas_metering_kind
 
         let result = instance.call_typed(&mut (), "main", ());
         assert!(matches!(result, Err(CallError::NotEnoughGas)), "unexpected result: {result:?}");
-        match gas_metering_kind {
-            GasMeteringKind::Sync => {
-                assert_eq!(instance.gas(), 0);
-            }
-            GasMeteringKind::Async => {
-                assert!(instance.gas() < 0);
-            }
-        }
+        assert_eq!(instance.gas(), 0);
     }
 
     {
@@ -6212,14 +6171,7 @@ fn basic_gas_metering(config: Config, isa: InstructionSetKind, gas_metering_kind
 
         let result = instance.call_typed(&mut (), "main", ());
         assert!(matches!(result, Err(CallError::NotEnoughGas)), "unexpected result: {result:?}");
-        match gas_metering_kind {
-            GasMeteringKind::Sync => {
-                assert_eq!(instance.gas(), 0);
-            }
-            GasMeteringKind::Async => {
-                assert!(instance.gas() < 0);
-            }
-        }
+        assert_eq!(instance.gas(), 0);
     }
 
     // Stress test.
@@ -6228,29 +6180,14 @@ fn basic_gas_metering(config: Config, isa: InstructionSetKind, gas_metering_kind
         instance.set_gas(2);
         let result = instance.call_typed(&mut (), "main", ());
         assert!(matches!(result, Err(CallError::NotEnoughGas)), "unexpected result: {result:?}");
-        match gas_metering_kind {
-            GasMeteringKind::Sync => {
-                assert_eq!(instance.get_result_typed::<i32>(), 0);
-                assert_eq!(instance.gas(), 1);
-            }
-            GasMeteringKind::Async => {
-                assert!(instance.gas() < 0);
-            }
-        }
+        assert_eq!(instance.get_result_typed::<i32>(), 0);
+        assert_eq!(instance.gas(), 1);
 
         instance.set_gas(5);
         instance.call_typed(&mut (), "main", ()).unwrap();
         assert_eq!(instance.gas(), 2);
         assert_eq!(instance.get_result_typed::<i32>(), 666);
     }
-}
-
-fn basic_gas_metering_sync(config: Config, isa: InstructionSetKind) {
-    basic_gas_metering(config, isa, GasMeteringKind::Sync);
-}
-
-fn basic_gas_metering_async(config: Config, isa: InstructionSetKind) {
-    basic_gas_metering(config, isa, GasMeteringKind::Async);
 }
 
 #[test]
@@ -6312,7 +6249,7 @@ fn per_instruction_gas_metering() {
     assert_eq!(instance.next_program_counter(), Some(offsets[4]));
 }
 
-fn consume_gas_in_host_function(config: Config, isa: InstructionSetKind, gas_metering_kind: GasMeteringKind) {
+fn consume_gas_in_host_function(config: Config, isa: InstructionSetKind) {
     let _ = env_logger::try_init();
 
     let mut builder = ProgramBlobBuilder::new(isa);
@@ -6323,7 +6260,7 @@ fn consume_gas_in_host_function(config: Config, isa: InstructionSetKind, gas_met
     let blob = ProgramBlob::parse(builder.into_vec().unwrap().into()).unwrap();
     let engine = Engine::new(&config).unwrap();
     let mut module_config = ModuleConfig::default();
-    module_config.set_gas_metering(Some(gas_metering_kind));
+    module_config.set_gas_metering(Some(GasMeteringKind::Sync));
 
     let module = Module::from_blob(&engine, &module_config, blob).unwrap();
     let mut linker: Linker<i64, core::convert::Infallible> = Linker::new();
@@ -6358,14 +6295,6 @@ fn consume_gas_in_host_function(config: Config, isa: InstructionSetKind, gas_met
         assert_eq!(instance.gas(), -1);
         assert!(matches!(result, Err(CallError::NotEnoughGas)), "unexpected result: {result:?}");
     }
-}
-
-fn consume_gas_in_host_function_sync(config: Config, isa: InstructionSetKind) {
-    consume_gas_in_host_function(config, isa, GasMeteringKind::Sync);
-}
-
-fn consume_gas_in_host_function_async(config: Config, isa: InstructionSetKind) {
-    consume_gas_in_host_function(config, isa, GasMeteringKind::Async);
 }
 
 fn gas_metering_with_more_than_one_basic_block(config: Config, isa: InstructionSetKind) {
@@ -7644,10 +7573,8 @@ run_tests! {
     stack_size_not_power_of_two
     sbrk_knob_works
 
-    basic_gas_metering_sync
-    basic_gas_metering_async
-    consume_gas_in_host_function_sync
-    consume_gas_in_host_function_async
+    basic_gas_metering
+    consume_gas_in_host_function
     gas_metering_with_more_than_one_basic_block
     gas_metering_with_implicit_trap
     gas_gets_charged_when_jumping_in_the_middle_of_a_basic_block
