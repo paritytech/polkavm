@@ -114,7 +114,7 @@ impl Vm {
                 b"pvm_fetch_inputs" => import_fetch_inputs = Some(import_index),
                 b"pvm_init_audio" => import_init_audio = Some(import_index),
                 b"pvm_output_audio" => import_output_audio = Some(import_index),
-                _ => return Err(format!("unsupported import: {}", import).into()),
+                _ => return Err(format!("unsupported import: {import}").into()),
             }
         }
 

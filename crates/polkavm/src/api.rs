@@ -1015,6 +1015,7 @@ impl Module {
 
 if_compiler_is_supported! {
     {
+        #[allow(clippy::large_enum_variant)]
         enum InstanceBackend {
             #[cfg(target_os = "linux")]
             CompiledLinux(SandboxInstance<SandboxLinux>),
