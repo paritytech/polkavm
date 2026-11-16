@@ -1,10 +1,10 @@
 use core::ops::Range;
 
 use object::elf::{FileHeader64, PF_R, PF_W, PF_X, PT_LOAD};
-use object::read::elf::{ElfFile, FileHeader, ProgramHeader};
+use object::read::elf::{ElfFile, ProgramHeader};
 use object::{LittleEndian, Object};
 
-use crate::riscv::{DecoderConfig, Inst, Reg};
+use crate::riscv::{Inst, Reg};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Exception {
@@ -116,21 +116,23 @@ impl Memory {
     }
 }
 
+/// A reference RV64 interpreter for a single hart with a 32-bit address space.
 pub struct Interpreter {
-    decoder_config: DecoderConfig,
     stop_address: Option<u64>,
     program_counter: u64,
     regs: [u64; 32],
     memory: Memory,
 }
 
-impl Interpreter {
-    pub fn new_64bit() -> Self {
-        let mut decoder_config = DecoderConfig::new_32bit();
-        decoder_config.set_rv64(true);
+impl Default for Interpreter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
+impl Interpreter {
+    pub fn new() -> Self {
         Interpreter {
-            decoder_config,
             stop_address: None,
             program_counter: 0,
             regs: [0; 32],
@@ -161,20 +163,16 @@ impl Interpreter {
     }
 
     pub fn load_elf(&mut self, data: &[u8]) -> Result<(), object::Error> {
-        self.load_elf_class::<FileHeader64<LittleEndian>>(data)
-    }
-
-    fn load_elf_class<Elf: FileHeader>(&mut self, data: &[u8]) -> Result<(), object::Error> {
-        let file: ElfFile<Elf> = ElfFile::parse(data)?;
+        let file: ElfFile<FileHeader64<LittleEndian>> = ElfFile::parse(data)?;
         let endian = file.endian();
         for header in file.elf_program_headers() {
             let is_loadable = header.p_type(endian) == PT_LOAD;
-            let memory_size: u64 = header.p_memsz(endian).into();
+            let memory_size = header.p_memsz(endian);
             if !is_loadable || memory_size == 0 {
                 continue;
             }
 
-            let address: u64 = header.p_vaddr(endian).into();
+            let address = header.p_vaddr(endian);
             let flags = header.p_flags(endian);
             let protection = MemoryProtection {
                 read: flags & PF_R != 0,
@@ -228,7 +226,7 @@ impl Interpreter {
     fn step(&mut self) -> Result<(), Exception> {
         let program_counter = self.program_counter;
         let (word, length) = self.fetch_instruction(program_counter)?;
-        let instruction = Inst::decode(&self.decoder_config, word).ok_or(Exception::IllegalInstruction(word))?;
+        let instruction = Inst::decode(word).ok_or(Exception::IllegalInstruction(word))?;
         self.set_program_counter(program_counter.wrapping_add(length));
 
         if let Err(exception) = self.execute(instruction, program_counter) {
@@ -304,7 +302,7 @@ mod tests {
     }
 
     fn run_program(code: &[u8], max_steps: u64) -> (StopReason, Interpreter) {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         map_region_with_data(&mut interpreter, CODE_ADDRESS, code, EXECUTE);
         interpreter.set_stop_address(STOP_ADDRESS);
         interpreter.set_program_counter(CODE_ADDRESS);
@@ -344,7 +342,7 @@ mod tests {
         const CORPUS_MAX_STEPS: u64 = 100_000;
         let mut failures = Vec::new();
         for (name, elf) in corpus_elfs(category) {
-            let mut interpreter = Interpreter::new_64bit();
+            let mut interpreter = Interpreter::new();
             interpreter.load_elf(&elf).unwrap();
             interpreter.set_stop_address(STOP_ADDRESS);
             interpreter.set_reg(Reg::RA, STOP_ADDRESS);
@@ -372,7 +370,7 @@ mod tests {
 
     #[test]
     fn registers_are_zero_at_construction() {
-        let interpreter = Interpreter::new_64bit();
+        let interpreter = Interpreter::new();
         for index in REGISTERS_RANGE {
             assert_eq!(interpreter.reg(Reg::decode(index)), 0);
         }
@@ -380,7 +378,7 @@ mod tests {
 
     #[test]
     fn set_reg_round_trips() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         interpreter.set_reg(Reg::A0, 0xdead_beef_0000_0001);
         assert_eq!(interpreter.reg(Reg::A0), 0xdead_beef_0000_0001);
         assert_eq!(interpreter.reg(Reg::A1), 0);
@@ -388,19 +386,14 @@ mod tests {
 
     #[test]
     fn writes_to_zero_register_are_noop() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         interpreter.set_reg(Reg::Zero, 5);
         assert_eq!(interpreter.reg(Reg::Zero), 0);
     }
 
     #[test]
-    fn decodes_in_64bit_mode() {
-        assert!(Interpreter::new_64bit().decoder_config.rv64);
-    }
-
-    #[test]
     fn maps_regions_to_sorted_addresses() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         let regions = [
             (REGION_ADDRESS + REGION_SIZE * 4, 10),
             (REGION_ADDRESS, 11),
@@ -427,7 +420,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn region_cannot_overlap_at_start() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         interpreter.map_region(REGION_ADDRESS, REGION_SIZE, READ_WRITE);
         interpreter.map_region(REGION_ADDRESS + REGION_SIZE - 1, 2, READ_WRITE);
     }
@@ -435,7 +428,7 @@ mod tests {
     #[test]
     #[should_panic]
     fn region_cannot_overlap_at_end() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         interpreter.map_region(REGION_ADDRESS, REGION_SIZE, READ_WRITE);
         interpreter.map_region(REGION_ADDRESS - REGION_SIZE + 1, REGION_SIZE, READ_WRITE);
     }
@@ -443,14 +436,14 @@ mod tests {
     #[test]
     #[should_panic]
     fn region_cannot_overlap_fully() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         interpreter.map_region(REGION_ADDRESS, REGION_SIZE, READ_WRITE);
         interpreter.map_region(REGION_ADDRESS - REGION_SIZE, 3 * REGION_SIZE, READ_WRITE);
     }
 
     #[test]
     fn accesses_memory_inside_mapped_region() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         let data: Vec<u8> = (0..=u8::MAX).collect();
         map_region_with_data(&mut interpreter, REGION_ADDRESS, &data, READ_WRITE);
 
@@ -466,7 +459,7 @@ mod tests {
 
     #[test]
     fn cannot_access_memory_outside_mapped_region() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         interpreter.map_region(REGION_ADDRESS, REGION_SIZE, READ_WRITE);
 
         let region_end = REGION_ADDRESS + REGION_SIZE;
@@ -488,7 +481,7 @@ mod tests {
 
     #[test]
     fn cannot_access_memory_across_mapped_regions() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         let region_end = REGION_ADDRESS + REGION_SIZE;
         interpreter.map_region(REGION_ADDRESS, REGION_SIZE, READ_WRITE);
         interpreter.map_region(region_end, REGION_SIZE, READ_WRITE);
@@ -508,7 +501,7 @@ mod tests {
 
     #[test]
     fn host_memory_access_ignores_protection() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         let data = &[1, 2, 3, 4];
         interpreter.map_region(REGION_ADDRESS, data.len() as u64, EXECUTE);
 
@@ -518,7 +511,7 @@ mod tests {
 
     #[test]
     fn run_at_stop_address_always_finishes() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         interpreter.set_stop_address(STOP_ADDRESS);
         interpreter.set_program_counter(STOP_ADDRESS);
 
@@ -528,7 +521,7 @@ mod tests {
 
     #[test]
     fn run_with_no_budget_is_out_of_steps() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         interpreter.set_stop_address(STOP_ADDRESS);
         interpreter.set_program_counter(CODE_ADDRESS);
 
@@ -538,7 +531,7 @@ mod tests {
 
     #[test]
     fn run_with_no_mapped_region_faults() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         interpreter.set_program_counter(CODE_ADDRESS);
 
         assert_eq!(interpreter.run(1), StopReason::Trap(Exception::InstructionAccessFault));
@@ -547,7 +540,7 @@ mod tests {
 
     #[test]
     fn run_with_no_mapped_executable_region_faults() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         map_region_with_data(&mut interpreter, CODE_ADDRESS, &NOP.to_le_bytes(), READ_WRITE);
         interpreter.set_program_counter(CODE_ADDRESS);
 
@@ -585,7 +578,7 @@ mod tests {
     #[test]
     fn fetch_returns_word_and_length() {
         const COMPRESSED_NOP: u16 = 0x0001;
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         let code = [NOP.to_le_bytes().as_slice(), COMPRESSED_NOP.to_le_bytes().as_slice()].concat();
         map_region_with_data(&mut interpreter, CODE_ADDRESS, &code, EXECUTE);
 
@@ -618,7 +611,7 @@ mod tests {
         const ELF_MAGIC: &[u8] = b"\x7fELF";
         for category in RV64_CATEGORIES {
             for (_, elf) in corpus_elfs(category) {
-                let mut interpreter = Interpreter::new_64bit();
+                let mut interpreter = Interpreter::new();
                 interpreter.load_elf(&elf).unwrap();
                 assert_eq!(
                     interpreter.read_memory(CORPUS_TEXT_ADDRESS, ELF_MAGIC.len() as u64),
@@ -630,7 +623,7 @@ mod tests {
                 let entry_offset = (entry - CORPUS_TEXT_ADDRESS) as usize;
                 let entry_word = u32::from_le_bytes(elf[entry_offset..][..INSTRUCTION_BYTE_LENGTH as usize].try_into().unwrap());
                 assert_eq!(interpreter.fetch_instruction(entry), Ok((entry_word, INSTRUCTION_BYTE_LENGTH)));
-                assert!(Inst::decode(&DecoderConfig::new_64bit(), entry_word).is_some());
+                assert!(Inst::decode(entry_word).is_some());
             }
         }
     }
@@ -640,7 +633,7 @@ mod tests {
         const ENTRY: u64 = 0x100f8;
         const TEXT_SIZE: usize = 0x5f4;
         let elf = include_bytes!("../../../guest-programs/riscv-tests/output/rv64ui/add.elf");
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         interpreter.load_elf(elf).unwrap();
         assert_eq!(memory_layout(&interpreter), [(CORPUS_TEXT_ADDRESS, TEXT_SIZE, READ_EXECUTE)]);
         assert_eq!(
@@ -652,7 +645,7 @@ mod tests {
         let (word, length) = interpreter.fetch_instruction(ENTRY).unwrap();
         assert_eq!(length, INSTRUCTION_BYTE_LENGTH);
         assert_eq!(
-            Inst::decode(&DecoderConfig::new_64bit(), word),
+            Inst::decode(word),
             Some(Inst::RegImm {
                 kind: RegImmKind::Add64,
                 dst: Reg::S0,
@@ -673,7 +666,7 @@ mod tests {
         const BSS_TAIL: Range<usize> = DATA_FILE_SIZE..DATA_MEMORY_SIZE;
         const BSS_TAIL_SIZE: usize = DATA_MEMORY_SIZE - DATA_FILE_SIZE;
         let elf = include_bytes!("../../../guest-programs/riscv-tests/output/rv64ua/amoadd_d.elf");
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         interpreter.load_elf(elf).unwrap();
         assert_eq!(
             memory_layout(&interpreter),
@@ -704,19 +697,21 @@ mod tests {
         // size to test that loading is skipped due to being a non-loadable segment.
         patched_elf[attributes_mem_size_field_range].copy_from_slice(&non_zero_size.to_le_bytes());
 
-        let mut interpreter_with_patched_elf = Interpreter::new_64bit();
+        let mut interpreter_with_patched_elf = Interpreter::new();
         interpreter_with_patched_elf.load_elf(&patched_elf).unwrap();
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         interpreter.load_elf(elf).unwrap();
         assert_eq!(memory_layout(&interpreter_with_patched_elf), memory_layout(&interpreter));
     }
 
     #[test]
     fn rejects_loading_32bit_elf() {
-        let mut interpreter = Interpreter::new_64bit();
+        let mut interpreter = Interpreter::new();
         interpreter.set_program_counter(0x1234);
-        let elf = include_bytes!("../../../guest-programs/riscv-tests/output/rv32ui/add.elf");
-        assert!(interpreter.load_elf(elf).is_err());
+        let elf = include_bytes!("../../../guest-programs/riscv-tests/output/rv64ui/add.elf");
+        let mut patched_elf = elf.to_vec();
+        patched_elf[core::mem::offset_of!(object::elf::Ident, class)] = object::elf::ELFCLASS32;
+        assert!(interpreter.load_elf(&patched_elf).is_err());
         assert_eq!(interpreter.program_counter(), 0x1234);
         assert_eq!(interpreter.read_memory(CORPUS_TEXT_ADDRESS, 1), None);
         assert!(interpreter.load_elf(b"not an elf").is_err());
