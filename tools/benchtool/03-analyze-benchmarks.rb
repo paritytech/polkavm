@@ -77,7 +77,6 @@ NAME_MAP = {
     "native" => "(bare metal)",
     "polkavm64_compiler_no_gas" => "**PolkaVM (64-bit, recompiler)**",
     "polkavm64_compiler_sync_gas" => "PolkaVM (64-bit, recompiler, sync gas)",
-    "polkavm64_compiler_async_gas" => "PolkaVM (64-bit, recompiler, async gas)",
     "wasmer" => "Wasmer (singlepass)",
     "wasmtime_cranelift_default" => "Wasmtime (cranelift)",
     "wasmtime_cranelift_with_epoch" => "Wasmtime (cranelift, epoch interruption)",

@@ -971,7 +971,7 @@ where
         debug_assert_eq!(step_prelude_length::<S>(), self.asm.len() - origin);
     }
 
-    pub(crate) fn emit_gas_metering_stub(&mut self, kind: GasMeteringKind) {
+    pub(crate) fn emit_gas_metering_stub(&mut self) {
         let origin = self.asm.len();
 
         assert_eq!(S::offset_table().gas, 0x60);
@@ -982,30 +982,28 @@ where
         // For generic sandbox this will be:
         // 49 81 ad 60 f0 ff ff ff ff ff 7f     sub qword [r13-0xfa0],0x7fffffff
         self.push(sub((Self::vmctx_field(S::offset_table().gas), imm64(i32::MAX))));
-        if matches!(kind, GasMeteringKind::Sync) {
-            // This will jump 5 bytes (or 8 bytes on generic sandbox) backwards to 0x60 which is the PUSHA instruction
-            // which is invalid in 64-bit, so it will trap with an SIGILL.
-            //
-            // Note that this is technically a forward-compatibility hazard as this opcode could arguably
-            // be reused for something in the future.
+        // This will jump 5 bytes (or 8 bytes on generic sandbox) backwards to 0x60 which is the PUSHA instruction
+        // which is invalid in 64-bit, so it will trap with an SIGILL.
+        //
+        // Note that this is technically a forward-compatibility hazard as this opcode could arguably
+        // be reused for something in the future.
 
-            if matches!(S::KIND, SandboxKind::Linux) {
-                debug_assert_eq!(GAS_COST_LINUX_SANDBOX_OFFSET, self.asm.len() - origin - 4); // Offset to bring us from the start of the stub to the gas cost.
-                assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r13 + 0x60)); // Sanity check.
-                debug_assert!(self.asm.code_mut().ends_with(&[0x49, 0x81, 0x6d, 0x60, 0xff, 0xff, 0xff, 0x7f]));
-                // Offset to bring us from where the trap will trigger to the beginning of the stub.
-                debug_assert_eq!(GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 5) as u64);
-                self.asm.push_raw(&[0x78, 0xf9]);
-            } else {
-                debug_assert_eq!(GAS_COST_GENERIC_SANDBOX_OFFSET, self.asm.len() - origin - 4);
-                assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r13 - 0xfa0)); // Sanity check.
-                debug_assert!(self
-                    .asm
-                    .code_mut()
-                    .ends_with(&[0x49, 0x81, 0xad, 0x60, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]));
-                debug_assert_eq!(GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 8) as u64);
-                self.asm.push_raw(&[0x78, 0xf6]);
-            }
+        if matches!(S::KIND, SandboxKind::Linux) {
+            debug_assert_eq!(GAS_COST_LINUX_SANDBOX_OFFSET, self.asm.len() - origin - 4); // Offset to bring us from the start of the stub to the gas cost.
+            assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r13 + 0x60)); // Sanity check.
+            debug_assert!(self.asm.code_mut().ends_with(&[0x49, 0x81, 0x6d, 0x60, 0xff, 0xff, 0xff, 0x7f]));
+            // Offset to bring us from where the trap will trigger to the beginning of the stub.
+            debug_assert_eq!(GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 5) as u64);
+            self.asm.push_raw(&[0x78, 0xf9]);
+        } else {
+            debug_assert_eq!(GAS_COST_GENERIC_SANDBOX_OFFSET, self.asm.len() - origin - 4);
+            assert_eq!(Self::vmctx_field(S::offset_table().gas), reg_indirect(RegSize::R64, r13 - 0xfa0)); // Sanity check.
+            debug_assert!(self
+                .asm
+                .code_mut()
+                .ends_with(&[0x49, 0x81, 0xad, 0x60, 0xf0, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]));
+            debug_assert_eq!(GAS_METERING_TRAP_OFFSET, (self.asm.len() - origin - 8) as u64);
+            self.asm.push_raw(&[0x78, 0xf6]);
         }
     }
 
@@ -1352,12 +1350,6 @@ where
                 let label_slow = self.memset_label;
                 branch_to_label(self.asm.reserve::<U1>(), Condition::Less, label_slow);
                 // If yes - do it the fast way.
-                self.emit_rep_stosb();
-                self.asm.push(mov(RegSize::R32, count, rcx));
-            }
-            Some(GasMeteringKind::Async) => {
-                self.asm.push(mov(RegSize::R32, rcx, count));
-                self.asm.push(sub((RegSize::R64, Self::vmctx_field(S::offset_table().gas), rcx)));
                 self.emit_rep_stosb();
                 self.asm.push(mov(RegSize::R32, count, rcx));
             }
