@@ -27,7 +27,7 @@ version = "0.39.0"
 authors = ["Jan Bujak <jan@parity.io>", "Parity Technologies <admin@parity.io>"]
 license = "MIT/Apache-2.0"
 edition = "2021"
-rust-version = "1.86.0"
+rust-version = "1.88.0"
 repository = "https://github.com/koute/polkavm"
 
 [workspace.dependencies]
