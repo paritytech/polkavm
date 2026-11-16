@@ -10,6 +10,7 @@ members = [
     "crates/polkavm-common",
     "crates/polkavm-linux-raw",
     "crates/polkavm",
+    "crates/riscv-test-interpreter",
 
     "tools/polkatool",
     "tools/polkavm-linux-raw-generate",

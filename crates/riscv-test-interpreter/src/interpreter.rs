@@ -3,8 +3,7 @@ use core::ops::Range;
 use object::elf::{FileHeader64, PF_R, PF_W, PF_X, PT_LOAD};
 use object::read::elf::{ElfFile, ProgramHeader};
 use object::{LittleEndian, Object};
-
-use crate::riscv::{Inst, Reg};
+use polkavm_linker::riscv::{Inst, Reg};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Exception {
@@ -259,7 +258,7 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
 
-    use crate::riscv::RegImmKind;
+    use polkavm_linker::riscv::RegImmKind;
 
     const RV64_CATEGORIES: &[&str] = &["rv64ua", "rv64uc", "rv64ui", "rv64um", "rv64uzbb"];
     const REGISTERS_RANGE: Range<u32> = 0..32;
