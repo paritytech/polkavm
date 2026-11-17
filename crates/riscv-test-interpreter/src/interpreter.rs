@@ -5,6 +5,8 @@ use object::read::elf::{ElfFile, ProgramHeader};
 use object::{LittleEndian, Object};
 use polkavm_linker::riscv::{Inst, Reg};
 
+use crate::width::{sign_extend_32, truncate_to_u32, zero_extend_32};
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Exception {
     IllegalInstruction(u32),
@@ -23,6 +25,7 @@ pub enum StopReason {
     OutOfSteps,
 }
 
+#[derive(Copy, Clone)]
 enum MemoryAccess {
     Fetch,
     // TODO (when implementation requires it):
@@ -263,8 +266,71 @@ impl Interpreter {
         Ok((u32::from_le_bytes(word_bytes), length))
     }
 
-    #[allow(clippy::needless_pass_by_ref_mut)]
-    fn execute(&mut self, _instruction: Inst, _instruction_address: u64) -> Result<(), Exception> {
-        todo!()
+    fn execute(&mut self, instruction: Inst, _instruction_address: u64) -> Result<(), Exception> {
+        match instruction {
+            Inst::RegImm { .. } => todo!(),
+            Inst::RegReg { .. } => todo!(),
+            Inst::LoadUpperImmediate { .. } => todo!(),
+            Inst::AddUpperImmediateToPc { .. } => todo!(),
+            Inst::JumpAndLink { .. } => todo!(),
+            Inst::JumpAndLinkRegister { dst, base, value } => self.jump_and_link_register(dst, base, value),
+            Inst::Branch { .. } => todo!(),
+            Inst::Load { .. } => todo!(),
+            Inst::Store { .. } => todo!(),
+
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#fence
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/zifencei.html
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/zihintpause.html
+            Inst::Fence { .. } | Inst::FenceI => {}
+
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#ecall-ebreak
+            Inst::Ecall => return Err(Exception::EnvironmentCall),
+
+            // https://github.com/riscv-non-isa/riscv-asm-manual/blob/7303c035b1be5b7de673a66db046221da237da8e/src/asm-manual.adoc#instruction-aliases
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/c-st-ext.html#27-1-5-4-defined-illegal-instruction
+            Inst::Unimplemented => return Err(Exception::Unimplemented),
+
+            // "B" extension (Zbb):
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-2-count-leadingtrailing-zero-bits
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-3-count-population
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-5-sign-extension-and-zero-extension
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-7-or-combine
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-8-byte-reverse
+            Inst::Reg { .. } => todo!(),
+
+            // "A" extension:
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/a-st-ext.html#sec:lrsc
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/a-st-ext.html#sec:amo
+            Inst::LoadReserved32 { .. }
+            | Inst::StoreConditional32 { .. }
+            | Inst::LoadReserved64 { .. }
+            | Inst::StoreConditional64 { .. }
+            | Inst::Atomic { .. } => todo!(),
+
+            // Vendor conditional moves:
+            // https://github.com/XUANTIE-RV/thead-extension-spec/blob/2.4.0/xtheadcondmov/mveqz.adoc
+            // https://github.com/XUANTIE-RV/thead-extension-spec/blob/2.4.0/xtheadcondmov/mvnez.adoc
+            // https://github.com/llvm/llvm-project/blob/e30e644266fbc9ba638ee2c6aa23b5691397163f/llvm/lib/Target/RISCV/RISCVInstrInfoXMips.td#L148-L166
+            Inst::Cmov { .. } | Inst::MipsCmov { .. } => todo!(),
+        }
+
+        Ok(())
+    }
+
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#ct-unconditional
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/c-st-ext.html#27-1-4-control-transfer-instructions
+    fn jump_and_link_register(&mut self, dst: Reg, base: Reg, value: i32) {
+        let target = self.reg(base).wrapping_add(sign_extend_32(value)) & !1;
+        self.set_reg(dst, self.program_counter);
+        self.set_program_counter(Self::to_32bit_address(target));
+    }
+
+    /// RISC-V address space is 2^XLEN bytes and address arithmetic wraps at 2^XLEN (https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html#memory),
+    /// but PolkaVM's address space is 2^32 bytes. Thus, this RISC-V execution environment always uses
+    /// only the low 32 bits of load/store addresses and indirect jump targets before resolving them,
+    /// so that sign-extended 32-bit pointers resolve as they do on PolkaVM, ensuring the differential
+    /// comparison during fuzzing does not falsely diverge on them.
+    fn to_32bit_address(address: u64) -> u64 {
+        zero_extend_32(truncate_to_u32(address))
     }
 }

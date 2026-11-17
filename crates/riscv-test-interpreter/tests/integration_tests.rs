@@ -18,6 +18,7 @@ const _: () = assert!(STOP_ADDRESS < END_OF_32BIT_ADDRESS_SPACE);
 const REGION_ADDRESS: u64 = 0x1000;
 const REGION_SIZE: u64 = 0x100;
 const CORPUS_TEXT_ADDRESS: u64 = 0x10000;
+const UPPER_32_BITS_SET: u64 = 0xffff_ffff_0000_0000;
 const ENOUGH_STEPS: u64 = 100;
 const EXECUTE: MemoryProtection = MemoryProtection {
     read: false,
@@ -37,6 +38,16 @@ const READ_EXECUTE: MemoryProtection = MemoryProtection {
 const INSTRUCTION_BYTE_LENGTH: u64 = 4;
 const COMPRESSED_INSTRUCTION_BYTE_LENGTH: u64 = 2;
 const NOP: u32 = 0x00000013;
+
+/// The matching instruction word, with its opcode and funct fields
+/// filled in and every operand field zero.
+#[derive(Copy, Clone)]
+#[repr(u32)]
+enum MatchWord {
+    Jalr = 0x0000_0067,
+}
+
+use MatchWord::*;
 
 fn map_region_with_data(interpreter: &mut Interpreter, address: u64, data: &[u8], protection: MemoryProtection) {
     interpreter.map_region(address, data.len() as u64, protection);
@@ -67,7 +78,7 @@ fn run(code: &[u32], setup: RunSetup) -> (StopReason, Interpreter) {
 /// The `code` is mapped to an execute-only memory region starting at [`CODE_ADDRESS`],
 /// which the program counter is set to, and `setup.data` to a read-write memory region
 /// starting at [`DATA_ADDRESS`]. The stop address and [`Reg::RA`] are set to [`STOP_ADDRESS`],
-/// so that if `code` ends with a `ret` instruction it returns to the stop address and
+/// so that if `code` ends with a [`RET`] instruction it returns to the stop address and
 /// reports [`StopReason::Finished`]. The `setup.registers` are applied and take precedence.
 fn run_bytes(code: &[u8], setup: RunSetup) -> (StopReason, Interpreter) {
     let mut interpreter = Interpreter::new();
@@ -139,6 +150,17 @@ fn describe_failure(name: &str, stop_reason: StopReason, interpreter: &Interpret
         interpreter.program_counter(),
         registers.join(" ")
     )
+}
+
+const fn immediate_bits(value: i32, low_bit: u32, high_bit: u32) -> u32 {
+    let mask = (1 << (high_bit - low_bit + 1)) - 1;
+
+    ((value as u32) >> low_bit) & mask
+}
+
+/// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-3-immediate-encoding-variants
+const fn i_type(match_word: MatchWord, dst: Reg, src: Reg, imm: i32) -> u32 {
+    match_word as u32 | (dst as u32) << 7 | (src as u32) << 15 | immediate_bits(imm, 0, 11) << 20
 }
 
 #[test]
@@ -367,6 +389,65 @@ fn run_undecodable_compressed_parcel_is_illegal_instruction() {
         StopReason::Trap(Exception::IllegalInstruction(u32::from(COMPRESSED_EBREAK)))
     );
     assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
+}
+
+#[test]
+fn jalr_clears_target_bit_0() {
+    for (base, offset) in [(STOP_ADDRESS, 1), (STOP_ADDRESS - 1, 1)] {
+        let (stop_reason, interpreter) = run(
+            &[i_type(Jalr, Reg::Zero, Reg::RA, offset)],
+            RunSetup {
+                registers: &[(Reg::RA, base)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.program_counter(), STOP_ADDRESS);
+    }
+}
+
+#[test]
+fn jalr_target_truncates_to_32_bits() {
+    let (stop_reason, interpreter) = run(
+        &[i_type(Jalr, Reg::Zero, Reg::RA, 0)],
+        RunSetup {
+            registers: &[(Reg::RA, UPPER_32_BITS_SET | STOP_ADDRESS)],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Finished);
+    assert_eq!(interpreter.program_counter(), STOP_ADDRESS);
+}
+
+#[test]
+fn jalr_target_wraps_at_32_bits() {
+    let (stop_reason, interpreter) = run(
+        &[i_type(Jalr, Reg::Zero, Reg::Zero, -(INSTRUCTION_BYTE_LENGTH as i32))],
+        RunSetup {
+            registers: &[],
+            data: &[],
+            max_steps: 1,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::OutOfSteps);
+    assert_eq!(interpreter.program_counter(), END_OF_32BIT_ADDRESS_SPACE - INSTRUCTION_BYTE_LENGTH);
+}
+
+#[test]
+fn jalr_to_unmapped_address_faults() {
+    let unmapped_address = CODE_ADDRESS - INSTRUCTION_BYTE_LENGTH;
+    let (stop_reason, interpreter) = run(
+        &[i_type(Jalr, Reg::Zero, Reg::RA, 0)],
+        RunSetup {
+            registers: &[(Reg::RA, unmapped_address)],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Trap(Exception::InstructionAccessFault));
+    assert_eq!(interpreter.program_counter(), unmapped_address);
 }
 
 #[test]
