@@ -1437,32 +1437,14 @@ fn rejects_loading_32bit_elf() {
     assert!(interpreter.load_elf(b"not an elf").is_err());
 }
 
-#[ignore = "enable once the base integer ISA is implemented"]
 #[test]
-fn corpus_rv64ui() {
-    run_corpus("rv64ui");
-}
+fn corpus_rv64() {
+    const IMPLEMENTED_CATEGORIES: &[&str] = &["rv64uc", "rv64ui"];
+    assert!(IMPLEMENTED_CATEGORIES.iter().all(|category| RV64_CATEGORIES.contains(category)));
 
-#[ignore = "enable once the C extension is implemented"]
-#[test]
-fn corpus_rv64uc() {
-    run_corpus("rv64uc");
-}
-
-#[ignore = "enable once the M extension is implemented"]
-#[test]
-fn corpus_rv64um() {
-    run_corpus("rv64um");
-}
-
-#[ignore = "enable once the A extension is implemented"]
-#[test]
-fn corpus_rv64ua() {
-    run_corpus("rv64ua");
-}
-
-#[ignore = "enable once the Zbb extension is implemented"]
-#[test]
-fn corpus_rv64uzbb() {
-    run_corpus("rv64uzbb");
+    for category in RV64_CATEGORIES {
+        if IMPLEMENTED_CATEGORIES.contains(category) {
+            run_corpus(category);
+        }
+    }
 }
