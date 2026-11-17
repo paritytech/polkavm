@@ -8,14 +8,17 @@ use riscv_test_interpreter::{Exception, Interpreter, MemoryProtection, Reg, Stop
 
 const RV64_CATEGORIES: &[&str] = &["rv64ua", "rv64uc", "rv64ui", "rv64um", "rv64uzbb"];
 const REGISTERS_RANGE: Range<u32> = 0..32;
+const END_OF_32BIT_ADDRESS_SPACE: u64 = 1 << 32;
 const CODE_ADDRESS: u64 = 0x10000;
-const STOP_ADDRESS: u64 = 0xffff0000;
+const _: () = assert!(CODE_ADDRESS < END_OF_32BIT_ADDRESS_SPACE);
+const DATA_ADDRESS: u64 = 0x20000;
+const _: () = assert!(DATA_ADDRESS < END_OF_32BIT_ADDRESS_SPACE);
+const STOP_ADDRESS: u64 = 0xffff_0000;
+const _: () = assert!(STOP_ADDRESS < END_OF_32BIT_ADDRESS_SPACE);
 const REGION_ADDRESS: u64 = 0x1000;
 const REGION_SIZE: u64 = 0x100;
 const CORPUS_TEXT_ADDRESS: u64 = 0x10000;
-const INSTRUCTION_BYTE_LENGTH: u64 = 4;
-const COMPRESSED_INSTRUCTION_BYTE_LENGTH: u64 = 2;
-const NOP: u32 = 0x00000013;
+const ENOUGH_STEPS: u64 = 100;
 const EXECUTE: MemoryProtection = MemoryProtection {
     read: false,
     write: false,
@@ -31,6 +34,9 @@ const READ_EXECUTE: MemoryProtection = MemoryProtection {
     write: false,
     execute: true,
 };
+const INSTRUCTION_BYTE_LENGTH: u64 = 4;
+const COMPRESSED_INSTRUCTION_BYTE_LENGTH: u64 = 2;
+const NOP: u32 = 0x00000013;
 
 fn map_region_with_data(interpreter: &mut Interpreter, address: u64, data: &[u8], protection: MemoryProtection) {
     interpreter.map_region(address, data.len() as u64, protection);
@@ -45,14 +51,37 @@ fn memory_layout(interpreter: &Interpreter) -> Vec<(u64, u64, MemoryProtection)>
         .collect()
 }
 
-fn run(code: &[u8], max_steps: u64) -> (StopReason, Interpreter) {
+struct RunSetup<'a> {
+    registers: &'a [(Reg, u64)],
+    data: &'a [u8],
+    max_steps: u64,
+}
+
+/// Calls [`run_bytes`] after converting the `code` instruction words to little-endian bytes.
+fn run(code: &[u32], setup: RunSetup) -> (StopReason, Interpreter) {
+    let bytes: Vec<u8> = code.iter().flat_map(|word| word.to_le_bytes()).collect();
+    run_bytes(&bytes, setup)
+}
+
+/// Runs `code` for at most `setup.max_steps` steps on a new interpreter.
+/// The `code` is mapped to an execute-only memory region starting at [`CODE_ADDRESS`],
+/// which the program counter is set to, and `setup.data` to a read-write memory region
+/// starting at [`DATA_ADDRESS`]. The stop address and [`Reg::RA`] are set to [`STOP_ADDRESS`],
+/// so that if `code` ends with a `ret` instruction it returns to the stop address and
+/// reports [`StopReason::Finished`]. The `setup.registers` are applied and take precedence.
+fn run_bytes(code: &[u8], setup: RunSetup) -> (StopReason, Interpreter) {
     let mut interpreter = Interpreter::new();
     map_region_with_data(&mut interpreter, CODE_ADDRESS, code, EXECUTE);
-    interpreter.set_stop_address(STOP_ADDRESS);
+    map_region_with_data(&mut interpreter, DATA_ADDRESS, setup.data, READ_WRITE);
     interpreter.set_program_counter(CODE_ADDRESS);
+    interpreter.set_stop_address(STOP_ADDRESS);
     interpreter.set_reg(Reg::RA, STOP_ADDRESS);
+    for &(reg, value) in setup.registers {
+        interpreter.set_reg(reg, value);
+        assert_eq!(interpreter.reg(reg), value);
+    }
 
-    let stop_reason = interpreter.run(max_steps);
+    let stop_reason = interpreter.run(setup.max_steps);
 
     (stop_reason, interpreter)
 }
@@ -254,6 +283,25 @@ fn host_memory_access_ignores_protection() {
 }
 
 #[test]
+fn run_with_no_mapped_region_faults() {
+    let mut interpreter = Interpreter::new();
+    interpreter.set_program_counter(CODE_ADDRESS);
+
+    assert_eq!(interpreter.run(1), StopReason::Trap(Exception::InstructionAccessFault));
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
+}
+
+#[test]
+fn run_with_no_mapped_executable_region_faults() {
+    let mut interpreter = Interpreter::new();
+    map_region_with_data(&mut interpreter, CODE_ADDRESS, &NOP.to_le_bytes(), READ_WRITE);
+    interpreter.set_program_counter(CODE_ADDRESS);
+
+    assert_eq!(interpreter.run(1), StopReason::Trap(Exception::InstructionAccessFault));
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
+}
+
+#[test]
 fn run_at_stop_address_always_finishes() {
     let mut interpreter = Interpreter::new();
     interpreter.set_stop_address(STOP_ADDRESS);
@@ -274,35 +322,30 @@ fn run_with_no_budget_is_out_of_steps() {
 }
 
 #[test]
-fn run_with_no_mapped_region_faults() {
-    let mut interpreter = Interpreter::new();
-    interpreter.set_program_counter(CODE_ADDRESS);
-
-    assert_eq!(interpreter.run(1), StopReason::Trap(Exception::InstructionAccessFault));
-    assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
-}
-
-#[test]
-fn run_with_no_mapped_executable_region_faults() {
-    let mut interpreter = Interpreter::new();
-    map_region_with_data(&mut interpreter, CODE_ADDRESS, &NOP.to_le_bytes(), READ_WRITE);
-    interpreter.set_program_counter(CODE_ADDRESS);
-
-    assert_eq!(interpreter.run(1), StopReason::Trap(Exception::InstructionAccessFault));
-    assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
-}
-
-#[test]
 fn run_truncated_32bit_instruction_faults() {
-    let (stop_reason, interpreter) = run(&NOP.to_le_bytes()[..COMPRESSED_INSTRUCTION_BYTE_LENGTH as usize], 1);
+    let (stop_reason, interpreter) = run_bytes(
+        &NOP.to_le_bytes()[..COMPRESSED_INSTRUCTION_BYTE_LENGTH as usize],
+        RunSetup {
+            registers: &[],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
     assert_eq!(stop_reason, StopReason::Trap(Exception::InstructionAccessFault));
     assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
 }
 
 #[test]
 fn run_undecodable_32bit_word_is_illegal_instruction() {
-    const EBREAK: u32 = 0x00100073;
-    let (stop_reason, interpreter) = run(&EBREAK.to_le_bytes(), 1);
+    const EBREAK: u32 = 0x0010_0073;
+    let (stop_reason, interpreter) = run(
+        &[EBREAK],
+        RunSetup {
+            registers: &[],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
     assert_eq!(stop_reason, StopReason::Trap(Exception::IllegalInstruction(EBREAK)));
     assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
 }
@@ -310,7 +353,15 @@ fn run_undecodable_32bit_word_is_illegal_instruction() {
 #[test]
 fn run_undecodable_compressed_parcel_is_illegal_instruction() {
     const COMPRESSED_EBREAK: u16 = 0x9002;
-    let (stop_reason, interpreter) = run(&COMPRESSED_EBREAK.to_le_bytes(), 1);
+    let code = [COMPRESSED_EBREAK.to_le_bytes().as_slice(), &[0xff, 0xff]].concat();
+    let (stop_reason, interpreter) = run_bytes(
+        &code,
+        RunSetup {
+            registers: &[],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
     assert_eq!(
         stop_reason,
         StopReason::Trap(Exception::IllegalInstruction(u32::from(COMPRESSED_EBREAK)))
