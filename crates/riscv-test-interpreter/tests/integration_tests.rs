@@ -1239,6 +1239,80 @@ fn bitwise_operations_use_64_bits() {
 }
 
 #[test]
+fn fences_act_as_noop() {
+    const FENCE: u32 = 0x0ff0_000f;
+    const FENCE_TSO: u32 = 0x8330_000f;
+    const FENCE_I: u32 = 0x0000_100f;
+    const PAUSE: u32 = 0x0100_000f;
+    let non_zero_value = 0xdead_beef_0000_0001;
+    let registers = [(Reg::A0, non_zero_value)];
+    let data = [1, 2, 3, 4];
+
+    // Invoke `run` with `max_steps: 0` to get a reference interpreter with the setup
+    // state unchanged, since the `0` budget does not execute any instructions.
+    let (stop_reason, reference) = run(
+        &[FENCE],
+        RunSetup {
+            registers: &registers,
+            data: &data,
+            max_steps: 0,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::OutOfSteps);
+    assert_eq!(reference.program_counter(), CODE_ADDRESS);
+
+    for fence in [FENCE, FENCE_TSO, FENCE_I, PAUSE] {
+        let (stop_reason, interpreter) = run(
+            &[fence],
+            RunSetup {
+                registers: &registers,
+                data: &data,
+                max_steps: 1,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::OutOfSteps);
+        assert_eq!(interpreter.program_counter(), CODE_ADDRESS + INSTRUCTION_BYTE_LENGTH);
+        for reg in REGISTERS_RANGE.map(Reg::decode) {
+            assert_eq!(interpreter.reg(reg), reference.reg(reg));
+        }
+        assert_eq!(interpreter.read_memory(DATA_ADDRESS, data.len() as u64), Some(&data[..]));
+    }
+}
+
+#[test]
+fn ecall_traps_as_environment_call() {
+    const ECALL: u32 = 0x0000_0073;
+    let (stop_reason, interpreter) = run(
+        &[ECALL],
+        RunSetup {
+            registers: &[],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Trap(Exception::EnvironmentCall));
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
+}
+
+#[test]
+fn unimp_traps_as_unimplemented() {
+    const UNIMP: u32 = 0xc0001073;
+    const COMPRESSED_UNIMP: u16 = 0x0000;
+    for code in [&UNIMP.to_le_bytes()[..], &COMPRESSED_UNIMP.to_le_bytes()[..]] {
+        let (stop_reason, interpreter) = run_bytes(
+            code,
+            RunSetup {
+                registers: &[],
+                data: &[],
+                max_steps: 1,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Trap(Exception::Unimplemented));
+        assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
+    }
+}
+
+#[test]
 fn every_rv64_category_is_represented() {
     let mut all_categories: Vec<String> = std::fs::read_dir(corpus_output_directory())
         .unwrap()
