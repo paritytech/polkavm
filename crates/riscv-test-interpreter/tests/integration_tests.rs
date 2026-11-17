@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use polkavm_linker::riscv::{BranchKind, Inst, RegImmKind, RegRegKind};
 use riscv_test_interpreter::{
-    width::{cast_to_u32, truncate_to_i32},
+    width::{cast_to_u32, sign_extend_32, truncate_to_i32},
     Exception, Interpreter, MemoryProtection, Reg, StopReason,
 };
 
@@ -40,6 +40,11 @@ const READ_EXECUTE: MemoryProtection = MemoryProtection {
     read: true,
     write: false,
     execute: true,
+};
+const READ_ONLY: MemoryProtection = MemoryProtection {
+    read: true,
+    write: false,
+    execute: false,
 };
 const INSTRUCTION_BYTE_LENGTH: u64 = 4;
 const COMPRESSED_INSTRUCTION_BYTE_LENGTH: u64 = 2;
@@ -79,6 +84,8 @@ enum MatchWord {
     Bltu = 0x0000_6063,
     Bge = 0x0000_5063,
     Bgeu = 0x0000_7063,
+    Lw = 0x0000_2003,
+    Ld = 0x0000_3003,
 }
 
 use MatchWord::*;
@@ -550,6 +557,21 @@ fn run_resumes_after_out_of_steps() {
 }
 
 #[test]
+fn run_exception_restores_program_counter() {
+    let unmapped_address = CODE_ADDRESS - INSTRUCTION_BYTE_LENGTH;
+    let (stop_reason, interpreter) = run(
+        &[NOP, NOP, i_type(Lw, Reg::A0, Reg::A1, 0)],
+        RunSetup {
+            registers: &[(Reg::A1, unmapped_address)],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Trap(Exception::LoadAccessFault(unmapped_address)));
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS + 2 * INSTRUCTION_BYTE_LENGTH);
+}
+
+#[test]
 fn run_truncated_32bit_instruction_faults() {
     let (stop_reason, interpreter) = run_bytes(
         &NOP.to_le_bytes()[..COMPRESSED_INSTRUCTION_BYTE_LENGTH as usize],
@@ -833,6 +855,135 @@ fn branch_target_wraps_at_64_bits() {
 
     assert_eq!(interpreter.run(1), StopReason::OutOfSteps);
     assert_eq!(interpreter.program_counter(), start_address.wrapping_sub(INSTRUCTION_BYTE_LENGTH));
+}
+
+#[test]
+fn load_to_zero_register_from_mapped_address_is_noop() {
+    let (stop_reason, interpreter) = run(
+        &[i_type(Lw, Reg::Zero, Reg::A0, 0), RET],
+        RunSetup {
+            registers: &[(Reg::A0, DATA_ADDRESS)],
+            data: &[1, 2, 3, 4],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Finished);
+    assert_eq!(interpreter.reg(Reg::Zero), 0);
+}
+
+#[test]
+fn load_to_zero_register_still_attempts_memory_access() {
+    let unmapped_address = CODE_ADDRESS - INSTRUCTION_BYTE_LENGTH;
+    let (stop_reason, interpreter) = run(
+        &[i_type(Lw, Reg::Zero, Reg::A0, 0)],
+        RunSetup {
+            registers: &[(Reg::A0, unmapped_address)],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Trap(Exception::LoadAccessFault(unmapped_address)));
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
+}
+
+#[test]
+fn loads_from_read_only_address() {
+    let mut interpreter = Interpreter::new();
+    let code = [i_type(Lw, Reg::A0, Reg::A1, 0).to_le_bytes(), RET.to_le_bytes()].concat();
+    let data: [u8; 4] = [1, 2, 3, 4];
+    map_region_with_data(&mut interpreter, CODE_ADDRESS, &code, EXECUTE);
+    map_region_with_data(&mut interpreter, DATA_ADDRESS, &data, READ_ONLY);
+    interpreter.set_program_counter(CODE_ADDRESS);
+    interpreter.set_stop_address(STOP_ADDRESS);
+    interpreter.set_reg(Reg::RA, STOP_ADDRESS);
+    interpreter.set_reg(Reg::A1, DATA_ADDRESS);
+
+    assert_eq!(interpreter.run(ENOUGH_STEPS), StopReason::Finished);
+    assert_eq!(interpreter.reg(Reg::A0), sign_extend_32(i32::from_le_bytes(data)));
+}
+
+#[test]
+fn load_from_non_readable_address_faults() {
+    let (stop_reason, interpreter) = run(
+        &[i_type(Lw, Reg::A0, Reg::A1, 0)],
+        RunSetup {
+            registers: &[(Reg::A0, 1), (Reg::A1, CODE_ADDRESS)],
+            data: &[],
+            max_steps: 1,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Trap(Exception::LoadAccessFault(CODE_ADDRESS)));
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
+    assert_eq!(interpreter.reg(Reg::A0), 1);
+}
+
+#[test]
+fn load_partly_outside_mapped_region_faults() {
+    let straddling_offset = 4;
+    let (stop_reason, interpreter) = run(
+        &[i_type(Ld, Reg::A0, Reg::A1, straddling_offset)],
+        RunSetup {
+            registers: &[(Reg::A0, 1), (Reg::A1, DATA_ADDRESS)],
+            data: &[1, 2, 3, 4, 5, 6, 7, 8],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(
+        stop_reason,
+        StopReason::Trap(Exception::LoadAccessFault(DATA_ADDRESS + straddling_offset as u64))
+    );
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
+    assert_eq!(interpreter.reg(Reg::A0), 1);
+}
+
+#[test]
+fn load_truncates_address_to_32_bits() {
+    let data = [1, 2, 3, 4];
+    let (stop_reason, interpreter) = run(
+        &[i_type(Lw, Reg::A0, Reg::A1, 0), RET],
+        RunSetup {
+            registers: &[(Reg::A1, UPPER_32_BITS_SET | DATA_ADDRESS)],
+            data: &data,
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Finished);
+    assert_eq!(interpreter.reg(Reg::A0), sign_extend_32(i32::from_le_bytes(data)));
+}
+
+#[test]
+fn load_fault_reports_truncated_32bit_address() {
+    let unmapped_address = 0;
+    let (stop_reason, interpreter) = run(
+        &[i_type(Lw, Reg::A0, Reg::A1, 0)],
+        RunSetup {
+            registers: &[(Reg::A1, UPPER_32_BITS_SET | unmapped_address)],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Trap(Exception::LoadAccessFault(unmapped_address)));
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
+}
+
+#[test]
+fn load_address_wraps_at_32_bits() {
+    let mut interpreter = Interpreter::new();
+    let data = [1, 2, 3, 4];
+    let data_address = END_OF_32BIT_ADDRESS_SPACE - data.len() as u64;
+    let code = [
+        i_type(Lw, Reg::A0, Reg::Zero, -(data.len() as i32)).to_le_bytes(),
+        RET.to_le_bytes(),
+    ]
+    .concat();
+    map_region_with_data(&mut interpreter, CODE_ADDRESS, &code, EXECUTE);
+    map_region_with_data(&mut interpreter, data_address, &data, READ_WRITE);
+    interpreter.set_program_counter(CODE_ADDRESS);
+    interpreter.set_stop_address(STOP_ADDRESS);
+    interpreter.set_reg(Reg::RA, STOP_ADDRESS);
+
+    assert_eq!(interpreter.run(ENOUGH_STEPS), StopReason::Finished);
+    assert_eq!(interpreter.reg(Reg::A0), sign_extend_32(i32::from_le_bytes(data)));
 }
 
 #[test]

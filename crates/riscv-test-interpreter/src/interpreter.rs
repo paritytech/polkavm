@@ -3,9 +3,12 @@ use core::ops::Range;
 use object::elf::{FileHeader64, PF_R, PF_W, PF_X, PT_LOAD};
 use object::read::elf::{ElfFile, ProgramHeader};
 use object::{LittleEndian, Object};
-use polkavm_linker::riscv::{BranchKind, Inst, Reg, RegImmKind, RegRegKind};
+use polkavm_linker::riscv::{BranchKind, Inst, LoadKind, Reg, RegImmKind, RegRegKind};
 
-use crate::width::{cast_to_i32, cast_to_i64, cast_to_u32, cast_to_u64, sign_extend_32, truncate_to_i32, truncate_to_u32, zero_extend_32};
+use crate::width::{
+    cast_to_i32, cast_to_i64, cast_to_u32, cast_to_u64, sign_extend_16, sign_extend_32, sign_extend_8, truncate_to_i32, truncate_to_u32,
+    zero_extend_16, zero_extend_32, zero_extend_8,
+};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Exception {
@@ -28,8 +31,7 @@ pub enum StopReason {
 #[derive(Copy, Clone)]
 enum MemoryAccess {
     Fetch,
-    // TODO (when implementation requires it):
-    // Load,
+    Load,
     // Store,
 }
 
@@ -74,6 +76,7 @@ impl MemoryRegion {
     fn allows(&self, access: MemoryAccess) -> bool {
         match access {
             MemoryAccess::Fetch => self.protection.execute,
+            MemoryAccess::Load => self.protection.read,
         }
     }
 }
@@ -215,9 +218,10 @@ impl Interpreter {
     }
 
     fn read_memory_as_guest(&self, address: u64, length: u64, access: MemoryAccess) -> Result<&[u8], Exception> {
-        self.memory
-            .read_as_guest(address, length, access)
-            .ok_or(Exception::InstructionAccessFault)
+        self.memory.read_as_guest(address, length, access).ok_or(match access {
+            MemoryAccess::Fetch => Exception::InstructionAccessFault,
+            MemoryAccess::Load => Exception::LoadAccessFault(address),
+        })
     }
 
     #[must_use]
@@ -275,7 +279,7 @@ impl Interpreter {
             Inst::JumpAndLink { dst, target } => self.jump_and_link(dst, target, instruction_address),
             Inst::JumpAndLinkRegister { dst, base, value } => self.jump_and_link_register(dst, base, value),
             Inst::Branch { kind, src1, src2, target } => self.branch(kind, src1, src2, target, instruction_address),
-            Inst::Load { .. } => todo!(),
+            Inst::Load { kind, dst, base, offset } => self.load(kind, dst, base, offset)?,
             Inst::Store { .. } => todo!(),
 
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#fence
@@ -450,6 +454,25 @@ impl Interpreter {
             let target = instruction_address.wrapping_add(sign_extend_32(cast_to_i32(offset)));
             self.set_program_counter(target);
         }
+    }
+
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#ldst
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv64.html#3-1-3-load-and-store-instructions
+    fn load(&mut self, kind: LoadKind, dst: Reg, base: Reg, offset: i32) -> Result<(), Exception> {
+        let address = Self::to_32bit_address(self.reg(base).wrapping_add(sign_extend_32(offset)));
+        let bytes = self.read_memory_as_guest(address, kind.size(), MemoryAccess::Load)?;
+        let value = match kind {
+            LoadKind::I8 => sign_extend_8(i8::from_le_bytes(bytes.try_into().unwrap())),
+            LoadKind::U8 => zero_extend_8(u8::from_le_bytes(bytes.try_into().unwrap())),
+            LoadKind::I16 => sign_extend_16(i16::from_le_bytes(bytes.try_into().unwrap())),
+            LoadKind::U16 => zero_extend_16(u16::from_le_bytes(bytes.try_into().unwrap())),
+            LoadKind::I32 => sign_extend_32(i32::from_le_bytes(bytes.try_into().unwrap())),
+            LoadKind::U32 => zero_extend_32(u32::from_le_bytes(bytes.try_into().unwrap())),
+            LoadKind::U64 => u64::from_le_bytes(bytes.try_into().unwrap()),
+        };
+        self.set_reg(dst, value);
+
+        Ok(())
     }
 
     /// RISC-V address space is 2^XLEN bytes and address arithmetic wraps at 2^XLEN (https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html#memory),
