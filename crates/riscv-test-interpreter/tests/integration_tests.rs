@@ -3,7 +3,7 @@
 use core::ops::Range;
 use std::path::{Path, PathBuf};
 
-use polkavm_linker::riscv::{Inst, RegImmKind};
+use polkavm_linker::riscv::{Inst, RegImmKind, RegRegKind};
 use riscv_test_interpreter::{Exception, Interpreter, MemoryProtection, Reg, StopReason};
 
 const RV64_CATEGORIES: &[&str] = &["rv64ua", "rv64uc", "rv64ui", "rv64um", "rv64uzbb"];
@@ -46,14 +46,23 @@ const RET: u32 = i_type(Jalr, Reg::Zero, Reg::RA, 0);
 #[derive(Copy, Clone)]
 #[repr(u32)]
 enum MatchWord {
+    Add = 0x0000_0033,
     Addi = 0x0000_0013,
+    Slt = 0x0000_2033,
     Slti = 0x0000_2013,
+    Sltu = 0x0000_3033,
     Sltiu = 0x0000_3013,
+    Sll = 0x0000_1033,
     Slli = 0x0000_1013,
+    Srl = 0x0000_5033,
     Srli = 0x0000_5013,
+    Sra = 0x4000_5033,
     Srai = 0x4000_5013,
+    Xor = 0x0000_4033,
     Xori = 0x0000_4013,
+    Or = 0x0000_6033,
     Ori = 0x0000_6013,
+    And = 0x0000_7033,
     Andi = 0x0000_7013,
     Jalr = 0x0000_0067,
 }
@@ -170,6 +179,11 @@ const fn immediate_bits(value: i32, low_bit: u32, high_bit: u32) -> u32 {
 }
 
 /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-3-immediate-encoding-variants
+const fn r_type(match_word: MatchWord, dst: Reg, src1: Reg, src2: Reg) -> u32 {
+    match_word as u32 | (dst as u32) << 7 | (src1 as u32) << 15 | (src2 as u32) << 20
+}
+
+/// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-3-immediate-encoding-variants
 const fn i_type(match_word: MatchWord, dst: Reg, src: Reg, imm: i32) -> u32 {
     match_word as u32 | (dst as u32) << 7 | (src as u32) << 15 | immediate_bits(imm, 0, 11) << 20
 }
@@ -178,6 +192,17 @@ const fn i_type(match_word: MatchWord, dst: Reg, src: Reg, imm: i32) -> u32 {
 fn format_helpers_encode_instructions() {
     // `expected_encoded` from `llvm-mc -triple=riscv64 -show-encoding` (little-endian order).
     for (encoded, expected_encoded, expected_decoded) in [
+        (
+            // `add a0, a1, a2`: three distinct registers, so swapped register fields change the word.
+            r_type(Add, Reg::A0, Reg::A1, Reg::A2),
+            0x00c58533,
+            Inst::RegReg {
+                kind: RegRegKind::Add64,
+                dst: Reg::A0,
+                src1: Reg::A1,
+                src2: Reg::A2,
+            },
+        ),
         (
             // `addi a0, a1, -1`: every immediate bit set, so an incorrect unset bit in any of them changes the word.
             i_type(Addi, Reg::A0, Reg::A1, !0),
@@ -581,6 +606,30 @@ fn jalr_to_unmapped_address_faults() {
 }
 
 #[test]
+fn shift_by_register_uses_low_6_bits_of_amount() {
+    for (word, value, shift_amount, expected) in [
+        (Sll, 1, 32, 1 << 32),
+        (Sll, 1, 63, 1 << 63),
+        (Sll, 1, 64, 1),
+        (Sll, 1, 65, 2),
+        (Srl, 1 << 63, 63, 1),
+        (Sra, 1 << 63, 63, u64::MAX),
+        (Sra, 1 << 63, 64, 1 << 63),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
+            RunSetup {
+                registers: &[(Reg::A1, value), (Reg::A2, shift_amount)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
+}
+
+#[test]
 fn shift_by_immediate_takes_6_bit_amount() {
     for (word, source, shift_amount, expected) in [
         (Slli, 1, 32, 1 << 32),
@@ -603,6 +652,24 @@ fn shift_by_immediate_takes_6_bit_amount() {
 
 #[test]
 fn set_less_than_compares_64_bits() {
+    for (word, lhs, rhs, expected) in [
+        (Slt, LOWEST_UPPER_BIT_SET, 1, 0),
+        (Slt, 1, LOWEST_UPPER_BIT_SET, 1),
+        (Sltu, LOWEST_UPPER_BIT_SET, 1, 0),
+        (Sltu, 1, LOWEST_UPPER_BIT_SET, 1),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
+            RunSetup {
+                registers: &[(Reg::A1, lhs), (Reg::A2, rhs)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
+
     for (word, lhs, imm, expected) in [(Slti, LOWEST_UPPER_BIT_SET, 1, 0), (Sltiu, LOWEST_UPPER_BIT_SET, 1, 0)] {
         let (stop_reason, interpreter) = run(
             &[i_type(word, Reg::A0, Reg::A1, imm), RET],
@@ -619,6 +686,33 @@ fn set_less_than_compares_64_bits() {
 
 #[test]
 fn bitwise_operations_use_64_bits() {
+    for (word, lhs, rhs, expected) in [
+        (And, LOWEST_UPPER_BIT_SET, UPPER_32_BITS_SET, LOWEST_UPPER_BIT_SET),
+        (
+            Or,
+            LOWEST_UPPER_BIT_SET,
+            UPPER_32_BITS_SET & !LOWEST_UPPER_BIT_SET,
+            UPPER_32_BITS_SET,
+        ),
+        (
+            Xor,
+            LOWEST_UPPER_BIT_SET,
+            UPPER_32_BITS_SET,
+            UPPER_32_BITS_SET & !LOWEST_UPPER_BIT_SET,
+        ),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
+            RunSetup {
+                registers: &[(Reg::A1, lhs), (Reg::A2, rhs)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
+
     for (word, immediate) in [(Andi, -1), (Ori, 0), (Xori, 0)] {
         let (stop_reason, interpreter) = run(
             &[i_type(word, Reg::A0, Reg::A1, immediate), RET],

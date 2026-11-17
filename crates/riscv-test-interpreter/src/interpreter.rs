@@ -3,7 +3,7 @@ use core::ops::Range;
 use object::elf::{FileHeader64, PF_R, PF_W, PF_X, PT_LOAD};
 use object::read::elf::{ElfFile, ProgramHeader};
 use object::{LittleEndian, Object};
-use polkavm_linker::riscv::{Inst, Reg, RegImmKind};
+use polkavm_linker::riscv::{Inst, Reg, RegImmKind, RegRegKind};
 
 use crate::width::{cast_to_i32, cast_to_i64, cast_to_u32, cast_to_u64, sign_extend_32, truncate_to_i32, truncate_to_u32, zero_extend_32};
 
@@ -269,7 +269,7 @@ impl Interpreter {
     fn execute(&mut self, instruction: Inst, _instruction_address: u64) -> Result<(), Exception> {
         match instruction {
             Inst::RegImm { kind, dst, src, imm } => self.register_immediate(kind, dst, src, imm),
-            Inst::RegReg { .. } => todo!(),
+            Inst::RegReg { kind, dst, src1, src2 } => self.register_register(kind, dst, src1, src2),
             Inst::LoadUpperImmediate { .. } => todo!(),
             Inst::AddUpperImmediateToPc { .. } => todo!(),
             Inst::JumpAndLink { .. } => todo!(),
@@ -344,6 +344,68 @@ impl Interpreter {
             // "B" extension (Zbb):
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-6-bitwise-rotation
             RegImmKind::RotateRight32AndSignExtend | RegImmKind::RotateRight64 => todo!(),
+        };
+        self.set_reg(dst, result);
+    }
+
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-4-2-integer-register-register-instructions
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv64.html#3-1-2-2-integer-register-register-operations
+    fn register_register(&mut self, kind: RegRegKind, dst: Reg, src1: Reg, src2: Reg) {
+        let lhs = self.reg(src1);
+        let rhs = self.reg(src2);
+        let result = match kind {
+            RegRegKind::Add32AndSignExtend => sign_extend_32(truncate_to_i32(lhs).wrapping_add(truncate_to_i32(rhs))),
+            RegRegKind::Add64 => lhs.wrapping_add(rhs),
+            RegRegKind::Sub32AndSignExtend => sign_extend_32(truncate_to_i32(lhs).wrapping_sub(truncate_to_i32(rhs))),
+            RegRegKind::Sub64 => lhs.wrapping_sub(rhs),
+            RegRegKind::SetLessThanSigned64 => u64::from(cast_to_i64(lhs) < cast_to_i64(rhs)),
+            RegRegKind::SetLessThanUnsigned64 => u64::from(lhs < rhs),
+            RegRegKind::ShiftLogicalLeft32AndSignExtend => sign_extend_32(truncate_to_i32(lhs).wrapping_shl(truncate_to_u32(rhs))),
+            RegRegKind::ShiftLogicalLeft64 => lhs.wrapping_shl(truncate_to_u32(rhs)),
+            // `lhs` for SRL and SRLW are unsigned since `wrapping_shr` is logical for unsigned values, otherwise arithmetic.
+            RegRegKind::ShiftLogicalRight32AndSignExtend => {
+                sign_extend_32(cast_to_i32(truncate_to_u32(lhs).wrapping_shr(truncate_to_u32(rhs))))
+            }
+            RegRegKind::ShiftLogicalRight64 => lhs.wrapping_shr(truncate_to_u32(rhs)),
+            // `lhs` for SRA and SRAW are signed since `wrapping_shr` is arithmetic for signed values, otherwise logical.
+            RegRegKind::ShiftArithmeticRight32AndSignExtend => sign_extend_32(truncate_to_i32(lhs).wrapping_shr(truncate_to_u32(rhs))),
+            RegRegKind::ShiftArithmeticRight64 => cast_to_u64(cast_to_i64(lhs).wrapping_shr(truncate_to_u32(rhs))),
+            RegRegKind::Xor64 => lhs ^ rhs,
+            RegRegKind::Or64 => lhs | rhs,
+            RegRegKind::And64 => lhs & rhs,
+
+            // "M" extension:
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html#mult-ops
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html#11-1-2-division-operations
+            RegRegKind::Mul32AndSignExtend
+            | RegRegKind::Mul64
+            | RegRegKind::MulUpperSignedSigned64
+            | RegRegKind::MulUpperSignedUnsigned64
+            | RegRegKind::MulUpperUnsignedUnsigned64
+            | RegRegKind::Div32AndSignExtend
+            | RegRegKind::Div64
+            | RegRegKind::DivUnsigned32AndSignExtend
+            | RegRegKind::DivUnsigned64
+            | RegRegKind::Rem32AndSignExtend
+            | RegRegKind::Rem64
+            | RegRegKind::RemUnsigned32AndSignExtend
+            | RegRegKind::RemUnsigned64 => todo!(),
+
+            // "B" extension (Zbb):
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-1-logical-with-negate
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-4-integer-minimummaximum
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-6-bitwise-rotation
+            RegRegKind::AndInverted
+            | RegRegKind::OrInverted
+            | RegRegKind::Xnor
+            | RegRegKind::Maximum
+            | RegRegKind::MaximumUnsigned
+            | RegRegKind::Minimum
+            | RegRegKind::MinimumUnsigned
+            | RegRegKind::RotateLeft32AndSignExtend
+            | RegRegKind::RotateLeft64
+            | RegRegKind::RotateRight32AndSignExtend
+            | RegRegKind::RotateRight64 => todo!(),
         };
         self.set_reg(dst, result);
     }
