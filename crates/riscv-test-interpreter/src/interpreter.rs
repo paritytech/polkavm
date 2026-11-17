@@ -272,7 +272,7 @@ impl Interpreter {
             Inst::RegReg { kind, dst, src1, src2 } => self.register_register(kind, dst, src1, src2),
             Inst::LoadUpperImmediate { dst, value } => self.load_upper_immediate(dst, value, None),
             Inst::AddUpperImmediateToPc { dst, value } => self.load_upper_immediate(dst, value, Some(instruction_address)),
-            Inst::JumpAndLink { .. } => todo!(),
+            Inst::JumpAndLink { dst, target } => self.jump_and_link(dst, target, instruction_address),
             Inst::JumpAndLinkRegister { dst, base, value } => self.jump_and_link_register(dst, base, value),
             Inst::Branch { .. } => todo!(),
             Inst::Load { .. } => todo!(),
@@ -417,6 +417,13 @@ impl Interpreter {
             None => sign_extend_32(cast_to_i32(imm)),
         };
         self.set_reg(dst, value);
+    }
+
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-5-1-unconditional-jumps
+    fn jump_and_link(&mut self, dst: Reg, offset: u32, instruction_address: u64) {
+        let target = instruction_address.wrapping_add(sign_extend_32(cast_to_i32(offset)));
+        self.set_reg(dst, self.program_counter);
+        self.set_program_counter(target);
     }
 
     /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#ct-unconditional

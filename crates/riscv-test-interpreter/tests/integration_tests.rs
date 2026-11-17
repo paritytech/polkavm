@@ -4,7 +4,10 @@ use core::ops::Range;
 use std::path::{Path, PathBuf};
 
 use polkavm_linker::riscv::{Inst, RegImmKind, RegRegKind};
-use riscv_test_interpreter::{Exception, Interpreter, MemoryProtection, Reg, StopReason};
+use riscv_test_interpreter::{
+    width::{cast_to_u32, truncate_to_i32},
+    Exception, Interpreter, MemoryProtection, Reg, StopReason,
+};
 
 const RV64_CATEGORIES: &[&str] = &["rv64ua", "rv64uc", "rv64ui", "rv64um", "rv64uzbb"];
 const REGISTERS_RANGE: Range<u32> = 0..32;
@@ -67,6 +70,7 @@ enum MatchWord {
     Andi = 0x0000_7013,
     Lui = 0x0000_0037,
     Auipc = 0x0000_0017,
+    Jal = 0x0000_006f,
     Jalr = 0x0000_0067,
 }
 
@@ -196,6 +200,16 @@ const fn u_type(match_word: MatchWord, dst: Reg, upper_imm: u32) -> u32 {
     match_word as u32 | (dst as u32) << 7 | upper_imm << 12
 }
 
+/// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-3-immediate-encoding-variants
+const fn j_type(match_word: MatchWord, dst: Reg, offset: i32) -> u32 {
+    match_word as u32
+        | (dst as u32) << 7
+        | immediate_bits(offset, 12, 19) << 12
+        | immediate_bits(offset, 11, 11) << 20
+        | immediate_bits(offset, 1, 10) << 21
+        | immediate_bits(offset, 20, 20) << 31
+}
+
 #[test]
 fn format_helpers_encode_instructions() {
     // `expected_encoded` from `llvm-mc -triple=riscv64 -show-encoding` (little-endian order).
@@ -240,6 +254,25 @@ fn format_helpers_encode_instructions() {
             Inst::LoadUpperImmediate {
                 dst: Reg::A0,
                 value: UPPER_IMMEDIATE_SIGN_BIT_SET << 12,
+            },
+        ),
+        (
+            // `jal ra, -2`: only immediate bit 0 unset, so an incorrect unset bit in any of the others changes the word.
+            j_type(Jal, Reg::RA, !1),
+            0xfffff0ef,
+            Inst::JumpAndLink {
+                dst: Reg::RA,
+                target: cast_to_u32(!1),
+            },
+        ),
+        (
+            // `jal ra, -6146`: only immediate bits 12, 11, and 0 unset, so `imm[19:12]` differs from incorrect adjacent
+            // `imm[20:13]` and `imm[18:11]`, `imm[11]` from `imm[20]`, and `imm[10:1]` from adjacent `imm[11:2]` and `imm[9:0]`.
+            j_type(Jal, Reg::RA, !(1 << 12 | 1 << 11 | 1)),
+            0xffefe0ef,
+            Inst::JumpAndLink {
+                dst: Reg::RA,
+                target: cast_to_u32(!(1 << 12 | 1 << 11 | 1)),
             },
         ),
     ] {
@@ -432,6 +465,20 @@ fn run_with_no_budget_is_out_of_steps() {
 }
 
 #[test]
+fn run_endless_loop_is_out_of_steps() {
+    let (stop_reason, interpreter) = run(
+        &[j_type(Jal, Reg::Zero, 0)],
+        RunSetup {
+            registers: &[],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::OutOfSteps);
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
+}
+
+#[test]
 fn run_stops_after_budget_at_next_instruction() {
     let (stop_reason, interpreter) = run(
         &[NOP, NOP, NOP],
@@ -510,6 +557,20 @@ fn run_undecodable_compressed_parcel_is_illegal_instruction() {
 }
 
 #[test]
+fn run_jump_past_end_of_code_faults() {
+    let (stop_reason, interpreter) = run(
+        &[j_type(Jal, Reg::Zero, INSTRUCTION_BYTE_LENGTH as i32)],
+        RunSetup {
+            registers: &[],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Trap(Exception::InstructionAccessFault));
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS + INSTRUCTION_BYTE_LENGTH);
+}
+
+#[test]
 fn run_counts_compressed_instruction_as_one_step() {
     const COMPRESSED_NOP: u16 = 0x0001;
     let (stop_reason, interpreter) = run_bytes(
@@ -584,6 +645,22 @@ fn auipc_to_zero_register_is_noop() {
     );
     assert_eq!(stop_reason, StopReason::Finished);
     assert_eq!(interpreter.reg(Reg::Zero), 0);
+}
+
+#[test]
+fn jal_target_wraps_at_64_bits() {
+    let target = UPPER_32_BITS_SET | STOP_ADDRESS;
+    let offset = truncate_to_i32(target.wrapping_sub(CODE_ADDRESS));
+    let (stop_reason, interpreter) = run(
+        &[j_type(Jal, Reg::Zero, offset)],
+        RunSetup {
+            registers: &[],
+            data: &[],
+            max_steps: 1,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::OutOfSteps);
+    assert_eq!(interpreter.program_counter(), target);
 }
 
 #[test]
