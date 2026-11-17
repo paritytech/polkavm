@@ -20,6 +20,7 @@ const REGION_SIZE: u64 = 0x100;
 const CORPUS_TEXT_ADDRESS: u64 = 0x10000;
 const UPPER_32_BITS_SET: u64 = 0xffff_ffff_0000_0000;
 const LOWEST_UPPER_BIT_SET: u64 = 1 << 32;
+const UPPER_IMMEDIATE_SIGN_BIT_SET: u32 = 1 << 19;
 const ENOUGH_STEPS: u64 = 100;
 const EXECUTE: MemoryProtection = MemoryProtection {
     read: false,
@@ -64,6 +65,8 @@ enum MatchWord {
     Ori = 0x0000_6013,
     And = 0x0000_7033,
     Andi = 0x0000_7013,
+    Lui = 0x0000_0037,
+    Auipc = 0x0000_0017,
     Jalr = 0x0000_0067,
 }
 
@@ -188,6 +191,11 @@ const fn i_type(match_word: MatchWord, dst: Reg, src: Reg, imm: i32) -> u32 {
     match_word as u32 | (dst as u32) << 7 | (src as u32) << 15 | immediate_bits(imm, 0, 11) << 20
 }
 
+/// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-3-immediate-encoding-variants
+const fn u_type(match_word: MatchWord, dst: Reg, upper_imm: u32) -> u32 {
+    match_word as u32 | (dst as u32) << 7 | upper_imm << 12
+}
+
 #[test]
 fn format_helpers_encode_instructions() {
     // `expected_encoded` from `llvm-mc -triple=riscv64 -show-encoding` (little-endian order).
@@ -223,6 +231,15 @@ fn format_helpers_encode_instructions() {
                 dst: Reg::A0,
                 src: Reg::A1,
                 imm: !1,
+            },
+        ),
+        (
+            // `lui a0, 0x80000`: only the sign bit set, so an incorrect shift or mask changes the word.
+            u_type(Lui, Reg::A0, UPPER_IMMEDIATE_SIGN_BIT_SET),
+            0x80000537,
+            Inst::LoadUpperImmediate {
+                dst: Reg::A0,
+                value: UPPER_IMMEDIATE_SIGN_BIT_SET << 12,
             },
         ),
     ] {
@@ -513,6 +530,54 @@ fn addi_to_zero_register_is_noop() {
         &[i_type(Addi, Reg::Zero, Reg::A0, 5), RET],
         RunSetup {
             registers: &[(Reg::A0, 1)],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Finished);
+    assert_eq!(interpreter.reg(Reg::Zero), 0);
+}
+
+#[test]
+fn auipc_adds_offset_to_instruction_address() {
+    let upper_immediate = 0x12345;
+    let (stop_reason, interpreter) = run(
+        &[u_type(Auipc, Reg::A0, upper_immediate), RET],
+        RunSetup {
+            registers: &[],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Finished);
+    assert_eq!(
+        interpreter.reg(Reg::A0),
+        CODE_ADDRESS.wrapping_add(u64::from(upper_immediate) << 12)
+    );
+}
+
+#[test]
+fn auipc_sign_extends_offset() {
+    let (stop_reason, interpreter) = run(
+        &[u_type(Auipc, Reg::A0, UPPER_IMMEDIATE_SIGN_BIT_SET), RET],
+        RunSetup {
+            registers: &[],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Finished);
+    let expected_offset = UPPER_32_BITS_SET | (u64::from(UPPER_IMMEDIATE_SIGN_BIT_SET) << 12);
+    assert_eq!(interpreter.reg(Reg::A0), CODE_ADDRESS.wrapping_add(expected_offset));
+}
+
+#[test]
+fn auipc_to_zero_register_is_noop() {
+    let non_zero_upper_immediate = 1;
+    let (stop_reason, interpreter) = run(
+        &[u_type(Auipc, Reg::Zero, non_zero_upper_immediate), RET],
+        RunSetup {
+            registers: &[],
             data: &[],
             max_steps: ENOUGH_STEPS,
         },

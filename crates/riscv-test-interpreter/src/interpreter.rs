@@ -266,12 +266,12 @@ impl Interpreter {
         Ok((u32::from_le_bytes(word_bytes), length))
     }
 
-    fn execute(&mut self, instruction: Inst, _instruction_address: u64) -> Result<(), Exception> {
+    fn execute(&mut self, instruction: Inst, instruction_address: u64) -> Result<(), Exception> {
         match instruction {
             Inst::RegImm { kind, dst, src, imm } => self.register_immediate(kind, dst, src, imm),
             Inst::RegReg { kind, dst, src1, src2 } => self.register_register(kind, dst, src1, src2),
-            Inst::LoadUpperImmediate { .. } => todo!(),
-            Inst::AddUpperImmediateToPc { .. } => todo!(),
+            Inst::LoadUpperImmediate { dst, value } => self.load_upper_immediate(dst, value, None),
+            Inst::AddUpperImmediateToPc { dst, value } => self.load_upper_immediate(dst, value, Some(instruction_address)),
             Inst::JumpAndLink { .. } => todo!(),
             Inst::JumpAndLinkRegister { dst, base, value } => self.jump_and_link_register(dst, base, value),
             Inst::Branch { .. } => todo!(),
@@ -408,6 +408,15 @@ impl Interpreter {
             | RegRegKind::RotateRight64 => todo!(),
         };
         self.set_reg(dst, result);
+    }
+
+    /// LUI and AUIPC of https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-4-1-integer-register-immediate-instructions
+    fn load_upper_immediate(&mut self, dst: Reg, imm: u32, base: Option<u64>) {
+        let value = match base {
+            Some(base) => base.wrapping_add(sign_extend_32(cast_to_i32(imm))),
+            None => sign_extend_32(cast_to_i32(imm)),
+        };
+        self.set_reg(dst, value);
     }
 
     /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#ct-unconditional
