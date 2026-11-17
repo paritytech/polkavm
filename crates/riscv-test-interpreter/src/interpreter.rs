@@ -3,9 +3,9 @@ use core::ops::Range;
 use object::elf::{FileHeader64, PF_R, PF_W, PF_X, PT_LOAD};
 use object::read::elf::{ElfFile, ProgramHeader};
 use object::{LittleEndian, Object};
-use polkavm_linker::riscv::{Inst, Reg};
+use polkavm_linker::riscv::{Inst, Reg, RegImmKind};
 
-use crate::width::{sign_extend_32, truncate_to_u32, zero_extend_32};
+use crate::width::{cast_to_i32, cast_to_i64, cast_to_u32, cast_to_u64, sign_extend_32, truncate_to_i32, truncate_to_u32, zero_extend_32};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Exception {
@@ -268,7 +268,7 @@ impl Interpreter {
 
     fn execute(&mut self, instruction: Inst, _instruction_address: u64) -> Result<(), Exception> {
         match instruction {
-            Inst::RegImm { .. } => todo!(),
+            Inst::RegImm { kind, dst, src, imm } => self.register_immediate(kind, dst, src, imm),
             Inst::RegReg { .. } => todo!(),
             Inst::LoadUpperImmediate { .. } => todo!(),
             Inst::AddUpperImmediateToPc { .. } => todo!(),
@@ -315,6 +315,37 @@ impl Interpreter {
         }
 
         Ok(())
+    }
+
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-4-1-integer-register-immediate-instructions
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv64.html#3-1-2-1-integer-register-immediate-instructions
+    fn register_immediate(&mut self, kind: RegImmKind, dst: Reg, src: Reg, imm: i32) {
+        let lhs = self.reg(src);
+        let rhs = sign_extend_32(imm);
+        let result = match kind {
+            RegImmKind::Add32AndSignExtend => sign_extend_32(truncate_to_i32(lhs.wrapping_add(rhs))),
+            RegImmKind::Add64 => lhs.wrapping_add(rhs),
+            RegImmKind::SetLessThanSigned64 => u64::from(cast_to_i64(lhs) < cast_to_i64(rhs)),
+            RegImmKind::SetLessThanUnsigned64 => u64::from(lhs < rhs),
+            RegImmKind::ShiftLogicalLeft32AndSignExtend => sign_extend_32(truncate_to_i32(lhs).wrapping_shl(cast_to_u32(imm))),
+            RegImmKind::ShiftLogicalLeft64 => lhs.wrapping_shl(cast_to_u32(imm)),
+            // `lhs` for SRLI and SRLIW are unsigned since `wrapping_shr` is logical for unsigned values, otherwise arithmetic.
+            RegImmKind::ShiftLogicalRight32AndSignExtend => {
+                sign_extend_32(cast_to_i32(truncate_to_u32(lhs).wrapping_shr(cast_to_u32(imm))))
+            }
+            RegImmKind::ShiftLogicalRight64 => lhs.wrapping_shr(cast_to_u32(imm)),
+            // `lhs` for SRAI and SRAIW are signed since `wrapping_shr` is arithmetic for signed values, otherwise logical.
+            RegImmKind::ShiftArithmeticRight32AndSignExtend => sign_extend_32(truncate_to_i32(lhs).wrapping_shr(cast_to_u32(imm))),
+            RegImmKind::ShiftArithmeticRight64 => cast_to_u64(cast_to_i64(lhs).wrapping_shr(cast_to_u32(imm))),
+            RegImmKind::Xor64 => lhs ^ rhs,
+            RegImmKind::Or64 => lhs | rhs,
+            RegImmKind::And64 => lhs & rhs,
+
+            // "B" extension (Zbb):
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-6-bitwise-rotation
+            RegImmKind::RotateRight32AndSignExtend | RegImmKind::RotateRight64 => todo!(),
+        };
+        self.set_reg(dst, result);
     }
 
     /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#ct-unconditional

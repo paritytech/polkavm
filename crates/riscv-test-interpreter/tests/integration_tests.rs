@@ -19,6 +19,7 @@ const REGION_ADDRESS: u64 = 0x1000;
 const REGION_SIZE: u64 = 0x100;
 const CORPUS_TEXT_ADDRESS: u64 = 0x10000;
 const UPPER_32_BITS_SET: u64 = 0xffff_ffff_0000_0000;
+const LOWEST_UPPER_BIT_SET: u64 = 1 << 32;
 const ENOUGH_STEPS: u64 = 100;
 const EXECUTE: MemoryProtection = MemoryProtection {
     read: false,
@@ -37,13 +38,23 @@ const READ_EXECUTE: MemoryProtection = MemoryProtection {
 };
 const INSTRUCTION_BYTE_LENGTH: u64 = 4;
 const COMPRESSED_INSTRUCTION_BYTE_LENGTH: u64 = 2;
-const NOP: u32 = 0x00000013;
+const NOP: u32 = i_type(Addi, Reg::Zero, Reg::Zero, 0);
+const RET: u32 = i_type(Jalr, Reg::Zero, Reg::RA, 0);
 
 /// The matching instruction word, with its opcode and funct fields
 /// filled in and every operand field zero.
 #[derive(Copy, Clone)]
 #[repr(u32)]
 enum MatchWord {
+    Addi = 0x0000_0013,
+    Slti = 0x0000_2013,
+    Sltiu = 0x0000_3013,
+    Slli = 0x0000_1013,
+    Srli = 0x0000_5013,
+    Srai = 0x4000_5013,
+    Xori = 0x0000_4013,
+    Ori = 0x0000_6013,
+    Andi = 0x0000_7013,
     Jalr = 0x0000_0067,
 }
 
@@ -161,6 +172,41 @@ const fn immediate_bits(value: i32, low_bit: u32, high_bit: u32) -> u32 {
 /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-3-immediate-encoding-variants
 const fn i_type(match_word: MatchWord, dst: Reg, src: Reg, imm: i32) -> u32 {
     match_word as u32 | (dst as u32) << 7 | (src as u32) << 15 | immediate_bits(imm, 0, 11) << 20
+}
+
+#[test]
+fn format_helpers_encode_instructions() {
+    // `expected_encoded` from `llvm-mc -triple=riscv64 -show-encoding` (little-endian order).
+    for (encoded, expected_encoded, expected_decoded) in [
+        (
+            // `addi a0, a1, -1`: every immediate bit set, so an incorrect unset bit in any of them changes the word.
+            i_type(Addi, Reg::A0, Reg::A1, !0),
+            0xfff58513,
+            Inst::RegImm {
+                kind: RegImmKind::Add64,
+                dst: Reg::A0,
+                src: Reg::A1,
+                imm: !0,
+            },
+        ),
+        (
+            // `addi a0, a1, -2`: only immediate bit 0 unset, so `imm[11:0]` differs from incorrect adjacent `imm[12:1]`.
+            i_type(Addi, Reg::A0, Reg::A1, !1),
+            0xffe58513,
+            Inst::RegImm {
+                kind: RegImmKind::Add64,
+                dst: Reg::A0,
+                src: Reg::A1,
+                imm: !1,
+            },
+        ),
+    ] {
+        assert_eq!(
+            encoded, expected_encoded,
+            "{expected_decoded:?} should encode as {expected_encoded:#010x}, but was {encoded:#010x}"
+        );
+        assert_eq!(Inst::decode(encoded), Some(expected_decoded));
+    }
 }
 
 #[test]
@@ -344,6 +390,36 @@ fn run_with_no_budget_is_out_of_steps() {
 }
 
 #[test]
+fn run_stops_after_budget_at_next_instruction() {
+    let (stop_reason, interpreter) = run(
+        &[NOP, NOP, NOP],
+        RunSetup {
+            registers: &[],
+            data: &[],
+            max_steps: 2,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::OutOfSteps);
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS + 2 * INSTRUCTION_BYTE_LENGTH);
+}
+
+#[test]
+fn run_resumes_after_out_of_steps() {
+    let (stop_reason, mut interpreter) = run(
+        &[NOP, RET],
+        RunSetup {
+            registers: &[],
+            data: &[],
+            max_steps: 1,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::OutOfSteps);
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS + INSTRUCTION_BYTE_LENGTH);
+
+    assert_eq!(interpreter.run(1), StopReason::Finished);
+}
+
+#[test]
 fn run_truncated_32bit_instruction_faults() {
     let (stop_reason, interpreter) = run_bytes(
         &NOP.to_le_bytes()[..COMPRESSED_INSTRUCTION_BYTE_LENGTH as usize],
@@ -389,6 +465,60 @@ fn run_undecodable_compressed_parcel_is_illegal_instruction() {
         StopReason::Trap(Exception::IllegalInstruction(u32::from(COMPRESSED_EBREAK)))
     );
     assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
+}
+
+#[test]
+fn run_counts_compressed_instruction_as_one_step() {
+    const COMPRESSED_NOP: u16 = 0x0001;
+    let (stop_reason, interpreter) = run_bytes(
+        &[COMPRESSED_NOP.to_le_bytes(), COMPRESSED_NOP.to_le_bytes()].concat(),
+        RunSetup {
+            registers: &[],
+            data: &[],
+            max_steps: 1,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::OutOfSteps);
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS + COMPRESSED_INSTRUCTION_BYTE_LENGTH);
+}
+
+#[test]
+fn addi_to_zero_register_is_noop() {
+    let (stop_reason, interpreter) = run(
+        &[i_type(Addi, Reg::Zero, Reg::A0, 5), RET],
+        RunSetup {
+            registers: &[(Reg::A0, 1)],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Finished);
+    assert_eq!(interpreter.reg(Reg::Zero), 0);
+}
+
+#[test]
+fn jalr_adds_offset_to_base() {
+    let base = CODE_ADDRESS + 5 * INSTRUCTION_BYTE_LENGTH;
+    let offset = -(INSTRUCTION_BYTE_LENGTH as i32);
+    let (stop_reason, interpreter) = run(
+        &[
+            i_type(Jalr, Reg::Zero, Reg::T1, offset),
+            i_type(Addi, Reg::T0, Reg::T0, 1),
+            i_type(Addi, Reg::T0, Reg::T0, 2),
+            i_type(Addi, Reg::T0, Reg::T0, 3),
+            i_type(Addi, Reg::T0, Reg::T0, 4), // <-- after Jalr
+            i_type(Addi, Reg::T0, Reg::T0, 5), // <-- base
+            i_type(Addi, Reg::T0, Reg::T0, 6),
+            RET,
+        ],
+        RunSetup {
+            registers: &[(Reg::T0, 1), (Reg::T1, base)],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Finished);
+    assert_eq!(interpreter.reg(Reg::T0), 16);
 }
 
 #[test]
@@ -448,6 +578,59 @@ fn jalr_to_unmapped_address_faults() {
     );
     assert_eq!(stop_reason, StopReason::Trap(Exception::InstructionAccessFault));
     assert_eq!(interpreter.program_counter(), unmapped_address);
+}
+
+#[test]
+fn shift_by_immediate_takes_6_bit_amount() {
+    for (word, source, shift_amount, expected) in [
+        (Slli, 1, 32, 1 << 32),
+        (Srli, 1 << 63, 63, 1),
+        (Srai, 1 << 63, 63, u64::MAX),
+        (Srai, 1 << 63, 32, 0xffff_ffff_8000_0000),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[i_type(word, Reg::A0, Reg::A1, shift_amount), RET],
+            RunSetup {
+                registers: &[(Reg::A1, source)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
+}
+
+#[test]
+fn set_less_than_compares_64_bits() {
+    for (word, lhs, imm, expected) in [(Slti, LOWEST_UPPER_BIT_SET, 1, 0), (Sltiu, LOWEST_UPPER_BIT_SET, 1, 0)] {
+        let (stop_reason, interpreter) = run(
+            &[i_type(word, Reg::A0, Reg::A1, imm), RET],
+            RunSetup {
+                registers: &[(Reg::A1, lhs)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
+}
+
+#[test]
+fn bitwise_operations_use_64_bits() {
+    for (word, immediate) in [(Andi, -1), (Ori, 0), (Xori, 0)] {
+        let (stop_reason, interpreter) = run(
+            &[i_type(word, Reg::A0, Reg::A1, immediate), RET],
+            RunSetup {
+                registers: &[(Reg::A1, UPPER_32_BITS_SET)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), UPPER_32_BITS_SET);
+    }
 }
 
 #[test]
