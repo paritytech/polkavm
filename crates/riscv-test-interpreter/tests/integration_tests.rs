@@ -3,7 +3,7 @@
 use core::ops::Range;
 use std::path::{Path, PathBuf};
 
-use polkavm_linker::riscv::{Inst, RegImmKind, RegRegKind};
+use polkavm_linker::riscv::{BranchKind, Inst, RegImmKind, RegRegKind};
 use riscv_test_interpreter::{
     width::{cast_to_u32, truncate_to_i32},
     Exception, Interpreter, MemoryProtection, Reg, StopReason,
@@ -23,6 +23,7 @@ const REGION_SIZE: u64 = 0x100;
 const CORPUS_TEXT_ADDRESS: u64 = 0x10000;
 const UPPER_32_BITS_SET: u64 = 0xffff_ffff_0000_0000;
 const LOWEST_UPPER_BIT_SET: u64 = 1 << 32;
+const SIGN_BIT_SET: u64 = 1 << 63;
 const UPPER_IMMEDIATE_SIGN_BIT_SET: u32 = 1 << 19;
 const ENOUGH_STEPS: u64 = 100;
 const EXECUTE: MemoryProtection = MemoryProtection {
@@ -72,6 +73,12 @@ enum MatchWord {
     Auipc = 0x0000_0017,
     Jal = 0x0000_006f,
     Jalr = 0x0000_0067,
+    Beq = 0x0000_0063,
+    Bne = 0x0000_1063,
+    Blt = 0x0000_4063,
+    Bltu = 0x0000_6063,
+    Bge = 0x0000_5063,
+    Bgeu = 0x0000_7063,
 }
 
 use MatchWord::*;
@@ -196,6 +203,17 @@ const fn i_type(match_word: MatchWord, dst: Reg, src: Reg, imm: i32) -> u32 {
 }
 
 /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-3-immediate-encoding-variants
+const fn b_type(match_word: MatchWord, src1: Reg, src2: Reg, offset: i32) -> u32 {
+    match_word as u32
+        | immediate_bits(offset, 11, 11) << 7
+        | immediate_bits(offset, 1, 4) << 8
+        | (src1 as u32) << 15
+        | (src2 as u32) << 20
+        | immediate_bits(offset, 5, 10) << 25
+        | immediate_bits(offset, 12, 12) << 31
+}
+
+/// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-3-immediate-encoding-variants
 const fn u_type(match_word: MatchWord, dst: Reg, upper_imm: u32) -> u32 {
     match_word as u32 | (dst as u32) << 7 | upper_imm << 12
 }
@@ -245,6 +263,29 @@ fn format_helpers_encode_instructions() {
                 dst: Reg::A0,
                 src: Reg::A1,
                 imm: !1,
+            },
+        ),
+        (
+            // `beq a0, a1, -2`: only immediate bit 0 unset, so an incorrect unset bit in any of the others changes the word.
+            b_type(Beq, Reg::A0, Reg::A1, !1),
+            0xfeb50fe3,
+            Inst::Branch {
+                kind: BranchKind::Eq64,
+                src1: Reg::A0,
+                src2: Reg::A1,
+                target: cast_to_u32(!1),
+            },
+        ),
+        (
+            // `beq a0, a1, -2082`: only immediate bits 11, 5, and 0 unset, so `imm[11]` differs from incorrect `imm[12]`,
+            // `imm[10:5]` from adjacent `imm[11:6]` and `imm[9:4]`, and `imm[4:1]` from adjacent `imm[5:2]` and `imm[3:0]`.
+            b_type(Beq, Reg::A0, Reg::A1, !(1 << 11 | 1 << 5 | 1)),
+            0xfcb50f63,
+            Inst::Branch {
+                kind: BranchKind::Eq64,
+                src1: Reg::A0,
+                src2: Reg::A1,
+                target: cast_to_u32(!(1 << 11 | 1 << 5 | 1)),
             },
         ),
         (
@@ -745,6 +786,53 @@ fn jalr_to_unmapped_address_faults() {
     );
     assert_eq!(stop_reason, StopReason::Trap(Exception::InstructionAccessFault));
     assert_eq!(interpreter.program_counter(), unmapped_address);
+}
+
+#[test]
+fn branch_compares_64_bits() {
+    let offset = 5 * INSTRUCTION_BYTE_LENGTH;
+    for (word, lhs, rhs, expected_taken) in [
+        (Blt, LOWEST_UPPER_BIT_SET, 1, false),
+        (Bltu, SIGN_BIT_SET, 1, false),
+        (Beq, LOWEST_UPPER_BIT_SET, 0, false),
+        (Bne, LOWEST_UPPER_BIT_SET, 0, true),
+        (Bge, 1, LOWEST_UPPER_BIT_SET, false),
+        (Bgeu, SIGN_BIT_SET, 1, true),
+        (Blt, 1, 1, false),
+        (Bltu, 1, 1, false),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[b_type(word, Reg::A0, Reg::A1, offset as i32)],
+            RunSetup {
+                registers: &[(Reg::A0, lhs), (Reg::A1, rhs)],
+                data: &[],
+                max_steps: 1,
+            },
+        );
+        let expected_target = if expected_taken {
+            CODE_ADDRESS + offset
+        } else {
+            CODE_ADDRESS + INSTRUCTION_BYTE_LENGTH
+        };
+        assert_eq!(stop_reason, StopReason::OutOfSteps);
+        assert_eq!(interpreter.program_counter(), expected_target);
+    }
+}
+
+#[test]
+fn branch_target_wraps_at_64_bits() {
+    let start_address = 0u64;
+    let mut interpreter = Interpreter::new();
+    map_region_with_data(
+        &mut interpreter,
+        start_address,
+        &b_type(Beq, Reg::Zero, Reg::Zero, -(INSTRUCTION_BYTE_LENGTH as i32)).to_le_bytes(),
+        EXECUTE,
+    );
+    interpreter.set_program_counter(start_address);
+
+    assert_eq!(interpreter.run(1), StopReason::OutOfSteps);
+    assert_eq!(interpreter.program_counter(), start_address.wrapping_sub(INSTRUCTION_BYTE_LENGTH));
 }
 
 #[test]

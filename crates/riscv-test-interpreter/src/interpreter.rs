@@ -3,7 +3,7 @@ use core::ops::Range;
 use object::elf::{FileHeader64, PF_R, PF_W, PF_X, PT_LOAD};
 use object::read::elf::{ElfFile, ProgramHeader};
 use object::{LittleEndian, Object};
-use polkavm_linker::riscv::{Inst, Reg, RegImmKind, RegRegKind};
+use polkavm_linker::riscv::{BranchKind, Inst, Reg, RegImmKind, RegRegKind};
 
 use crate::width::{cast_to_i32, cast_to_i64, cast_to_u32, cast_to_u64, sign_extend_32, truncate_to_i32, truncate_to_u32, zero_extend_32};
 
@@ -274,7 +274,7 @@ impl Interpreter {
             Inst::AddUpperImmediateToPc { dst, value } => self.load_upper_immediate(dst, value, Some(instruction_address)),
             Inst::JumpAndLink { dst, target } => self.jump_and_link(dst, target, instruction_address),
             Inst::JumpAndLinkRegister { dst, base, value } => self.jump_and_link_register(dst, base, value),
-            Inst::Branch { .. } => todo!(),
+            Inst::Branch { kind, src1, src2, target } => self.branch(kind, src1, src2, target, instruction_address),
             Inst::Load { .. } => todo!(),
             Inst::Store { .. } => todo!(),
 
@@ -432,6 +432,24 @@ impl Interpreter {
         let target = self.reg(base).wrapping_add(sign_extend_32(value)) & !1;
         self.set_reg(dst, self.program_counter);
         self.set_program_counter(Self::to_32bit_address(target));
+    }
+
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-5-2-conditional-branches
+    fn branch(&mut self, kind: BranchKind, src1: Reg, src2: Reg, offset: u32, instruction_address: u64) {
+        let lhs = self.reg(src1);
+        let rhs = self.reg(src2);
+        let taken = match kind {
+            BranchKind::Eq64 => lhs == rhs,
+            BranchKind::NotEq64 => lhs != rhs,
+            BranchKind::LessSigned64 => cast_to_i64(lhs) < cast_to_i64(rhs),
+            BranchKind::LessUnsigned64 => lhs < rhs,
+            BranchKind::GreaterOrEqualSigned64 => cast_to_i64(lhs) >= cast_to_i64(rhs),
+            BranchKind::GreaterOrEqualUnsigned64 => lhs >= rhs,
+        };
+        if taken {
+            let target = instruction_address.wrapping_add(sign_extend_32(cast_to_i32(offset)));
+            self.set_program_counter(target);
+        }
     }
 
     /// RISC-V address space is 2^XLEN bytes and address arithmetic wraps at 2^XLEN (https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html#memory),
