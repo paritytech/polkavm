@@ -3,7 +3,7 @@ use core::ops::Range;
 use object::elf::{FileHeader64, PF_R, PF_W, PF_X, PT_LOAD};
 use object::read::elf::{ElfFile, ProgramHeader};
 use object::{LittleEndian, Object};
-use polkavm_linker::riscv::{BranchKind, Inst, LoadKind, Reg, RegImmKind, RegRegKind};
+use polkavm_linker::riscv::{BranchKind, Inst, LoadKind, Reg, RegImmKind, RegRegKind, StoreKind};
 
 use crate::width::{
     cast_to_i32, cast_to_i64, cast_to_u32, cast_to_u64, sign_extend_16, sign_extend_32, sign_extend_8, truncate_to_i32, truncate_to_u32,
@@ -32,7 +32,7 @@ pub enum StopReason {
 enum MemoryAccess {
     Fetch,
     Load,
-    // Store,
+    Store,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -77,6 +77,7 @@ impl MemoryRegion {
         match access {
             MemoryAccess::Fetch => self.protection.execute,
             MemoryAccess::Load => self.protection.read,
+            MemoryAccess::Store => self.protection.write,
         }
     }
 }
@@ -128,6 +129,18 @@ impl Memory {
     fn write(&mut self, address: u64, data: &[u8]) -> Option<()> {
         let (index, range) = self.find_region(address, data.len() as u64)?;
         self.regions[index].data[range].copy_from_slice(data);
+
+        Some(())
+    }
+
+    #[must_use]
+    fn write_as_guest(&mut self, address: u64, data: &[u8]) -> Option<()> {
+        let (index, range) = self.find_region(address, data.len() as u64)?;
+        let region = &mut self.regions[index];
+        if !region.allows(MemoryAccess::Store) {
+            return None;
+        }
+        region.data[range].copy_from_slice(data);
 
         Some(())
     }
@@ -221,12 +234,21 @@ impl Interpreter {
         self.memory.read_as_guest(address, length, access).ok_or(match access {
             MemoryAccess::Fetch => Exception::InstructionAccessFault,
             MemoryAccess::Load => Exception::LoadAccessFault(address),
+            // Handle `Store` when AMO is supported. AMO should raise a store access-fault exception.
+            // (https://docs.riscv.org/reference/isa/v20260120/priv/machine.html#norm:pmp_store_fault)
+            MemoryAccess::Store => todo!(),
         })
     }
 
     #[must_use]
     pub fn write_memory(&mut self, address: u64, data: &[u8]) -> Option<()> {
         self.memory.write(address, data)
+    }
+
+    fn write_memory_as_guest(&mut self, address: u64, data: &[u8]) -> Result<(), Exception> {
+        self.memory
+            .write_as_guest(address, data)
+            .ok_or(Exception::StoreAccessFault(address))
     }
 
     pub fn run(&mut self, max_steps: u64) -> StopReason {
@@ -280,7 +302,7 @@ impl Interpreter {
             Inst::JumpAndLinkRegister { dst, base, value } => self.jump_and_link_register(dst, base, value),
             Inst::Branch { kind, src1, src2, target } => self.branch(kind, src1, src2, target, instruction_address),
             Inst::Load { kind, dst, base, offset } => self.load(kind, dst, base, offset)?,
-            Inst::Store { .. } => todo!(),
+            Inst::Store { kind, src, base, offset } => self.store(kind, src, base, offset)?,
 
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#fence
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/zifencei.html
@@ -473,6 +495,21 @@ impl Interpreter {
         self.set_reg(dst, value);
 
         Ok(())
+    }
+
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#ldst
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv64.html#3-1-3-load-and-store-instructions
+    fn store(&mut self, kind: StoreKind, src: Reg, base: Reg, offset: i32) -> Result<(), Exception> {
+        let address = Self::to_32bit_address(self.reg(base).wrapping_add(sign_extend_32(offset)));
+        let width = match kind {
+            StoreKind::U8 => 1,
+            StoreKind::U16 => 2,
+            StoreKind::U32 => 4,
+            StoreKind::U64 => 8,
+        };
+        let bytes = self.reg(src).to_le_bytes();
+
+        self.write_memory_as_guest(address, &bytes[..width])
     }
 
     /// RISC-V address space is 2^XLEN bytes and address arithmetic wraps at 2^XLEN (https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html#memory),

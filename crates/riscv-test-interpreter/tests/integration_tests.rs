@@ -3,7 +3,7 @@
 use core::ops::Range;
 use std::path::{Path, PathBuf};
 
-use polkavm_linker::riscv::{BranchKind, Inst, RegImmKind, RegRegKind};
+use polkavm_linker::riscv::{BranchKind, Inst, RegImmKind, RegRegKind, StoreKind};
 use riscv_test_interpreter::{
     width::{cast_to_u32, sign_extend_32, truncate_to_i32},
     Exception, Interpreter, MemoryProtection, Reg, StopReason,
@@ -86,6 +86,8 @@ enum MatchWord {
     Bgeu = 0x0000_7063,
     Lw = 0x0000_2003,
     Ld = 0x0000_3003,
+    Sw = 0x0000_2023,
+    Sd = 0x0000_3023,
 }
 
 use MatchWord::*;
@@ -210,6 +212,11 @@ const fn i_type(match_word: MatchWord, dst: Reg, src: Reg, imm: i32) -> u32 {
 }
 
 /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-3-immediate-encoding-variants
+const fn s_type(match_word: MatchWord, src: Reg, base: Reg, offset: i32) -> u32 {
+    match_word as u32 | immediate_bits(offset, 0, 4) << 7 | (base as u32) << 15 | (src as u32) << 20 | immediate_bits(offset, 5, 11) << 25
+}
+
+/// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-3-immediate-encoding-variants
 const fn b_type(match_word: MatchWord, src1: Reg, src2: Reg, offset: i32) -> u32 {
     match_word as u32
         | immediate_bits(offset, 11, 11) << 7
@@ -270,6 +277,29 @@ fn format_helpers_encode_instructions() {
                 dst: Reg::A0,
                 src: Reg::A1,
                 imm: !1,
+            },
+        ),
+        (
+            // `sw a0, -1(a1)`: every immediate bit set, so an incorrect unset bit in any of them changes the word.
+            s_type(Sw, Reg::A0, Reg::A1, !0),
+            0xfea5afa3,
+            Inst::Store {
+                kind: StoreKind::U32,
+                src: Reg::A0,
+                base: Reg::A1,
+                offset: !0,
+            },
+        ),
+        (
+            // `sw a0, -33(a1)`: only immediate bit 5 unset, so `imm[11:5]` differs from incorrect adjacent
+            // `imm[12:6]` and `imm[10:4]`, and `imm[4:0]` from adjacent `imm[5:1]`.
+            s_type(Sw, Reg::A0, Reg::A1, !(1 << 5)),
+            0xfca5afa3,
+            Inst::Store {
+                kind: StoreKind::U32,
+                src: Reg::A0,
+                base: Reg::A1,
+                offset: !(1 << 5),
             },
         ),
         (
@@ -984,6 +1014,106 @@ fn load_address_wraps_at_32_bits() {
 
     assert_eq!(interpreter.run(ENOUGH_STEPS), StopReason::Finished);
     assert_eq!(interpreter.reg(Reg::A0), sign_extend_32(i32::from_le_bytes(data)));
+}
+
+#[test]
+fn store_to_non_writable_address_faults() {
+    let mut interpreter = Interpreter::new();
+    let code = s_type(Sw, Reg::A0, Reg::A1, 0).to_le_bytes();
+    let data = [1, 2, 3, 4];
+    map_region_with_data(&mut interpreter, CODE_ADDRESS, &code, EXECUTE);
+    map_region_with_data(&mut interpreter, DATA_ADDRESS, &data, READ_ONLY);
+    interpreter.set_program_counter(CODE_ADDRESS);
+    interpreter.set_stop_address(STOP_ADDRESS);
+    interpreter.set_reg(Reg::RA, STOP_ADDRESS);
+    interpreter.set_reg(Reg::A0, u64::MAX);
+    interpreter.set_reg(Reg::A1, DATA_ADDRESS);
+
+    assert_eq!(
+        interpreter.run(ENOUGH_STEPS),
+        StopReason::Trap(Exception::StoreAccessFault(DATA_ADDRESS))
+    );
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
+    assert_eq!(interpreter.read_memory(DATA_ADDRESS, data.len() as u64), Some(&data[..]));
+}
+
+#[test]
+fn store_partly_outside_mapped_region_faults() {
+    let straddling_offset = 4;
+    let data = [1, 2, 3, 4, 5, 6, 7, 8];
+    let (stop_reason, interpreter) = run(
+        &[s_type(Sd, Reg::A0, Reg::A1, straddling_offset)],
+        RunSetup {
+            registers: &[(Reg::A0, u64::MAX), (Reg::A1, DATA_ADDRESS)],
+            data: &data,
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(
+        stop_reason,
+        StopReason::Trap(Exception::StoreAccessFault(DATA_ADDRESS + straddling_offset as u64))
+    );
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
+    assert_eq!(interpreter.read_memory(DATA_ADDRESS, data.len() as u64), Some(&data[..]));
+}
+
+#[test]
+fn store_truncates_address_to_32_bits() {
+    let to_store: u32 = 0x1234_5678;
+    let data = [0, 0, 0, 0];
+    let (stop_reason, interpreter) = run(
+        &[s_type(Sw, Reg::A0, Reg::A1, 0), RET],
+        RunSetup {
+            registers: &[(Reg::A0, u64::from(to_store)), (Reg::A1, UPPER_32_BITS_SET | DATA_ADDRESS)],
+            data: &data,
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Finished);
+    assert_eq!(
+        interpreter.read_memory(DATA_ADDRESS, data.len() as u64),
+        Some(&to_store.to_le_bytes()[..])
+    );
+}
+
+#[test]
+fn store_fault_reports_truncated_32bit_address() {
+    let unmapped_address = 0;
+    let (stop_reason, interpreter) = run(
+        &[s_type(Sw, Reg::Zero, Reg::A1, 0)],
+        RunSetup {
+            registers: &[(Reg::A1, UPPER_32_BITS_SET | unmapped_address)],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Trap(Exception::StoreAccessFault(unmapped_address)));
+    assert_eq!(interpreter.program_counter(), CODE_ADDRESS);
+}
+
+#[test]
+fn store_address_wraps_at_32_bits() {
+    let mut interpreter = Interpreter::new();
+    let to_store: u32 = 0x1234_5678;
+    let data = [0, 0, 0, 0];
+    let data_address = END_OF_32BIT_ADDRESS_SPACE - data.len() as u64;
+    let code = [
+        s_type(Sw, Reg::A0, Reg::Zero, -(data.len() as i32)).to_le_bytes(),
+        RET.to_le_bytes(),
+    ]
+    .concat();
+    map_region_with_data(&mut interpreter, CODE_ADDRESS, &code, EXECUTE);
+    map_region_with_data(&mut interpreter, data_address, &data, READ_WRITE);
+    interpreter.set_program_counter(CODE_ADDRESS);
+    interpreter.set_stop_address(STOP_ADDRESS);
+    interpreter.set_reg(Reg::RA, STOP_ADDRESS);
+    interpreter.set_reg(Reg::A0, u64::from(to_store));
+
+    assert_eq!(interpreter.run(ENOUGH_STEPS), StopReason::Finished);
+    assert_eq!(
+        interpreter.read_memory(data_address, data.len() as u64),
+        Some(&to_store.to_le_bytes()[..])
+    );
 }
 
 #[test]
