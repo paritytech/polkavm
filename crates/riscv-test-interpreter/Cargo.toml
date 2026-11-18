@@ -1,0 +1,16 @@
+[package]
+name = "riscv-test-interpreter"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+object = { workspace = true, features = ["std", "read_core", "elf", "unaligned"] }
+polkavm-linker = { workspace = true, features = ["export-internals-for-testing"] }
+
+[lints]
+workspace = true

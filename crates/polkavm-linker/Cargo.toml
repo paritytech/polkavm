@@ -30,3 +30,6 @@ object = { workspace = true, features = ["write"] }
 
 [lints]
 workspace = true
+
+[features]
+export-internals-for-testing = []

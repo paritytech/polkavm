@@ -17,6 +17,7 @@ cargo clippy -p polkavm-derive-impl-macro
 cargo clippy -p polkavm-disassembler
 cargo clippy -p polkavm-linker
 cargo clippy -p polkavm-linux-raw
+cargo clippy -p riscv-test-interpreter
 
 echo ">> cargo clippy (examples)"
 cargo clippy -p hello-world-host
