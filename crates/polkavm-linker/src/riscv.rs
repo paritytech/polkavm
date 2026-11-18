@@ -106,7 +106,7 @@ impl LoadKind {
         }
     }
 
-    pub(crate) const fn size(self) -> u64 {
+    pub const fn size(self) -> u64 {
         match self {
             LoadKind::I8 | LoadKind::U8 => 1,
             LoadKind::I16 | LoadKind::U16 => 2,
