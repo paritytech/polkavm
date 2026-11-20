@@ -30,6 +30,14 @@ pub fn truncate_to_u32(value: u64) -> u32 {
     value as u32
 }
 
+pub fn truncate_to_i64(value: i128) -> i64 {
+    value as i64
+}
+
+pub fn truncate_to_u64(value: u128) -> u64 {
+    value as u64
+}
+
 pub fn cast_to_i32(value: u32) -> i32 {
     value as i32
 }

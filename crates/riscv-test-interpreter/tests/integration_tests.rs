@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use polkavm_linker::riscv::{BranchKind, Inst, RegImmKind, RegRegKind, StoreKind};
 use riscv_test_interpreter::{
-    width::{cast_to_u32, sign_extend_32, truncate_to_i32},
+    width::{cast_to_u32, cast_to_u64, sign_extend_32, truncate_to_i32},
     Exception, Interpreter, MemoryProtection, Reg, StopReason,
 };
 
@@ -75,6 +75,9 @@ enum MatchWord {
     And = 0x0000_7033,
     Andi = 0x0000_7013,
     Mulw = 0x0200_003b,
+    Mulh = 0x0200_1033,
+    Mulhsu = 0x0200_2033,
+    Mulhu = 0x0200_3033,
     Lui = 0x0000_0037,
     Auipc = 0x0000_0017,
     Jal = 0x0000_006f,
@@ -1251,6 +1254,32 @@ fn mulw_sign_extends_low_32_bits_of_product() {
     );
     assert_eq!(stop_reason, StopReason::Finished);
     assert_eq!(interpreter.reg(Reg::A0), sign_extend_32(1 << 31));
+}
+
+#[test]
+fn multiply_upper_returns_upper_64_bits_of_128bit_product() {
+    for (word, lhs, rhs, expected) in [
+        (Mulh, cast_to_u64(-3 << 32), 5 << 32, cast_to_u64(-15)),
+        (Mulhsu, cast_to_u64(-3 << 32), 5 << 32, cast_to_u64(-15)),
+        (Mulhu, 3 << 32, 5 << 32, 15),
+        (Mulh, cast_to_u64(i64::MIN), 1, cast_to_u64(-1)),
+        (Mulhsu, cast_to_u64(i64::MIN), 1, cast_to_u64(-1)),
+        (Mulhu, 1 << 63, 1, 0),
+        (Mulh, 1, cast_to_u64(i64::MIN), cast_to_u64(-1)),
+        (Mulhsu, 1, 1 << 63, 0),
+        (Mulhu, 1, 1 << 63, 0),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
+            RunSetup {
+                registers: &[(Reg::A1, lhs), (Reg::A2, rhs)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
 }
 
 #[test]

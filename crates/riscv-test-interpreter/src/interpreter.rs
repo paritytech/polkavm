@@ -6,8 +6,8 @@ use object::{LittleEndian, Object};
 use polkavm_linker::riscv::{BranchKind, Inst, LoadKind, Reg, RegImmKind, RegRegKind, StoreKind};
 
 use crate::width::{
-    cast_to_i32, cast_to_i64, cast_to_u32, cast_to_u64, sign_extend_16, sign_extend_32, sign_extend_8, truncate_to_i32, truncate_to_u32,
-    zero_extend_16, zero_extend_32, zero_extend_8,
+    cast_to_i32, cast_to_i64, cast_to_u32, cast_to_u64, sign_extend_16, sign_extend_32, sign_extend_8, truncate_to_i32, truncate_to_i64,
+    truncate_to_u32, truncate_to_u64, zero_extend_16, zero_extend_32, zero_extend_8,
 };
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -405,10 +405,19 @@ impl Interpreter {
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html#11-1-2-division-operations
             RegRegKind::Mul32AndSignExtend => sign_extend_32(truncate_to_i32(lhs).wrapping_mul(truncate_to_i32(rhs))),
             RegRegKind::Mul64 => lhs.wrapping_mul(rhs),
-            RegRegKind::MulUpperSignedSigned64
-            | RegRegKind::MulUpperSignedUnsigned64
-            | RegRegKind::MulUpperUnsignedUnsigned64
-            | RegRegKind::Div32AndSignExtend
+            RegRegKind::MulUpperSignedSigned64 => {
+                let product = i128::from(cast_to_i64(lhs)) * i128::from(cast_to_i64(rhs));
+                cast_to_u64(truncate_to_i64(product >> u64::BITS))
+            }
+            RegRegKind::MulUpperSignedUnsigned64 => {
+                let product = i128::from(cast_to_i64(lhs)) * i128::from(rhs);
+                cast_to_u64(truncate_to_i64(product >> u64::BITS))
+            }
+            RegRegKind::MulUpperUnsignedUnsigned64 => {
+                let product = u128::from(lhs) * u128::from(rhs);
+                truncate_to_u64(product >> u64::BITS)
+            }
+            RegRegKind::Div32AndSignExtend
             | RegRegKind::Div64
             | RegRegKind::DivUnsigned32AndSignExtend
             | RegRegKind::DivUnsigned64
