@@ -422,17 +422,26 @@ impl Interpreter {
                 let quotient = if divisor == 0 { -1 } else { dividend.wrapping_div(divisor) };
                 sign_extend_32(quotient)
             }
+            RegRegKind::Div64 => {
+                let (dividend, divisor) = (cast_to_i64(lhs), cast_to_i64(rhs));
+                let quotient = if divisor == 0 { -1 } else { dividend.wrapping_div(divisor) };
+                cast_to_u64(quotient)
+            }
             RegRegKind::DivUnsigned32AndSignExtend => {
                 let (dividend, divisor) = (truncate_to_u32(lhs), truncate_to_u32(rhs));
                 let quotient = if divisor == 0 { u32::MAX } else { dividend / divisor };
                 sign_extend_32(cast_to_i32(quotient))
             }
-            RegRegKind::Div64
-            | RegRegKind::DivUnsigned64
-            | RegRegKind::Rem32AndSignExtend
-            | RegRegKind::Rem64
-            | RegRegKind::RemUnsigned32AndSignExtend
-            | RegRegKind::RemUnsigned64 => todo!(),
+            RegRegKind::DivUnsigned64 => {
+                if rhs == 0 {
+                    u64::MAX
+                } else {
+                    lhs / rhs
+                }
+            }
+            RegRegKind::Rem32AndSignExtend | RegRegKind::Rem64 | RegRegKind::RemUnsigned32AndSignExtend | RegRegKind::RemUnsigned64 => {
+                todo!()
+            }
 
             // "B" extension (Zbb):
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-1-logical-with-negate

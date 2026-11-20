@@ -79,7 +79,9 @@ enum MatchWord {
     Mulhsu = 0x0200_2033,
     Mulhu = 0x0200_3033,
     Divw = 0x0200_403b,
+    Div = 0x0200_4033,
     Divuw = 0x0200_503b,
+    Divu = 0x0200_5033,
     Lui = 0x0000_0037,
     Auipc = 0x0000_0017,
     Jal = 0x0000_006f,
@@ -1312,10 +1314,31 @@ fn word_division_uses_low_32_bits_of_sources() {
 }
 
 #[test]
+fn division_uses_64_bits_of_divisor() {
+    for (word, lhs, rhs, expected) in [
+        (Div, LOWEST_UPPER_BIT_SET + 5, LOWEST_UPPER_BIT_SET, 1),
+        (Divu, LOWEST_UPPER_BIT_SET + 5, LOWEST_UPPER_BIT_SET, 1),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
+            RunSetup {
+                registers: &[(Reg::A1, lhs), (Reg::A2, rhs)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
+}
+
+#[test]
 fn signed_division_minimum_by_negative_one_overflows() {
     for (word, lhs, rhs, expected) in [
         (Divw, sign_extend_32(i32::MIN), sign_extend_32(-1), sign_extend_32(i32::MIN)),
+        (Div, cast_to_u64(i64::MIN), cast_to_u64(-1), cast_to_u64(i64::MIN)),
         (Divw, 7, sign_extend_32(-1), sign_extend_32(-7)),
+        (Div, 7, cast_to_u64(-1), cast_to_u64(-7)),
     ] {
         let (stop_reason, interpreter) = run(
             &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
