@@ -83,7 +83,9 @@ enum MatchWord {
     Divuw = 0x0200_503b,
     Divu = 0x0200_5033,
     Remw = 0x0200_603b,
+    Rem = 0x0200_6033,
     Remuw = 0x0200_703b,
+    Remu = 0x0200_7033,
     Lui = 0x0000_0037,
     Auipc = 0x0000_0017,
     Jal = 0x0000_006f,
@@ -1325,7 +1327,9 @@ fn word_division_uses_low_32_bits_of_sources() {
 fn division_uses_64_bits_of_divisor() {
     for (word, lhs, rhs, expected) in [
         (Div, LOWEST_UPPER_BIT_SET + 5, LOWEST_UPPER_BIT_SET, 1),
+        (Rem, LOWEST_UPPER_BIT_SET + 5, LOWEST_UPPER_BIT_SET, 5),
         (Divu, LOWEST_UPPER_BIT_SET + 5, LOWEST_UPPER_BIT_SET, 1),
+        (Remu, LOWEST_UPPER_BIT_SET + 5, LOWEST_UPPER_BIT_SET, 5),
     ] {
         let (stop_reason, interpreter) = run(
             &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
@@ -1346,9 +1350,11 @@ fn signed_division_minimum_by_negative_one_overflows() {
         (Divw, sign_extend_32(i32::MIN), sign_extend_32(-1), sign_extend_32(i32::MIN)),
         (Remw, sign_extend_32(i32::MIN), sign_extend_32(-1), 0),
         (Div, cast_to_u64(i64::MIN), cast_to_u64(-1), cast_to_u64(i64::MIN)),
+        (Rem, cast_to_u64(i64::MIN), cast_to_u64(-1), 0),
         (Divw, 7, sign_extend_32(-1), sign_extend_32(-7)),
         (Div, 7, cast_to_u64(-1), cast_to_u64(-7)),
         (Remw, sign_extend_32(i32::MIN), sign_extend_32(i32::MAX), sign_extend_32(-1)),
+        (Rem, cast_to_u64(i64::MIN), cast_to_u64(i64::MAX), cast_to_u64(-1)),
     ] {
         let (stop_reason, interpreter) = run(
             &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
