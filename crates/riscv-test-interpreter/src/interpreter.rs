@@ -418,8 +418,8 @@ impl Interpreter {
             RegRegKind::Mul32AndSignExtend => {
                 cast(cast(lhs).truncate_to_i32().wrapping_mul(cast(rhs).truncate_to_i32())).to_u64_sign_extend()
             }
-            RegRegKind::Mul64
-            | RegRegKind::MulUpperSignedSigned64
+            RegRegKind::Mul64 => lhs.wrapping_mul(rhs),
+            RegRegKind::MulUpperSignedSigned64
             | RegRegKind::MulUpperSignedUnsigned64
             | RegRegKind::MulUpperUnsignedUnsigned64
             | RegRegKind::Div32AndSignExtend
