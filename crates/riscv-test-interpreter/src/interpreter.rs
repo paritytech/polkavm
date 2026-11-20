@@ -6,8 +6,8 @@ use object::{LittleEndian, Object};
 use polkavm_linker::riscv::{BranchKind, Inst, LoadKind, Reg, RegImmKind, RegRegKind, StoreKind};
 
 use crate::width::{
-    cast_to_i32, cast_to_i64, cast_to_u32, cast_to_u64, sign_extend_16, sign_extend_32, sign_extend_8, truncate_to_i32, truncate_to_u32,
-    zero_extend_16, zero_extend_32, zero_extend_8,
+    cast_to_i32, cast_to_i64, cast_to_u32, cast_to_u64, sign_extend_16, sign_extend_32, sign_extend_8, truncate_to_i32, truncate_to_i64,
+    truncate_to_u32, truncate_to_u64, zero_extend_16, zero_extend_32, zero_extend_8,
 };
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -403,19 +403,64 @@ impl Interpreter {
             // "M" extension:
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html#mult-ops
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html#11-1-2-division-operations
-            RegRegKind::Mul32AndSignExtend
-            | RegRegKind::Mul64
-            | RegRegKind::MulUpperSignedSigned64
-            | RegRegKind::MulUpperSignedUnsigned64
-            | RegRegKind::MulUpperUnsignedUnsigned64
-            | RegRegKind::Div32AndSignExtend
-            | RegRegKind::Div64
-            | RegRegKind::DivUnsigned32AndSignExtend
-            | RegRegKind::DivUnsigned64
-            | RegRegKind::Rem32AndSignExtend
-            | RegRegKind::Rem64
-            | RegRegKind::RemUnsigned32AndSignExtend
-            | RegRegKind::RemUnsigned64 => todo!(),
+            RegRegKind::Mul32AndSignExtend => sign_extend_32(truncate_to_i32(lhs).wrapping_mul(truncate_to_i32(rhs))),
+            RegRegKind::Mul64 => lhs.wrapping_mul(rhs),
+            RegRegKind::MulUpperSignedSigned64 => {
+                let product = i128::from(cast_to_i64(lhs)) * i128::from(cast_to_i64(rhs));
+                cast_to_u64(truncate_to_i64(product >> u64::BITS))
+            }
+            RegRegKind::MulUpperSignedUnsigned64 => {
+                let product = i128::from(cast_to_i64(lhs)) * i128::from(rhs);
+                cast_to_u64(truncate_to_i64(product >> u64::BITS))
+            }
+            RegRegKind::MulUpperUnsignedUnsigned64 => {
+                let product = u128::from(lhs) * u128::from(rhs);
+                truncate_to_u64(product >> u64::BITS)
+            }
+            RegRegKind::Div32AndSignExtend => {
+                let (dividend, divisor) = (truncate_to_i32(lhs), truncate_to_i32(rhs));
+                let quotient = if divisor == 0 { -1 } else { dividend.wrapping_div(divisor) };
+                sign_extend_32(quotient)
+            }
+            RegRegKind::Div64 => {
+                let (dividend, divisor) = (cast_to_i64(lhs), cast_to_i64(rhs));
+                let quotient = if divisor == 0 { -1 } else { dividend.wrapping_div(divisor) };
+                cast_to_u64(quotient)
+            }
+            RegRegKind::DivUnsigned32AndSignExtend => {
+                let (dividend, divisor) = (truncate_to_u32(lhs), truncate_to_u32(rhs));
+                let quotient = if divisor == 0 { u32::MAX } else { dividend / divisor };
+                sign_extend_32(cast_to_i32(quotient))
+            }
+            RegRegKind::DivUnsigned64 => {
+                if rhs == 0 {
+                    u64::MAX
+                } else {
+                    lhs / rhs
+                }
+            }
+            RegRegKind::Rem32AndSignExtend => {
+                let (dividend, divisor) = (truncate_to_i32(lhs), truncate_to_i32(rhs));
+                let remainder = if divisor == 0 { dividend } else { dividend.wrapping_rem(divisor) };
+                sign_extend_32(remainder)
+            }
+            RegRegKind::Rem64 => {
+                let (dividend, divisor) = (cast_to_i64(lhs), cast_to_i64(rhs));
+                let remainder = if divisor == 0 { dividend } else { dividend.wrapping_rem(divisor) };
+                cast_to_u64(remainder)
+            }
+            RegRegKind::RemUnsigned32AndSignExtend => {
+                let (dividend, divisor) = (truncate_to_u32(lhs), truncate_to_u32(rhs));
+                let remainder = if divisor == 0 { dividend } else { dividend % divisor };
+                sign_extend_32(cast_to_i32(remainder))
+            }
+            RegRegKind::RemUnsigned64 => {
+                if rhs == 0 {
+                    lhs
+                } else {
+                    lhs % rhs
+                }
+            }
 
             // "B" extension (Zbb):
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-1-logical-with-negate
