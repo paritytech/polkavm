@@ -453,7 +453,17 @@ impl Interpreter {
                     lhs / rhs
                 }
             }
-            RegRegKind::Rem32AndSignExtend | RegRegKind::Rem64 | RegRegKind::RemUnsigned32AndSignExtend | RegRegKind::RemUnsigned64 => {
+            RegRegKind::Rem32AndSignExtend => {
+                let (dividend, divisor) = (cast(lhs).truncate_to_i32(), cast(rhs).truncate_to_i32());
+                let remainder = if divisor == 0 { dividend } else { dividend.wrapping_rem(divisor) };
+                cast(remainder).to_u64_sign_extend()
+            }
+            RegRegKind::RemUnsigned32AndSignExtend => {
+                let (dividend, divisor) = (cast(lhs).truncate_to_u32(), cast(rhs).truncate_to_u32());
+                let remainder = if divisor == 0 { dividend } else { dividend % divisor };
+                cast(remainder).to_u64_sign_extend()
+            }
+            RegRegKind::Rem64 | RegRegKind::RemUnsigned64 => {
                 todo!()
             }
 
