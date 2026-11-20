@@ -403,8 +403,8 @@ impl Interpreter {
             // "M" extension:
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html#mult-ops
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html#11-1-2-division-operations
-            RegRegKind::Mul32AndSignExtend
-            | RegRegKind::Mul64
+            RegRegKind::Mul32AndSignExtend => sign_extend_32(truncate_to_i32(lhs).wrapping_mul(truncate_to_i32(rhs))),
+            RegRegKind::Mul64
             | RegRegKind::MulUpperSignedSigned64
             | RegRegKind::MulUpperSignedUnsigned64
             | RegRegKind::MulUpperUnsignedUnsigned64
