@@ -72,6 +72,7 @@ enum MatchWord {
     Ori = 0x0000_6013,
     And = 0x0000_7033,
     Andi = 0x0000_7013,
+    Mulw = 0x0200_003b,
     Lui = 0x0000_0037,
     Auipc = 0x0000_0017,
     Jal = 0x0000_006f,
@@ -1234,6 +1235,20 @@ fn bitwise_operations_use_64_bits() {
         assert_eq!(stop_reason, StopReason::Finished);
         assert_eq!(interpreter.reg(Reg::A0), UPPER_32_BITS_SET);
     }
+}
+
+#[test]
+fn mulw_sign_extends_low_32_bits_of_product() {
+    let (stop_reason, interpreter) = run(
+        &[r_type(Mulw, Reg::A0, Reg::A1, Reg::A2), RET],
+        RunSetup {
+            registers: &[(Reg::A1, 1 << 31), (Reg::A2, 1)],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Finished);
+    assert_eq!(interpreter.reg(Reg::A0), cast(1_i32 << 31).to_u64_sign_extend());
 }
 
 #[test]
