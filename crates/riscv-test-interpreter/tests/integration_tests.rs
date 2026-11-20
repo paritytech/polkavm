@@ -76,6 +76,8 @@ enum MatchWord {
     Mulh = 0x0200_1033,
     Mulhsu = 0x0200_2033,
     Mulhu = 0x0200_3033,
+    Divw = 0x0200_403b,
+    Divuw = 0x0200_503b,
     Lui = 0x0000_0037,
     Auipc = 0x0000_0017,
     Jal = 0x0000_006f,
@@ -1266,6 +1268,62 @@ fn multiply_upper_returns_upper_64_bits_of_128bit_product() {
         (Mulh, 1, cast(i64::MIN).bitwise_as_u64(), cast(-1).bitwise_as_u64()),
         (Mulhsu, 1, 1 << 63, 0),
         (Mulhu, 1, 1 << 63, 0),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
+            RunSetup {
+                registers: &[(Reg::A1, lhs), (Reg::A2, rhs)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
+}
+
+#[test]
+fn word_division_uses_low_32_bits_of_sources() {
+    for (word, lhs, rhs, expected) in [
+        (
+            Divw,
+            LOWEST_UPPER_BIT_SET | 7,
+            cast(cast(-2).bitwise_as_u32()).to_u64(),
+            cast(-3_i32).to_u64_sign_extend(),
+        ),
+        (Divuw, LOWEST_UPPER_BIT_SET | 7, LOWEST_UPPER_BIT_SET | 2, 3),
+        (Divw, 7, LOWEST_UPPER_BIT_SET, cast(-1_i32).to_u64_sign_extend()),
+        (Divuw, 7, LOWEST_UPPER_BIT_SET, u64::MAX),
+        (
+            Divw,
+            cast(cast(i32::MIN).bitwise_as_u32()).to_u64(),
+            cast(cast(-1).bitwise_as_u32()).to_u64(),
+            cast(i32::MIN).to_u64_sign_extend(),
+        ),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
+            RunSetup {
+                registers: &[(Reg::A1, lhs), (Reg::A2, rhs)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
+}
+
+#[test]
+fn signed_division_minimum_by_negative_one_overflows() {
+    for (word, lhs, rhs, expected) in [
+        (
+            Divw,
+            cast(i32::MIN).to_u64_sign_extend(),
+            cast(-1_i32).to_u64_sign_extend(),
+            cast(i32::MIN).to_u64_sign_extend(),
+        ),
+        (Divw, 7, cast(-1_i32).to_u64_sign_extend(), cast(-7_i32).to_u64_sign_extend()),
     ] {
         let (stop_reason, interpreter) = run(
             &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],

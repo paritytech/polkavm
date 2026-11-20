@@ -431,9 +431,17 @@ impl Interpreter {
                 let product = u128::from(lhs) * u128::from(rhs);
                 cast(product >> u64::BITS).truncate_to_u64()
             }
-            RegRegKind::Div32AndSignExtend
-            | RegRegKind::Div64
-            | RegRegKind::DivUnsigned32AndSignExtend
+            RegRegKind::Div32AndSignExtend => {
+                let (dividend, divisor) = (cast(lhs).truncate_to_i32(), cast(rhs).truncate_to_i32());
+                let quotient = if divisor == 0 { -1 } else { dividend.wrapping_div(divisor) };
+                cast(quotient).to_u64_sign_extend()
+            }
+            RegRegKind::DivUnsigned32AndSignExtend => {
+                let (dividend, divisor) = (cast(lhs).truncate_to_u32(), cast(rhs).truncate_to_u32());
+                let quotient = if divisor == 0 { u32::MAX } else { dividend / divisor };
+                cast(quotient).to_u64_sign_extend()
+            }
+            RegRegKind::Div64
             | RegRegKind::DivUnsigned64
             | RegRegKind::Rem32AndSignExtend
             | RegRegKind::Rem64
