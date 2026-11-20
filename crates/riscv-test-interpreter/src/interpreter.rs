@@ -436,17 +436,26 @@ impl Interpreter {
                 let quotient = if divisor == 0 { -1 } else { dividend.wrapping_div(divisor) };
                 cast(quotient).to_u64_sign_extend()
             }
+            RegRegKind::Div64 => {
+                let (dividend, divisor) = (cast(lhs).bitwise_as_i64(), cast(rhs).bitwise_as_i64());
+                let quotient = if divisor == 0 { -1 } else { dividend.wrapping_div(divisor) };
+                cast(quotient).bitwise_as_u64()
+            }
             RegRegKind::DivUnsigned32AndSignExtend => {
                 let (dividend, divisor) = (cast(lhs).truncate_to_u32(), cast(rhs).truncate_to_u32());
                 let quotient = if divisor == 0 { u32::MAX } else { dividend / divisor };
                 cast(quotient).to_u64_sign_extend()
             }
-            RegRegKind::Div64
-            | RegRegKind::DivUnsigned64
-            | RegRegKind::Rem32AndSignExtend
-            | RegRegKind::Rem64
-            | RegRegKind::RemUnsigned32AndSignExtend
-            | RegRegKind::RemUnsigned64 => todo!(),
+            RegRegKind::DivUnsigned64 => {
+                if rhs == 0 {
+                    u64::MAX
+                } else {
+                    lhs / rhs
+                }
+            }
+            RegRegKind::Rem32AndSignExtend | RegRegKind::Rem64 | RegRegKind::RemUnsigned32AndSignExtend | RegRegKind::RemUnsigned64 => {
+                todo!()
+            }
 
             // "B" extension (Zbb):
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-1-logical-with-negate
