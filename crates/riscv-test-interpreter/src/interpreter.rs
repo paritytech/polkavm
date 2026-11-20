@@ -458,13 +458,22 @@ impl Interpreter {
                 let remainder = if divisor == 0 { dividend } else { dividend.wrapping_rem(divisor) };
                 cast(remainder).to_u64_sign_extend()
             }
+            RegRegKind::Rem64 => {
+                let (dividend, divisor) = (cast(lhs).bitwise_as_i64(), cast(rhs).bitwise_as_i64());
+                let remainder = if divisor == 0 { dividend } else { dividend.wrapping_rem(divisor) };
+                cast(remainder).bitwise_as_u64()
+            }
             RegRegKind::RemUnsigned32AndSignExtend => {
                 let (dividend, divisor) = (cast(lhs).truncate_to_u32(), cast(rhs).truncate_to_u32());
                 let remainder = if divisor == 0 { dividend } else { dividend % divisor };
                 cast(remainder).to_u64_sign_extend()
             }
-            RegRegKind::Rem64 | RegRegKind::RemUnsigned64 => {
-                todo!()
+            RegRegKind::RemUnsigned64 => {
+                if rhs == 0 {
+                    lhs
+                } else {
+                    lhs % rhs
+                }
             }
 
             // "B" extension (Zbb):
