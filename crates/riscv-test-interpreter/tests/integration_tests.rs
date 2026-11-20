@@ -73,6 +73,9 @@ enum MatchWord {
     And = 0x0000_7033,
     Andi = 0x0000_7013,
     Mulw = 0x0200_003b,
+    Mulh = 0x0200_1033,
+    Mulhsu = 0x0200_2033,
+    Mulhu = 0x0200_3033,
     Lui = 0x0000_0037,
     Auipc = 0x0000_0017,
     Jal = 0x0000_006f,
@@ -1249,6 +1252,32 @@ fn mulw_sign_extends_low_32_bits_of_product() {
     );
     assert_eq!(stop_reason, StopReason::Finished);
     assert_eq!(interpreter.reg(Reg::A0), cast(1_i32 << 31).to_u64_sign_extend());
+}
+
+#[test]
+fn multiply_upper_returns_upper_64_bits_of_128bit_product() {
+    for (word, lhs, rhs, expected) in [
+        (Mulh, cast(-3 << 32).bitwise_as_u64(), 5 << 32, cast(-15).bitwise_as_u64()),
+        (Mulhsu, cast(-3 << 32).bitwise_as_u64(), 5 << 32, cast(-15).bitwise_as_u64()),
+        (Mulhu, 3 << 32, 5 << 32, 15),
+        (Mulh, cast(i64::MIN).bitwise_as_u64(), 1, cast(-1).bitwise_as_u64()),
+        (Mulhsu, cast(i64::MIN).bitwise_as_u64(), 1, cast(-1).bitwise_as_u64()),
+        (Mulhu, 1 << 63, 1, 0),
+        (Mulh, 1, cast(i64::MIN).bitwise_as_u64(), cast(-1).bitwise_as_u64()),
+        (Mulhsu, 1, 1 << 63, 0),
+        (Mulhu, 1, 1 << 63, 0),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
+            RunSetup {
+                registers: &[(Reg::A1, lhs), (Reg::A2, rhs)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
 }
 
 #[test]

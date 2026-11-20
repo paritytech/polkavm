@@ -419,10 +419,19 @@ impl Interpreter {
                 cast(cast(lhs).truncate_to_i32().wrapping_mul(cast(rhs).truncate_to_i32())).to_u64_sign_extend()
             }
             RegRegKind::Mul64 => lhs.wrapping_mul(rhs),
-            RegRegKind::MulUpperSignedSigned64
-            | RegRegKind::MulUpperSignedUnsigned64
-            | RegRegKind::MulUpperUnsignedUnsigned64
-            | RegRegKind::Div32AndSignExtend
+            RegRegKind::MulUpperSignedSigned64 => {
+                let product = i128::from(cast(lhs).bitwise_as_i64()) * i128::from(cast(rhs).bitwise_as_i64());
+                cast(cast(product >> u64::BITS).truncate_to_i64()).bitwise_as_u64()
+            }
+            RegRegKind::MulUpperSignedUnsigned64 => {
+                let product = i128::from(cast(lhs).bitwise_as_i64()) * i128::from(rhs);
+                cast(cast(product >> u64::BITS).truncate_to_i64()).bitwise_as_u64()
+            }
+            RegRegKind::MulUpperUnsignedUnsigned64 => {
+                let product = u128::from(lhs) * u128::from(rhs);
+                cast(product >> u64::BITS).truncate_to_u64()
+            }
+            RegRegKind::Div32AndSignExtend
             | RegRegKind::Div64
             | RegRegKind::DivUnsigned32AndSignExtend
             | RegRegKind::DivUnsigned64
