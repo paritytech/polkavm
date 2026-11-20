@@ -1591,7 +1591,7 @@ fn rejects_loading_32bit_elf() {
 
 #[test]
 fn corpus_rv64() {
-    const IMPLEMENTED_CATEGORIES: &[&str] = &["rv64uc", "rv64ui"];
+    const IMPLEMENTED_CATEGORIES: &[&str] = &["rv64uc", "rv64ui", "rv64um"];
     assert!(IMPLEMENTED_CATEGORIES.iter().all(|category| RV64_CATEGORIES.contains(category)));
 
     for category in RV64_CATEGORIES {
