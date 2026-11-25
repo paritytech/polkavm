@@ -1139,8 +1139,8 @@ fn shift_by_register_uses_low_6_bits_of_amount() {
 }
 
 #[test]
-fn shift_by_immediate_takes_6_bit_amount() {
-    for (word, source, shift_amount, expected) in [
+fn shift_by_immediate_takes_6bit_amount() {
+    for (word, value, shift_amount, expected) in [
         (Slli, 1, 32, 1 << 32),
         (Srli, 1 << 63, 63, 1),
         (Srai, 1 << 63, 63, u64::MAX),
@@ -1149,7 +1149,7 @@ fn shift_by_immediate_takes_6_bit_amount() {
         let (stop_reason, interpreter) = run(
             &[i_type(word, Reg::A0, Reg::A1, shift_amount), RET],
             RunSetup {
-                registers: &[(Reg::A1, source)],
+                registers: &[(Reg::A1, value)],
                 data: &[],
                 max_steps: ENOUGH_STEPS,
             },
