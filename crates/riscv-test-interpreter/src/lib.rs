@@ -1,4 +1,5 @@
 #![deny(unused_must_use)]
+#![deny(clippy::as_conversions)]
 
 mod interpreter;
 

@@ -44,7 +44,11 @@ impl Reg {
     ];
 
     pub fn name(self) -> &'static str {
-        Self::NAMES[self as usize]
+        Self::NAMES[self.to_usize()]
+    }
+
+    pub const fn to_usize(self) -> usize {
+        self as usize
     }
 }
 
@@ -106,7 +110,7 @@ impl LoadKind {
         }
     }
 
-    pub(crate) const fn size(self) -> u64 {
+    pub const fn size(self) -> u64 {
         match self {
             LoadKind::I8 | LoadKind::U8 => 1,
             LoadKind::I16 | LoadKind::U16 => 2,

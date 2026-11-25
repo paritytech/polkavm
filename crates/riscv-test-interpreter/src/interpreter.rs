@@ -3,7 +3,8 @@ use core::ops::Range;
 use object::elf::{FileHeader64, PF_R, PF_W, PF_X, PT_LOAD};
 use object::read::elf::{ElfFile, ProgramHeader};
 use object::{LittleEndian, Object};
-use polkavm_linker::riscv::{Inst, Reg};
+use polkavm_common::cast::cast;
+use polkavm_linker::riscv::{BranchKind, Inst, LoadKind, Reg, RegImmKind, RegRegKind, StoreKind};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Exception {
@@ -23,11 +24,11 @@ pub enum StopReason {
     OutOfSteps,
 }
 
+#[derive(Copy, Clone)]
 enum MemoryAccess {
     Fetch,
-    // TODO (when implementation requires it):
-    // Load,
-    // Store,
+    Load,
+    Store,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -49,7 +50,7 @@ impl MemoryRegion {
     }
 
     pub fn size(&self) -> u64 {
-        self.data.len() as u64
+        cast(self.data.len()).to_u64()
     }
 
     pub fn protection(&self) -> MemoryProtection {
@@ -71,6 +72,8 @@ impl MemoryRegion {
     fn allows(&self, access: MemoryAccess) -> bool {
         match access {
             MemoryAccess::Fetch => self.protection.execute,
+            MemoryAccess::Load => self.protection.read,
+            MemoryAccess::Store => self.protection.write,
         }
     }
 }
@@ -97,9 +100,9 @@ impl Memory {
     fn find_region(&self, address: u64, length: u64) -> Option<(usize, Range<usize>)> {
         let end = address.checked_add(length)?;
         let index = self.regions.iter().position(|region| region.contains(address..end))?;
-        let offset = (address - self.regions[index].address) as usize;
+        let offset = usize::try_from(address - self.regions[index].address).unwrap();
 
-        Some((index, offset..offset + length as usize))
+        Some((index, offset..offset + usize::try_from(length).unwrap()))
     }
 
     fn read(&self, address: u64, length: u64) -> Option<&[u8]> {
@@ -120,8 +123,20 @@ impl Memory {
 
     #[must_use]
     fn write(&mut self, address: u64, data: &[u8]) -> Option<()> {
-        let (index, range) = self.find_region(address, data.len() as u64)?;
+        let (index, range) = self.find_region(address, cast(data.len()).to_u64())?;
         self.regions[index].data[range].copy_from_slice(data);
+
+        Some(())
+    }
+
+    #[must_use]
+    fn write_as_guest(&mut self, address: u64, data: &[u8]) -> Option<()> {
+        let (index, range) = self.find_region(address, cast(data.len()).to_u64())?;
+        let region = &mut self.regions[index];
+        if !region.allows(MemoryAccess::Store) {
+            return None;
+        }
+        region.data[range].copy_from_slice(data);
 
         Some(())
     }
@@ -160,12 +175,12 @@ impl Interpreter {
     }
 
     pub fn reg(&self, reg: Reg) -> u64 {
-        self.regs[reg as usize]
+        self.regs[reg.to_usize()]
     }
 
     pub fn set_reg(&mut self, reg: Reg, value: u64) {
         if reg != Reg::Zero {
-            self.regs[reg as usize] = value;
+            self.regs[reg.to_usize()] = value;
         }
     }
 
@@ -212,14 +227,24 @@ impl Interpreter {
     }
 
     fn read_memory_as_guest(&self, address: u64, length: u64, access: MemoryAccess) -> Result<&[u8], Exception> {
-        self.memory
-            .read_as_guest(address, length, access)
-            .ok_or(Exception::InstructionAccessFault)
+        self.memory.read_as_guest(address, length, access).ok_or(match access {
+            MemoryAccess::Fetch => Exception::InstructionAccessFault,
+            MemoryAccess::Load => Exception::LoadAccessFault(address),
+            // Handle `Store` when AMO is supported. AMO should raise a store access-fault exception.
+            // (https://docs.riscv.org/reference/isa/v20260120/priv/machine.html#norm:pmp_store_fault)
+            MemoryAccess::Store => todo!(),
+        })
     }
 
     #[must_use]
     pub fn write_memory(&mut self, address: u64, data: &[u8]) -> Option<()> {
         self.memory.write(address, data)
+    }
+
+    fn write_memory_as_guest(&mut self, address: u64, data: &[u8]) -> Result<(), Exception> {
+        self.memory
+            .write_as_guest(address, data)
+            .ok_or(Exception::StoreAccessFault(address))
     }
 
     pub fn run(&mut self, max_steps: u64) -> StopReason {
@@ -263,8 +288,248 @@ impl Interpreter {
         Ok((u32::from_le_bytes(word_bytes), length))
     }
 
-    #[allow(clippy::needless_pass_by_ref_mut)]
-    fn execute(&mut self, _instruction: Inst, _instruction_address: u64) -> Result<(), Exception> {
-        todo!()
+    fn execute(&mut self, instruction: Inst, instruction_address: u64) -> Result<(), Exception> {
+        match instruction {
+            Inst::RegImm { kind, dst, src, imm } => self.register_immediate(kind, dst, src, imm),
+            Inst::RegReg { kind, dst, src1, src2 } => self.register_register(kind, dst, src1, src2),
+            Inst::LoadUpperImmediate { dst, value } => self.load_upper_immediate(dst, value, None),
+            Inst::AddUpperImmediateToPc { dst, value } => self.load_upper_immediate(dst, value, Some(instruction_address)),
+            Inst::JumpAndLink { dst, target } => self.jump_and_link(dst, target, instruction_address),
+            Inst::JumpAndLinkRegister { dst, base, value } => self.jump_and_link_register(dst, base, value),
+            Inst::Branch { kind, src1, src2, target } => self.branch(kind, src1, src2, target, instruction_address),
+            Inst::Load { kind, dst, base, offset } => self.load(kind, dst, base, offset)?,
+            Inst::Store { kind, src, base, offset } => self.store(kind, src, base, offset)?,
+
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#fence
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/zifencei.html
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/zihintpause.html
+            Inst::Fence { .. } | Inst::FenceI => {}
+
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#ecall-ebreak
+            Inst::Ecall => return Err(Exception::EnvironmentCall),
+
+            // https://github.com/riscv-non-isa/riscv-asm-manual/blob/7303c035b1be5b7de673a66db046221da237da8e/src/asm-manual.adoc#instruction-aliases
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/c-st-ext.html#27-1-5-4-defined-illegal-instruction
+            Inst::Unimplemented => return Err(Exception::Unimplemented),
+
+            // "B" extension (Zbb):
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-2-count-leadingtrailing-zero-bits
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-3-count-population
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-5-sign-extension-and-zero-extension
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-7-or-combine
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-8-byte-reverse
+            Inst::Reg { .. } => todo!(),
+
+            // "A" extension:
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/a-st-ext.html#sec:lrsc
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/a-st-ext.html#sec:amo
+            Inst::LoadReserved32 { .. }
+            | Inst::StoreConditional32 { .. }
+            | Inst::LoadReserved64 { .. }
+            | Inst::StoreConditional64 { .. }
+            | Inst::Atomic { .. } => todo!(),
+
+            // Vendor conditional moves:
+            // https://github.com/XUANTIE-RV/thead-extension-spec/blob/2.4.0/xtheadcondmov/mveqz.adoc
+            // https://github.com/XUANTIE-RV/thead-extension-spec/blob/2.4.0/xtheadcondmov/mvnez.adoc
+            // https://github.com/llvm/llvm-project/blob/e30e644266fbc9ba638ee2c6aa23b5691397163f/llvm/lib/Target/RISCV/RISCVInstrInfoXMips.td#L148-L166
+            Inst::Cmov { .. } | Inst::MipsCmov { .. } => todo!(),
+        }
+
+        Ok(())
+    }
+
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-4-1-integer-register-immediate-instructions
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv64.html#3-1-2-1-integer-register-immediate-instructions
+    fn register_immediate(&mut self, kind: RegImmKind, dst: Reg, src: Reg, imm: i32) {
+        let lhs = self.reg(src);
+        let rhs = cast(imm).to_u64_sign_extend();
+        let result = match kind {
+            RegImmKind::Add32AndSignExtend => cast(cast(lhs.wrapping_add(rhs)).truncate_to_i32()).to_u64_sign_extend(),
+            RegImmKind::Add64 => lhs.wrapping_add(rhs),
+            RegImmKind::SetLessThanSigned64 => u64::from(cast(lhs).bitwise_as_i64() < cast(rhs).bitwise_as_i64()),
+            RegImmKind::SetLessThanUnsigned64 => u64::from(lhs < rhs),
+            RegImmKind::ShiftLogicalLeft32AndSignExtend => {
+                cast(cast(lhs).truncate_to_i32().wrapping_shl(cast(imm).bitwise_as_u32())).to_u64_sign_extend()
+            }
+            RegImmKind::ShiftLogicalLeft64 => lhs.wrapping_shl(cast(imm).bitwise_as_u32()),
+            // `lhs` for SRLI and SRLIW are unsigned since `wrapping_shr` is logical for unsigned values, otherwise arithmetic.
+            RegImmKind::ShiftLogicalRight32AndSignExtend => {
+                cast(cast(lhs).truncate_to_u32().wrapping_shr(cast(imm).bitwise_as_u32())).to_u64_sign_extend()
+            }
+            RegImmKind::ShiftLogicalRight64 => lhs.wrapping_shr(cast(imm).bitwise_as_u32()),
+            // `lhs` for SRAI and SRAIW are signed since `wrapping_shr` is arithmetic for signed values, otherwise logical.
+            RegImmKind::ShiftArithmeticRight32AndSignExtend => {
+                cast(cast(lhs).truncate_to_i32().wrapping_shr(cast(imm).bitwise_as_u32())).to_u64_sign_extend()
+            }
+            RegImmKind::ShiftArithmeticRight64 => {
+                cast(cast(lhs).bitwise_as_i64().wrapping_shr(cast(imm).bitwise_as_u32())).bitwise_as_u64()
+            }
+            RegImmKind::Xor64 => lhs ^ rhs,
+            RegImmKind::Or64 => lhs | rhs,
+            RegImmKind::And64 => lhs & rhs,
+
+            // "B" extension (Zbb):
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-6-bitwise-rotation
+            RegImmKind::RotateRight32AndSignExtend | RegImmKind::RotateRight64 => todo!(),
+        };
+        self.set_reg(dst, result);
+    }
+
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-4-2-integer-register-register-instructions
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv64.html#3-1-2-2-integer-register-register-operations
+    fn register_register(&mut self, kind: RegRegKind, dst: Reg, src1: Reg, src2: Reg) {
+        let lhs = self.reg(src1);
+        let rhs = self.reg(src2);
+        let result = match kind {
+            RegRegKind::Add32AndSignExtend => {
+                cast(cast(lhs).truncate_to_i32().wrapping_add(cast(rhs).truncate_to_i32())).to_u64_sign_extend()
+            }
+            RegRegKind::Add64 => lhs.wrapping_add(rhs),
+            RegRegKind::Sub32AndSignExtend => {
+                cast(cast(lhs).truncate_to_i32().wrapping_sub(cast(rhs).truncate_to_i32())).to_u64_sign_extend()
+            }
+            RegRegKind::Sub64 => lhs.wrapping_sub(rhs),
+            RegRegKind::SetLessThanSigned64 => u64::from(cast(lhs).bitwise_as_i64() < cast(rhs).bitwise_as_i64()),
+            RegRegKind::SetLessThanUnsigned64 => u64::from(lhs < rhs),
+            RegRegKind::ShiftLogicalLeft32AndSignExtend => {
+                cast(cast(lhs).truncate_to_i32().wrapping_shl(cast(rhs).truncate_to_u32())).to_u64_sign_extend()
+            }
+            RegRegKind::ShiftLogicalLeft64 => lhs.wrapping_shl(cast(rhs).truncate_to_u32()),
+            // `lhs` for SRL and SRLW are unsigned since `wrapping_shr` is logical for unsigned values, otherwise arithmetic.
+            RegRegKind::ShiftLogicalRight32AndSignExtend => {
+                cast(cast(lhs).truncate_to_u32().wrapping_shr(cast(rhs).truncate_to_u32())).to_u64_sign_extend()
+            }
+            RegRegKind::ShiftLogicalRight64 => lhs.wrapping_shr(cast(rhs).truncate_to_u32()),
+            // `lhs` for SRA and SRAW are signed since `wrapping_shr` is arithmetic for signed values, otherwise logical.
+            RegRegKind::ShiftArithmeticRight32AndSignExtend => {
+                cast(cast(lhs).truncate_to_i32().wrapping_shr(cast(rhs).truncate_to_u32())).to_u64_sign_extend()
+            }
+            RegRegKind::ShiftArithmeticRight64 => {
+                cast(cast(lhs).bitwise_as_i64().wrapping_shr(cast(rhs).truncate_to_u32())).bitwise_as_u64()
+            }
+            RegRegKind::Xor64 => lhs ^ rhs,
+            RegRegKind::Or64 => lhs | rhs,
+            RegRegKind::And64 => lhs & rhs,
+
+            // "M" extension:
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html#mult-ops
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html#11-1-2-division-operations
+            RegRegKind::Mul32AndSignExtend
+            | RegRegKind::Mul64
+            | RegRegKind::MulUpperSignedSigned64
+            | RegRegKind::MulUpperSignedUnsigned64
+            | RegRegKind::MulUpperUnsignedUnsigned64
+            | RegRegKind::Div32AndSignExtend
+            | RegRegKind::Div64
+            | RegRegKind::DivUnsigned32AndSignExtend
+            | RegRegKind::DivUnsigned64
+            | RegRegKind::Rem32AndSignExtend
+            | RegRegKind::Rem64
+            | RegRegKind::RemUnsigned32AndSignExtend
+            | RegRegKind::RemUnsigned64 => todo!(),
+
+            // "B" extension (Zbb):
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-1-logical-with-negate
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-4-integer-minimummaximum
+            // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-6-bitwise-rotation
+            RegRegKind::AndInverted
+            | RegRegKind::OrInverted
+            | RegRegKind::Xnor
+            | RegRegKind::Maximum
+            | RegRegKind::MaximumUnsigned
+            | RegRegKind::Minimum
+            | RegRegKind::MinimumUnsigned
+            | RegRegKind::RotateLeft32AndSignExtend
+            | RegRegKind::RotateLeft64
+            | RegRegKind::RotateRight32AndSignExtend
+            | RegRegKind::RotateRight64 => todo!(),
+        };
+        self.set_reg(dst, result);
+    }
+
+    /// LUI and AUIPC of https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-4-1-integer-register-immediate-instructions
+    fn load_upper_immediate(&mut self, dst: Reg, imm: u32, base: Option<u64>) {
+        let value = match base {
+            Some(base) => base.wrapping_add(cast(imm).to_u64_sign_extend()),
+            None => cast(imm).to_u64_sign_extend(),
+        };
+        self.set_reg(dst, value);
+    }
+
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-5-1-unconditional-jumps
+    fn jump_and_link(&mut self, dst: Reg, offset: u32, instruction_address: u64) {
+        let target = instruction_address.wrapping_add(cast(offset).to_u64_sign_extend());
+        self.set_reg(dst, self.program_counter);
+        self.set_program_counter(target);
+    }
+
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#ct-unconditional
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/c-st-ext.html#27-1-4-control-transfer-instructions
+    fn jump_and_link_register(&mut self, dst: Reg, base: Reg, value: i32) {
+        let target = self.reg(base).wrapping_add(cast(value).to_u64_sign_extend()) & !1;
+        self.set_reg(dst, self.program_counter);
+        self.set_program_counter(Self::to_32bit_address(target));
+    }
+
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#1-1-5-2-conditional-branches
+    fn branch(&mut self, kind: BranchKind, src1: Reg, src2: Reg, offset: u32, instruction_address: u64) {
+        let lhs = self.reg(src1);
+        let rhs = self.reg(src2);
+        let taken = match kind {
+            BranchKind::Eq64 => lhs == rhs,
+            BranchKind::NotEq64 => lhs != rhs,
+            BranchKind::LessSigned64 => cast(lhs).bitwise_as_i64() < cast(rhs).bitwise_as_i64(),
+            BranchKind::LessUnsigned64 => lhs < rhs,
+            BranchKind::GreaterOrEqualSigned64 => cast(lhs).bitwise_as_i64() >= cast(rhs).bitwise_as_i64(),
+            BranchKind::GreaterOrEqualUnsigned64 => lhs >= rhs,
+        };
+        if taken {
+            let target = instruction_address.wrapping_add(cast(offset).to_u64_sign_extend());
+            self.set_program_counter(target);
+        }
+    }
+
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#ldst
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv64.html#3-1-3-load-and-store-instructions
+    fn load(&mut self, kind: LoadKind, dst: Reg, base: Reg, offset: i32) -> Result<(), Exception> {
+        let address = Self::to_32bit_address(self.reg(base).wrapping_add(cast(offset).to_u64_sign_extend()));
+        let bytes = self.read_memory_as_guest(address, kind.size(), MemoryAccess::Load)?;
+        let value = match kind {
+            LoadKind::I8 => cast(i8::from_le_bytes(bytes.try_into().unwrap())).to_u64_sign_extend(),
+            LoadKind::U8 => cast(u8::from_le_bytes(bytes.try_into().unwrap())).to_u64(),
+            LoadKind::I16 => cast(i16::from_le_bytes(bytes.try_into().unwrap())).to_u64_sign_extend(),
+            LoadKind::U16 => cast(u16::from_le_bytes(bytes.try_into().unwrap())).to_u64(),
+            LoadKind::I32 => cast(i32::from_le_bytes(bytes.try_into().unwrap())).to_u64_sign_extend(),
+            LoadKind::U32 => cast(u32::from_le_bytes(bytes.try_into().unwrap())).to_u64(),
+            LoadKind::U64 => u64::from_le_bytes(bytes.try_into().unwrap()),
+        };
+        self.set_reg(dst, value);
+
+        Ok(())
+    }
+
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv32.html#ldst
+    /// https://docs.riscv.org/reference/isa/v20260120/unpriv/rv64.html#3-1-3-load-and-store-instructions
+    fn store(&mut self, kind: StoreKind, src: Reg, base: Reg, offset: i32) -> Result<(), Exception> {
+        let address = Self::to_32bit_address(self.reg(base).wrapping_add(cast(offset).to_u64_sign_extend()));
+        let width = match kind {
+            StoreKind::U8 => 1,
+            StoreKind::U16 => 2,
+            StoreKind::U32 => 4,
+            StoreKind::U64 => 8,
+        };
+        let bytes = self.reg(src).to_le_bytes();
+
+        self.write_memory_as_guest(address, &bytes[..width])
+    }
+
+    /// RISC-V address space is 2^XLEN bytes and address arithmetic wraps at 2^XLEN (https://docs.riscv.org/reference/isa/v20260120/unpriv/intro.html#memory),
+    /// but PolkaVM's address space is 2^32 bytes. Thus, this RISC-V execution environment always uses
+    /// only the low 32 bits of load/store addresses and indirect jump targets before resolving them,
+    /// so that sign-extended 32-bit pointers resolve as they do on PolkaVM, ensuring the differential
+    /// comparison during fuzzing does not falsely diverge on them.
+    fn to_32bit_address(address: u64) -> u64 {
+        cast(cast(address).truncate_to_u32()).to_u64()
     }
 }

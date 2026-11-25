@@ -40,6 +40,11 @@ impl cast<i8> {
     pub const fn to_i64_sign_extend(self) -> i64 {
         self.0 as i64
     }
+
+    #[inline(always)]
+    pub const fn to_u64_sign_extend(self) -> u64 {
+        cast(self.to_i64_sign_extend()).bitwise_as_u64()
+    }
 }
 
 impl cast<i16> {
@@ -56,6 +61,11 @@ impl cast<i16> {
     #[inline(always)]
     pub const fn to_i64_sign_extend(self) -> i64 {
         self.0 as i64
+    }
+
+    #[inline(always)]
+    pub const fn to_u64_sign_extend(self) -> u64 {
+        cast(self.to_i64_sign_extend()).bitwise_as_u64()
     }
 }
 
@@ -82,6 +92,11 @@ impl cast<i32> {
     #[inline(always)]
     pub const fn to_i64_sign_extend(self) -> i64 {
         self.0 as i64
+    }
+
+    #[inline(always)]
+    pub const fn to_u64_sign_extend(self) -> u64 {
+        cast(self.to_i64_sign_extend()).bitwise_as_u64()
     }
 }
 
@@ -226,6 +241,11 @@ impl cast<u64> {
     #[inline(always)]
     pub const fn truncate_to_u32(self) -> u32 {
         self.0 as u32
+    }
+
+    #[inline(always)]
+    pub const fn truncate_to_i32(self) -> i32 {
+        cast(self.truncate_to_u32()).bitwise_as_i32()
     }
 }
 
