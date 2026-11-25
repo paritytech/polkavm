@@ -72,6 +72,18 @@ enum MatchWord {
     Ori = 0x0000_6013,
     And = 0x0000_7033,
     Andi = 0x0000_7013,
+    Mulw = 0x0200_003b,
+    Mulh = 0x0200_1033,
+    Mulhsu = 0x0200_2033,
+    Mulhu = 0x0200_3033,
+    Divw = 0x0200_403b,
+    Div = 0x0200_4033,
+    Divuw = 0x0200_503b,
+    Divu = 0x0200_5033,
+    Remw = 0x0200_603b,
+    Rem = 0x0200_6033,
+    Remuw = 0x0200_703b,
+    Remu = 0x0200_7033,
     Lui = 0x0000_0037,
     Auipc = 0x0000_0017,
     Jal = 0x0000_006f,
@@ -1237,6 +1249,176 @@ fn bitwise_operations_use_64_bits() {
 }
 
 #[test]
+fn mulw_sign_extends_low_32_bits_of_product() {
+    let (stop_reason, interpreter) = run(
+        &[r_type(Mulw, Reg::A0, Reg::A1, Reg::A2), RET],
+        RunSetup {
+            registers: &[(Reg::A1, 1 << 31), (Reg::A2, 1)],
+            data: &[],
+            max_steps: ENOUGH_STEPS,
+        },
+    );
+    assert_eq!(stop_reason, StopReason::Finished);
+    assert_eq!(interpreter.reg(Reg::A0), cast(1_i32 << 31).to_u64_sign_extend());
+}
+
+#[test]
+fn multiply_upper_returns_upper_64_bits_of_128bit_product() {
+    for (word, lhs, rhs, expected) in [
+        (Mulh, cast(-3 << 32).bitwise_as_u64(), 5 << 32, cast(-15).bitwise_as_u64()),
+        (Mulhsu, cast(-3 << 32).bitwise_as_u64(), 5 << 32, cast(-15).bitwise_as_u64()),
+        (Mulhu, 3 << 32, 5 << 32, 15),
+        (Mulh, cast(i64::MIN).bitwise_as_u64(), 1, cast(-1).bitwise_as_u64()),
+        (Mulhsu, cast(i64::MIN).bitwise_as_u64(), 1, cast(-1).bitwise_as_u64()),
+        (Mulhu, 1 << 63, 1, 0),
+        (Mulh, 1, cast(i64::MIN).bitwise_as_u64(), cast(-1).bitwise_as_u64()),
+        (Mulhsu, 1, 1 << 63, 0),
+        (Mulhu, 1, 1 << 63, 0),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
+            RunSetup {
+                registers: &[(Reg::A1, lhs), (Reg::A2, rhs)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
+}
+
+#[test]
+fn word_division_uses_low_32_bits_of_sources() {
+    for (word, lhs, rhs, expected) in [
+        (
+            Divw,
+            LOWEST_UPPER_BIT_SET | 7,
+            cast(cast(-2).bitwise_as_u32()).to_u64(),
+            cast(-3_i32).to_u64_sign_extend(),
+        ),
+        (Remw, LOWEST_UPPER_BIT_SET | 7, cast(cast(-2).bitwise_as_u32()).to_u64(), 1),
+        (Divuw, LOWEST_UPPER_BIT_SET | 7, LOWEST_UPPER_BIT_SET | 2, 3),
+        (Remuw, LOWEST_UPPER_BIT_SET | 7, LOWEST_UPPER_BIT_SET | 2, 1),
+        (Divw, 7, LOWEST_UPPER_BIT_SET, cast(-1_i32).to_u64_sign_extend()),
+        (Remw, 7, LOWEST_UPPER_BIT_SET, 7),
+        (Divuw, 7, LOWEST_UPPER_BIT_SET, u64::MAX),
+        (Remuw, 7, LOWEST_UPPER_BIT_SET, 7),
+        (
+            Divw,
+            cast(cast(i32::MIN).bitwise_as_u32()).to_u64(),
+            cast(cast(-1).bitwise_as_u32()).to_u64(),
+            cast(i32::MIN).to_u64_sign_extend(),
+        ),
+        (
+            Remw,
+            cast(cast(i32::MIN).bitwise_as_u32()).to_u64(),
+            cast(cast(-1).bitwise_as_u32()).to_u64(),
+            0,
+        ),
+        (Remuw, LOWEST_UPPER_BIT_SET | (1 << 31), (1 << 31) - 1, 1),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
+            RunSetup {
+                registers: &[(Reg::A1, lhs), (Reg::A2, rhs)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
+}
+
+#[test]
+fn division_uses_64_bits_of_divisor() {
+    for (word, lhs, rhs, expected) in [
+        (Div, LOWEST_UPPER_BIT_SET + 5, LOWEST_UPPER_BIT_SET, 1),
+        (Rem, LOWEST_UPPER_BIT_SET + 5, LOWEST_UPPER_BIT_SET, 5),
+        (Divu, LOWEST_UPPER_BIT_SET + 5, LOWEST_UPPER_BIT_SET, 1),
+        (Remu, LOWEST_UPPER_BIT_SET + 5, LOWEST_UPPER_BIT_SET, 5),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
+            RunSetup {
+                registers: &[(Reg::A1, lhs), (Reg::A2, rhs)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
+}
+
+#[test]
+fn signed_division_minimum_by_negative_one_overflows() {
+    for (word, lhs, rhs, expected) in [
+        (
+            Divw,
+            cast(i32::MIN).to_u64_sign_extend(),
+            cast(-1_i32).to_u64_sign_extend(),
+            cast(i32::MIN).to_u64_sign_extend(),
+        ),
+        (Remw, cast(i32::MIN).to_u64_sign_extend(), cast(-1_i32).to_u64_sign_extend(), 0),
+        (
+            Div,
+            cast(i64::MIN).bitwise_as_u64(),
+            cast(-1).bitwise_as_u64(),
+            cast(i64::MIN).bitwise_as_u64(),
+        ),
+        (Rem, cast(i64::MIN).bitwise_as_u64(), cast(-1).bitwise_as_u64(), 0),
+        (Divw, 7, cast(-1_i32).to_u64_sign_extend(), cast(-7_i32).to_u64_sign_extend()),
+        (Div, 7, cast(-1).bitwise_as_u64(), cast(-7).bitwise_as_u64()),
+        (
+            Remw,
+            cast(i32::MIN).to_u64_sign_extend(),
+            cast(i32::MAX).to_u64_sign_extend(),
+            cast(-1_i32).to_u64_sign_extend(),
+        ),
+        (
+            Rem,
+            cast(i64::MIN).bitwise_as_u64(),
+            cast(i64::MAX).bitwise_as_u64(),
+            cast(-1).bitwise_as_u64(),
+        ),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
+            RunSetup {
+                registers: &[(Reg::A1, lhs), (Reg::A2, rhs)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
+}
+
+#[test]
+fn word_remainder_by_zero_is_sign_extended_32bit_dividend() {
+    for (word, lhs, rhs, expected) in [
+        (Remw, LOWEST_UPPER_BIT_SET + 5, 0, cast(5_i32).to_u64_sign_extend()),
+        (Remuw, LOWEST_UPPER_BIT_SET + 5, 0, cast(5_i32).to_u64_sign_extend()),
+        (Remw, 1 << 31, 0, cast(1_i32 << 31).to_u64_sign_extend()),
+        (Remuw, 1 << 31, 0, cast(1_i32 << 31).to_u64_sign_extend()),
+    ] {
+        let (stop_reason, interpreter) = run(
+            &[r_type(word, Reg::A0, Reg::A1, Reg::A2), RET],
+            RunSetup {
+                registers: &[(Reg::A1, lhs), (Reg::A2, rhs)],
+                data: &[],
+                max_steps: ENOUGH_STEPS,
+            },
+        );
+        assert_eq!(stop_reason, StopReason::Finished);
+        assert_eq!(interpreter.reg(Reg::A0), expected);
+    }
+}
+
+#[test]
 fn fences_act_as_noop() {
     const FENCE: u32 = 0x0ff0_000f;
     const FENCE_TSO: u32 = 0x8330_000f;
@@ -1437,7 +1619,7 @@ fn rejects_loading_32bit_elf() {
 
 #[test]
 fn corpus_rv64() {
-    const IMPLEMENTED_CATEGORIES: &[&str] = &["rv64uc", "rv64ui"];
+    const IMPLEMENTED_CATEGORIES: &[&str] = &["rv64uc", "rv64ui", "rv64um"];
     assert!(IMPLEMENTED_CATEGORIES.iter().all(|category| RV64_CATEGORIES.contains(category)));
 
     for category in RV64_CATEGORIES {

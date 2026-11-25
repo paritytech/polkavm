@@ -415,19 +415,66 @@ impl Interpreter {
             // "M" extension:
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html#mult-ops
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/m-st-ext.html#11-1-2-division-operations
-            RegRegKind::Mul32AndSignExtend
-            | RegRegKind::Mul64
-            | RegRegKind::MulUpperSignedSigned64
-            | RegRegKind::MulUpperSignedUnsigned64
-            | RegRegKind::MulUpperUnsignedUnsigned64
-            | RegRegKind::Div32AndSignExtend
-            | RegRegKind::Div64
-            | RegRegKind::DivUnsigned32AndSignExtend
-            | RegRegKind::DivUnsigned64
-            | RegRegKind::Rem32AndSignExtend
-            | RegRegKind::Rem64
-            | RegRegKind::RemUnsigned32AndSignExtend
-            | RegRegKind::RemUnsigned64 => todo!(),
+            RegRegKind::Mul32AndSignExtend => {
+                cast(cast(lhs).truncate_to_i32().wrapping_mul(cast(rhs).truncate_to_i32())).to_u64_sign_extend()
+            }
+            RegRegKind::Mul64 => lhs.wrapping_mul(rhs),
+            RegRegKind::MulUpperSignedSigned64 => {
+                let product = i128::from(cast(lhs).bitwise_as_i64()) * i128::from(cast(rhs).bitwise_as_i64());
+                cast(cast(product >> u64::BITS).truncate_to_i64()).bitwise_as_u64()
+            }
+            RegRegKind::MulUpperSignedUnsigned64 => {
+                let product = i128::from(cast(lhs).bitwise_as_i64()) * i128::from(rhs);
+                cast(cast(product >> u64::BITS).truncate_to_i64()).bitwise_as_u64()
+            }
+            RegRegKind::MulUpperUnsignedUnsigned64 => {
+                let product = u128::from(lhs) * u128::from(rhs);
+                cast(product >> u64::BITS).truncate_to_u64()
+            }
+            RegRegKind::Div32AndSignExtend => {
+                let (dividend, divisor) = (cast(lhs).truncate_to_i32(), cast(rhs).truncate_to_i32());
+                let quotient = if divisor == 0 { -1 } else { dividend.wrapping_div(divisor) };
+                cast(quotient).to_u64_sign_extend()
+            }
+            RegRegKind::Div64 => {
+                let (dividend, divisor) = (cast(lhs).bitwise_as_i64(), cast(rhs).bitwise_as_i64());
+                let quotient = if divisor == 0 { -1 } else { dividend.wrapping_div(divisor) };
+                cast(quotient).bitwise_as_u64()
+            }
+            RegRegKind::DivUnsigned32AndSignExtend => {
+                let (dividend, divisor) = (cast(lhs).truncate_to_u32(), cast(rhs).truncate_to_u32());
+                let quotient = if divisor == 0 { u32::MAX } else { dividend / divisor };
+                cast(quotient).to_u64_sign_extend()
+            }
+            RegRegKind::DivUnsigned64 => {
+                if rhs == 0 {
+                    u64::MAX
+                } else {
+                    lhs / rhs
+                }
+            }
+            RegRegKind::Rem32AndSignExtend => {
+                let (dividend, divisor) = (cast(lhs).truncate_to_i32(), cast(rhs).truncate_to_i32());
+                let remainder = if divisor == 0 { dividend } else { dividend.wrapping_rem(divisor) };
+                cast(remainder).to_u64_sign_extend()
+            }
+            RegRegKind::Rem64 => {
+                let (dividend, divisor) = (cast(lhs).bitwise_as_i64(), cast(rhs).bitwise_as_i64());
+                let remainder = if divisor == 0 { dividend } else { dividend.wrapping_rem(divisor) };
+                cast(remainder).bitwise_as_u64()
+            }
+            RegRegKind::RemUnsigned32AndSignExtend => {
+                let (dividend, divisor) = (cast(lhs).truncate_to_u32(), cast(rhs).truncate_to_u32());
+                let remainder = if divisor == 0 { dividend } else { dividend % divisor };
+                cast(remainder).to_u64_sign_extend()
+            }
+            RegRegKind::RemUnsigned64 => {
+                if rhs == 0 {
+                    lhs
+                } else {
+                    lhs % rhs
+                }
+            }
 
             // "B" extension (Zbb):
             // https://docs.riscv.org/reference/isa/v20260120/unpriv/b-st-ext.html#29-1-3-1-logical-with-negate

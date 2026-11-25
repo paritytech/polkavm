@@ -107,6 +107,13 @@ impl cast<i64> {
     }
 }
 
+impl cast<i128> {
+    #[inline(always)]
+    pub const fn truncate_to_i64(self) -> i64 {
+        self.0 as i64
+    }
+}
+
 impl cast<u8> {
     #[inline(always)]
     pub const fn bitwise_as_i8(self) -> i8 {
@@ -246,6 +253,13 @@ impl cast<u64> {
     #[inline(always)]
     pub const fn truncate_to_i32(self) -> i32 {
         cast(self.truncate_to_u32()).bitwise_as_i32()
+    }
+}
+
+impl cast<u128> {
+    #[inline(always)]
+    pub const fn truncate_to_u64(self) -> u64 {
+        self.0 as u64
     }
 }
 
