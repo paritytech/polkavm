@@ -1442,6 +1442,7 @@ name = "riscv-test-interpreter"
 version = "0.39.0"
 dependencies = [
  "object",
+ "polkavm-common",
  "polkavm-linker",
 ]
 

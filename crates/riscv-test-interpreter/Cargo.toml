@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 object = { workspace = true, features = ["std", "read_core", "elf", "unaligned"] }
+polkavm-common = { workspace = true }
 polkavm-linker = { workspace = true, features = ["export-internals-for-testing"] }
 
 [lints]

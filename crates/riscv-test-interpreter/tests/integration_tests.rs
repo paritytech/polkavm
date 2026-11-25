@@ -3,11 +3,9 @@
 use core::ops::Range;
 use std::path::{Path, PathBuf};
 
+use polkavm_common::cast::cast;
 use polkavm_linker::riscv::{BranchKind, Inst, RegImmKind, RegRegKind, StoreKind};
-use riscv_test_interpreter::{
-    width::{cast_to_u32, sign_extend_32, truncate_to_i32},
-    Exception, Interpreter, MemoryProtection, Reg, StopReason,
-};
+use riscv_test_interpreter::{Exception, Interpreter, MemoryProtection, Reg, StopReason};
 
 const RV64_CATEGORIES: &[&str] = &["rv64ua", "rv64uc", "rv64ui", "rv64um", "rv64uzbb"];
 const REGISTERS_RANGE: Range<u32> = 0..32;
@@ -310,7 +308,7 @@ fn format_helpers_encode_instructions() {
                 kind: BranchKind::Eq64,
                 src1: Reg::A0,
                 src2: Reg::A1,
-                target: cast_to_u32(!1),
+                target: cast(!1).bitwise_as_u32(),
             },
         ),
         (
@@ -322,7 +320,7 @@ fn format_helpers_encode_instructions() {
                 kind: BranchKind::Eq64,
                 src1: Reg::A0,
                 src2: Reg::A1,
-                target: cast_to_u32(!(1 << 11 | 1 << 5 | 1)),
+                target: cast(!(1 << 11 | 1 << 5 | 1)).bitwise_as_u32(),
             },
         ),
         (
@@ -340,7 +338,7 @@ fn format_helpers_encode_instructions() {
             0xfffff0ef,
             Inst::JumpAndLink {
                 dst: Reg::RA,
-                target: cast_to_u32(!1),
+                target: cast(!1).bitwise_as_u32(),
             },
         ),
         (
@@ -350,7 +348,7 @@ fn format_helpers_encode_instructions() {
             0xffefe0ef,
             Inst::JumpAndLink {
                 dst: Reg::RA,
-                target: cast_to_u32(!(1 << 12 | 1 << 11 | 1)),
+                target: cast(!(1 << 12 | 1 << 11 | 1)).bitwise_as_u32(),
             },
         ),
     ] {
@@ -743,7 +741,7 @@ fn auipc_to_zero_register_is_noop() {
 #[test]
 fn jal_target_wraps_at_64_bits() {
     let target = UPPER_32_BITS_SET | STOP_ADDRESS;
-    let offset = truncate_to_i32(target.wrapping_sub(CODE_ADDRESS));
+    let offset = cast(target.wrapping_sub(CODE_ADDRESS)).truncate_to_i32();
     let (stop_reason, interpreter) = run(
         &[j_type(Jal, Reg::Zero, offset)],
         RunSetup {
@@ -929,7 +927,7 @@ fn loads_from_read_only_address() {
     interpreter.set_reg(Reg::A1, DATA_ADDRESS);
 
     assert_eq!(interpreter.run(ENOUGH_STEPS), StopReason::Finished);
-    assert_eq!(interpreter.reg(Reg::A0), sign_extend_32(i32::from_le_bytes(data)));
+    assert_eq!(interpreter.reg(Reg::A0), cast(i32::from_le_bytes(data)).to_u64_sign_extend());
 }
 
 #[test]
@@ -978,7 +976,7 @@ fn load_truncates_address_to_32_bits() {
         },
     );
     assert_eq!(stop_reason, StopReason::Finished);
-    assert_eq!(interpreter.reg(Reg::A0), sign_extend_32(i32::from_le_bytes(data)));
+    assert_eq!(interpreter.reg(Reg::A0), cast(i32::from_le_bytes(data)).to_u64_sign_extend());
 }
 
 #[test]
@@ -1013,7 +1011,7 @@ fn load_address_wraps_at_32_bits() {
     interpreter.set_reg(Reg::RA, STOP_ADDRESS);
 
     assert_eq!(interpreter.run(ENOUGH_STEPS), StopReason::Finished);
-    assert_eq!(interpreter.reg(Reg::A0), sign_extend_32(i32::from_le_bytes(data)));
+    assert_eq!(interpreter.reg(Reg::A0), cast(i32::from_le_bytes(data)).to_u64_sign_extend());
 }
 
 #[test]
