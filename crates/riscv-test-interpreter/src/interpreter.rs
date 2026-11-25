@@ -174,15 +174,13 @@ impl Interpreter {
         self.program_counter = program_counter;
     }
 
-    #[allow(clippy::as_conversions)]
     pub fn reg(&self, reg: Reg) -> u64 {
-        self.regs[reg as usize]
+        self.regs[reg.to_usize()]
     }
 
-    #[allow(clippy::as_conversions)]
     pub fn set_reg(&mut self, reg: Reg, value: u64) {
         if reg != Reg::Zero {
-            self.regs[reg as usize] = value;
+            self.regs[reg.to_usize()] = value;
         }
     }
 

@@ -44,7 +44,11 @@ impl Reg {
     ];
 
     pub fn name(self) -> &'static str {
-        Self::NAMES[self as usize]
+        Self::NAMES[self.to_usize()]
+    }
+
+    pub const fn to_usize(self) -> usize {
+        self as usize
     }
 }
 
