@@ -3,6 +3,11 @@ use polkavm_common::cast::cast;
 
 #[cfg(test)]
 fn create_elf(code_u32: &[u32]) -> Vec<u8> {
+    create_elf_with_sections(code_u32, &[])
+}
+
+#[cfg(test)]
+fn create_elf_with_sections(code_u32: &[u32], extra_sections: &[(&str, object::SectionKind, &[u8])]) -> Vec<u8> {
     use object::write::{Object, Relocation, StandardSegment, Symbol, SymbolSection};
     use object::{Architecture, BinaryFormat, Endianness, RelocationFlags, SectionKind, SymbolFlags, SymbolKind, SymbolScope};
 
@@ -124,6 +129,11 @@ fn create_elf(code_u32: &[u32]) -> Vec<u8> {
     )
     .unwrap();
 
+    for &(name, kind, contents) in extra_sections {
+        let section = obj.add_section(obj.segment_name(StandardSegment::Data).to_vec(), name.as_bytes().to_vec(), kind);
+        obj.append_section_data(section, contents, 1);
+    }
+
     obj.write().unwrap()
 }
 
@@ -209,6 +219,77 @@ fn metadata_hash_is_absent_by_default() {
 
     let blob = polkavm_common::program::ProgramBlob::parse(program.as_slice().into()).unwrap();
     assert!(blob.metadata_hash().is_empty());
+}
+
+#[test]
+fn custom_sections_are_embedded_in_blob() {
+    let _ = env_logger::try_init();
+
+    let bytes = create_elf_with_sections(
+        &[0x00b50533, 0x00008067],
+        &[
+            (".polkavm_custom.foo", object::SectionKind::ReadOnlyData, b"first"),
+            (".polkavm_custom.bar", object::SectionKind::Other, b"\x01\x02\x03"),
+            (".polkavm_custom.foo", object::SectionKind::ReadOnlyData, b"second"),
+        ],
+    );
+
+    let mut config = Config::default();
+    config.set_optimize(false);
+    config.set_metadata_hash(Some([0x42u8; 32].to_vec()));
+    let program = program_from_elf(config, TargetInstructionSet::Latest, &bytes).unwrap();
+
+    let blob = polkavm_common::program::ProgramBlob::parse(program.as_slice().into()).unwrap();
+    assert_eq!(blob.metadata_hash(), [0x42u8; 32]);
+    assert_eq!(blob.custom_section("foo"), Some(&b"firstsecond"[..]));
+    assert_eq!(blob.custom_section("bar"), Some(&b"\x01\x02\x03"[..]));
+    assert!(blob.ro_data().is_empty());
+}
+
+#[test]
+fn custom_sections_are_kept_when_stripping() {
+    let _ = env_logger::try_init();
+
+    let bytes = create_elf_with_sections(
+        &[0x00b50533, 0x00008067],
+        &[(".polkavm_custom.foo", object::SectionKind::ReadOnlyData, b"first")],
+    );
+
+    let mut config = Config::default();
+    config.set_optimize(false);
+    config.set_strip(true);
+    let program = program_from_elf(config, TargetInstructionSet::Latest, &bytes).unwrap();
+
+    let blob = polkavm_common::program::ProgramBlob::parse(program.as_slice().into()).unwrap();
+    assert_eq!(blob.custom_section("foo"), Some(&b"first"[..]));
+}
+
+#[test]
+fn sections_without_custom_prefix_are_not_custom_sections() {
+    let _ = env_logger::try_init();
+
+    let bytes = create_elf_with_sections(&[0x00b50533, 0x00008067], &[("foo", object::SectionKind::ReadOnlyData, b"first")]);
+
+    let mut config = Config::default();
+    config.set_optimize(false);
+    let program = program_from_elf(config, TargetInstructionSet::Latest, &bytes).unwrap();
+
+    let blob = polkavm_common::program::ProgramBlob::parse(program.as_slice().into()).unwrap();
+    assert_eq!(blob.custom_sections().count(), 0);
+}
+
+#[test]
+fn custom_section_with_empty_name_is_rejected() {
+    let _ = env_logger::try_init();
+
+    let bytes = create_elf_with_sections(
+        &[0x00b50533, 0x00008067],
+        &[(".polkavm_custom.", object::SectionKind::ReadOnlyData, b"first")],
+    );
+
+    let mut config = Config::default();
+    config.set_optimize(false);
+    assert!(program_from_elf(config, TargetInstructionSet::Latest, &bytes).is_err());
 }
 
 #[test]

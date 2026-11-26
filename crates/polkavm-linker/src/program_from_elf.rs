@@ -9773,6 +9773,7 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
     let mut sections_metadata = Vec::new();
     let mut sections_exports = Vec::new();
     let mut sections_min_stack_size = Vec::new();
+    let mut sections_named_custom: Vec<(String, Vec<u8>)> = Vec::new();
     let mut sections_other = Vec::new();
 
     let mut section_map = RangeMap::new();
@@ -9846,6 +9847,18 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
             sections_exports.push(section.index());
         } else if name == ".polkavm_min_stack_size" {
             sections_min_stack_size.push(section.index());
+        } else if let Some(custom_name) = name.strip_prefix(".polkavm_custom.") {
+            if custom_name.is_empty() {
+                return Err(ProgramFromElfError::other(format!(
+                    "found section '{name}' without a custom section name; expected '.polkavm_custom.<name>' with a non-empty '<name>'"
+                )));
+            }
+
+            if let Some((_, contents)) = sections_named_custom.iter_mut().find(|(name, _)| name == custom_name) {
+                contents.extend_from_slice(section.data());
+            } else {
+                sections_named_custom.push((custom_name.to_owned(), section.data().to_vec()));
+            }
         } else if name == ".eh_frame" || name == ".got" || name == ".dynsym" || name == ".dynstr" || name == ".dynamic" {
             continue;
         } else if section.is_allocated() {
@@ -10720,21 +10733,25 @@ fn program_from_elf_internal(config: Config, isa: TargetInstructionSet, mut elf:
     builder.set_code(&raw_code, &jump_table);
 
     let mut offsets = Vec::new();
-    let raw_blob = if config.strip {
+    let add_optional_sections = |builder: &mut ProgramBlobBuilder| {
         if let Some(metadata_hash) = config.metadata_hash.clone() {
             builder.add_custom_section(program::SECTION_OPT_METADATA_HASH, metadata_hash);
         }
 
+        for (name, contents) in &sections_named_custom {
+            builder.add_named_custom_section(name, contents);
+        }
+    };
+
+    let raw_blob = if config.strip {
+        add_optional_sections(&mut builder);
         builder.to_vec()
     } else {
         builder.to_vec_with_instruction_offsets(|builder, instruction_offsets| {
             offsets = instruction_offsets.iter().copied().skip(config.dispatch_table.len()).collect();
             assert_eq!(offsets.len(), locations_for_instruction.len());
             emit_debug_info(builder, &locations_for_instruction, &offsets);
-
-            if let Some(metadata_hash) = config.metadata_hash.clone() {
-                builder.add_custom_section(program::SECTION_OPT_METADATA_HASH, metadata_hash);
-            }
+            add_optional_sections(builder);
         })
     }
     .map_err(ProgramFromElfError::other)?;

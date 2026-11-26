@@ -534,3 +534,15 @@ extern "C" fn jump_table_with_constant_index() -> u32 {
         output
     }
 }
+
+const _: () = {
+    #[used]
+    #[link_section = ".polkavm_custom.test_section"]
+    static SECTION_CONTENTS: [u8; 4] = *b"PVM!";
+};
+
+const _: () = {
+    #[used]
+    #[link_section = ".polkavm_custom.test_section"]
+    static SECTION_CONTENTS: [u8; 2] = *b"42";
+};

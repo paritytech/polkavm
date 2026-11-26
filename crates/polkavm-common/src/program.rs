@@ -4773,6 +4773,7 @@ pub struct ProgramBlob {
     debug_line_programs: ArcBytes,
 
     metadata_hash: ArcBytes,
+    named_custom_sections: ArcBytes,
 }
 
 struct Reader<'a, T>
@@ -6603,6 +6604,7 @@ pub struct ProgramParts {
     pub debug_line_programs: ArcBytes,
 
     pub metadata_hash: ArcBytes,
+    pub named_custom_sections: ArcBytes,
 }
 
 impl ProgramParts {
@@ -6625,6 +6627,7 @@ impl ProgramParts {
             debug_line_programs: Default::default(),
 
             metadata_hash: Default::default(),
+            named_custom_sections: Default::default(),
         }
     }
 
@@ -6700,6 +6703,7 @@ impl ProgramParts {
         parts.debug_line_programs = reader.read_section_as_bytes(&mut section, SECTION_OPT_DEBUG_LINE_PROGRAMS)?;
         parts.debug_line_program_ranges = reader.read_section_as_bytes(&mut section, SECTION_OPT_DEBUG_LINE_PROGRAM_RANGES)?;
         parts.metadata_hash = reader.read_section_as_bytes(&mut section, SECTION_OPT_METADATA_HASH)?;
+        parts.named_custom_sections = reader.read_section_as_bytes(&mut section, SECTION_OPT_NAMED_CUSTOM)?;
 
         while (section & 0b10000000) != 0 {
             // We don't know this section, but it's optional, so just skip it.
@@ -6718,6 +6722,27 @@ impl ProgramParts {
         }
 
         Ok(parts)
+    }
+}
+
+struct NamedCustomSections<'a>(&'a [u8]);
+
+impl<'a> Iterator for NamedCustomSections<'a> {
+    type Item = Option<(&'a str, &'a [u8])>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0.is_empty() {
+            return None;
+        }
+
+        let mut reader = Reader { blob: self.0, position: 0 };
+        let entry = reader
+            .read_string_with_length()
+            .and_then(|name| Ok((name, reader.read_bytes_with_length()?)))
+            .ok();
+
+        self.0 = if entry.is_some() { &self.0[reader.position..] } else { &[] };
+        Some(entry)
     }
 }
 
@@ -6766,7 +6791,14 @@ impl ProgramBlob {
             debug_line_programs: parts.debug_line_programs,
 
             metadata_hash: parts.metadata_hash,
+            named_custom_sections: parts.named_custom_sections,
         };
+
+        if NamedCustomSections(&blob.named_custom_sections).any(|entry| entry.is_none()) {
+            return Err(ProgramParseError(ProgramParseErrorKind::Other(
+                "the named custom sections section is invalid",
+            )));
+        }
 
         if blob.ro_data.len() > blob.ro_data_size as usize {
             return Err(ProgramParseError(ProgramParseErrorKind::Other(
@@ -6881,6 +6913,16 @@ impl ProgramBlob {
         &self.metadata_hash
     }
 
+    pub fn custom_sections(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        NamedCustomSections(&self.named_custom_sections).flatten()
+    }
+
+    pub fn custom_section(&self, name: &str) -> Option<&[u8]> {
+        self.custom_sections()
+            .find(|&(section_name, _)| section_name == name)
+            .map(|(_, contents)| contents)
+    }
+
     /// Calculates an unique hash of the program blob.
     pub fn unique_hash(&self, include_debug: bool) -> crate::hasher::Hash {
         let ProgramBlob {
@@ -6903,6 +6945,7 @@ impl ProgramBlob {
             debug_line_program_ranges,
             debug_line_programs,
             metadata_hash: _,
+            named_custom_sections: _,
         } = self;
 
         let mut hasher = crate::hasher::Hasher::new();
@@ -7329,6 +7372,7 @@ impl ProgramBlob {
             debug_line_program_ranges,
             debug_line_programs,
             metadata_hash,
+            named_custom_sections,
         } = self;
 
         let mut ranges = [
@@ -7344,6 +7388,7 @@ impl ProgramBlob {
             debug_line_program_ranges.parent_address_range(),
             debug_line_programs.parent_address_range(),
             metadata_hash.parent_address_range(),
+            named_custom_sections.parent_address_range(),
         ];
 
         ranges.sort_unstable_by_key(|r| r.start);
@@ -7503,6 +7548,7 @@ fn test_calculate_blob_length() {
         debug_line_program_ranges: Default::default(),
         debug_line_programs: Default::default(),
         metadata_hash: Default::default(),
+        named_custom_sections: Default::default(),
     };
 
     let blob = ProgramBlob::from_parts(parts).unwrap();
@@ -8149,6 +8195,7 @@ pub const SECTION_OPT_DEBUG_STRINGS: u8 = 128;
 pub const SECTION_OPT_DEBUG_LINE_PROGRAMS: u8 = 129;
 pub const SECTION_OPT_DEBUG_LINE_PROGRAM_RANGES: u8 = 130;
 pub const SECTION_OPT_METADATA_HASH: u8 = 131;
+pub const SECTION_OPT_NAMED_CUSTOM: u8 = 132;
 pub const SECTION_END_OF_FILE: u8 = 0;
 
 pub const VERSION_DEBUG_LINE_PROGRAM_V1: u8 = 1;
