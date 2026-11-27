@@ -55,7 +55,7 @@ fn get_test_program(kind: TestProgram) -> &'static [u8] {
     };
 
     let mut args = polkavm_linker::TargetJsonArgs::default();
-    args.rustc_version = polkavm_linker::RustcVersion::Legacy;
+    args.rustc_version = polkavm_linker::RustcVersion::Rustc_1_91;
 
     let target = "riscv64emac-unknown-none-polkavm";
     let target_path = polkavm_linker::target_json_path(args).unwrap();

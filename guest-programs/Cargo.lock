@@ -74,9 +74,9 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "compiler_builtins"
-version = "0.1.139"
+version = "0.1.158"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7925a77545f37a18e152a4aeaeb9a220309022067cafcfa2ecebe9ec55d36ccb"
+checksum = "164cdc689e4c6d69417f77a5f48be240c291e84fbef0b1281755dc754b19c809"
 
 [[package]]
 name = "cpufeatures"

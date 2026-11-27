@@ -67,7 +67,7 @@ build_polkavm() {
 
     RUSTFLAGS="$extra_flags" cargo build  \
         -Z build-std=core,alloc \
-        --target "$PWD/../crates/polkavm-linker/targets/legacy/riscv64emac-unknown-none-polkavm.json" \
+        --target "$PWD/../crates/polkavm-linker/targets/1_91/riscv64emac-unknown-none-polkavm.json" \
         -q --release --bin $1 -p $1
 
     pushd ..
