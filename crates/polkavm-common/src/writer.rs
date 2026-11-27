@@ -114,6 +114,7 @@ pub struct ProgramBlobBuilder {
     code: Vec<Instruction>,
     jump_table: Vec<u32>,
     custom: Vec<(u8, Vec<u8>)>,
+    named_custom: Vec<u8>,
     dispatch_table: Vec<Vec<u8>>,
     ignore_instruction_set_incompatibility: bool,
 }
@@ -148,6 +149,7 @@ impl ProgramBlobBuilder {
             code: Default::default(),
             jump_table: Default::default(),
             custom: Default::default(),
+            named_custom: Default::default(),
             dispatch_table: Default::default(),
             ignore_instruction_set_incompatibility: false,
         }
@@ -623,6 +625,12 @@ impl ProgramBlobBuilder {
         self.custom.push((section, contents));
     }
 
+    pub fn add_named_custom_section(&mut self, name: &str, contents: &[u8]) {
+        let mut writer = Writer::new(&mut self.named_custom);
+        writer.push_bytes_with_length(name.as_bytes());
+        writer.push_bytes_with_length(contents);
+    }
+
     pub fn into_vec(self) -> Result<Vec<u8>, String> {
         self.to_vec()
     }
@@ -698,6 +706,8 @@ impl ProgramBlobBuilder {
         for (section, contents) in &self.custom {
             writer.push_section(*section, contents);
         }
+
+        writer.push_section(program::SECTION_OPT_NAMED_CUSTOM, &self.named_custom);
 
         writer.push_raw_bytes(&[program::SECTION_END_OF_FILE]);
 
@@ -812,6 +822,34 @@ mod tests {
     fn metadata_hash_is_empty_when_absent() {
         let blob = build_minimal(None);
         assert!(blob.metadata_hash().is_empty());
+    }
+
+    #[test]
+    fn named_custom_sections_round_trip() {
+        let mut builder = ProgramBlobBuilder::new(InstructionSetKind::Latest64);
+        builder.set_code(&[Instruction::trap], &[]);
+        builder.add_custom_section(SECTION_OPT_METADATA_HASH, [0xab_u8; 32].to_vec());
+        builder.add_named_custom_section("foo", b"first");
+        builder.add_named_custom_section("bar", b"\x01\x02\x03");
+        builder.add_named_custom_section("empty", &[]);
+        let blob = ProgramBlob::parse(builder.to_vec().unwrap().into()).unwrap();
+
+        assert_eq!(blob.metadata_hash(), [0xab_u8; 32]);
+        assert_eq!(blob.custom_section("foo"), Some(&b"first"[..]));
+        assert_eq!(blob.custom_section("bar"), Some(&b"\x01\x02\x03"[..]));
+        assert_eq!(blob.custom_section("empty"), Some(&b""[..]));
+        assert_eq!(blob.custom_section("fo"), None);
+        assert_eq!(
+            blob.custom_sections().collect::<alloc::vec::Vec<_>>(),
+            [("foo", &b"first"[..]), ("bar", &b"\x01\x02\x03"[..]), ("empty", &b""[..])]
+        );
+    }
+
+    #[test]
+    fn named_custom_sections_are_absent_by_default() {
+        let blob = build_minimal(None);
+        assert_eq!(blob.custom_section("foo"), None);
+        assert_eq!(blob.custom_sections().count(), 0);
     }
 
     #[test]

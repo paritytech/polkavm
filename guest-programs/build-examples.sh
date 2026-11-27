@@ -5,9 +5,7 @@ set -euo pipefail
 cd "${0%/*}/"
 source build-common.sh
 
-pushd ..
-TARGET_JSON_PATH="$(cargo run -p polkatool get-target-json-path)"
-popd
+TARGET_JSON_PATH="$PWD/../crates/polkavm-linker/targets/1_91/riscv64emac-unknown-none-polkavm.json"
 
 function build_example () {
     output_path="output/$1.polkavm"

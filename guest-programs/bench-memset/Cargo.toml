@@ -14,7 +14,7 @@ name = "bench-memset"
 path = "src/main.rs"
 
 [dependencies]
-compiler_builtins_crate = { package = "compiler_builtins", version = "=0.1.139", default-features = false }
+compiler_builtins_crate = { package = "compiler_builtins", version = "=0.1.158", default-features = false }
 picoalloc = { workspace = true }
 
 [target.'cfg(target_env = "polkavm")'.dependencies]

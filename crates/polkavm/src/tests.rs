@@ -55,7 +55,7 @@ fn get_test_program(kind: TestProgram) -> &'static [u8] {
     };
 
     let mut args = polkavm_linker::TargetJsonArgs::default();
-    args.rustc_version = polkavm_linker::RustcVersion::Legacy;
+    args.rustc_version = polkavm_linker::RustcVersion::Rustc_1_91;
 
     let target = "riscv64emac-unknown-none-polkavm";
     let target_path = polkavm_linker::target_json_path(args).unwrap();
@@ -5703,6 +5703,21 @@ fn test_blob_basic_test(args: TestBlobArgs) {
     assert_eq!(i.call::<(), u32>("push_one_to_global_vec", ()).unwrap(), 3);
 }
 
+fn test_blob_custom_sections_are_embedded(args: TestBlobArgs) {
+    let blob = get_blob_impl(BlobMapKey {
+        optimize: args.optimize,
+        strip: false,
+        isa: args.isa,
+        elf: args.get_test_program(),
+        is_permissive: true,
+    });
+
+    let contents = blob.custom_section("test_section").unwrap();
+    assert_eq!(contents.len(), 6);
+    assert!(contents.starts_with(b"PVM!") || contents.starts_with(b"42"));
+    assert!(contents.ends_with(b"PVM!") || contents.ends_with(b"42"));
+}
+
 fn test_blob_atomic_fetch_add(args: TestBlobArgs) {
     let elf = args.get_test_program();
     let mut i = TestInstance::new(&args, elf);
@@ -7645,6 +7660,7 @@ run_tests_on_isa! { jam_v1, InstructionSetKind::JamV1,
 
 run_test_blob_tests! {
     test_blob_basic_test
+    test_blob_custom_sections_are_embedded
     test_blob_atomic_fetch_add
     test_blob_atomic_fetch_swap
     test_blob_atomic_fetch_minmax
