@@ -380,7 +380,7 @@ extern "C" fn get_heap_base() -> u32 {
 #[inline(never)]
 fn get_self_address_impl() -> usize {
     unsafe { GLOBAL += 1; }
-    get_self_address_impl as usize
+    get_self_address_impl as *const () as usize
 }
 
 #[polkavm_derive::polkavm_export]
@@ -403,7 +403,7 @@ extern "C" fn get_self_address_naked_impl() -> usize {
 #[polkavm_derive::polkavm_export]
 fn get_self_address_naked() -> u32 {
     let address = get_self_address_naked_impl();
-    assert_eq!(get_self_address_naked_impl as usize, address);
+    assert_eq!(get_self_address_naked_impl as *const () as usize, address);
     address as u32
 }
 
@@ -420,7 +420,7 @@ extern "C" fn infinite_loop_without_relocation() {
 #[polkavm_derive::polkavm_export]
 fn get_address_dummy() -> usize {
     // To make sure it's not removed as dead code.
-    infinite_loop_without_relocation as usize
+    infinite_loop_without_relocation as *const () as usize
 }
 
 #[polkavm_derive::polkavm_export]

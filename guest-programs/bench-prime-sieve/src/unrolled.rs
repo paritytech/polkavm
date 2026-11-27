@@ -1,14 +1,6 @@
-use alloc::boxed::Box;
-use alloc::vec;
+use crate::primes::square_start;
 
-use helper_macros::generic_dispatch;
-
-use crate::{
-    primes::{square_start, FlagStorage},
-    unrolled::patterns::pattern_equivalent_skip,
-};
-
-use self::patterns::{index_pattern, mask_pattern_set_u64, mask_pattern_set_u8};
+use self::patterns::{index_pattern, mask_pattern_set_u8};
 
 pub mod patterns {
 
@@ -57,20 +49,6 @@ pub mod patterns {
         masks
     }
 
-    /// Produces a set of masks based on [`modulo_pattern`]. It's simply
-    /// the bit address shifted left into the correct position. This produces
-    /// a set of 64 single-bit masks for u64 words.
-    pub const fn mask_pattern_set_u64(skip: usize) -> [u64; 64] {
-        let mod_pattern = modulo_pattern::<64>(skip);
-        let mut masks = [0; 64];
-        let mut i = 0;
-        while i < 64 {
-            masks[i] = 1u64 << mod_pattern[i];
-            i += 1;
-        }
-        masks
-    }
-
     /// Calculate the equivalent (base) skip factor that will yield
     /// the same modulo pattern as a higher skip factor, for a given
     /// number of bits. They are periodic.
@@ -86,144 +64,6 @@ pub mod patterns {
 /// we're casting from a wider type to a narrower one.
 fn reinterpret_slice_mut_u64_u8(words: &mut [u64]) -> &mut [u8] {
     unsafe { core::slice::from_raw_parts_mut(words.as_mut_ptr() as *mut u8, words.len() * 8) }
-}
-
-/// Storage structure implementing standard linear bit storage, but with a hybrid bit setting strategy:
-/// - dense resetting for small skip factors
-/// - sparse resetting for larger skip factors
-///
-/// This algorithm was developed in collaboration with @GordonBGood, and leverages his extreme-unrolling
-/// approach combined with the elements of the dense-resetting approach in my `bit-storage-striped-hybrid`
-/// solution.
-pub struct FlagStorageUnrolledHybrid {
-    words: Box<[u64]>,
-    length_bits: usize,
-}
-
-impl FlagStorage for FlagStorageUnrolledHybrid {
-    fn create_true(size: usize) -> Self {
-        let num_words = size / 64 + (size % 64).min(1);
-        Self {
-            words: vec![0; num_words].into_boxed_slice(),
-            length_bits: size,
-        }
-    }
-
-    /// The dispatcher finds the correct procedure to call, based on the requested
-    /// `skip` factor. Small skip factors have specific dense resetters for each of
-    /// them. Larger skip factors have 8 different sparse resetters, and we delegate
-    /// to one of them based on the `modulo` of the skip factor; the patterns required
-    /// have a periodicity of 8 (odd) numbers, with 3 == 19, etc.
-    ///
-    /// We have a nice procedural macro to create the big case statement that dispatches
-    /// to the correct specific function, [`generic_dispatch`], where the macro specifies
-    /// the specific constant for the generic type, by substituting type parameter N.
-    /// In summary, we create a match statement of the form:
-    /// ```ignore
-    /// // dense reset
-    /// match skip {
-    ///     3 => ResetterDenseU64::<3>::reset_dense(self.words.as_mut()),
-    ///     5 => ResetterDenseU64::<5>::reset_dense(self.words.as_mut()),
-    ///     //... etc
-    ///     129 => ResetterDenseU64::<129>::reset_dense(self.words.as_mut()),
-    ///     _ => debug_assert!(false, "this case should not occur"),
-    ///  },
-    /// ```
-    #[inline(always)]
-    fn reset_flags(&mut self, skip: usize) {
-        // sparse resets for skip factors larger than those covered by dense resets
-        if skip > 129 {
-            let equivalent_skip = pattern_equivalent_skip(skip, 8);
-            generic_dispatch!(
-                equivalent_skip,
-                3,
-                2,
-                17,
-                ResetterSparseU8::<N>::reset_sparse(self.words.as_mut(), skip),
-                debug_assert!(false, "this case should not occur skip {} equivalent {}", skip, equivalent_skip)
-            );
-            return;
-        }
-
-        // dense resets for all odd numbers in {3, 5, ... =129}
-        generic_dispatch!(
-            skip,
-            3,
-            2,
-            129, // 64 unique sets
-            ResetterDenseU64::<N>::reset_dense(self.words.as_mut()),
-            debug_assert!(false, "dense reset function should not be called for skip {}", skip)
-        );
-    }
-
-    #[inline(always)]
-    fn get(&self, index: usize) -> bool {
-        if index >= self.length_bits {
-            return false;
-        }
-        let word = self.words.get(index / 64).unwrap();
-        *word & (1 << (index % 64)) == 0
-    }
-}
-
-/// Specific implementation for the dense resetter where we have words that
-/// are close together. Since the `SKIP` is a constant (generic) parameter,
-/// the compiler produces a specific separate type for each `SKIP` factor,
-/// permitting it to inject the single-bit masks and addresses as _immediate_
-/// values in the assembly. We're still applying the single-bit masks one
-/// at a time, but it's pretty fast given that they're immediates, etc.
-pub struct ResetterDenseU64<const SKIP: usize>();
-impl<const SKIP: usize> ResetterDenseU64<SKIP> {
-    const BITS: usize = 64;
-    const SINGLE_BIT_MASK_SET: [u64; 64] = mask_pattern_set_u64(SKIP);
-    const RELATIVE_INDICES: [usize; 64] = index_pattern(SKIP);
-
-    #[inline(never)]
-    pub fn reset_dense(words: &mut [u64]) {
-        // determine the offset of the first skip-size chunk we need
-        // to touch, and proceed from there.
-        let square_start = square_start(SKIP);
-        debug_assert!(
-            square_start < words.len() * 64,
-            "square_start should be within the bounds of our array; check caller"
-        );
-        let start_chunk_offset = square_start / 64 / SKIP * SKIP;
-
-        let mut chunks = words[start_chunk_offset..].chunks_exact_mut(SKIP);
-        (&mut chunks).for_each(|chunk| {
-            const CHUNK_SIZE: usize = 16; // 8, 16, or 32 seems to work
-            Self::RELATIVE_INDICES
-                .chunks_exact(CHUNK_SIZE)
-                .zip(Self::SINGLE_BIT_MASK_SET.chunks(CHUNK_SIZE))
-                .for_each(|(word_indices, masks)| {
-                    word_indices.iter().zip(masks).for_each(|(word_idx, single_bit_mask)| unsafe {
-                        // Safety: relative indices are all smaller than `skip` by construction
-                        *chunk.get_unchecked_mut(*word_idx) |= single_bit_mask;
-                    });
-                });
-        });
-
-        let remainder = chunks.into_remainder();
-        for i in 0..Self::BITS {
-            let word_idx = Self::RELATIVE_INDICES[i];
-            if word_idx < remainder.len() {
-                // Safety: check above breaks the loop before we exceed remainder.len()
-                unsafe {
-                    *remainder.get_unchecked_mut(word_idx) |= Self::SINGLE_BIT_MASK_SET[i];
-                }
-            } else {
-                break;
-            }
-        }
-
-        // restore original factor bit -- we have clobbered it, and it is the prime
-        let factor_index = SKIP / 2;
-        let factor_word = factor_index / Self::BITS;
-        let factor_bit = factor_index % Self::BITS;
-        if let Some(w) = words.get_mut(factor_word) {
-            *w &= !(1 << factor_bit);
-        }
-    }
 }
 
 /// Specific implementation for the sparse resetter where we have words that
